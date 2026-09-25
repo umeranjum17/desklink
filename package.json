@@ -1,0 +1,23 @@
+{
+    "name": "desklink",
+    "private": true,
+    "license": "Apache-2.0",
+    "type": "module",
+    "workspaces": [
+        "packages/*"
+    ],
+    "scripts": {
+        "build": "tsc --build packages/desktop-host",
+        "test": "vitest run",
+        "test:engine": "cargo test --manifest-path packages/desktop-host/engine/Cargo.toml"
+    },
+    "devDependencies": {
+        "@types/node": "^22.10.0",
+        "@types/react": "^19.2.0",
+        "@types/ws": "^8.5.13",
+        "react": "19.2.0",
+        "react-test-renderer": "19.2.0",
+        "typescript": "^5.7.2",
+        "vitest": "^4.1.11"
+    }
+}

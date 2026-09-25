@@ -1,0 +1,6 @@
+node_modules
+dist/
+*.tsbuildinfo
+packages/desktop-host/engine/target/
+# release/build-engine.sh output and release/pack.mjs tarballs
+dist-desklink/
