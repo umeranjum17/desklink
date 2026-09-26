@@ -350,12 +350,20 @@ fn request_screen_capture_content() -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(60);
     while !completed.load(Ordering::Acquire) && Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, remaining.min(Duration::from_millis(100)).as_secs_f64(), 0) };
+        unsafe {
+            CFRunLoopRunInMode(
+                kCFRunLoopDefaultMode,
+                remaining.min(Duration::from_millis(100)).as_secs_f64(),
+                0,
+            )
+        };
     }
     if completed.load(Ordering::Acquire) {
         Ok(())
     } else {
-        Err(String::from("capture-permission: timed out waiting for ScreenCaptureKit permission request"))
+        Err(String::from(
+            "capture-permission: timed out waiting for ScreenCaptureKit permission request",
+        ))
     }
 }
 

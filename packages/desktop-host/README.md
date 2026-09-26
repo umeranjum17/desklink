@@ -71,7 +71,15 @@ can [build it from source](#building-from-source). Windows remains unsupported.
 ### macOS status
 
 A macOS source build can report displays and current permissions without
-prompting, but cannot open a remote desktop session even after grants. See the
+prompting. Its `capture-probe` captures screenshots of the main display through
+ScreenCaptureKit for a local diagnostic, but cannot open a remote desktop session
+even after grants. Run `desklink-host capture-probe [seconds] [--out result.json]`
+(default: 3 seconds); it reports frame count, a distinct-frame count based on
+full-frame hashes, source and dimensions as JSON on stdout or at the given path.
+With Screen Recording permission missing, it requests consent, waits up to 60
+seconds for the request callback, then writes a JSON error and exits nonzero;
+grant access in System Settings and rerun the probe. `--out` is useful when
+launching an app bundle through `open`, which cannot pipe its stdout. See the
 [protocol's macOS status](docs/PROTOCOL.md#macos-status) for supported commands
 and wire behavior. Engine resolution is off by default on macOS;
 `DESKLINK_MACOS=1` only allows a configured or local candidate engine to be
@@ -92,7 +100,8 @@ cargo build --release --manifest-path engine/Cargo.toml
 ```
 
 On macOS, prefix the launcher commands with `DESKLINK_MACOS=1` to resolve the
-local candidate; this does not enable desktop capture.
+local candidate; the engine can run the local capture probe but cannot open a
+desktop session.
 
 On Linux, a source build links system libraries through `pkg-config` (and
 libxcb directly), compiles `native/vpx_shim.c` against libvpx's headers, and
