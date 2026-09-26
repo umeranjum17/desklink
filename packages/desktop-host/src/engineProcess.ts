@@ -1,4 +1,5 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 import {
@@ -81,11 +82,16 @@ export class EngineClient {
             const missing = /error while loading shared libraries: ([^:\s]+): cannot open shared object file/.exec(probe.stderr ?? '')?.[1];
             if (missing !== undefined && [
                 'libpipewire-0.3.so.0', 'libxkbcommon.so.0', 'libevdev.so.2', 'libstdc++.so.6',
+                'libXcursor.so.1', 'libX11.so.6', 'libwayland-client.so.0',
             ].includes(missing)) {
                 throw new EngineRefused('missing-system-library', `missing system library: ${missing}`);
             }
         }
         const child = spawn(command, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
+        if (env.DESKLINK_AXI_ENGINE_PID_FILE && child.pid) {
+            try { appendFileSync(env.DESKLINK_AXI_ENGINE_PID_FILE, `${child.pid}\n`); }
+            catch (error) { child.kill('SIGKILL'); throw error; }
+        }
         const client = new EngineClient(child, options);
         try {
             await client.request('hello', { protocol: PROTOCOL_VERSION });
@@ -176,6 +182,7 @@ export class EngineClient {
             ...(request.restoreToken === undefined ? {} : { restore_token: request.restoreToken }),
             ...(request.ttlSeconds === undefined ? {} : { ttl_seconds: request.ttlSeconds }),
             ...(request.loopbackTcp === true ? { loopback_tcp: true } : {}),
+            ...(request.agentIndicator === true ? { agent_indicator: true } : {}),
         }, timeoutMs);
     }
 

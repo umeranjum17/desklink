@@ -129,7 +129,7 @@ let out = `Third-party notices for the desklink-host executable
 The executable is licensed Apache-2.0. It links the components below into
 itself; each keeps its own licence, reproduced here as that licence requires.
 Libraries it loads from the system at run time (glibc, libstdc++, libpipewire,
-libxkbcommon, libevdev) are not part of it and are not reproduced.`;
+libxkbcommon, libevdev, libXcursor, libX11, libwayland-client) are not part of it and are not reproduced.`;
 out += rule('libvpx (BSD-3-Clause), linked statically') + licenceTexts(join(inputs, 'libvpx')).join('\n\n');
 out += rule('inputtino (MIT), vendored and linked statically') + licenceTexts(join(inputs, 'inputtino')).join('\n\n');
 out += rule('The Rust standard library (MIT OR Apache-2.0), linked statically')

@@ -57,8 +57,8 @@ platform package `@desklink/host-linux-x64-gnu`, which carries the prebuilt
 engine, and `resolveEngine()` finds it there. No Rust toolchain, compiler or
 install script is involved, so `--ignore-scripts` installs work. The engine
 requires the system's `libpipewire-0.3.so.0`, `libxkbcommon.so.0`,
-`libevdev.so.2` and `libstdc++.so.6` (normally supplied by a modern Linux
-desktop). If one is missing, the host reports `missing system library: <name>`
+`libevdev.so.2`, `libstdc++.so.6`, `libXcursor.so.1`, `libX11.so.6`, and
+`libwayland-client.so.0` (normally supplied by a modern Linux desktop). If one is missing, the host reports `missing system library: <name>`
 with code `missing-system-library` rather than failing silently; it does not
 bundle these system libraries. libvpx and inputtino are linked into the engine.
 
@@ -125,6 +125,7 @@ install:
 | Wayland (`wayland-client`) | `libwayland-dev` | `wayland-devel` | `wayland` |
 | libevdev | `libevdev-dev` | `libevdev-devel` | `libevdev` |
 | libxcb (source/container builds only) | `libxcb1-dev` | `libxcb-devel` | `libxcb` |
+| Xcursor | `libxcursor-dev` | `libXcursor-devel` | `libxcursor` |
 
 These are build prerequisites, not additional runtime requirements for the
 prebuilt package; in particular, libxcb is not a prebuilt runtime requirement.

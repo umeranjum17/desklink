@@ -16,6 +16,7 @@ use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 impl PixelFormat {
     fn from_spa(raw: u32) -> Self {
@@ -194,6 +195,7 @@ pub fn start(
     encoded_height: usize,
     max_fps: u32,
     sink: FrameSink,
+    indicator_position: Option<Arc<Mutex<Option<(i64, i64)>>>>,
 ) -> Result<Capture> {
     let PortalSession { fd, source, .. } = session;
     let geometry = Arc::new(Mutex::new(None));
@@ -218,6 +220,7 @@ pub fn start(
                     encoded_height,
                     max_fps,
                     sink,
+                    indicator_position,
                     geometry,
                     frames,
                     dropped,
@@ -263,6 +266,7 @@ fn run_loop(
     encoded_height: usize,
     max_fps: u32,
     sink: FrameSink,
+    indicator_position: Option<Arc<Mutex<Option<(i64, i64)>>>>,
     geometry: Arc<Mutex<Option<StreamGeometry>>>,
     frames: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
@@ -297,6 +301,7 @@ fn run_loop(
         format: None,
         buffer_type: String::from("unknown"),
         sink,
+        mask: indicator_position.map(IndicatorMask::new),
         geometry,
         frames,
         dropped,
@@ -366,8 +371,31 @@ fn run_loop(
             // second time and hand the encoder a frame it refuses whenever the
             // stream's size differs from the one the portal reported.
             let seq = state.frames.load(Ordering::Relaxed);
-            match to_i420(chunk_bytes, w, h, stride, format, state.box_w, state.box_h) {
-                Some(i420) => {
+            let raw = crate::convert::to_bgrx(
+                chunk_bytes,
+                w,
+                h,
+                stride,
+                format,
+                state.box_w,
+                state.box_h,
+            );
+            if let Some(mut raw) = raw {
+                let frame = if let Some(mask) = state.mask.as_mut() {
+                    mask.apply(&mut raw, state.box_w, state.box_h, w, h);
+                    to_i420(
+                        &raw,
+                        state.box_w,
+                        state.box_h,
+                        state.box_w * 4,
+                        PixelFormat::Bgrx,
+                        state.box_w,
+                        state.box_h,
+                    )
+                } else {
+                    to_i420(chunk_bytes, w, h, stride, format, state.box_w, state.box_h)
+                };
+                if let Some(i420) = frame {
                     if state.geometry.lock().map(|g| g.is_none()).unwrap_or(false) {
                         if let Ok(mut g) = state.geometry.lock() {
                             *g = Some(StreamGeometry {
@@ -381,17 +409,7 @@ fn run_loop(
                         }
                     }
                     state.frames.fetch_add(1, Ordering::Relaxed);
-                    if let Some(raw) = crate::convert::to_bgrx(
-                        chunk_bytes,
-                        w,
-                        h,
-                        stride,
-                        format,
-                        state.box_w,
-                        state.box_h,
-                    ) {
-                        (state.sink)(i420, seq, raw);
-                    }
+                    (state.sink)(i420, seq, raw);
                     // The first frame the loop actually delivers is the only
                     // proof capture started; sending this when `run_loop`
                     // returns would be after the main loop quits, too late for
@@ -399,10 +417,11 @@ fn run_loop(
                     if let Some(sender) = ready.take() {
                         let _ = sender.send(Ok(()));
                     }
-                }
-                None => {
+                } else {
                     state.dropped.fetch_add(1, Ordering::Relaxed);
                 }
+            } else {
+                state.dropped.fetch_add(1, Ordering::Relaxed);
             }
         })
         .register()
@@ -430,12 +449,115 @@ fn run_loop(
     Ok(())
 }
 
+// The portal composites layer-shell into its pixels. Keep the last clean
+// backing for the helper's bounded circle and edge strips before diff/encode;
+// the center stays live so a click marker at the caret remains observable.
+struct IndicatorMask {
+    position: Arc<Mutex<Option<(i64, i64)>>>,
+    clean: Option<Vec<u8>>,
+    last: Option<(i64, i64)>,
+    from: Option<(i64, i64)>,
+    moved_at: Option<Instant>,
+}
+
+impl IndicatorMask {
+    fn new(position: Arc<Mutex<Option<(i64, i64)>>>) -> Self {
+        Self {
+            position,
+            clean: None,
+            last: None,
+            from: None,
+            moved_at: None,
+        }
+    }
+
+    fn apply(
+        &mut self,
+        raw: &mut [u8],
+        width: usize,
+        height: usize,
+        source_w: usize,
+        source_h: usize,
+    ) {
+        let position = self.position.lock().ok().and_then(|value| *value);
+        if position != self.last {
+            self.from = self.last;
+            self.last = position;
+            self.moved_at = Some(Instant::now());
+        }
+        if let Some(clean) = self.clean.as_ref().filter(|clean| clean.len() == raw.len()) {
+            let x = position.map_or(-1000, |point| point.0 * width as i64 / source_w as i64);
+            let y = position.map_or(-1000, |point| point.1 * height as i64 / source_h as i64);
+            let from = self
+                .from
+                .filter(|_| {
+                    self.moved_at
+                        .is_some_and(|at| at.elapsed() < Duration::from_millis(800))
+                })
+                .map(|point| {
+                    (
+                        point.0 * width as i64 / source_w as i64,
+                        point.1 * height as i64 / source_h as i64,
+                    )
+                });
+            let radius = (150 * width / source_w).max(55) as i64;
+            let edge = (20 * width / source_w)
+                .max(8)
+                .min(width / 2)
+                .min(height / 2);
+            for row in 0..height {
+                let start = row * width * 4;
+                if row < edge || row + edge >= height {
+                    raw[start..start + width * 4].copy_from_slice(&clean[start..start + width * 4]);
+                    continue;
+                }
+                raw[start..start + edge * 4].copy_from_slice(&clean[start..start + edge * 4]);
+                let end = start + width * 4;
+                raw[end - edge * 4..end].copy_from_slice(&clean[end - edge * 4..end]);
+                let start_y = from.map_or(y, |point| y.min(point.1));
+                let end_y = from.map_or(y, |point| y.max(point.1));
+                if (row as i64) < start_y - radius || (row as i64) > end_y + radius {
+                    continue;
+                }
+                let start_x = from.map_or(x, |point| x.min(point.0));
+                let end_x = from.map_or(x, |point| x.max(point.0));
+                for col in (start_x - radius).max(0) as usize
+                    ..=(end_x + radius).min(width as i64 - 1).max(0) as usize
+                {
+                    let dx = col as i64 - x;
+                    let dy = row as i64 - y;
+                    let distance = dx * dx + dy * dy;
+                    let along = from.is_some_and(|(fx, fy)| {
+                        let vx = x - fx;
+                        let vy = y - fy;
+                        let projection = ((col as i64 - fx) * vx + (row as i64 - fy) * vy)
+                            .clamp(0, vx * vx + vy * vy);
+                        let length = vx * vx + vy * vy;
+                        let (cx, cy) = if length == 0 {
+                            (x, y)
+                        } else {
+                            (fx + projection * vx / length, fy + projection * vy / length)
+                        };
+                        (col as i64 - cx).pow(2) + (row as i64 - cy).pow(2) <= radius * radius
+                    });
+                    if (distance <= radius * radius || along) && distance > 16 {
+                        let at = start + col * 4;
+                        raw[at..at + 4].copy_from_slice(&clean[at..at + 4]);
+                    }
+                }
+            }
+        }
+        self.clean = Some(raw.to_vec());
+    }
+}
+
 struct StreamState {
     box_w: usize,
     box_h: usize,
     format: Option<PixelFormat>,
     buffer_type: String,
     sink: FrameSink,
+    mask: Option<IndicatorMask>,
     geometry: Arc<Mutex<Option<StreamGeometry>>>,
     frames: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
@@ -450,6 +572,23 @@ unsafe impl Send for StreamState {}
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn layer_mask_keeps_click_center_and_removes_ring_and_edge() {
+        let position = Arc::new(Mutex::new(Some((50, 50))));
+        let mut mask = IndicatorMask::new(position.clone());
+        mask.apply(&mut vec![1; 100 * 100 * 4], 100, 100, 100, 100);
+        let mut frame = vec![2; 100 * 100 * 4];
+        mask.apply(&mut frame, 100, 100, 100, 100);
+        assert_eq!(frame[(50 * 100 + 50) * 4], 2);
+        assert_eq!(frame[(50 * 100 + 60) * 4], 1);
+        assert_eq!(frame[0], 1);
+        *position.lock().unwrap() = Some((75, 50));
+        let mut moved = vec![3; 100 * 100 * 4];
+        mask.apply(&mut moved, 100, 100, 100, 100);
+        assert_eq!(moved[(50 * 100 + 60) * 4], 1, "eased path is masked");
+        assert_eq!(moved[(50 * 100 + 75) * 4], 3, "click center remains live");
+    }
 
     #[test]
     fn dropping_capture_stops_and_joins_its_live_pipewire_loop() {

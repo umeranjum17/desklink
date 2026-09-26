@@ -163,7 +163,8 @@ trigger a capture request.
   "ice_servers": [{"urls":["stun:..."],"username":null,"credential":null}],
   "restore_token": null,                // from a previous session.restoreToken
   "ttl_seconds": 3600,                 // session lease; default 3600
-  "loopback_tcp": false                // also offer ICE over TCP on 127.0.0.1; default false
+  "loopback_tcp": false,               // also offer ICE over TCP on 127.0.0.1; default false
+  "agent_indicator": false             // local input feedback; default false (phone control)
 }}
 ```
 
@@ -194,6 +195,16 @@ clipboard action and never infers them from a source, a peer or an SDP.
 rate and X11 capture loop; portal capture offers it as the preferred PipeWire
 frame rate, and macOS sets its ScreenCaptureKit stream minimum frame interval.
 A source may still supply fewer frames.
+
+`agent_indicator` is opt-in local feedback for an agent controller; desklink-axi
+sets it for control sessions, never for view-only or human phone control. It
+adds an eased pointer halo, click ripple, and typing pulse. On Wayland it uses
+a click-through layer-shell surface with an edge glow; its bounded area is
+masked before capture/diff (pixels behind the effect can remain briefly stale).
+On bare X11 it replaces the pointer sprite instead, which XGetImage excludes:
+there is no edge glow on that path. macOS uses a nonactivating, click-through
+window excluded by the ScreenCaptureKit content filter. Closing the session
+fades and removes the indicator.
 
 `session.open` is where the capture request happens, which is where the user's
 consent appears. It is not implicit and it is not retried silently.

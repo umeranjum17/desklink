@@ -1,5 +1,5 @@
 import { createServer, connect, type Server } from 'node:net';
-import { mkdirSync, existsSync, unlinkSync, mkdtempSync, rmSync, chmodSync, readFileSync } from 'node:fs';
+import { mkdirSync, existsSync, unlinkSync, mkdtempSync, rmSync, chmodSync, readFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
@@ -19,6 +19,10 @@ export async function call(command: string, args: string[] = []): Promise<string
     const errorPath = `${socketPath}.error`;
     if (existsSync(errorPath)) unlinkSync(errorPath);
     const child = spawn(process.execPath, [process.argv[1]!, '--bridge', ...args], { detached: true, stdio: 'ignore', env: process.env });
+    if (process.env.DESKLINK_AXI_PID_FILE && child.pid) {
+      try { appendFileSync(process.env.DESKLINK_AXI_PID_FILE, `${child.pid}\n`); }
+      catch (error) { child.kill('SIGKILL'); throw error; }
+    }
     child.unref();
     const deadline = Date.now() + Number(args.includes('--timeout') ? args[args.indexOf('--timeout')+1] : 120000) + 5000;
     while (Date.now() < deadline && !existsSync(socketPath) && !existsSync(errorPath)) await new Promise(r => setTimeout(r, 50));
@@ -108,6 +112,7 @@ export async function serve(args: string[]): Promise<void> {
       ? { kind: 'display', ...(display === undefined ? {} : { display_id: Number(display) }) }
       : source === 'x11' || (source === 'auto' && display) ? { kind: 'x11', display } : { kind: 'portal' },
     permissions: control ? ['view', 'control', 'clipboard'] : ['view'], loopbackTcp: true,
+    agentIndicator: control,
   }, timeout);
   peer = control ? new PeerConnection('desklink-axi', { iceServers: [], bindAddress: '127.0.0.1', enableIceTcp: true }) : undefined;
   let channel: DataChannel | undefined;

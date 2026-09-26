@@ -30,7 +30,7 @@ describe("desklink-axi AXI contract", () => {
     expect(help.status).toBe(0);
     expect(help.stdout).toContain('display');
     const result = run('start', '--source', 'display', '--display', '1');
-    expect(result.status).toBe(1);
+    expect(result.status).toBe(1); // Syntax accepted; no usable engine in this smoke test.
     expect(result.stdout).not.toContain('invalid value');
   });
 

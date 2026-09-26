@@ -39,7 +39,8 @@ static void fail(char *error, size_t capacity, NSString *message) {
 }
 
 extern "C" void *dl_mac_stream_start(uint32_t display_id, size_t width, size_t height, uint32_t fps,
-                                      void *context, FrameCallback callback, char *error, size_t capacity) {
+                                      uint32_t indicator_pid, void *context, FrameCallback callback,
+                                      char *error, size_t capacity) {
     @autoreleasepool {
         dispatch_semaphore_t found = dispatch_semaphore_create(0);
         __block SCShareableContent *content = nil;
@@ -58,7 +59,17 @@ extern "C" void *dl_mac_stream_start(uint32_t display_id, size_t width, size_t h
         for (SCDisplay *candidate in content.displays)
             if (candidate.displayID == display_id) { display = candidate; break; }
         if (!display) { fail(error, capacity, @"Selected display is unavailable"); return nullptr; }
-        SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
+        NSMutableArray<SCWindow *> *excluded = [NSMutableArray array];
+        if (indicator_pid) {
+            for (SCWindow *window in content.windows)
+                if (window.owningApplication.processID == (pid_t)indicator_pid)
+                    [excluded addObject:window];
+            if (!excluded.count) {
+                fail(error, capacity, @"Agent indicator window not found for capture exclusion");
+                return nullptr;
+            }
+        }
+        SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:excluded];
         SCStreamConfiguration *config = [SCStreamConfiguration new];
         config.width = width;
         config.height = height;

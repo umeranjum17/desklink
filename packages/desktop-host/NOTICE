@@ -30,6 +30,9 @@ licences.
     The client library the engine uses to read the portal's stream.
 
   wayland / wayland-protocols   MIT
+  wlr-layer-shell-unstable-v1   MIT (Copyright 2017 Drew DeVault)
+    The small protocol interface declarations in native/agent_overlay_wayland.c
+    carry their own permission and warranty notice.
   xkbcommon                     MIT
     Keyboard layout lookup.
 

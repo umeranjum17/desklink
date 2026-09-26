@@ -495,6 +495,7 @@ pub struct OpenRequest {
     pub ttl: Option<Duration>,
     /// Offer a passive ICE-TCP candidate on the loopback, for a forwarded client.
     pub loopback_tcp: bool,
+    pub agent_indicator: bool,
 }
 
 /// Events a session raises for its consumer.
@@ -550,6 +551,7 @@ struct Inner {
     peer: Arc<VideoPeer>,
     encoder: Mutex<Encoder>,
     input: Mutex<Option<InputTarget>>,
+    indicator: Mutex<Option<crate::indicator::Indicator>>,
     capture: Mutex<Option<FrameSource>>,
     layout: Mutex<Layout>,
     last_seq: Mutex<u64>,
@@ -718,6 +720,7 @@ impl Session {
         }
 
         let metrics = Arc::new(Mutex::new(Metrics::default()));
+        let mut indicator = None;
         let (frame_tx, frame_rx) = latest_frame();
         let latest = Arc::new(Mutex::new(None));
         let observed = latest.clone();
@@ -803,8 +806,51 @@ impl Session {
                 let source_h = source.height.max(1) as usize;
                 let (width, height) =
                     fit(source_w, source_h, request.max_width, request.max_height);
-                let capture = capture::start(portal, width, height, max_fps, sink)
-                    .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
+                #[cfg(target_os = "linux")]
+                if request.agent_indicator && wants_control {
+                    indicator = Some(
+                        crate::indicator::Indicator::start_wayland(source_w, source_h).map_err(
+                            |error| {
+                                SessionError::new("indicator-unavailable", format!("{error:#}"))
+                            },
+                        )?,
+                    );
+                }
+                #[cfg(target_os = "macos")]
+                if request.agent_indicator && wants_control {
+                    indicator = Some(
+                        crate::indicator::Indicator::start(source.node_id, source_w, source_h)
+                            .map_err(|error| {
+                                SessionError::new("indicator", format!("{error:#}"))
+                            })?,
+                    );
+                }
+                #[cfg(target_os = "macos")]
+                let capture = capture::start(
+                    portal,
+                    width,
+                    height,
+                    max_fps,
+                    sink,
+                    indicator.as_ref().map(crate::indicator::Indicator::pid),
+                )
+                .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
+                #[cfg(target_os = "linux")]
+                let capture = capture::start(
+                    portal,
+                    width,
+                    height,
+                    max_fps,
+                    sink,
+                    indicator
+                        .as_ref()
+                        .map(crate::indicator::Indicator::position),
+                )
+                .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
+                #[cfg(target_os = "linux")]
+                if let Some(indicator) = indicator.as_mut() {
+                    indicator.event('A', -1, -1);
+                }
                 Selected {
                     source,
                     capture: FrameSource::Portal(capture),
@@ -815,6 +861,20 @@ impl Session {
 
         let source_w = source.width.max(1) as usize;
         let source_h = source.height.max(1) as usize;
+        #[cfg(target_os = "linux")]
+        if request.agent_indicator && wants_control && wants_x11 {
+            let display = match &request.source {
+                Some(SourceRequest::X11 {
+                    display: Some(display),
+                }) => display.clone(),
+                _ => std::env::var("DISPLAY")
+                    .map_err(|_| SessionError::new("indicator-unavailable", "no X display"))?,
+            };
+            indicator = Some(
+                crate::indicator::Indicator::start(&display, source_w, source_h)
+                    .map_err(|error| SessionError::new("indicator", format!("{error:#}")))?,
+            );
+        }
         let (width, height) = fit(source_w, source_h, request.max_width, request.max_height);
 
         let bitrate_kbps = if request.bitrate_kbps == 0 {
@@ -906,6 +966,7 @@ impl Session {
             peer: Arc::new(peer),
             encoder: Mutex::new(encoder),
             input: Mutex::new(input),
+            indicator: Mutex::new(indicator),
             capture: Mutex::new(Some(capture)),
             layout: Mutex::new(layout),
             last_seq: Mutex::new(0),
@@ -1122,6 +1183,9 @@ impl Inner {
         }
         self.control_open.store(false, Ordering::SeqCst);
         self.pipeline.store(false, Ordering::SeqCst);
+        if let Ok(mut indicator) = self.indicator.lock() {
+            indicator.take();
+        }
         // Release first, then tear down: a stuck modifier is the one failure the
         // user cannot undo by reconnecting.
         if let Ok(mut input) = self.input.lock() {
@@ -1225,6 +1289,23 @@ impl Inner {
             }
             *last = seq;
         }
+        let feedback = match &message {
+            ControlMessage::Pointer { phase, x, y, .. } => {
+                let (x, y) = to_source_pixels(*x, *y, self.encoded_size(), &self.source);
+                Some((
+                    if matches!(phase, PointerPhase::Down) {
+                        'C'
+                    } else {
+                        'M'
+                    },
+                    x,
+                    y,
+                ))
+            }
+            ControlMessage::Text { text, .. } if !text.is_empty() => Some(('T', -1, -1)),
+            ControlMessage::Key { down: true, .. } => Some(('T', -1, -1)),
+            _ => None,
+        };
         let outcome = match message {
             ControlMessage::Pointer {
                 phase,
@@ -1261,6 +1342,13 @@ impl Inner {
         };
         match outcome {
             Ok(()) => {
+                if let Some((kind, x, y)) = feedback {
+                    if let Ok(mut indicator) = self.indicator.lock() {
+                        if let Some(indicator) = indicator.as_mut() {
+                            indicator.event(kind, x, y);
+                        }
+                    }
+                }
                 if let Ok(mut m) = self.metrics.lock() {
                     m.input_applied += 1;
                 }
@@ -2054,6 +2142,7 @@ mod tests {
                 wheel_rest: (0.0, 0.0),
             })),
             capture: Mutex::new(None),
+            indicator: Mutex::new(None),
             layout: Mutex::new(Layout::from_environment().expect("a keymap")),
             last_seq: Mutex::new(0),
             control_open: AtomicBool::new(true),
@@ -2392,6 +2481,7 @@ mod tests {
                 restore_token: None,
                 ttl: None,
                 loopback_tcp: false,
+                agent_indicator: false,
             },
             events,
         )
