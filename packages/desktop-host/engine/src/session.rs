@@ -1498,6 +1498,14 @@ impl Inner {
             }
             let _ = seq;
             self.with_input(|target| {
+                // Uinput's immediate down/up pairs can be collapsed by a compositor's
+                // event loop. XTest flushes each edge, so pace only the virtual device.
+                let paced = matches!(&target.applier, Applier::Uinput(_));
+                let pause = || {
+                    if paced {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                };
                 target.check_keys(
                     plan.iter()
                         .flatten()
@@ -1508,11 +1516,15 @@ impl Inner {
                         let modifiers = stroke.modifiers();
                         for modifier in &modifiers {
                             target.modifier(*modifier, true, false)?;
+                            pause();
                         }
                         target.key(stroke.code, true)?;
+                        pause();
                         target.key(stroke.code, false)?;
+                        pause();
                         for modifier in modifiers.iter().rev() {
                             target.modifier(*modifier, false, false)?;
+                            pause();
                         }
                     }
                 }

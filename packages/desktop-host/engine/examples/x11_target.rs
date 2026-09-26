@@ -29,6 +29,15 @@ fn main() -> Result<()> {
     let (connection, screen_number) =
         RustConnection::connect(None).context("cannot open the X display in DISPLAY")?;
     let screen = &connection.setup().roots[screen_number as usize];
+    if std::env::args().any(|arg| arg == "--probe") {
+        let vendor = String::from_utf8_lossy(&connection.setup().vendor);
+        let xwayland = connection.query_extension(b"XWAYLAND")?.reply()?.present;
+        println!(
+            "vendor={vendor} size={}x{} xwayland={xwayland}",
+            screen.width_in_pixels, screen.height_in_pixels
+        );
+        return Ok(());
+    }
     let window = connection.generate_id()?;
     connection
         .create_window(
@@ -80,7 +89,13 @@ fn main() -> Result<()> {
     )?;
     connection.flush()?;
 
-    let animate = std::env::args().any(|arg| arg == "--animate");
+    let args: Vec<String> = std::env::args().collect();
+    let record_text = args
+        .iter()
+        .position(|arg| arg == "--record-text")
+        .and_then(|i| args.get(i + 1));
+    let mut typed = String::new();
+    let animate = args.iter().any(|arg| arg == "--animate");
     let moving = std::env::args().any(|arg| arg == "--move");
     let mut position = 0usize;
     let mut bright = false;
@@ -158,6 +173,22 @@ fn main() -> Result<()> {
                             ("phase", String::from("down")),
                         ],
                     );
+                    if let Some(path) = record_text {
+                        let mapping = connection.get_keyboard_mapping(press.detail, 1)?.reply()?;
+                        let shift = press
+                            .state
+                            .contains(x11rb::protocol::xproto::KeyButMask::SHIFT);
+                        let symbol = mapping
+                            .keysyms
+                            .get(usize::from(shift))
+                            .or(mapping.keysyms.first())
+                            .copied()
+                            .unwrap_or(0);
+                        if (32..=126).contains(&symbol) {
+                            typed.push(char::from_u32(symbol).unwrap());
+                            std::fs::write(path, &typed)?;
+                        }
+                    }
                     if press.detail == 9 {
                         // Escape: the lab's own stop key.
                         emit(&mut out, "quit", &[]);
