@@ -51,6 +51,13 @@ try {
   await client.stop(); client = undefined;
   const started = await run('start','--control','--source','x11','--display',display);
   assert.match(started,/permissions=view,control/);
+  for (const args of [['wait','120001','--timeout','200000'], ['click','100,100','--wait','120001']]) {
+    const invalid = spawn(process.execPath,[cli,...args],{env});
+    let output = ''; for await (const part of invalid.stdout) output += part;
+    assert.equal(await new Promise(r=>invalid.on('exit',r)),1,output);
+    assert.match(output,/error: wait-duration: milliseconds must be an integer from 0 to 120000/);
+  }
+  assert.doesNotMatch(events, /"kind":"button"/, 'rejected delay must not send input');
   const before = await run('diff'); assert.match(before,/changed:/);
   const clicked = await run('click','100,100'); assert.match(clicked,/changed: [1-9]/);
   const looked = await run('look','@r1'); assert.match(looked,/image: .*\.png/);

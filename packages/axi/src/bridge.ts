@@ -63,6 +63,12 @@ function tileDamage(before: Buffer, after: Buffer, width: number, height: number
   return boxes;
 }
 
+function boundedDelay(value: string): number {
+  const ms = Number(value);
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(ms) || ms > 120000) throw new Error('wait-duration: milliseconds must be an integer from 0 to 120000');
+  return ms;
+}
+
 function overlaps(a: string, b: string): boolean {
   const [ax,ay,aw,ah] = a.split(',').map(Number);
   const [bx,by,bw,bh] = b.split(',').map(Number);
@@ -203,6 +209,8 @@ export async function serve(args: string[]): Promise<void> {
       if (args[0] === 'write') { await engine.writeClipboard(opened.sessionId, args[1] ?? ''); return 'clipboard: written'; }
     }
     const action = ['click','drag','type','press','scroll'].includes(command);
+    const actionWait = action && args.includes('--wait') ? args[args.indexOf('--wait')+1] : 'settle';
+    const actionDelay = action && /^\d+$/.test(actionWait!) ? boundedDelay(actionWait!) : undefined;
     if (['click','drag','type','scroll'].includes(command) && (args.some(arg=>arg.startsWith('@')) || args.includes('--into') || args.includes('--at'))) {
       const current = await engine.request<{seq:number}>('session.frame',{session_id:opened.sessionId,since:baseline});
       if (current.seq !== baseline) throw new Error(`stale-ref: frame ${baseline} is now ${current.seq}; run screen --query`);
@@ -239,8 +247,9 @@ export async function serve(args: string[]): Promise<void> {
       const condition = args[0] ?? 'change';
       const deadline = Date.now() + Number(args.includes('--timeout') ? args[args.indexOf('--timeout')+1] : 5000);
       if (/^\d+$/.test(condition)) {
-        if (Number(condition) > deadline - Date.now()) throw new Error('settle-timeout: condition not met before deadline');
-        await new Promise(r=>setTimeout(r,Number(condition)));
+        const ms = boundedDelay(condition);
+        if (ms > deadline - Date.now()) throw new Error('settle-timeout: condition not met before deadline');
+        await new Promise(r=>setTimeout(r,ms));
       } else if (condition === 'change' || condition === 'settle') {
         await engine.request('session.frame', {session_id:opened.sessionId, since:baseline, ...(condition === 'change' ? {after_seq:baseline} : {still_ms:150}), timeout_ms:Math.max(0,deadline-Date.now())});
       } else {
@@ -265,10 +274,9 @@ export async function serve(args: string[]): Promise<void> {
       }
     }
     if (action) {
-      const wait = args.includes('--wait') ? args[args.indexOf('--wait')+1] : 'settle';
-      if (wait !== 'none') {
-        if (/^\d+$/.test(wait!)) await new Promise(r=>setTimeout(r,Number(wait)));
-        else await engine.request('session.frame',{session_id:opened.sessionId,since:baseline,after_seq:preActionSeq,...(wait === 'settle' ? {still_ms:150} : {}),timeout_ms:5000});
+      if (actionWait !== 'none') {
+        if (actionDelay !== undefined) await new Promise(r=>setTimeout(r,actionDelay));
+        else await engine.request('session.frame',{session_id:opened.sessionId,since:baseline,after_seq:preActionSeq,...(actionWait === 'settle' ? {still_ms:150} : {}),timeout_ms:5000});
       }
     }
     const fields = args.includes('--fields') ? args[args.indexOf('--fields')+1]!.split(',') : ['ref','text','x','y'];
