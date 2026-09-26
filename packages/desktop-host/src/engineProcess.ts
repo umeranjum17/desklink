@@ -269,10 +269,8 @@ export class EngineClient {
         this.child.stdin.end();
         const child = this.child;
         await new Promise<void>((resolve) => {
-            const timer = setTimeout(() => {
-                child.kill('SIGTERM');
-                resolve();
-            }, 3000);
+            if (child.exitCode !== null || child.signalCode !== null) return resolve();
+            const timer = setTimeout(() => child.kill('SIGKILL'), 3000);
             child.once('exit', () => {
                 clearTimeout(timer);
                 resolve();

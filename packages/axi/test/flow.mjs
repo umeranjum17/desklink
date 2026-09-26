@@ -10,6 +10,9 @@ import { randomBytes } from 'node:crypto';
 const dir = mkdtempSync(join(tmpdir(), 'desklink-axi-flow-'));
 const enginePath = process.env.DESKLINK_AXI_ENGINE;
 assert(enginePath && existsSync(enginePath), 'set DESKLINK_AXI_ENGINE to this task’s built engine');
+const build = spawnSync('cargo', ['build','-q','--manifest-path','packages/desktop-host/engine/Cargo.toml','--example','x11_target'], { stdio:'ignore' });
+assert.equal(build.status,0,'X client builds');
+const example = join(process.env.CARGO_TARGET_DIR ?? 'packages/desktop-host/engine/target','debug','examples','x11_target');
 const number = Array.from({length:50},(_,i)=>150+i).find(n =>
   !existsSync(`/tmp/.X11-unix/X${n}`) && !existsSync(`/tmp/.X${n}-lock`));
 assert(number !== undefined, 'no unclaimed high X display');
@@ -51,6 +54,11 @@ function recordProcesses() {
     } catch { /* Child already exited. */ }
   }
 }
+async function goneOwned(pid) {
+  const started = owned.get(pid);
+  for (let i=0; i<40 && proc(pid)?.started===started && proc(pid)?.state!=='Z'; i++) await new Promise(r=>setTimeout(r,50));
+  assert(!started || proc(pid)?.started!==started || proc(pid)?.state==='Z', `task process ${pid} survived stop`);
+}
 async function stopProcess(pid) {
   const started = owned.get(pid);
   if (!started) return;
@@ -70,11 +78,9 @@ async function verifyXvfb() {
   assert(readdirSync(`/proc/${xvfb.pid}/fd`).some(fd=> {
     try { return readlinkSync(`/proc/${xvfb.pid}/fd/${fd}`)===`socket:[${inode}]`; } catch { return false; }
   }), 'X server socket is not held by the spawned Xvfb PID');
-  const info = spawnSync('xdpyinfo',['-display',display],{env,encoding:'utf8',timeout:3000});
-  assert.equal(info.status,0,`xdpyinfo could not verify ${display}: ${info.stderr}`);
-  assert.match(info.stdout,/vendor string:\s+The X.Org Foundation/, 'unexpected X server vendor');
-  assert.doesNotMatch(info.stdout,/\bXWAYLAND\b/, 'refusing live Xwayland');
-  assert.match(info.stdout,/dimensions:\s+1280x720 pixels/, 'unexpected display geometry');
+  const info = spawnSync(example,['--probe'],{env,encoding:'utf8',timeout:3000});
+  assert.equal(info.status,0,`X client could not verify ${display}: ${info.stderr}`);
+  assert.match(info.stdout,/vendor=The X.Org Foundation size=1280x720 xwayland=false/, 'unexpected server vendor or geometry');
 }
 
 const cli = resolve('packages/axi/bin/desklink-axi.js');
@@ -124,11 +130,9 @@ try {
   const original = readFileSync(path);
   await new Promise(r=>setTimeout(r,180));
   await assert.rejects(client.request('session.frame',{session_id:session.sessionId,after_seq:first.seq,still_ms:150,timeout_ms:50}),{code:'frame-timeout'});
-  const build = spawn('cargo', ['build','-q','--manifest-path','packages/desktop-host/engine/Cargo.toml','--example','x11_target'], { env, stdio:'ignore' });
-  assert.equal(await new Promise(r=>build.on('exit',r)),0,'X client builds');
-  const example = join(process.env.CARGO_TARGET_DIR ?? 'packages/desktop-host/engine/target','debug','examples','x11_target');
   await verifyXvfb();
-  target = spawn(example, [], { env, stdio:['ignore','pipe','pipe'] });
+  const typedPath = join(dir, 'typed.txt');
+  target = spawn(example, ['--record-text', typedPath], { env, stdio:['ignore','pipe','pipe'] });
   remember(target.pid,example);
   target.stdout.on('data', chunk => events += chunk);
   const changed = await client.request('session.frame',{session_id:session.sessionId,since:first.seq,path,after_seq:first.seq,still_ms:150,timeout_ms:6000});
@@ -171,13 +175,19 @@ try {
   assert.equal(await new Promise(r=>unchanged.on('exit',r)),1,noChange);
   assert.match(noChange,/error: frame-timeout: frame condition not met before deadline/);
   await verifyXvfb();
-  const typing = spawn(process.execPath,[cli,'type','abc'],{env});
+  const expectedText = 'AXI_SYNTHETIC_726';
+  const typing = spawn(process.execPath,[cli,'type',expectedText],{env});
   let typed = ''; for await (const part of typing.stdout) typed += part;
   assert.equal(await new Promise(r=>typing.on('exit',r)),1,typed);
   assert.match(typed,/error: frame-timeout:/);
+  assert.equal(readFileSync(typedPath,'utf8'),expectedText,'saved X-client buffer must equal typed text');
   assert.match(events, /"kind":"button".*"phase":"up"/);
   assert.match(events, /"kind":"key".*"phase":"down"/);
+  recordProcesses();
+  const bridgePid = Number(readFileSync(pidFile,'utf8').trim().split(/\s+/).at(-1));
+  const enginePid = Number(readFileSync(enginePidFile,'utf8').trim().split(/\s+/).at(-1));
   await run('stop');
+  await goneOwned(bridgePid); await goneOwned(enginePid);
   assert.match(await run('start','--control','--source','x11','--display',display),/permissions=view,control/);
   await run('diff'); // Establish the snapshot before the corner starts looping.
   target.kill('SIGTERM');
@@ -208,8 +218,16 @@ try {
   }
   assert.match(await run('screen','--query','zebra'),/0 items match "zebra"/);
   await run('stop');
+  const badDisplay = `:${number+1000}`;
+  assert(!existsSync(`/tmp/.X11-unix/X${number+1000}`) && !existsSync(`/tmp/.X${number+1000}-lock`));
+  const failed = spawn(process.execPath,[cli,'start','--source','x11','--display',badDisplay,'--timeout','3000'],{env:{...env,DESKLINK_AXI_SESSION:`failed-${process.pid}`}});
+  let failure=''; for await (const part of failed.stdout) failure += part;
+  assert.equal(await new Promise(r=>failed.on('exit',r)),1,failure);
+  recordProcesses();
+  await goneOwned(Number(readFileSync(pidFile,'utf8').trim().split(/\s+/).at(-1)));
+  await goneOwned(Number(readFileSync(enginePidFile,'utf8').trim().split(/\s+/).at(-1)));
   if (process.env.DESKLINK_AXI_MEASURE_PATH) writeFileSync(process.env.DESKLINK_AXI_MEASURE_PATH,JSON.stringify(observations));
-  console.log('engine: frame bytes and damage followed X client; CLI: click changed pixels and type reached X client');
+  console.log('engine: private Xvfb frame/damage; CLI: saved text matched, click and cleanup passed');
 } finally {
   await cleanup();
 }

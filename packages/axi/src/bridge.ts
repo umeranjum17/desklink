@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { EngineClient, resolveEngine, type EngineEvent } from '@desklink/host';
 import { PeerConnection, type DataChannel } from 'node-datachannel';
+import { saveToken, takeToken, tokenPath } from './token.js';
 
 export const socketPath = join(process.env.XDG_RUNTIME_DIR ?? join(tmpdir(), `desklink-axi-${process.getuid?.() ?? 'user'}`), 'desklink-axi', `${process.env.DESKLINK_AXI_SESSION ?? 'default'}.sock`);
 
@@ -90,11 +91,19 @@ export async function serve(args: string[]): Promise<void> {
   const executable = resolveEngine(process.env.DESKLINK_AXI_ENGINE);
   if (!executable) throw new Error('desktop engine unavailable; set DESKLINK_AXI_ENGINE');
   const events: EngineEvent[] = [];
+  const tokenFailure: { current?: Error } = {};
+  const checkToken = () => { if (tokenFailure.current) throw new Error(`cannot persist portal restore token: ${tokenFailure.current.message}`); };
+  const portal = process.platform === 'linux' && source !== 'x11' && !(source === 'auto' && display);
+  const tokenFile = portal ? tokenPath() : undefined;
   const motion = new Map<string, {seq:number;at:number;count:number;reported:boolean}>();
   let peer: PeerConnection | undefined;
   let offerReady = false;
   const engine = await EngineClient.start(executable.command, executable.args, { requestTimeoutMs: 125000, onEvent: event => {
     if (event.event !== 'session.frame.changed') events.push(event);
+    if (event.event === 'session.restoreToken' && tokenFile) {
+      try { saveToken(tokenFile, event.params.token); }
+      catch (error) { tokenFailure.current = error as Error; }
+    }
     if (event.event === 'session.frame.changed') {
       const now = Date.now();
       const previous = [...motion];
@@ -107,13 +116,17 @@ export async function serve(args: string[]): Promise<void> {
     }
     if (offerReady && peer && event.event === 'session.candidate') peer.addRemoteCandidate(event.params.candidate, event.params.sdpMid || '0');
   } });
+  const dir = mkdtempSync(join(tmpdir(), 'desklink-axi-'));
+  try {
   const opened = await engine.openSession({
     source: process.platform === 'darwin'
       ? { kind: 'display', ...(display === undefined ? {} : { display_id: Number(display) }) }
       : source === 'x11' || (source === 'auto' && display) ? { kind: 'x11', display } : { kind: 'portal' },
     permissions: control ? ['view', 'control', 'clipboard'] : ['view'], loopbackTcp: true,
     agentIndicator: control,
+    ...(tokenFile ? { restoreToken: takeToken(tokenFile) } : {}),
   }, timeout);
+  checkToken();
   peer = control ? new PeerConnection('desklink-axi', { iceServers: [], bindAddress: '127.0.0.1', enableIceTcp: true }) : undefined;
   let channel: DataChannel | undefined;
   let open = false;
@@ -136,7 +149,6 @@ export async function serve(args: string[]): Promise<void> {
     }
     offerReady = true;
   }
-  const dir = mkdtempSync(join(tmpdir(), 'desklink-axi-'));
   let baseline = 0;
   type Item = { ref: string; text: string; x: number; y: number; conf: number; line: string; words: {text:string;x:number;y:number;w:number;h:number}[] };
   let text: Item[] = []; 
@@ -210,7 +222,15 @@ export async function serve(args: string[]): Promise<void> {
     let pendingDamage: string[] | undefined;
     let waitSeen = baseline;
     if (command === 'start') return `session: open source=${source} ${display ?? ''} size=${opened.geometry.encoded.width}x${opened.geometry.encoded.height} permissions=view${control ? ',control' : ''}`;
-    if (command === 'stop') { await engine.closeSession(opened.sessionId); peer?.close(); await engine.stop(); server.close(); if (existsSync(socketPath)) unlinkSync(socketPath); rmSync(dir, { recursive: true, force: true }); return 'session: stopped'; }
+    if (command === 'stop') {
+      try { await engine.closeSession(opened.sessionId); }
+      finally {
+        peer?.close(); await engine.stop(); server.close();
+        if (existsSync(socketPath)) unlinkSync(socketPath);
+        rmSync(dir, { recursive: true, force: true });
+      }
+      return 'session: stopped';
+    }
     if (command === 'clipboard') {
       if (!control) throw new Error('input-unavailable: clipboard requires start --control');
       if (args[0] === 'read') { const result = await engine.readClipboard(opened.sessionId); return `clipboard: ${args.includes('--full') ? result.text : result.text.slice(0,1000)} (${result.text.length} chars)`; }
@@ -364,16 +384,22 @@ export async function serve(args: string[]): Promise<void> {
         const result = await output(command,args);
         const completed = observed as {seq:number;damage:string[]} | undefined;
         if (completed && command !== 'look') { baseline = completed.seq; regions = completed.damage; }
-        socket.end(result+'\n');
+        socket.end(result+'\n', () => { if (command === 'stop') process.exit(0); });
       } catch (error) {
         const message = (error as Error).message;
         const code = (error as {code?:string}).code;
-        socket.end(`error: ${code ? `${code}: ` : ''}${message}\nsuggestion: desklink-axi ${message.includes('ocr') ? 'look' : 'screen'} --help\n`);
+        socket.end(`error: ${code ? `${code}: ` : ''}${message}\nsuggestion: desklink-axi ${message.includes('ocr') ? 'look' : 'screen'} --help\n`, () => { if (command === 'stop') process.exit(1); });
       }
     });
   }); });
-  try { await engine.request('session.frame', {session_id:opened.sessionId,after_seq:0,timeout_ms:timeout}); }
-  catch (error) { peer?.close(); await engine.stop(); rmSync(dir,{recursive:true,force:true}); throw error; }
+  await engine.request('session.frame', {session_id:opened.sessionId,after_seq:0,timeout_ms:timeout});
+  checkToken();
   server.listen(socketPath, () => chmodSync(socketPath, 0o600));
-  process.on('SIGTERM', () => { void engine.stop().finally(() => { server.close(); if (existsSync(socketPath)) unlinkSync(socketPath); rmSync(dir, {recursive:true,force:true}); }); });
+  process.on('SIGTERM', () => { void engine.stop().finally(() => { server.close(); if (existsSync(socketPath)) unlinkSync(socketPath); rmSync(dir, {recursive:true,force:true}); process.exit(0); }); });
+  } catch (error) {
+    peer?.close();
+    await engine.stop();
+    rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
 }
