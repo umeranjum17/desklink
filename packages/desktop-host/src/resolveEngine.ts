@@ -24,7 +24,11 @@ export interface ResolvedEngine {
 }
 
 /** Platforms with a published platform package. */
-const PREBUILT_PLATFORMS = ['linux-x64-gnu'];
+const PREBUILT_PLATFORMS = ['linux-x64-gnu', 'darwin-arm64'];
+
+export function macosEngineEnabled(platform = process.platform, flag = process.env.DESKLINK_MACOS): boolean {
+    return platform !== 'darwin' || flag === '1';
+}
 
 export function enginePackageRoot(): string {
     return resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -78,6 +82,7 @@ function buildCandidates(root: string): string[] {
 }
 
 export function resolveEngine(configured = process.env.MUXR_DESKLINK_ENGINE): ResolvedEngine | null {
+    if (!macosEngineEnabled()) return null;
     if (configured !== undefined && configured.trim() !== '') {
         if (!isExecutable(configured)) return null;
         return { command: configured, args: ['serve'], origin: 'configured' };
@@ -108,6 +113,9 @@ function isExecutable(path: string): boolean {
  * there.
  */
 export function explainMissingEngine(configured = process.env.MUXR_DESKLINK_ENGINE): string | null {
+    if (!macosEngineEnabled()) {
+        return 'The macOS desktop engine is experimental and off; set DESKLINK_MACOS=1 to try it.';
+    }
     const resolved = resolveEngine(configured);
     if (resolved !== null) return null;
     if (configured !== undefined && configured.trim() !== '') {
