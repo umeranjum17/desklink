@@ -338,8 +338,9 @@ previous capture). A request with the current sequence reports empty damage;
 omitting `path` requests metadata only (`written: false`). `after_seq` waits for
 `seq` to exceed that value; `still_ms` waits for that many milliseconds
 of stillness. When both are supplied, both conditions must hold.
-`timeout_ms` alone waits for 150 ms of stillness. A deadline (at most 120 s)
-returns `frame-timeout`. Damage is grouped by connected 32-pixel tiles.
+`timeout_ms` alone waits for 150 ms of stillness. The default deadline is 5 s;
+`timeout_ms` can extend it to at most 120 s. An unmet condition returns
+`frame-timeout`. Damage is grouped by connected 32-pixel tiles.
 Each changed capture emits a local `session.frame.changed` event with `sessionId`,
 `seq` and `damage`, allowing a co-located consumer to track animation across
 observations. Neither the event nor this file-writing method is forwarded by

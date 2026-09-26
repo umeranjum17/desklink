@@ -14,10 +14,12 @@ desklink-axi look @r1
 desklink-axi stop
 ```
 
-`start` defaults to view-only; without `--source x11 --display :N` it uses the portal, which can require a desktop consent prompt. Do not run it unattended against someone else's display. `stop` releases held input. Every action reports a text diff; `look` alone writes PNG pixels. `--help` lists the 14 commands and each command's flags. Errors are structured and the CLI does not prompt.
+`start` defaults to view-only; without `--source x11 --display :N` it uses the portal, which can require a desktop consent prompt. Do not run it unattended against someone else's display. Input and clipboard read/write require `start --control`; view-only clipboard calls return a structured error naming that flag. `stop` releases held input. Actions wait for a post-action frame and stillness by default, with a bounded timeout; `click --wait settle|change|none|<milliseconds>` changes that wait. `wait change` and `wait settle` block on engine frame signals rather than polling. `diff` reports repeatedly changing regions separately as `animating`; `diff --include-animating` includes them among ordinary changes. `look` writes a PNG crop. `--help` lists the 14 commands and their flags. Errors are structured and the CLI does not prompt.
+
+`desklink-axi setup hooks` adds a Claude `SessionStart` hook to `.claude/settings.local.json` in the current directory; it does not start capture.
 
 For an isolated integration proof run `DESKLINK_AXI_ENGINE=/path/to/engine CARGO_TARGET_DIR=/tmp/task-owned-target node packages/axi/test/flow.mjs` from the repository root. It launches and kills its own Xvfb process by exact PID.
 
-`axi-axi validate "node bin/desklink-axi.js" --dir .` from `packages/axi`: V01–V12 pass; **12 pass, 0 fail, 0 warn, 0 skip, 4 advisory** (spec axi/1.0-2026-07).
+To check the CLI against the AXI spec, run `axi-axi validate "node bin/desklink-axi.js" --dir .` from `packages/axi`.
 
 Measured on a private 1280×720 Xvfb client: `diff → click 100,100 → look @r1 → type abc` returned 79 + 79 + 39 + 30 = **227 text tokens** (`@anthropic-ai/tokenizer` 0.0.4), plus ~5 tokens for the 64×64 crop. Four full screenshots would cost ~4×1,229 = **4,916 image tokens** under the same published width×height/750 estimate (~21× difference). This is a short synthetic task, not a production-workload benchmark; the tokenizer is legacy, so absolute counts are approximate.

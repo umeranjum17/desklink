@@ -521,6 +521,8 @@ pub struct Notice {
     pub event: SessionEvent,
 }
 
+type FrameSnapshot = (u64, Instant, usize, usize, Vec<u8>, Vec<u64>, Vec<u64>);
+
 /// Everything a session's background tasks need, shared rather than borrowed so
 /// the consumer can own the `Session` handle while the pipeline runs.
 struct Inner {
@@ -530,7 +532,7 @@ struct Inner {
     source: SelectedSource,
     geometry: serde_json::Value,
     metrics: Arc<Mutex<Metrics>>,
-    latest: Arc<Mutex<Option<(u64, Instant, usize, usize, Vec<u8>, Vec<u64>, Vec<u64>)>>>,
+    latest: Arc<Mutex<Option<FrameSnapshot>>>,
     frame_changes: tokio::sync::watch::Receiver<u64>,
     peer: Arc<VideoPeer>,
     encoder: Mutex<Encoder>,
@@ -652,18 +654,9 @@ impl Session {
                             *width == frame.width && *height == frame.height && current == &hashes
                         });
                 if !unchanged {
-                    let seq = held.as_ref().map_or(
-                        1,
-                        |(seq, _, _, _, _, _, _): &(
-                            u64,
-                            Instant,
-                            usize,
-                            usize,
-                            Vec<u8>,
-                            Vec<u64>,
-                            Vec<u64>,
-                        )| seq + 1,
-                    );
+                    let seq = held
+                        .as_ref()
+                        .map_or(1, |(seq, _, _, _, _, _, _): &FrameSnapshot| seq + 1);
                     let previous = held
                         .as_ref()
                         .map(|(_, _, _, _, _, current, _)| current.clone())
