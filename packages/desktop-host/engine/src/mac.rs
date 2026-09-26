@@ -334,7 +334,15 @@ fn ensure_disclaimed() -> Result<(), String> {
     }
 }
 
-fn capture_probe(seconds: u64) -> Result<(), String> {
+fn request_screen_capture_content() {
+    use block2::RcBlock;
+    use objc2_screen_capture_kit::SCShareableContent;
+
+    let completion = RcBlock::new(|_content, _error| {});
+    unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&completion) };
+}
+
+fn capture_probe(seconds: u64) -> Result<Value, String> {
     use block2::RcBlock;
     use objc2_core_foundation::{
         CGPoint as NativePoint, CGRect as NativeRect, CGSize as NativeSize,
@@ -423,16 +431,14 @@ fn capture_probe(seconds: u64) -> Result<(), String> {
             distinct_frames.insert(hash);
             frames += 1;
         }
+        std::thread::sleep(Duration::from_millis(33));
     }
-    println!(
-        "{}",
-        serde_json::json!({"frames": frames, "distinct_frames": distinct_frames.len(), "source": {"kind":"screencapturekit", "width":dimensions.0, "height":dimensions.1}})
-    );
     if frames == 0 {
-        Err(String::from("ScreenCaptureKit delivered no frames"))
-    } else {
-        Ok(())
+        return Err(String::from("ScreenCaptureKit delivered no frames"));
     }
+    Ok(
+        serde_json::json!({"frames": frames, "distinct_frames": distinct_frames.len(), "source": {"kind":"screencapturekit", "width":dimensions.0, "height":dimensions.1}}),
+    )
 }
 
 pub fn run() -> i32 {
@@ -464,12 +470,34 @@ pub fn run() -> i32 {
             }
         }
         "capture-probe" => {
-            if !unsafe { CGPreflightScreenCaptureAccess() } {
-                let _ = unsafe { CGRequestScreenCaptureAccess() };
-                eprintln!("capture-permission: allow desklink-host in System Settings › Privacy & Security › Screen & System Audio Recording, then reconnect");
-                return 1;
+            let mut seconds = 3;
+            let mut output_path = None;
+            while let Some(argument) = args.next() {
+                if argument == "--out" {
+                    output_path = args.next();
+                } else if let Ok(value) = argument.parse() {
+                    seconds = value;
+                }
             }
-            if let Err(error) = capture_probe(args.next().and_then(|value| value.parse().ok()).unwrap_or(3)) {
+            let result = if unsafe { CGPreflightScreenCaptureAccess() } {
+                capture_probe(seconds)
+            } else {
+                request_screen_capture_content();
+                Err(String::from("capture-permission: allow DesklinkHost in System Settings › Privacy & Security › Screen & System Audio Recording, then reconnect"))
+            };
+            let output = result.as_ref().map_or_else(
+                |error| serde_json::json!({"error": error}),
+                |value| value.clone(),
+            );
+            if let Some(path) = output_path {
+                if let Err(error) = std::fs::write(&path, serde_json::to_vec_pretty(&output).unwrap()) {
+                    eprintln!("capture-probe: could not write {path}: {error}");
+                    return 1;
+                }
+            } else {
+                println!("{}", serde_json::to_string_pretty(&output).unwrap());
+            }
+            if let Err(error) = result {
                 eprintln!("capture-probe: {error}");
                 return 1;
             }
