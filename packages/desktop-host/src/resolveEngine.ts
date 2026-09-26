@@ -24,7 +24,7 @@ export interface ResolvedEngine {
 }
 
 /** Platforms with a published platform package. */
-const PREBUILT_PLATFORMS = ['linux-x64-gnu', 'darwin-arm64'];
+const PREBUILT_PLATFORMS = ['linux-x64-gnu'];
 
 export function macosEngineEnabled(platform = process.platform, flag = process.env.DESKLINK_MACOS): boolean {
     return platform !== 'darwin' || flag === '1';
