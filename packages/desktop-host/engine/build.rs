@@ -10,8 +10,9 @@
 //!   over `uinput`/`libevdev`, built by its own CMake project into a static
 //!   library and called through its documented C API.
 //!
-//! macOS does not build either shim. Its capture and input backends arrive in
-//! later slices; Linux runtime access is still checked through `/dev/uinput`.
+//! macOS builds only the libvpx shim; ScreenCaptureKit, Quartz input and
+//! AppKit clipboard use native frameworks. Linux runtime input access is still
+//! checked through `/dev/uinput`.
 //!
 //! `DESKLINK_VPX_STATIC_DIR` names a libvpx install prefix (`include/`, `lib/`)
 //! to link statically instead. The prebuilt engine uses it, because libvpx's
@@ -21,6 +22,8 @@
 use std::path::{Path, PathBuf};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("cargo:rustc-check-cfg=cfg(desklink_vpx)");
+    println!("cargo:rustc-check-cfg=cfg(desklink_macos_cli)");
     println!("cargo:rerun-if-changed=native/vpx_shim.c");
     println!("cargo:rerun-if-changed=native/inputtino_shim.cpp");
     println!("cargo:rerun-if-changed=Info.plist");
@@ -29,8 +32,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=vendor/inputtino/CMakeLists.txt");
 
     println!("cargo:rerun-if-env-changed=DESKLINK_VPX_STATIC_DIR");
+    println!("cargo:rerun-if-env-changed=DESKLINK_MACOS_CLI");
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "macos" && std::env::var_os("DESKLINK_MACOS_CLI").is_some() {
+        println!("cargo:rustc-cfg=desklink_macos_cli");
+    }
     if target_os == "linux" {
         let static_vpx = std::env::var_os("DESKLINK_VPX_STATIC_DIR").map(PathBuf::from);
         let mut shim = cc::Build::new();
@@ -61,16 +68,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .compile("dlinputkey");
         build_inputtino(&PathBuf::from(std::env::var("OUT_DIR")?))?;
     } else if target_os == "macos" {
+        if let Some(prefix) = std::env::var_os("DESKLINK_VPX_STATIC_DIR").map(PathBuf::from) {
+            cc::Build::new()
+                .file("native/vpx_shim.c")
+                .include(prefix.join("include"))
+                .compile("dlvpx");
+            println!(
+                "cargo:rustc-link-search=native={}",
+                prefix.join("lib").display()
+            );
+            println!("cargo:rustc-link-lib=static=vpx");
+            println!("cargo:rustc-cfg=desklink_vpx");
+        }
         println!("cargo:rustc-link-lib=framework=CoreGraphics");
         println!("cargo:rustc-link-lib=framework=ApplicationServices");
         println!("cargo:rustc-link-lib=framework=Carbon");
-        println!("cargo:rustc-link-arg-bins=-sectcreate");
-        println!("cargo:rustc-link-arg-bins=__TEXT");
-        println!("cargo:rustc-link-arg-bins=__info_plist");
-        println!(
-            "cargo:rustc-link-arg-bins={}",
-            Path::new("Info.plist").canonicalize()?.display()
-        );
+        // The dev harness embeds its bundle identity for local TCC qualification.
+        // The published CLI must inherit the responsible app's TCC identity instead.
+        if std::env::var_os("DESKLINK_MACOS_CLI").is_none() {
+            println!("cargo:rustc-link-arg-bins=-sectcreate");
+            println!("cargo:rustc-link-arg-bins=__TEXT");
+            println!("cargo:rustc-link-arg-bins=__info_plist");
+            println!(
+                "cargo:rustc-link-arg-bins={}",
+                Path::new("Info.plist").canonicalize()?.display()
+            );
+        }
     }
     Ok(())
 }

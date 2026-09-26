@@ -382,6 +382,19 @@ impl InputTarget {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
+    fn unicode_text(&mut self, text: &str) -> Result<()> {
+        match &mut self.applier {
+            #[cfg(target_os = "macos")]
+            Applier::Uinput(devices) => devices.unicode_text(text),
+            #[cfg(target_os = "linux")]
+            Applier::Uinput(_) => anyhow::bail!("Unicode text input is unavailable on Linux"),
+            Applier::X11(_) => anyhow::bail!("Unicode text input is unavailable for X11"),
+            #[cfg(test)]
+            Applier::Recording(_) => Ok(()),
+        }
+    }
+
     fn chord(&mut self, code: i16, modifiers: Vec<i16>, down: bool) -> Result<()> {
         if down {
             if self.chord_keys.iter().any(|(held, _)| *held == code) {
@@ -552,12 +565,14 @@ pub struct Session {
     inner: Arc<Inner>,
 }
 
+#[cfg(target_os = "linux")]
 fn wayland_clipboard_available() -> bool {
     std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
         && std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
 /// What the engine can actually do on this machine right now.
+#[cfg(target_os = "linux")]
 pub fn capabilities() -> serde_json::Value {
     let session_kind = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         "wayland"
@@ -615,25 +630,90 @@ pub fn capabilities() -> serde_json::Value {
     })
 }
 
+#[cfg(target_os = "macos")]
+fn wayland_clipboard_available() -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
+pub fn capabilities() -> serde_json::Value {
+    let capture_granted = unsafe { crate::mac::CGPreflightScreenCaptureAccess() };
+    let (input, input_grant, unavailable) = match crate::input::probe() {
+        Ok(()) => (true, "granted", serde_json::Value::Null),
+        Err(error) => (
+            false,
+            "missing-accessibility",
+            serde_json::json!({
+                "reason": error.reason,
+                "remedy": error.remedy,
+            }),
+        ),
+    };
+    serde_json::json!({
+        "protocol": crate::protocol::PROTOCOL_VERSION,
+        "engine": format!("desklink-host/{}", env!("CARGO_PKG_VERSION")),
+        "platform": "macos",
+        "session": { "kind": "quartz", "on_console": crate::mac::on_console() },
+        "x11": { "available": false, "size": null },
+        "capture": {
+            "mechanism": "screencapturekit",
+            "backends": ["screencapturekit"],
+            "formats": ["bgra"],
+            "cursor": "embedded",
+            "audio": false,
+            "displays": crate::mac::displays(),
+            "grant": if capture_granted { "granted" } else { "missing-screen-recording" },
+            "unavailable_reason": if capture_granted { serde_json::Value::Null } else { serde_json::json!({
+                "reason": format!("Screen Recording permission has not been granted to {}.", crate::mac::tcc_responsible_app_name()),
+                "remedy": format!("Allow {} in System Settings › Privacy & Security › Screen & System Audio Recording, then reconnect.", crate::mac::tcc_responsible_app_name())
+            }) }
+        },
+        "encode": { "codecs": ["vp9"], "hardware": false },
+        "input": {
+            "mechanism": "quartz-cgevent",
+            "pointer": input,
+            "wheel": input,
+            "keyboard": input,
+            "text": ["unicode", "us-ansi-keymap"],
+            "layout": keymap::LayoutNames::from_environment().identity(),
+            "unavailable_reason": unavailable,
+            "grant": input_grant,
+        },
+        "clipboard": { "read": true, "write": true, "mime": ["text/plain;charset=utf-8"],
+            "maxBytes": clipboard::MAX_CLIPBOARD_BYTES },
+    })
+}
+
 impl Session {
     pub async fn open(
         request: OpenRequest,
         events: tokio_mpsc::UnboundedSender<Notice>,
     ) -> std::result::Result<Self, SessionError> {
+        if !request.permissions.contains(&Permission::View) {
+            return Err(SessionError::new(
+                "permission",
+                "session.open requires the view permission",
+            ));
+        }
         let id = opaque_id();
         let wants_control = request.permissions.contains(&Permission::Control);
         let wants_x11 = matches!(request.source, Some(SourceRequest::X11 { .. }));
+        let max_fps = request.max_fps.clamp(1, 60);
         // Which desktop decides which input path is even available: an X display
         // takes XTest, which cannot reach any other session, while a portal
         // desktop needs kernel input access.
         if wants_control && !wants_x11 {
             // Refuse up front rather than presenting a control surface that
             // silently does nothing.
-            if let Err(unavailable) = crate::input::probe() {
-                return Err(SessionError::new(
-                    "input-unavailable",
-                    format!("{}; {}", unavailable.reason, unavailable.remedy),
-                ));
+            if crate::input::probe().is_err() {
+                #[cfg(target_os = "macos")]
+                let _ = crate::input::request_access();
+                if let Err(unavailable) = crate::input::probe() {
+                    return Err(SessionError::new(
+                        "input-unavailable",
+                        format!("{}; {}", unavailable.reason, unavailable.remedy),
+                    ));
+                }
             }
         }
 
@@ -699,15 +779,19 @@ impl Session {
                 display.as_deref(),
                 request.max_width,
                 request.max_height,
-                request.max_fps,
+                max_fps,
                 metrics.clone(),
                 sink,
             )
             .map_err(|error| SessionError::new("source", format!("{error:#}")))?,
             _ => {
-                let portal = portal::open(request.restore_token.as_deref())
-                    .await
-                    .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
+                let portal = match request.source.as_ref() {
+                    Some(SourceRequest::Display { display_id }) => {
+                        portal::open_display(*display_id).await
+                    }
+                    _ => portal::open(request.restore_token.as_deref()).await,
+                }
+                .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
                 if let Some(token) = &portal.restore_token {
                     let _ = events.send(Notice {
                         session_id: id.clone(),
@@ -719,7 +803,7 @@ impl Session {
                 let source_h = source.height.max(1) as usize;
                 let (width, height) =
                     fit(source_w, source_h, request.max_width, request.max_height);
-                let capture = capture::start(portal, width, height, request.max_fps, sink)
+                let capture = capture::start(portal, width, height, max_fps, sink)
                     .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
                 Selected {
                     source,
@@ -742,7 +826,7 @@ impl Session {
             width,
             height,
             bitrate_kbps,
-            request.max_fps,
+            max_fps,
             available_parallelism().min(8) as u32,
         )
         .map_err(|error| SessionError::new("encode", format!("{error:#}")))?;
@@ -762,11 +846,19 @@ impl Session {
                     wheel_rest: (0.0, 0.0),
                 },
                 None => InputTarget {
-                    applier: Applier::Uinput(
-                        InputDevices::create(source_w as i32, source_h as i32).map_err(
-                            |error| SessionError::new("input-unavailable", format!("{error:#}")),
-                        )?,
-                    ),
+                    applier: Applier::Uinput({
+                        #[cfg(target_os = "linux")]
+                        let devices = InputDevices::create(source_w as i32, source_h as i32);
+                        #[cfg(target_os = "macos")]
+                        let devices = InputDevices::create_for_display(
+                            source_w as i32,
+                            source_h as i32,
+                            source.node_id,
+                        );
+                        devices.map_err(|error| {
+                            SessionError::new("input-unavailable", format!("{error:#}"))
+                        })?
+                    }),
                     held: HeldState::default(),
                     explicit_modifiers: Vec::new(),
                     chord_modifiers: Vec::new(),
@@ -833,7 +925,7 @@ impl Session {
             first_frame: false,
         });
 
-        spawn_pipeline(&inner, frame_rx, pipeline, request.max_fps, bitrate_kbps);
+        spawn_pipeline(&inner, frame_rx, pipeline, max_fps, bitrate_kbps);
         spawn_peer_events(&inner, peer_events_rx);
         spawn_lease(&inner, request.ttl.unwrap_or(Duration::from_secs(3600)));
 
@@ -1262,10 +1354,16 @@ impl Inner {
                 keymap::named_key(&name)
                     .ok_or(("text-unsupported", format!("unknown key {name}")))?
             } else if let Some(character) = character {
-                let wanted = character
-                    .chars()
+                let mut characters = character.chars();
+                let wanted = characters
                     .next()
                     .ok_or(("text-unsupported", String::from("empty character")))?;
+                if characters.next().is_some() {
+                    return Err((
+                        "text-unsupported",
+                        String::from("character must contain exactly one Unicode scalar"),
+                    ));
+                }
                 layout.keystroke_for_char(wanted).ok_or((
                     "text-unsupported",
                     format!("the active layout cannot produce {wanted:?}"),
@@ -1291,42 +1389,48 @@ impl Inner {
         if text.len() > 4096 {
             return Err(("text-too-large", String::from("text exceeds 4096 bytes")));
         }
-        let layout = self
-            .layout
-            .lock()
-            .map_err(|_| ("session", String::from("no keyboard layout")))?;
-        let (plan, unreachable) = layout.plan_text(text);
-        drop(layout);
-        if !unreachable.is_empty() {
-            return Err((
-                "text-unsupported",
-                format!("the active layout cannot produce {unreachable:?}; use the clipboard"),
-            ));
+        #[cfg(target_os = "macos")]
+        {
+            let _ = seq;
+            return self.with_input(|target| target.unicode_text(text));
         }
-        let _ = seq;
-        self.with_input(|target| {
-            // Refuse an unsupported physical key before typing any prefix or
-            // holding a modifier. X11 already consumes evdev identities.
-            target.check_keys(
-                plan.iter()
-                    .flatten()
-                    .flat_map(|stroke| std::iter::once(stroke.code).chain(stroke.modifiers())),
-            )?;
-            for keystroke in plan {
-                for stroke in keystroke {
-                    let modifiers = stroke.modifiers();
-                    for modifier in &modifiers {
-                        target.modifier(*modifier, true, false)?;
-                    }
-                    target.key(stroke.code, true)?;
-                    target.key(stroke.code, false)?;
-                    for modifier in modifiers.iter().rev() {
-                        target.modifier(*modifier, false, false)?;
+        #[cfg(target_os = "linux")]
+        {
+            let layout = self
+                .layout
+                .lock()
+                .map_err(|_| ("session", String::from("no keyboard layout")))?;
+            let (plan, unreachable) = layout.plan_text(text);
+            drop(layout);
+            if !unreachable.is_empty() {
+                return Err((
+                    "text-unsupported",
+                    format!("the active layout cannot produce {unreachable:?}; use the clipboard"),
+                ));
+            }
+            let _ = seq;
+            self.with_input(|target| {
+                target.check_keys(
+                    plan.iter()
+                        .flatten()
+                        .flat_map(|stroke| std::iter::once(stroke.code).chain(stroke.modifiers())),
+                )?;
+                for keystroke in plan {
+                    for stroke in keystroke {
+                        let modifiers = stroke.modifiers();
+                        for modifier in &modifiers {
+                            target.modifier(*modifier, true, false)?;
+                        }
+                        target.key(stroke.code, true)?;
+                        target.key(stroke.code, false)?;
+                        for modifier in modifiers.iter().rev() {
+                            target.modifier(*modifier, false, false)?;
+                        }
                     }
                 }
-            }
-            Ok(())
-        })
+                Ok(())
+            })
+        }
     }
 
     fn clipboard_read(self: &Arc<Self>, request: String) {
@@ -2271,6 +2375,32 @@ mod tests {
             inner.revoked_reason().is_some(),
             "the session is closed, not left black"
         );
+    }
+
+    #[tokio::test]
+    async fn opening_without_view_permission_is_refused_before_capture() {
+        let (events, _received) = tokio_mpsc::unbounded_channel();
+        let result = Session::open(
+            OpenRequest {
+                source: None,
+                permissions: vec![Permission::Control],
+                max_width: 640,
+                max_height: 480,
+                bitrate_kbps: 0,
+                max_fps: 30,
+                ice_servers: Vec::new(),
+                restore_token: None,
+                ttl: None,
+                loopback_tcp: false,
+            },
+            events,
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("a viewless session must not open"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "permission");
     }
 
     #[tokio::test]

@@ -5,7 +5,7 @@
 //! Everything PipeWire lives on this module's own thread because its objects are
 //! not `Send`; frames and state changes leave through channels.
 
-use crate::convert::{to_i420, I420};
+use crate::convert::{to_i420, PixelFormat, I420};
 use crate::portal::{PortalSession, SelectedSource};
 use anyhow::{Context, Result};
 use pipewire as pw;
@@ -16,18 +16,6 @@ use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PixelFormat {
-    Bgrx,
-    Rgbx,
-    Bgra,
-    Rgba,
-    Bgr,
-    Rgb,
-    Unsupported,
-}
 
 impl PixelFormat {
     fn from_spa(raw: u32) -> Self {

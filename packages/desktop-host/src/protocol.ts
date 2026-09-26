@@ -17,7 +17,7 @@ export interface EngineCapabilities {
     protocol: number;
     engine: string;
     platform: string;
-    session: { kind: string };
+    session: { kind: string; on_console?: boolean };
     /** Whether the X11 backend can reach a server here, and that server's screen size. */
     x11: { available: boolean; size: [number, number] | null };
     capture: {
@@ -27,6 +27,17 @@ export interface EngineCapabilities {
         formats: string[];
         cursor: string;
         audio: boolean;
+        displays?: Array<{
+            id: number;
+            width: number;
+            height: number;
+            scale: number;
+            points: { width: number; height: number };
+            origin: { x: number; y: number };
+            main: boolean;
+        }>;
+        grant?: string;
+        unavailable_reason?: { reason: string; remedy: string } | null;
     };
     encode: { codecs: string[]; hardware: boolean };
     input: {
@@ -49,13 +60,12 @@ export interface SurfaceGeometry {
 }
 
 /**
- * Which desktop to capture. Absent means the portal, which is the only backend
- * that carries a Wayland user's consent; an explicit X display is the supported
- * alternative for a machine whose screen-cast portal does not work, and it is
- * what a host with no Wayland session uses.
+ * Which desktop to capture. Absent means the platform default; macOS can target
+ * a specific display while Linux uses the portal or an explicit X display.
  */
 export type SourceRequest =
     | { kind: 'portal' }
+    | { kind: 'display'; display_id?: number }
     | { kind: 'x11'; display?: string };
 
 export interface OpenSessionRequest {

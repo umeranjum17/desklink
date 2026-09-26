@@ -42,6 +42,10 @@ pub struct PortalSession {
 /// `restore_token` is a token from an earlier session; supplying it lets a
 /// backend skip the picker when its policy allows it. The returned token must be
 /// persisted by the consumer and is single-use.
+pub async fn open_display(_: Option<u32>) -> Result<PortalSession> {
+    anyhow::bail!("display selection is only supported on macOS")
+}
+
 pub async fn open(restore_token: Option<&str>) -> Result<PortalSession> {
     let proxy = Screencast::new()
         .await

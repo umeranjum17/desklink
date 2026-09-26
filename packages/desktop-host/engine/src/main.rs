@@ -8,40 +8,62 @@
 
 #[cfg(target_os = "linux")]
 mod capture;
+#[cfg(target_os = "macos")]
+#[path = "capture_mac.rs"]
+mod capture;
 #[cfg(target_os = "linux")]
 mod clipboard;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
+#[path = "clipboard_mac.rs"]
+mod clipboard;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod convert;
 #[cfg(target_os = "linux")]
 mod encoder;
+#[cfg(all(target_os = "macos", desklink_vpx))]
+mod encoder;
 #[cfg(target_os = "linux")]
+mod input;
+#[cfg(target_os = "macos")]
+#[path = "input_mac.rs"]
 mod input;
 #[cfg(target_os = "linux")]
 mod keymap;
 #[cfg(target_os = "macos")]
+#[path = "keymap_mac.rs"]
+mod keymap;
+#[cfg(target_os = "macos")]
 mod mac;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
 mod peer;
 #[cfg(target_os = "linux")]
 mod portal;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
+#[path = "portal_mac.rs"]
+mod portal;
+#[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
 mod protocol;
 #[cfg(target_os = "linux")]
 mod session;
+#[cfg(all(target_os = "macos", desklink_vpx))]
+mod session;
 #[cfg(target_os = "linux")]
 mod x11;
+#[cfg(target_os = "macos")]
+#[path = "x11_mac.rs"]
+mod x11;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
 use anyhow::Result;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
 use protocol::{ErrorBody, Event, Request, Response};
 #[cfg(target_os = "linux")]
 use std::sync::mpsc as std_mpsc;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
 use std::time::Duration;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
 use tokio::sync::mpsc as tokio_mpsc;
 
 #[cfg(target_os = "linux")]
@@ -92,7 +114,7 @@ fn main() {
     std::process::exit(code);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
 fn report(result: Result<()>) -> i32 {
     match result {
         Ok(()) => 0,
@@ -280,7 +302,7 @@ async fn probe_portal(seconds: u64) -> Result<()> {
 }
 
 /// The local control protocol loop.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
 async fn serve() -> Result<()> {
     let (out_tx, mut out_rx) = tokio_mpsc::unbounded_channel::<String>();
     let writer = tokio::spawn(async move {
@@ -371,7 +393,7 @@ async fn serve() -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
 fn render_event(notice: session::Notice) -> Option<String> {
     let session::Notice { session_id, event } = notice;
     let (name, params) = match event {
@@ -422,7 +444,7 @@ fn render_event(notice: session::Notice) -> Option<String> {
     .ok()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
 async fn dispatch(
     request: &Request,
     hello_seen: &mut bool,
@@ -594,7 +616,7 @@ async fn dispatch(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
 fn require_session(
     current: &mut Option<session::Session>,
 ) -> std::result::Result<&mut session::Session, ErrorBody> {
@@ -605,7 +627,7 @@ fn require_session(
 
 /// A late message for a session that has already ended must not revive it, and a
 /// message for a different session must not reach this one.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
 fn check_session(
     session: &session::Session,
     id: &str,

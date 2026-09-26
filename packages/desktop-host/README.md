@@ -11,13 +11,14 @@ particular application.
 
 ## What it does
 
-The following working desktop path is Linux-only; the macOS source build currently
-reports capabilities but cannot open a desktop session (see [macOS status](#macos-status)).
+The engine supports Linux and macOS desktop sessions; macOS currently requires
+a source build with a static VP9 library.
 
 - **Capture** through the XDG Desktop Portal (`ScreenCast`) and PipeWire, with
-  compositor consent, or from an explicitly selected X display's root window.
-  The portal path asks for shared-memory buffers rather than DMA-BUFs, keeping
-  its pixel path on the CPU and out of the driver.
+  compositor consent, from an explicitly selected X display's root window, or
+  from a selected macOS display through ScreenCaptureKit. The macOS backend
+  currently requests images at the session frame cap; the source may supply fewer
+  frames. The portal path asks for shared-memory buffers rather than DMA-BUFs.
 - **Encode** VP9 with libvpx in real time, single pass, no lookahead: one frame
   in, one packet out. Software by default, because a hardware encoder would put a
   vendor driver dependency on every machine class. Tuned for a desktop: the
@@ -27,12 +28,11 @@ reports capabilities but cannot open a desktop session (see [macOS status](#maco
 - **Transport** with WebRTC — ICE, DTLS, SRTP, RTP — and one data channel for the
   session's pointer/keyboard/clipboard.
 - **Input** through [inputtino](https://github.com/games-on-whales/inputtino)
-  (MIT) over `uinput`/`libevdev` for portal capture, or XTest for an X display.
-  Both release held input when the session ends.
+  (MIT) over `uinput`/`libevdev` for portal capture, XTest for an X display, or
+  Quartz events on macOS. Held input is released when the session ends.
 - **Clipboard** explicitly, in both directions, only when asked. It is never
   polled and never used as a hidden way to type. On Wayland, writes require
-  `wl-copy` from `wl-clipboard`; its selection server keeps the copied text
-  available after the desktop session ends, until another app replaces it.
+  `wl-copy` from `wl-clipboard`; macOS uses the plain-text general pasteboard.
 
 ## What it deliberately does not do
 
@@ -68,22 +68,27 @@ and only the portal backend needs it.
 There is no prebuilt engine for any other platform. Another Linux (arm64, musl)
 can [build it from source](#building-from-source). Windows remains unsupported.
 
-### macOS status
+### macOS
 
-A macOS source build can report displays and current permissions without
-prompting. Its `capture-probe` captures screenshots of the main display through
-ScreenCaptureKit for a local diagnostic, but cannot open a remote desktop session
-even after grants. Run `desklink-host capture-probe [seconds] [--out result.json]`
-(default: 3 seconds); it reports frame count, a distinct-frame count based on
-full-frame hashes, source and dimensions as JSON on stdout or at the given path.
-With Screen Recording permission missing, it requests consent, waits up to 60
-seconds for the request callback, then writes a JSON error and exits nonzero;
-grant access in System Settings and rerun the probe. `--out` is useful when
-launching an app bundle through `open`, which cannot pipe its stdout. See the
-[protocol's macOS status](docs/PROTOCOL.md#macos-status) for supported commands
-and wire behavior. Engine resolution is off by default on macOS;
-`DESKLINK_MACOS=1` only allows a configured or local candidate engine to be
-resolved, not a working session.
+The macOS engine shares protocol v3's WebRTC session path: selected-display
+ScreenCaptureKit capture, VP9 encoding, Quartz pointer/keyboard events, and
+plain-text NSPasteboard operations. `capabilities` is non-prompting; `session.open`
+requests Screen Recording and, for control, Accessibility consent when needed.
+TCC belongs to the app responsible for launching the unsigned CLI: typically
+Terminal, iTerm, or a Node.js host. Grant that app in **System Settings → Privacy
+& Security → Screen & System Audio Recording** and **Accessibility**; the CLI does
+not install a separate DesklinkHost.app or pre-seed/bypass TCC. macOS currently
+uses a US ANSI virtual-key map for character chords (the current input layout is
+diagnostic); free-form text uses Unicode key events.
+
+The published engine is an **unsigned macOS arm64 CLI** in the optional
+`@desklink/host-darwin-arm64` platform package; no Developer ID identity or
+notarization is required. The macOS engine remains opt-in (`DESKLINK_MACOS=1`).
+To build and pack it, build on an Apple Silicon Mac with Rust 1.97+ and static
+Homebrew libvpx, then run `release/build-engine-macos-arm64.sh` and
+`node release/pack.mjs --engine dist-desklink/engine-darwin-arm64 --platform darwin-arm64`.
+The app-bundled signed harness is only for local TCC qualification, not npm
+installation. See the [macOS protocol](docs/PROTOCOL.md#macos).
 
 Point `MUXR_DESKLINK_ENGINE` at a binary built elsewhere if you have one. The
 package never searches `PATH` for a same-named program: "a binary called
@@ -100,8 +105,9 @@ cargo build --release --manifest-path engine/Cargo.toml
 ```
 
 On macOS, prefix the launcher commands with `DESKLINK_MACOS=1` to resolve the
-local candidate; the engine can run the local capture probe but cannot open a
-desktop session.
+local candidate. The app-bundled dev harness is not the npm package; a source
+build is an unsigned CLI and its TCC permissions are attributed to the
+responsible launching app.
 
 On Linux, a source build links system libraries through `pkg-config` (and
 libxcb directly), compiles `native/vpx_shim.c` against libvpx's headers, and
