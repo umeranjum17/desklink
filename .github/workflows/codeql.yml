@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  security-events: write
 
 jobs:
   analyze:
@@ -18,32 +19,32 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [ 'cpp', 'javascript-typescript', 'rust' ]
+        include:
+          - language: cpp
+            build-mode: manual
+          - language: javascript-typescript
+            build-mode: none
+          - language: rust
+            build-mode: none
     steps:
       - uses: actions/checkout@v4
       - name: Native prerequisites
         if: matrix.language == 'cpp' || matrix.language == 'rust'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \\
-            build-essential cmake pkg-config libclang-dev \\
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config libclang-dev \
             libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libevdev-dev libxcb1-dev
       - name: Rust toolchain
-        if: matrix.language == 'rust'
+        if: matrix.language == 'cpp' || matrix.language == 'rust'
         run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            packages/desktop-host/engine/target
-          key: codeql-${{ matrix.language }}-${{ runner.os }}-${{ hashFiles('packages/desktop-host/engine/Cargo.lock') }}
-          restore-keys: |
-            codeql-${{ matrix.language }}-${{ runner.os }}-
       - uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
-          build-mode: autobuild
+          build-mode: ${{ matrix.build-mode }}
+      - name: Build engine
+        if: matrix.language == 'cpp'
+        run: cargo build --manifest-path packages/desktop-host/engine/Cargo.toml
       - uses: github/codeql-action/analyze@v3
         with:
           category: /language:${{ matrix.language }}
