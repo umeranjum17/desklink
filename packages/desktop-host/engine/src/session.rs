@@ -472,6 +472,7 @@ struct Inner {
     geometry: serde_json::Value,
     metrics: Arc<Mutex<Metrics>>,
     latest: Arc<Mutex<Option<(u64, Instant, usize, usize, Vec<u8>, Vec<u64>, Vec<u64>)>>>,
+    frame_changes: tokio::sync::watch::Receiver<u64>,
     peer: Arc<VideoPeer>,
     encoder: Mutex<Encoder>,
     input: Mutex<Option<InputTarget>>,
@@ -579,6 +580,7 @@ impl Session {
         let (frame_tx, frame_rx) = latest_frame();
         let latest = Arc::new(Mutex::new(None));
         let observed = latest.clone();
+        let (frame_tx_signal, frame_changes) = tokio::sync::watch::channel(0u64);
         let captured = metrics.clone();
         let sink = Box::new(move |frame: I420, _seq: u64, raw: Vec<u8>| {
             let hashes = tile_hashes(&raw, frame.width, frame.height);
@@ -608,6 +610,7 @@ impl Session {
                     hashes,
                     previous,
                 ));
+                frame_tx_signal.send_replace(seq);
             }
             if let Ok(mut m) = captured.lock() {
                 m.captured_frames += 1;
@@ -741,6 +744,7 @@ impl Session {
             geometry,
             metrics,
             latest,
+            frame_changes,
             peer: Arc::new(peer),
             encoder: Mutex::new(encoder),
             input: Mutex::new(input),
@@ -784,6 +788,23 @@ impl Session {
 
     pub fn source(&self) -> &SelectedSource {
         &self.inner.source
+    }
+
+    pub async fn wait_frame(&self, after_seq: Option<u64>, timeout_ms: u64) -> std::result::Result<(), SessionError> {
+        let mut changes = self.inner.frame_changes.clone();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms.min(120_000));
+        loop {
+            let (seq, still) = self.inner.latest.lock().ok()
+                .and_then(|held| held.as_ref().map(|(seq, at, ..)| (*seq, at.elapsed())))
+                .unwrap_or((0, Duration::ZERO));
+            if seq > 0 && after_seq.map_or(still >= Duration::from_millis(150), |after| seq > after) {
+                return Ok(());
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() { return Err(SessionError::new("frame-timeout", "frame condition not met before deadline")); }
+            let until_still = if seq > 0 && after_seq.is_none() { Duration::from_millis(150).saturating_sub(still) } else { remaining };
+            let _ = tokio::time::timeout(remaining.min(until_still), changes.changed()).await;
+        }
     }
 
     /// Write only the requested lossless frame bytes; JSON carries metadata, never pixels.
@@ -1845,6 +1866,7 @@ mod tests {
             }),
             metrics: Arc::new(Mutex::new(Metrics::default())),
             latest: Arc::new(Mutex::new(None)),
+            frame_changes: tokio::sync::watch::channel(0).1,
             peer: Arc::new(peer),
             encoder: Mutex::new(Encoder::new(64, 64, 1000, 30, 1).expect("an encoder")),
             input: Mutex::new(Some(InputTarget {

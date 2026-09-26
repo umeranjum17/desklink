@@ -4,6 +4,7 @@ import { call, serve, socketPath } from './bridge.js';
 import { writeFileSync } from 'node:fs';
 import { print } from './output/toon.js';
 import { installHooks } from './hooks.js';
+import { UsageError } from './output/errors.js';
 
 if (process.argv[2] === '--bridge') {
   try { await serve(process.argv.slice(3)); }
@@ -22,8 +23,11 @@ if (process.argv[2] === '--bridge') {
   ];
   const commands: Record<string, CommandModule> = {};
   for (const [name, required, flags] of definitions) commands[name] = {
-    spec: { name, summary: `${name} on the live desktop`, args: required.map(arg => ({name:arg,required:true,description:arg})), flags: flags.map(flag => ({name:flag,type: ['control','full','double','submit','include-animating'].includes(flag) ? 'boolean' : 'string', description:flag})), examples: [`desklink-axi ${name} ${required.map(arg=>`<${arg}>`).join(' ')}`] },
+    spec: { name, summary: `${name} on the live desktop`, args: required.map(arg => ({name:arg,required:true,description:arg})), flags: flags.map(flag => ({name:flag,type: ['control','full','double','submit','include-animating'].includes(flag) ? 'boolean' : 'string', values: flag === 'source' ? ['auto','portal','x11'] : flag === 'button' ? ['left','right'] : undefined, description:flag})), examples: [`desklink-axi ${name} ${required.map(arg=>`<${arg}>`).join(' ')}`] },
     async run(parsed) {
+      if (name === 'scroll' && !['up','down'].includes(parsed.positionals[0]!)) throw new UsageError('scroll direction must be up or down');
+      if (typeof parsed.flags.wait === 'string' && !['none','change','settle'].includes(parsed.flags.wait) && !/^\d+$/.test(parsed.flags.wait)) throw new UsageError('--wait must be none, change, settle, or milliseconds');
+      for (const key of ['timeout','amount'] as const) if (typeof parsed.flags[key] === 'string' && (!/^\d+$/.test(parsed.flags[key]) || Number(parsed.flags[key]) <= 0)) throw new UsageError(`--${key} must be a positive integer`);
       const args = [...parsed.positionals];
       for (const [key,value] of Object.entries(parsed.flags)) if (value === true) args.push(`--${key}`); else if (typeof value === 'string') args.push(`--${key}`,value);
       if (name === 'setup hooks') { print(installHooks()); return 0; }
@@ -31,6 +35,6 @@ if (process.argv[2] === '--bridge') {
       catch (error) { print(`error: ${(error as Error).message}\nsuggestion: desklink-axi start --help`); return 1; }
     },
   };
-  const registry: Registry = { tool: 'desklink-axi', root: homeCommand, rootHelp, commands, aliases: {} };
+  const registry: Registry = { tool: 'desklink-axi', root: homeCommand, rootHelp, commands };
   process.exit(await dispatch(registry, process.argv.slice(2)));
 }

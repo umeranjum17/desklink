@@ -335,7 +335,10 @@ travel through JSON. `seq` advances only when capture changes, `still_ms` is
 elapsed time since that capture, and `damage` bounds the changed 32-pixel
 tiles since `since` (full frame when the requested sequence is older than the
 previous capture). A request with the current sequence reports empty damage;
-omitting `path` requests metadata only (`written: false`).
+omitting `path` requests metadata only (`written: false`). `after_seq` waits for
+`seq` to exceed that value; `timeout_ms` without `after_seq` waits for 150 ms
+of stillness. Both return `frame-timeout` at the deadline (at most 120 s).
+This file-writing method is local-only and is refused by the remote WebSocket bridge.
 
 ```json
 {"id":20,"method":"session.frame","params":{"session_id":"…","since":7,"path":"/run/user/1000/frame.raw"}}

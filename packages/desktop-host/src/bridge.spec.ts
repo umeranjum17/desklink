@@ -103,6 +103,8 @@ describe('the bridge', () => {
         const malformed = new Promise<string>((resolve) => socket.once('message', (raw) => resolve(String(raw))));
         socket.send('null');
         expect(JSON.parse(await malformed)).toMatchObject({ error: { code: 'malformed' } });
+        await expect(requestOn(socket, 20, 'session.frame', { path: '/tmp/remote-frame.raw' }))
+            .rejects.toThrow('session.frame is local-only');
         const opened = await requestOn(socket, 1, 'session.open');
         expect(opened).toMatchObject({ sessionId: 'engine-1', generation: 1 });
         expect((opened.geometry as { encoded: unknown }).encoded).toEqual({ width: 100, height: 100 });

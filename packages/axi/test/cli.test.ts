@@ -32,6 +32,14 @@ describe("desklink-axi AXI contract", () => {
     expect(r.stdout).toContain("--");
   });
 
+  it('rejects mistyped desktop actions before connecting', () => {
+    for (const args of [['start','--source','bogus'], ['click','1,1','--button','middle'], ['click','1,1','--wait','forever'], ['scroll','sideways'], ['scroll','down','--amount','NaN']]) {
+      const result = run(...args);
+      expect(result.status).toBe(2);
+      expect(result.stdout).toContain('error:');
+    }
+  });
+
   it("stderr is silent on success (principle 6)", () => {
     const r = run();
     expect(r.stderr.trim()).toBe("");

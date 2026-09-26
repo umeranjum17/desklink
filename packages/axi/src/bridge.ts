@@ -45,12 +45,17 @@ export async function serve(args: string[]): Promise<void> {
   const executable = resolveEngine(process.env.DESKLINK_AXI_ENGINE);
   if (!executable) throw new Error('desktop engine unavailable; set DESKLINK_AXI_ENGINE');
   const events: EngineEvent[] = [];
-  const engine = await EngineClient.start(executable.command, executable.args, { onEvent: event => events.push(event) });
+  let peer: PeerConnection | undefined;
+  let offerReady = false;
+  const engine = await EngineClient.start(executable.command, executable.args, { requestTimeoutMs: 125000, onEvent: event => {
+    events.push(event);
+    if (offerReady && peer && event.event === 'session.candidate') peer.addRemoteCandidate(event.params.candidate, event.params.sdpMid || '0');
+  } });
   const opened = await engine.openSession({
     source: source === 'x11' || (source === 'auto' && display) ? { kind: 'x11', display } : { kind: 'portal' },
     permissions: control ? ['view', 'control', 'clipboard'] : ['view'], loopbackTcp: true,
   }, timeout);
-  const peer = control ? new PeerConnection('desklink-axi', { iceServers: [], bindAddress: '127.0.0.1', enableIceTcp: true }) : undefined;
+  peer = control ? new PeerConnection('desklink-axi', { iceServers: [], bindAddress: '127.0.0.1', enableIceTcp: true }) : undefined;
   let channel: DataChannel | undefined;
   let open = false;
   let nextSeq = 1;
@@ -70,6 +75,7 @@ export async function serve(args: string[]): Promise<void> {
     for (const event of events) if (event.event === 'session.candidate') {
       peer.addRemoteCandidate(event.params.candidate, event.params.sdpMid || '0');
     }
+    offerReady = true;
   }
   const dir = mkdtempSync(join(tmpdir(), 'desklink-axi-'));
   let baseline = 0;
@@ -78,14 +84,15 @@ export async function serve(args: string[]): Promise<void> {
   let regions: string[] = [];
   let motionRegion = '';
   let motionCount = 0;
-  const capture = async (advance = true) => {
+  let motionSeq = 0;
+  let observed: {seq:number;damage:string[]} | undefined;
+  const capture = async () => {
     const path = join(dir, 'frame.raw');
     const frame = await engine.request<{seq:number;still_ms:number;width:number;height:number;damage:number[][]}>('session.frame', { session_id: opened.sessionId, since: baseline, path });
     const changed = frame.seq !== baseline;
     const damage = frame.damage.map(box => box.join(','));
-    if (damage.length) regions = damage;
-    if (advance) baseline = frame.seq;
-    return { ...frame, changed, damage, path };
+    observed = {seq:frame.seq,damage};
+    return { ...frame, changed, damage, path, previous: baseline };
   };
   const image = async (frame: Awaited<ReturnType<typeof capture>>, box: number[], path: string) => {
     const { PNG } = await import('pngjs');
@@ -143,6 +150,7 @@ export async function serve(args: string[]): Promise<void> {
     if (command === 'start') return `session: open source=${source} ${display ?? ''} size=${opened.geometry.encoded.width}x${opened.geometry.encoded.height} permissions=view${control ? ',control' : ''}`;
     if (command === 'stop') { await engine.closeSession(opened.sessionId); peer?.close(); await engine.stop(); server.close(); if (existsSync(socketPath)) unlinkSync(socketPath); rmSync(dir, { recursive: true, force: true }); return 'session: stopped'; }
     if (command === 'clipboard') {
+      if (!control) throw new Error('input-unavailable: clipboard requires start --control');
       if (args[0] === 'read') { const result = await engine.readClipboard(opened.sessionId); return `clipboard: ${args.includes('--full') ? result.text : result.text.slice(0,1000)} (${result.text.length} chars)`; }
       if (args[0] === 'write') { await engine.writeClipboard(opened.sessionId, args[1] ?? ''); return 'clipboard: written'; }
     }
@@ -152,55 +160,68 @@ export async function serve(args: string[]): Promise<void> {
     }
     if (command === 'click' || command === 'drag') {
       const [x,y] = target(args[0]!);
+      const [endX,endY] = command === 'drag' ? target(args[1]!) : [x,y];
+      const button = args.includes('right') ? 3 : 1;
       await act({ kind: 'pointer', phase: 'move', x, y });
-      await act({ kind: 'pointer', phase: 'down', x, y, button: args.includes('right') ? 3 : 1 });
-      let endX=x,endY=y;
-      if (command === 'drag') { [endX,endY] = target(args[1]!); await act({kind:'pointer',phase:'move',x:endX,y:endY}); }
-      await act({ kind: 'pointer', phase: 'up', x:endX, y:endY, button: args.includes('right') ? 3 : 1 });
-      if (command === 'click' && args.includes('--double')) { await act({kind:'pointer',phase:'down',x,y}); await act({kind:'pointer',phase:'up',x,y}); }
+      await act({ kind: 'pointer', phase: 'down', x, y, button });
+      try {
+        if (command === 'drag') await act({kind:'pointer',phase:'move',x:endX,y:endY});
+        await act({ kind: 'pointer', phase: 'up', x:endX, y:endY, button });
+        if (command === 'click' && args.includes('--double')) { await act({kind:'pointer',phase:'down',x,y,button}); await act({kind:'pointer',phase:'up',x,y,button}); }
+      } catch (error) { await act({kind:'release_all'}).catch(() => undefined); throw error; }
     } else if (command === 'type') {
-      if (args.includes('--into')) { const [x,y]=target(args[args.indexOf('--into')+1]!); await act({kind:'pointer',phase:'move',x,y}); await act({kind:'pointer',phase:'down',x,y}); await act({kind:'pointer',phase:'up',x,y}); }
-      await act({ kind: 'text', text: args[0] ?? '' });
-      if (args.includes('--submit')) { await act({kind:'key',name:'Enter',down:true}); await act({kind:'key',name:'Enter',down:false}); }
+      try {
+        if (args.includes('--into')) { const [x,y]=target(args[args.indexOf('--into')+1]!); await act({kind:'pointer',phase:'move',x,y}); await act({kind:'pointer',phase:'down',x,y}); await act({kind:'pointer',phase:'up',x,y}); }
+        await act({ kind: 'text', text: args[0] ?? '' });
+        if (args.includes('--submit')) { await act({kind:'key',name:'Enter',down:true}); await act({kind:'key',name:'Enter',down:false}); }
+      } catch (error) { await act({kind:'release_all'}).catch(() => undefined); throw error; }
     } else if (command === 'press') {
       const parts = (args[0] ?? '').split('+'); const name = parts.pop()!;
       const modifiers = parts.map(p=>({ctrl:'Ctrl',control:'Control',alt:'Alt',shift:'Shift',meta:'Meta'}[p.toLowerCase()] ?? p));
       const key = name.length === 1 ? {character:name} : {name};
-      await act({kind:'key',...key,down:true,modifiers}); await act({kind:'key',...key,down:false,modifiers});
+      try { await act({kind:'key',...key,down:true,modifiers}); await act({kind:'key',...key,down:false,modifiers}); }
+      catch (error) { await act({kind:'release_all'}).catch(() => undefined); throw error; }
     } else if (command === 'scroll') {
       if (args.includes('--at')) { const [x,y]=target(args[args.indexOf('--at')+1]!); await act({kind:'pointer',phase:'move',x,y}); }
       await act({kind:'wheel',dy:args[0] === 'up' ? -Number(args.includes('--amount') ? args[args.indexOf('--amount')+1] : 3) : Number(args.includes('--amount') ? args[args.indexOf('--amount')+1] : 3)});
     }
     else if (command === 'wait') {
       const condition = args[0] ?? 'change';
-      const before = baseline;
       const deadline = Date.now() + Number(args.includes('--timeout') ? args[args.indexOf('--timeout')+1] : 5000);
-      let matched = false;
-      if (/^\d+$/.test(condition)) { await new Promise(r=>setTimeout(r,Number(condition))); matched=true; }
-      while (!matched && Date.now() < deadline) {
-        const f = await engine.request<{seq:number;still_ms:number}>('session.frame', { session_id: opened.sessionId, since: before });
-        if (condition === 'settle') matched = f.still_ms >= 150;
-        else if (condition === 'change') matched = f.seq !== before;
-        else if (f.seq !== before) { const snapshot = await capture(false); matched = (await ocr(snapshot)).some(t=>t.text.toLowerCase().includes(condition.toLowerCase())); }
-        if (!matched) await new Promise(r => setTimeout(r, 80));
+      if (/^\d+$/.test(condition)) {
+        if (Number(condition) > deadline - Date.now()) throw new Error('settle-timeout: condition not met before deadline');
+        await new Promise(r=>setTimeout(r,Number(condition)));
+      } else if (condition === 'change' || condition === 'settle') {
+        await engine.request('session.frame', {session_id:opened.sessionId, since:baseline, ...(condition === 'change' ? {after_seq:baseline} : {}), timeout_ms:Math.max(0,deadline-Date.now())});
+      } else {
+        let seen = baseline, found = false;
+        while (Date.now() < deadline) {
+          const f = await engine.request<{seq:number;damage:number[][]}>('session.frame', {session_id:opened.sessionId,since:seen,after_seq:seen,timeout_ms:Math.max(0,deadline-Date.now())});
+          const snapshot = await capture();
+          const bounds = snapshot.damage.length ? snapshot.damage.map(box=>box.split(',').map(Number)) : [[0,0,snapshot.width,snapshot.height]];
+          for (const box of bounds) {
+            const [x,y,w,h] = box;
+            if ((await ocr(snapshot,[Math.max(0,x!-32),Math.max(0,y!-32),Math.min(snapshot.width-Math.max(0,x!-32),w!+64),Math.min(snapshot.height-Math.max(0,y!-32),h!+64)])).some(t=>t.text.toLowerCase().includes(condition.toLowerCase()))) { found = true; break; }
+          }
+          if (found) break;
+          seen = f.seq;
+        }
+        if (!found) throw new Error('settle-timeout: condition not met before deadline');
       }
-      if (!matched) throw new Error('settle-timeout: condition not met before deadline');
     }
     if (['click','drag','type','press','scroll'].includes(command)) {
       const wait = args.includes('--wait') ? args[args.indexOf('--wait')+1] : 'settle';
       if (wait !== 'none') {
         if (/^\d+$/.test(wait!)) await new Promise(r=>setTimeout(r,Number(wait)));
         else {
-          const before = baseline, started=Date.now(), deadline=started+5000;
-          while (Date.now()<deadline) {
-            const state = await engine.request<{seq:number;still_ms:number}>('session.frame',{session_id:opened.sessionId,since:before});
-            if (wait === 'change' ? state.seq !== before : Date.now()-started>=150 && state.still_ms>=150) break;
-            await new Promise(r=>setTimeout(r,50));
-          }
+          if (wait === 'settle') await new Promise(r=>setTimeout(r,150));
+          await engine.request('session.frame',{session_id:opened.sessionId,since:baseline,...(wait === 'change' ? {after_seq:baseline} : {}),timeout_ms:5000});
         }
       }
     }
-    const frame = await capture(command !== 'look');
+    const fields = args.includes('--fields') ? args[args.indexOf('--fields')+1]!.split(',') : ['ref','text','x','y'];
+    if (fields.some(field=>!['ref','text','x','y','w','h','conf','line'].includes(field))) throw new Error('fields: valid fields are ref,text,x,y,w,h,conf,line');
+    const frame = await capture();
     if (command === 'look') {
       const item = text.find(t=>t.ref === args[0]);
       if (item && !item.ref.startsWith(`@${frame.seq}.`)) throw new Error(`stale-ref: ${args[0]}; run screen --query`);
@@ -222,8 +243,6 @@ export async function serve(args: string[]): Promise<void> {
     if (command === 'screen') {
       const query = args.includes('--query') ? args[args.indexOf('--query')+1] : undefined;
       const items = query ? text.filter(t => t.text.toLowerCase().includes(query.toLowerCase())) : text;
-      const fields = args.includes('--fields') ? args[args.indexOf('--fields')+1]!.split(',') : ['ref','text','x','y'];
-      if (fields.some(field=>!['ref','text','x','y','w','h','conf','line'].includes(field))) throw new Error('fields: valid fields are ref,text,x,y,w,h,conf,line');
       const limit = args.includes('--full') ? items.length : 40;
       const rows = items.slice(0,limit).map(t => `  ${fields.map(field=>JSON.stringify(field === 'w' ? t.words.at(-1)!.x+t.words.at(-1)!.w-t.x : field === 'h' ? Math.max(...t.words.map(w=>w.y+w.h))-t.y : t[field as keyof Item])).join(',')}`).join('\n');
       return `screen: ${frame.width}x${frame.height} frame=${frame.seq} settled=${frame.still_ms>=150}\n${items.length ? `text[${Math.min(items.length,limit)} of ${items.length}]{${fields.join(',')}}:\n${rows}` : `text: 0 items match ${JSON.stringify(query ?? 'screen')} on frame ${frame.seq} (${text.length} items searched)`}${items.length>limit ? `\ntruncated: ${items.length-limit} more — use --full or --query` : ''}\nhelp[1]:\n  desklink-axi click @${frame.seq}.<n>`;
@@ -233,21 +252,22 @@ export async function serve(args: string[]): Promise<void> {
       const bounds = (frame.damage.length ? frame.damage : [`0,0,${frame.width},${frame.height}`]).map(d=>d.split(',').map(Number));
       const x = Math.max(0,Math.min(...bounds.map(b=>b[0]!))-32), y = Math.max(0,Math.min(...bounds.map(b=>b[1]!))-32);
       const right = Math.min(frame.width,Math.max(...bounds.map(b=>b[0]!+b[2]!))+32), bottom = Math.min(frame.height,Math.max(...bounds.map(b=>b[1]!+b[3]!))+32);
-      const kept = prev.filter(t=>t.x<x || t.x>=right || t.y<y || t.y>=bottom);
+      const kept = prev.filter(t=>!t.words.some(w=>w.x<right && w.x+w.w>x && w.y<bottom && w.y+w.h>y));
       const dirty = await ocr(frame,[x,y,right-x,bottom-y]);
       text = [...kept,...dirty].map((t,i)=>({...t,ref:`@${frame.seq}.${i+1}`}));
       const appeared = text.filter(t => !prev.some(p => p.text === t.text));
-      const fields = args.includes('--fields') ? args[args.indexOf('--fields')+1]!.split(',') : ['ref','text','x','y'];
-      if (fields.some(field=>!['ref','text','x','y','w','h','conf','line'].includes(field))) throw new Error('fields: valid fields are ref,text,x,y,w,h,conf,line');
       const gone =  prev.filter(p=>!text.some(t=>t.text===p.text)).length;
-      const currentRegion = frame.damage[0] ?? '';
-      motionCount = appeared.length || gone || currentRegion !== motionRegion ? 0 : motionCount + 1;
-      motionRegion = currentRegion;
-      if (motionCount >= 3 && !args.includes('--include-animating')) return `changed: none (animating region ${currentRegion} masked; use diff --include-animating)\nhelp[1]:\n  desklink-axi look @r1`;
-      return `changed: ${frame.damage.length} region since frame ${baseline-1}\nregions[${frame.damage.length}]{ref,box}:\n${frame.damage.map((d,i)=>`  @r${i+1},"${d}"`).join('\n')}\nappeared[${Math.min(appeared.length,20)} of ${appeared.length}]{${fields.join(',')}}:\n${appeared.slice(0,20).map(t=>`  ${fields.map(field=>JSON.stringify(field === 'w' ? t.words.at(-1)!.x+t.words.at(-1)!.w-t.x : field === 'h' ? Math.max(...t.words.map(w=>w.y+w.h))-t.y : t[field as keyof Item])).join(',')}`).join('\n')}\ngone: ${gone} text items\nhelp[2]:\n  desklink-axi look @r1\n  desklink-axi screen --query "<words>"`; }
+      const region = frame.damage[0] ?? '';
+      motionCount = frame.previous === frame.seq - 1 && motionSeq === frame.previous && region === motionRegion && !appeared.length && !gone ? motionCount + 1 : 0;
+      motionRegion = region;
+      motionSeq = frame.seq;
+      const motion = motionCount >= 3 && !args.includes('--include-animating') ? `\nanimating: ${region} (candidate; changed pixels retained)` : '';
+      return `changed: ${frame.damage.length} region since frame ${frame.previous}\nregions[${frame.damage.length}]{ref,box}:\n${frame.damage.map((d,i)=>`  @r${i+1},"${d}"`).join('\n')}\nappeared[${Math.min(appeared.length,20)} of ${appeared.length}]{${fields.join(',')}}:\n${appeared.slice(0,20).map(t=>`  ${fields.map(field=>JSON.stringify(field === 'w' ? t.words.at(-1)!.x+t.words.at(-1)!.w-t.x : field === 'h' ? Math.max(...t.words.map(w=>w.y+w.h))-t.y : t[field as keyof Item])).join(',')}`).join('\n')}\ngone: ${gone} text items${motion}\nhelp[2]:\n  desklink-axi look @r1\n  desklink-axi screen --query "<words>"`; }
     return `changed: none since frame ${frame.seq} (still ${frame.still_ms}ms)\nhelp[1]:\n  desklink-axi screen --query "<words>"`;
   };
-  const server: Server = createServer(socket => { let request = ''; socket.on('data', chunk => { request += chunk; if (!request.includes('\n')) return; const { command, args } = JSON.parse(request.split('\n')[0]!) as {command:string;args:string[]}; void output(command,args).then(result => socket.end(result+'\n'), error => socket.end(`error: ${error.message}\nsuggestion: desklink-axi ${error.message.includes('ocr') ? 'look' : 'screen'} --help\n`)); }); });
+  const server: Server = createServer(socket => { let request = ''; socket.on('data', chunk => { request += chunk; if (!request.includes('\n')) return; const { command, args } = JSON.parse(request.split('\n')[0]!) as {command:string;args:string[]}; observed = undefined; void output(command,args).then(result => { if (observed && command !== 'look') { baseline = observed.seq; if (observed.damage.length) regions = observed.damage; } socket.end(result+'\n'); }, error => socket.end(`error: ${error.message}\nsuggestion: desklink-axi ${error.message.includes('ocr') ? 'look' : 'screen'} --help\n`)); }); });
+  try { await engine.request('session.frame', {session_id:opened.sessionId,after_seq:0,timeout_ms:timeout}); }
+  catch (error) { peer?.close(); await engine.stop(); rmSync(dir,{recursive:true,force:true}); throw error; }
   server.listen(socketPath, () => chmodSync(socketPath, 0o600));
   process.on('SIGTERM', () => { void engine.stop().finally(() => { server.close(); if (existsSync(socketPath)) unlinkSync(socketPath); rmSync(dir, {recursive:true,force:true}); }); });
 }

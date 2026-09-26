@@ -144,6 +144,10 @@ export class Bridge {
             }
             const method = request.method;
             if (typeof method !== 'string') return;
+            if (method === 'session.frame') {
+                socket.send(JSON.stringify({ id: request.id, error: { code: 'operation', message: 'session.frame is local-only' } }));
+                return;
+            }
             if (method === 'session.open' && request.params != null && Object.prototype.hasOwnProperty.call(request.params, 'source')) {
                 socket.send(JSON.stringify({ id: request.id, error: { code: 'source', message: 'the client cannot choose the desktop source' } }));
                 return;

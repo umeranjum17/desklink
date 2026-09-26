@@ -42,25 +42,3 @@ export function emitBlock(name: string, lines: string[]): string {
 export function emitKV(pairs: Array<[string, unknown]>): string {
   return pairs.map(([k, v]) => `${k}: ${toonValue(v) === "" ? "" : String(v)}`.trimEnd()).join("\n");
 }
-
-/**
- * Tolerant TOON parser used by the validator: checks that text is shaped
- * like TOON (top-level `key: value` / `name[N]{f,..}:` headers with indented
- * rows) without enforcing a strict grammar.
- */
-export function parseToon(text: string): { ok: boolean; errorLine?: number } {
-  const lines = text.split("\n");
-  let allowIndent = false;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (!line.trim()) continue;
-    if (/^\s/.test(line)) {
-      if (!allowIndent) return { ok: false, errorLine: i + 1 };
-      continue;
-    }
-    const header = /^[A-Za-z][\w.-]*(\[[^\]]*\])?(\{[^}]*\})?:(\s.*|)$/.test(line);
-    if (!header) return { ok: false, errorLine: i + 1 };
-    allowIndent = true;
-  }
-  return { ok: true };
-}

@@ -29,16 +29,17 @@ try {
   client = await EngineClient.start(enginePath, ['serve'], {}, env);
   const session = await client.openSession({ source: {kind:'x11',display}, permissions:['view'] });
   const path = join(dir, 'frame.raw');
-  let first;
-  for (let i=0;i<40;i++) { try { first = await client.request('session.frame',{session_id:session.sessionId,path}); break; } catch { await new Promise(r=>setTimeout(r,100)); } }
-  assert(first?.seq > 0);
+  const first = await client.request('session.frame',{session_id:session.sessionId,path,after_seq:0,timeout_ms:3000});
+  assert(first.seq > 0);
   const original = readFileSync(path);
   const build = spawn('cargo', ['build','-q','--manifest-path','packages/desktop-host/engine/Cargo.toml','--example','x11_target'], { env, stdio:'ignore' });
   assert.equal(await new Promise(r=>build.on('exit',r)),0,'X client builds');
   const example = join(process.env.CARGO_TARGET_DIR ?? 'packages/desktop-host/engine/target','debug','examples','x11_target');
   target = spawn(example, [], { env, stdio:['ignore','pipe','pipe'] });
   target.stdout.on('data', chunk => events += chunk);
-  for (let i=0;i<60;i++) { if (target.exitCode !== null) throw Error('X test client exited'); await new Promise(r=>setTimeout(r,100)); const f = await client.request('session.frame',{session_id:session.sessionId,since:first.seq,path}); if (f.seq > first.seq) { assert(f.damage.length > 0); assert.notDeepEqual(readFileSync(path),original); break; } if (i===59) throw Error('frame never changed'); }
+  const changed = await client.request('session.frame',{session_id:session.sessionId,since:first.seq,path,after_seq:first.seq,timeout_ms:6000});
+  assert(changed.damage.length > 0);
+  assert.notDeepEqual(readFileSync(path),original);
   await client.stop(); client = undefined;
   const started = await run('start','--control','--source','x11','--display',display);
   assert.match(started,/permissions=view,control/);

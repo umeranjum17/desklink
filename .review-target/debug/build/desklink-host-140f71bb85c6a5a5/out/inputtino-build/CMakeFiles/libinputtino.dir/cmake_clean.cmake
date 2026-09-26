@@ -1,0 +1,41 @@
+file(REMOVE_RECURSE
+  "CMakeFiles/libinputtino.dir/src/c-bindings/joypad_ps5.cpp.o"
+  "CMakeFiles/libinputtino.dir/src/c-bindings/joypad_ps5.cpp.o.d"
+  "CMakeFiles/libinputtino.dir/src/c-bindings/joypad_switch.cpp.o"
+  "CMakeFiles/libinputtino.dir/src/c-bindings/joypad_switch.cpp.o.d"
+  "CMakeFiles/libinputtino.dir/src/c-bindings/joypad_xone.cpp.o"
+  "CMakeFiles/libinputtino.dir/src/c-bindings/joypad_xone.cpp.o.d"
+  "CMakeFiles/libinputtino.dir/src/c-bindings/keyboard.cpp.o"
+  "CMakeFiles/libinputtino.dir/src/c-bindings/keyboard.cpp.o.d"
+  "CMakeFiles/libinputtino.dir/src/c-bindings/mouse.cpp.o"
+  "CMakeFiles/libinputtino.dir/src/c-bindings/mouse.cpp.o.d"
+  "CMakeFiles/libinputtino.dir/src/c-bindings/pen_tablet.cpp.o"
+  "CMakeFiles/libinputtino.dir/src/c-bindings/pen_tablet.cpp.o.d"
+  "CMakeFiles/libinputtino.dir/src/c-bindings/touchscreen.cpp.o"
+  "CMakeFiles/libinputtino.dir/src/c-bindings/touchscreen.cpp.o.d"
+  "CMakeFiles/libinputtino.dir/src/c-bindings/trackpad.cpp.o"
+  "CMakeFiles/libinputtino.dir/src/c-bindings/trackpad.cpp.o.d"
+  "CMakeFiles/libinputtino.dir/src/uinput/joypad_nintendo.cpp.o"
+  "CMakeFiles/libinputtino.dir/src/uinput/joypad_nintendo.cpp.o.d"
+  "CMakeFiles/libinputtino.dir/src/uinput/joypad_ps.cpp.o"
+  "CMakeFiles/libinputtino.dir/src/uinput/joypad_ps.cpp.o.d"
+  "CMakeFiles/libinputtino.dir/src/uinput/joypad_xbox.cpp.o"
+  "CMakeFiles/libinputtino.dir/src/uinput/joypad_xbox.cpp.o.d"
+  "CMakeFiles/libinputtino.dir/src/uinput/keyboard.cpp.o"
+  "CMakeFiles/libinputtino.dir/src/uinput/keyboard.cpp.o.d"
+  "CMakeFiles/libinputtino.dir/src/uinput/mouse.cpp.o"
+  "CMakeFiles/libinputtino.dir/src/uinput/mouse.cpp.o.d"
+  "CMakeFiles/libinputtino.dir/src/uinput/pentablet.cpp.o"
+  "CMakeFiles/libinputtino.dir/src/uinput/pentablet.cpp.o.d"
+  "CMakeFiles/libinputtino.dir/src/uinput/touchscreen.cpp.o"
+  "CMakeFiles/libinputtino.dir/src/uinput/touchscreen.cpp.o.d"
+  "CMakeFiles/libinputtino.dir/src/uinput/trackpad.cpp.o"
+  "CMakeFiles/libinputtino.dir/src/uinput/trackpad.cpp.o.d"
+  "liblibinputtino.a"
+  "liblibinputtino.pdb"
+)
+
+# Per-language clean rules from dependency scanning.
+foreach(lang CXX)
+  include(CMakeFiles/libinputtino.dir/cmake_clean_${lang}.cmake OPTIONAL)
+endforeach()

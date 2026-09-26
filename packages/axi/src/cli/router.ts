@@ -21,14 +21,11 @@ export interface Registry {
   rootHelp(): string;
   /** Commands keyed by full path, e.g. "principles show". */
   commands: Record<string, CommandModule>;
-  /** Read-only aliases, e.g. "principles" -> "principles list". */
-  aliases: Record<string, string>;
 }
 
 function topLevelCommands(reg: Registry): string {
   const tops = new Set<string>();
   for (const key of Object.keys(reg.commands)) tops.add(key.split(" ")[0]!);
-  for (const key of Object.keys(reg.aliases)) tops.add(key.split(" ")[0]!);
   return [...tops].sort().join(", ");
 }
 
@@ -44,9 +41,8 @@ export async function dispatch(reg: Registry, argv: string[]): Promise<number> {
     let consumed = 0;
     for (let n = Math.min(2, words.length); n >= 1; n--) {
       const candidate = words.slice(0, n).join(" ");
-      const resolved = reg.aliases[candidate] ?? candidate;
-      if (reg.commands[resolved]) {
-        key = resolved;
+      if (reg.commands[candidate]) {
+        key = candidate;
         consumed = n;
         break;
       }
