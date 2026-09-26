@@ -23,7 +23,7 @@ if (process.argv[2] === '--bridge') {
   ];
   const commands: Record<string, CommandModule> = {};
   for (const [name, required, flags] of definitions) commands[name] = {
-    spec: { name, summary: `${name} on the live desktop`, args: required.map(arg => ({name:arg,required:true,description:arg})), flags: flags.map(flag => ({name:flag,type: ['control','full','double','submit','include-animating'].includes(flag) ? 'boolean' : 'string', values: flag === 'source' ? ['auto','portal','x11'] : flag === 'button' ? ['left','right'] : undefined, description:flag})), examples: [`desklink-axi ${name} ${required.map(arg=>`<${arg}>`).join(' ')}`] },
+    spec: { name, summary: `${name} on the live desktop`, args: required.map(arg => ({name:arg,required:true,description:arg})), flags: flags.map(flag => ({name:flag,type: ['control','full','double','submit','include-animating'].includes(flag) ? 'boolean' : 'string', values: flag === 'source' ? ['auto','portal','x11','display'] : flag === 'button' ? ['left','right'] : undefined, description:flag})), examples: [`desklink-axi ${name} ${required.map(arg=>`<${arg}>`).join(' ')}`] },
     async run(parsed) {
       if (name === 'scroll' && !['up','down'].includes(parsed.positionals[0]!)) throw new UsageError('scroll direction must be up or down');
       if (typeof parsed.flags.wait === 'string' && !['none','change','settle'].includes(parsed.flags.wait) && !/^\d+$/.test(parsed.flags.wait)) throw new UsageError('--wait must be none, change, settle, or milliseconds');

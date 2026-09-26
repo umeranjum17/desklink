@@ -20,6 +20,7 @@ const readline = require('node:readline');
 const out = (value) => process.stdout.write(JSON.stringify(value) + '\\n');
 readline.createInterface({ input: process.stdin }).on('line', (line) => {
   const request = JSON.parse(line);
+  if (request.method === 'hello' && request.params.protocol !== 3) return out({ id: request.id, error: { code: 'unsupported-protocol', message: 'protocol 3 required' } });
   if (request.method === 'hello' || request.method === 'capabilities') return out({ id: request.id, result: {
     protocol: 3, clipboard: { read: true, write: true, mime: [], maxBytes: 1024 },
   } });

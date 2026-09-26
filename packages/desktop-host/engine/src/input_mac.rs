@@ -101,6 +101,16 @@ pub fn request_access() -> bool {
     trusted
 }
 
+fn modifier_flag(code: i16) -> u64 {
+    match code {
+        keycode::LEFT_SHIFT => 0x20000,
+        keycode::LEFT_CTRL => 0x40000,
+        keycode::LEFT_ALT => 0x80000,
+        keycode::LEFT_META => 0x100000,
+        _ => 0,
+    }
+}
+
 pub fn native_keycode(code: i16) -> Result<i16> {
     anyhow::ensure!(
         (0..=127).contains(&code),
@@ -143,6 +153,8 @@ unsafe extern "C" {
     ) -> EventRef;
     fn CGEventCreateKeyboardEvent(source: SourceRef, keycode: u16, key_down: bool) -> EventRef;
     fn CGEventKeyboardSetUnicodeString(event: EventRef, length: u32, text: *const u16);
+    fn CGEventSetFlags(event: EventRef, flags: u64);
+    fn CGEventSetLocation(event: EventRef, location: Point);
     fn CGEventPost(tap: u32, event: EventRef);
 }
 
@@ -170,6 +182,7 @@ pub struct InputDevices {
     points_per_pixel: (f64, f64),
     last_position: Point,
     wheel_rest: (f64, f64),
+    modifier_flags: u64,
 }
 
 unsafe impl Send for InputDevices {}
@@ -198,6 +211,7 @@ impl InputDevices {
                 y: origin_y,
             },
             wheel_rest: (0.0, 0.0),
+            modifier_flags: 0,
         })
     }
 
@@ -235,12 +249,25 @@ impl InputDevices {
         let event = unsafe {
             CGEventCreateScrollWheelEvent(std::ptr::null(), 0, 2, -whole_y as i32, whole_x as i32)
         };
+        if !event.is_null() {
+            unsafe { CGEventSetLocation(event, self.last_position) };
+        }
         Self::post(event);
     }
 
     pub fn key(&mut self, code: i16, down: bool) -> Result<()> {
         let code = native_keycode(code)? as u16;
-        Self::post(unsafe { CGEventCreateKeyboardEvent(std::ptr::null(), code, down) });
+        let flag = modifier_flag(code as i16);
+        if down {
+            self.modifier_flags |= flag;
+        } else {
+            self.modifier_flags &= !flag;
+        }
+        let event = unsafe { CGEventCreateKeyboardEvent(std::ptr::null(), code, down) };
+        if !event.is_null() {
+            unsafe { CGEventSetFlags(event, self.modifier_flags) };
+        }
+        Self::post(event);
         Ok(())
     }
 
@@ -252,6 +279,7 @@ impl InputDevices {
         }
         unsafe {
             CGEventKeyboardSetUnicodeString(event, characters.len() as u32, characters.as_ptr());
+            CGEventSetFlags(event, self.modifier_flags);
         }
         Self::post(event);
         Self::post(unsafe { CGEventCreateKeyboardEvent(std::ptr::null(), 0, false) });
@@ -269,5 +297,16 @@ impl InputDevices {
                 CFRelease(event);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_key_uses_quartz_command_flag() {
+        assert_eq!(modifier_flag(keycode::LEFT_META), 0x100000);
+        assert_eq!(modifier_flag(0), 0);
     }
 }

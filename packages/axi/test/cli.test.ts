@@ -25,6 +25,15 @@ describe("desklink-axi AXI contract", () => {
     expect(r.stdout).toContain("--");
   });
 
+  it('accepts the macOS display source and numeric display id', () => {
+    const help = run('start', '--help');
+    expect(help.status).toBe(0);
+    expect(help.stdout).toContain('display');
+    const result = run('start', '--source', 'display', '--display', '1');
+    expect(result.status).toBe(1);
+    expect(result.stdout).not.toContain('invalid value');
+  });
+
   it("unknown flag exits 2 naming valid flags (principle 6)", () => {
     const r = run("--not-a-real-flag");
     expect(r.status).toBe(2);

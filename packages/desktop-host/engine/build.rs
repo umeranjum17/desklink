@@ -26,6 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-check-cfg=cfg(desklink_macos_cli)");
     println!("cargo:rerun-if-changed=native/vpx_shim.c");
     println!("cargo:rerun-if-changed=native/inputtino_shim.cpp");
+    println!("cargo:rerun-if-changed=native/mac_stream.mm");
     println!("cargo:rerun-if-changed=Info.plist");
     println!("cargo:rerun-if-changed=vendor/inputtino/src/uinput/include/inputtino/keyboard.hpp");
     println!("cargo:rerun-if-changed=vendor/inputtino/include/inputtino/input.h");
@@ -68,6 +69,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .compile("dlinputkey");
         build_inputtino(&PathBuf::from(std::env::var("OUT_DIR")?))?;
     } else if target_os == "macos" {
+        cc::Build::new()
+            .cpp(true)
+            .file("native/mac_stream.mm")
+            .flag("-fobjc-arc")
+            .compile("dlmacstream");
+        for framework in ["ScreenCaptureKit", "CoreVideo", "CoreMedia", "Foundation"] {
+            println!("cargo:rustc-link-lib=framework={framework}");
+        }
         if let Some(prefix) = std::env::var_os("DESKLINK_VPX_STATIC_DIR").map(PathBuf::from) {
             cc::Build::new()
                 .file("native/vpx_shim.c")

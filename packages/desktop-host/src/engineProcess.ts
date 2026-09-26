@@ -88,8 +88,7 @@ export class EngineClient {
         const child = spawn(command, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
         const client = new EngineClient(child, options);
         try {
-            // The macOS diagnostic-only engine still speaks v2 until its session work lands.
-            await client.request('hello', { protocol: process.platform === 'darwin' ? 2 : PROTOCOL_VERSION });
+            await client.request('hello', { protocol: PROTOCOL_VERSION });
         } catch (error) {
             // A refused or timed-out handshake must not leave a child running
             // with its exit still wired to the caller's state.
