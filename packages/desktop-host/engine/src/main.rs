@@ -6,25 +6,45 @@
 //! process, owns its stdin/stdout, and carries the SDP/ICE the engine produces
 //! over whatever authenticated channel it already has.
 
+#[cfg(target_os = "linux")]
 mod capture;
+#[cfg(target_os = "linux")]
 mod clipboard;
+#[cfg(target_os = "linux")]
 mod convert;
+#[cfg(target_os = "linux")]
 mod encoder;
+#[cfg(target_os = "linux")]
 mod input;
+#[cfg(target_os = "linux")]
 mod keymap;
+#[cfg(target_os = "macos")]
+mod mac;
+#[cfg(target_os = "linux")]
 mod peer;
+#[cfg(target_os = "linux")]
 mod portal;
+#[cfg(target_os = "linux")]
 mod protocol;
+#[cfg(target_os = "linux")]
 mod session;
+#[cfg(target_os = "linux")]
 mod x11;
 
+#[cfg(target_os = "linux")]
 use anyhow::Result;
+#[cfg(target_os = "linux")]
 use protocol::{ErrorBody, Event, Request, Response};
+#[cfg(target_os = "linux")]
 use std::sync::mpsc as std_mpsc;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
+#[cfg(target_os = "linux")]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(target_os = "linux")]
 use tokio::sync::mpsc as tokio_mpsc;
 
+#[cfg(target_os = "linux")]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("help");
@@ -72,6 +92,7 @@ fn main() {
     std::process::exit(code);
 }
 
+#[cfg(target_os = "linux")]
 fn report(result: Result<()>) -> i32 {
     match result {
         Ok(()) => 0,
@@ -82,6 +103,7 @@ fn report(result: Result<()>) -> i32 {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn print_help() {
     println!(
         "desklink-host {}
@@ -105,6 +127,7 @@ anything. See docs/PROTOCOL.md for the protocol.",
 
 /// Deliberately does not perform the change. Kernel input access is a privileged
 /// decision, so the engine explains it and stops; the user runs the command.
+#[cfg(target_os = "linux")]
 fn print_input_setup() {
     match input::probe() {
         Ok(()) => {
@@ -154,6 +177,7 @@ fn print_input_setup() {
 
 /// Start the portal session, capture a few frames, and print what actually
 /// arrived. This is the diagnostic to run when the picture does not appear.
+#[cfg(target_os = "linux")]
 async fn probe(seconds: Option<u64>, display: Option<&str>) -> Result<()> {
     let seconds = seconds.unwrap_or(3);
     match display {
@@ -164,6 +188,7 @@ async fn probe(seconds: Option<u64>, display: Option<&str>) -> Result<()> {
 
 /// Read a named X display's root window for a few seconds. The frame shape is
 /// reported as a coarse checksum so a flat or unreadable screen is visible.
+#[cfg(target_os = "linux")]
 fn probe_x11(display: &str, seconds: u64) -> Result<()> {
     let mut desktop = crate::x11::X11Desktop::connect(Some(display))?;
     let (width, height) = desktop.screen_size();
@@ -195,6 +220,7 @@ fn probe_x11(display: &str, seconds: u64) -> Result<()> {
 
 /// A cheap fingerprint of a frame, enough to tell "the screen changed" from
 /// "the screen is one flat colour".
+#[cfg(target_os = "linux")]
 fn frame_shape(frame: &crate::convert::I420) -> u64 {
     frame
         .y_plane()
@@ -207,6 +233,7 @@ fn frame_shape(frame: &crate::convert::I420) -> u64 {
         })
 }
 
+#[cfg(target_os = "linux")]
 async fn probe_portal(seconds: u64) -> Result<()> {
     let portal = portal::open(None).await?;
     eprintln!("portal source: {:?}", portal.source);
@@ -253,6 +280,7 @@ async fn probe_portal(seconds: u64) -> Result<()> {
 }
 
 /// The local control protocol loop.
+#[cfg(target_os = "linux")]
 async fn serve() -> Result<()> {
     let (out_tx, mut out_rx) = tokio_mpsc::unbounded_channel::<String>();
     let writer = tokio::spawn(async move {
@@ -343,6 +371,7 @@ async fn serve() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn render_event(notice: session::Notice) -> Option<String> {
     let session::Notice { session_id, event } = notice;
     let (name, params) = match event {
@@ -389,6 +418,7 @@ fn render_event(notice: session::Notice) -> Option<String> {
     .ok()
 }
 
+#[cfg(target_os = "linux")]
 async fn dispatch(
     request: &Request,
     hello_seen: &mut bool,
@@ -538,6 +568,7 @@ async fn dispatch(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn require_session(
     current: &mut Option<session::Session>,
 ) -> std::result::Result<&mut session::Session, ErrorBody> {
@@ -548,6 +579,7 @@ fn require_session(
 
 /// A late message for a session that has already ended must not revive it, and a
 /// message for a different session must not reach this one.
+#[cfg(target_os = "linux")]
 fn check_session(
     session: &session::Session,
     id: &str,
@@ -567,7 +599,12 @@ fn check_session(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(target_os = "macos")]
+fn main() {
+    std::process::exit(mac::run());
+}
+
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 

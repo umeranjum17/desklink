@@ -1,7 +1,8 @@
 //! Native dependencies of the engine.
 //!
-//! Two permissive C libraries, both built or linked from this machine's own
-//! sources — no prebuilt binary is fetched, and nothing is installed:
+//! The Linux build uses two permissive C libraries, both built or linked from
+//! this machine's own sources — no prebuilt binary is fetched, and nothing is
+//! installed:
 //!
 //! * libvpx (BSD-3-Clause) — VP9 encode, through `native/vpx_shim.c` so the
 //!   versioned encoder config struct is laid out by a C compiler.
@@ -9,9 +10,8 @@
 //!   over `uinput`/`libevdev`, built by its own CMake project into a static
 //!   library and called through its documented C API.
 //!
-//! Both are required to build the engine; the README lists the system packages
-//! they need. Whether input can actually be injected is a separate, runtime
-//! question the engine answers through its own `/dev/uinput` probe.
+//! macOS does not build either shim. Its capture and input backends arrive in
+//! later slices; Linux runtime access is still checked through `/dev/uinput`.
 //!
 //! `DESKLINK_VPX_STATIC_DIR` names a libvpx install prefix (`include/`, `lib/`)
 //! to link statically instead. The prebuilt engine uses it, because libvpx's
@@ -23,38 +23,55 @@ use std::path::{Path, PathBuf};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=native/vpx_shim.c");
     println!("cargo:rerun-if-changed=native/inputtino_shim.cpp");
+    println!("cargo:rerun-if-changed=Info.plist");
     println!("cargo:rerun-if-changed=vendor/inputtino/src/uinput/include/inputtino/keyboard.hpp");
     println!("cargo:rerun-if-changed=vendor/inputtino/include/inputtino/input.h");
     println!("cargo:rerun-if-changed=vendor/inputtino/CMakeLists.txt");
 
     println!("cargo:rerun-if-env-changed=DESKLINK_VPX_STATIC_DIR");
 
-    let static_vpx = std::env::var_os("DESKLINK_VPX_STATIC_DIR").map(PathBuf::from);
-    let mut shim = cc::Build::new();
-    shim.file("native/vpx_shim.c")
-        .flag_if_supported("-Wno-unused-parameter");
-    if let Some(prefix) = &static_vpx {
-        shim.include(prefix.join("include"));
-    }
-    shim.compile("dlvpx");
-    match &static_vpx {
-        Some(prefix) => {
-            println!(
-                "cargo:rustc-link-search=native={}",
-                prefix.join("lib").display()
-            );
-            println!("cargo:rustc-link-lib=static=vpx");
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "linux" {
+        let static_vpx = std::env::var_os("DESKLINK_VPX_STATIC_DIR").map(PathBuf::from);
+        let mut shim = cc::Build::new();
+        shim.file("native/vpx_shim.c")
+            .flag_if_supported("-Wno-unused-parameter");
+        if let Some(prefix) = &static_vpx {
+            shim.include(prefix.join("include"));
         }
-        None => println!("cargo:rustc-link-lib=vpx"),
+        shim.compile("dlvpx");
+        match &static_vpx {
+            Some(prefix) => {
+                println!(
+                    "cargo:rustc-link-search=native={}",
+                    prefix.join("lib").display()
+                );
+                println!("cargo:rustc-link-lib=static=vpx");
+            }
+            None => println!("cargo:rustc-link-lib=vpx"),
+        }
     }
 
-    cc::Build::new()
-        .cpp(true)
-        .std("c++17")
-        .include("vendor/inputtino/src/uinput/include")
-        .file("native/inputtino_shim.cpp")
-        .compile("dlinputkey");
-    build_inputtino(&PathBuf::from(std::env::var("OUT_DIR")?))?;
+    if target_os == "linux" {
+        cc::Build::new()
+            .cpp(true)
+            .std("c++17")
+            .include("vendor/inputtino/src/uinput/include")
+            .file("native/inputtino_shim.cpp")
+            .compile("dlinputkey");
+        build_inputtino(&PathBuf::from(std::env::var("OUT_DIR")?))?;
+    } else if target_os == "macos" {
+        println!("cargo:rustc-link-lib=framework=CoreGraphics");
+        println!("cargo:rustc-link-lib=framework=ApplicationServices");
+        println!("cargo:rustc-link-lib=framework=Carbon");
+        println!("cargo:rustc-link-arg-bins=-sectcreate");
+        println!("cargo:rustc-link-arg-bins=__TEXT");
+        println!("cargo:rustc-link-arg-bins=__info_plist");
+        println!(
+            "cargo:rustc-link-arg-bins={}",
+            Path::new("Info.plist").canonicalize()?.display()
+        );
+    }
     Ok(())
 }
 
