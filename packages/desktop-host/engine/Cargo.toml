@@ -33,6 +33,12 @@ wl-clipboard-rs = "0.9"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
+objc2-screen-capture-kit = { version = "0.3.2", features = ["SCStream", "SCShareableContent", "SCError", "SCScreenshotManager", "block2", "dispatch2", "objc2-core-media", "objc2-core-graphics"] }
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSError", "NSString"] }
+objc2-core-media = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-core-graphics = { version = "0.3.2", features = ["CGImage", "CGDataProvider"] }
+block2 = "0.6"
 
 [build-dependencies]
 cc = "1"
