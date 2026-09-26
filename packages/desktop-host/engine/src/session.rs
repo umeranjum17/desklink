@@ -523,6 +523,7 @@ pub enum SessionEvent {
         damage: Vec<[usize; 4]>,
     },
     RestoreToken(String),
+    CaptureStopped { reason: String },
     Revoked {
         reason: String,
     },
@@ -725,8 +726,9 @@ impl Session {
         let metrics = Arc::new(Mutex::new(Metrics::default()));
         let mut indicator = None;
         let (frame_tx, frame_rx) = latest_frame();
-        let latest = Arc::new(Mutex::new(None));
+        let latest = Arc::new(Mutex::new(None::<FrameSnapshot>));
         let observed = latest.clone();
+        let frame_sequence = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let capture_error = Arc::new(Mutex::new(None::<String>));
         let stopped_error = capture_error.clone();
         let stopped_latest = latest.clone();
@@ -740,7 +742,8 @@ impl Session {
             if let Ok(mut frame) = stopped_latest.lock() { *frame = None; }
             stop_signal.send_replace(0);
             let _ = stopped_events.send(Notice { session_id: stopped_id.clone(),
-                event: SessionEvent::State { capture: if running { "streaming" } else { "stopped" }, transport: reason, first_frame: false } });
+                event: if running { SessionEvent::State { capture: "streaming", transport: String::from("connected"), first_frame: false } }
+                    else { SessionEvent::CaptureStopped { reason } } });
         };
         let capture_status = Arc::new(on_capture_status);
         let frame_events = events.clone();
@@ -754,9 +757,7 @@ impl Session {
                             *width == frame.width && *height == frame.height && current == &hashes
                         });
                 if !unchanged {
-                    let seq = held
-                        .as_ref()
-                        .map_or(1, |(seq, _, _, _, _, _, _): &FrameSnapshot| seq + 1);
+                    let seq = frame_sequence.fetch_add(1, Ordering::Relaxed) + 1;
                     let previous = held
                         .as_ref()
                         .map(|(_, _, _, _, _, current, _)| current.clone())

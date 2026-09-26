@@ -166,6 +166,7 @@ try {
   assert.doesNotMatch(events, /"kind":"button"/, 'rejected delay must not send input');
   const before = await run('diff'); assert.match(before,/changed:/);
   const clicked = await run('click','100,100'); assert.match(clicked,/input: applied/, events);
+  assert.match(await run('wait','change','--timeout','5000'),/wait: change met/);
   assert.match(await run('diff'),/changed: [1-9]/, events);
   assert.match(events, /"kind":"button".*"phase":"up"/, 'the click reached the app beneath the indicator');
   const looked = await run('look','@r1'); assert.match(looked,/image: .*\.png/);

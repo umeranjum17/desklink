@@ -225,6 +225,12 @@ export async function serve(args: string[]): Promise<void> {
     let pendingDamage: string[] | undefined;
     let waitSeen = baseline;
     if (command === 'start') return `session: open source=${source} ${display ?? ''} size=${opened.geometry.encoded.width}x${opened.geometry.encoded.height} permissions=view${control ? ',control' : ''}`;
+    if (command === 'health') {
+      const state = events.filter(event=>event.event === 'session.state' || event.event === 'session.capture.stopped').at(-1);
+      if (state?.event === 'session.capture.stopped') return `capture: stopped; reason: ${state.params.reason}`;
+      const frame = await engine.request<{seq:number}>('session.frame',{session_id:opened.sessionId,path:''}).catch(() => undefined);
+      return state?.event === 'session.state' ? `capture: ${state.params.capture}; transport: ${state.params.transport}; frame: ${frame?.seq ?? 'unavailable'}` : 'capture: starting';
+    }
     if (command === 'batch') {
       let steps: unknown;
       try { steps = JSON.parse(args[0] ?? ''); } catch { throw new Error('batch: expected JSON array of [verb, ...args] steps'); }
@@ -324,6 +330,7 @@ export async function serve(args: string[]): Promise<void> {
         }
         if (!found) throw new Error('settle-timeout: condition not met before deadline');
       }
+      return `wait: ${condition} met`;
     }
     if (action) {
       if (actionWait === 'none') return 'input: applied';

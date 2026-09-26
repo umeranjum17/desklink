@@ -456,6 +456,10 @@ fn render_event(notice: session::Notice) -> Option<String> {
             "session.restoreToken",
             serde_json::json!({ "sessionId": session_id, "token": token }),
         ),
+        session::SessionEvent::CaptureStopped { reason } => (
+            "session.capture.stopped",
+            serde_json::json!({ "sessionId": session_id, "reason": reason }),
+        ),
         session::SessionEvent::Revoked { reason } => (
             "session.revoked",
             serde_json::json!({ "sessionId": session_id, "reason": reason }),

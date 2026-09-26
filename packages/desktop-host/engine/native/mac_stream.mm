@@ -143,6 +143,21 @@ extern "C" void *dl_mac_stream_start(uint32_t display_id, size_t width, size_t h
             dispatch_sync(session.queue, ^{});
             return nullptr;
         }
+        const char *simulate = getenv("DESKLINK_AXI_SIMULATE_STREAM_STOP_MS");
+        int delay = simulate ? atoi(simulate) : 0;
+        if (delay >= 100 && delay <= 60000) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delay * NSEC_PER_MSEC),
+                           dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                if (session.closing) return;
+                SCStream *stream = session.stream;
+                [stream stopCaptureWithCompletionHandler:^(NSError *err) {
+                    (void)err;
+                    NSError *stopped = [NSError errorWithDomain:@"SCStreamErrorDomain" code:-3821
+                        userInfo:@{NSLocalizedDescriptionKey: @"simulated systemStoppedStream"}];
+                    [session stream:stream didStopWithError:stopped];
+                }];
+            });
+        }
         return (__bridge_retained void *)session;
     }
 }

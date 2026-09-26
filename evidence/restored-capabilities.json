@@ -1,0 +1,70 @@
+{
+  "capture": {
+    "audio": false,
+    "backends": [
+      "screencapturekit"
+    ],
+    "cursor": "embedded",
+    "displays": [
+      {
+        "height": 2224,
+        "id": 1,
+        "main": true,
+        "origin": {
+          "x": 0.0,
+          "y": 0.0
+        },
+        "points": {
+          "height": 1112.0,
+          "width": 1710.0
+        },
+        "scale": 2.0,
+        "width": 3420
+      }
+    ],
+    "formats": [
+      "bgra"
+    ],
+    "grant": "granted",
+    "mechanism": "screencapturekit",
+    "unavailable_reason": null
+  },
+  "clipboard": {
+    "maxBytes": 262144,
+    "mime": [
+      "text/plain;charset=utf-8"
+    ],
+    "read": true,
+    "write": true
+  },
+  "encode": {
+    "codecs": [
+      "vp9"
+    ],
+    "hardware": false
+  },
+  "engine": "desklink-host/0.1.0",
+  "input": {
+    "grant": "granted",
+    "keyboard": true,
+    "layout": "com.apple.keylayout.ABC",
+    "mechanism": "quartz-cgevent",
+    "pointer": true,
+    "text": [
+      "unicode",
+      "us-ansi-keymap"
+    ],
+    "unavailable_reason": null,
+    "wheel": true
+  },
+  "platform": "macos",
+  "protocol": 3,
+  "session": {
+    "kind": "quartz",
+    "on_console": true
+  },
+  "x11": {
+    "available": false,
+    "size": null
+  }
+}

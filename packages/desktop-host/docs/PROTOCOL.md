@@ -245,12 +245,12 @@ always does.
 
 ```jsonc
 {"event":"session.state","params":{"sessionId":"…",
-  "capture":"streaming",              // consented|streaming|stopped|ended
+  "capture":"streaming",              // consented|streaming|ended
   "transport":"connected",            // new|connecting|connected|failed|closed
   "firstFrame":true}}                 // false until a frame has been encoded
 ```
 
-The `geometry` a client maps touch against is the one `session.open` returned,
+A stopped capture emits `{"event":"session.capture.stopped","params":{"sessionId":"…","reason":"SCStream stopped (SCStreamErrorDomain -3821): …"}}`. Frame requests then return `stream-stopped` rather than stale pixels. On macOS the engine retries opening the stream up to three times and emits `session.state` with `capture=streaming` on recovery; Linux capture errors also surface instead of serving an old frame.\n\nThe `geometry` a client maps touch against is the one `session.open` returned,
 and the one the control channel's `hello` repeats. A session keeps the one
 `generation` it was opened with: a different source or scale is a new
 `session.open`, not a generation change within a session.
