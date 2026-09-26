@@ -79,8 +79,6 @@ unsigned char *desklink_image_bgra(CGImageRef image, size_t *length, size_t *str
                                                  kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst);
     CGColorSpaceRelease(color);
     if (!context) { free(pixels); return NULL; }
-    CGContextTranslateCTM(context, 0, height);
-    CGContextScaleCTM(context, 1, -1);
     CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
     CGContextRelease(context);
     return pixels;
