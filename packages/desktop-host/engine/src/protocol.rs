@@ -81,6 +81,10 @@ pub struct IceServerParam {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SourceRequest {
     Portal,
+    Display {
+        #[serde(default)]
+        display_id: Option<u32>,
+    },
     X11 {
         #[serde(default)]
         display: Option<String>,
@@ -331,6 +335,21 @@ mod tests {
     #[test]
     fn an_unknown_action_is_refused_rather_than_ignored() {
         assert!(serde_json::from_str::<ControlMessage>(r#"{"kind":"teleport"}"#).is_err());
+    }
+
+    #[test]
+    fn display_source_round_trips_its_explicit_id() {
+        let request: SourceRequest = serde_json::from_value(serde_json::json!({
+            "kind": "display",
+            "display_id": 42
+        }))
+        .unwrap();
+        assert!(matches!(
+            request,
+            SourceRequest::Display {
+                display_id: Some(42)
+            }
+        ));
     }
 
     #[test]

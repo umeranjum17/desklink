@@ -5,9 +5,9 @@ the user's session starts it and talks to it over an inherited private channel �
 the engine never opens a public listener, never runs as root, and never installs
 a service.
 
-This document describes the working Linux engine protocol. The macOS source
-build currently implements only the diagnostic subset described in
-[macOS status](#macos-status). The protocol contains no application concepts:
+This document describes the shared Linux and macOS engine protocol. The macOS
+engine uses the same v3 stdio/WebRTC session path, with native display capture,
+input and clipboard adapters. The protocol contains no application concepts:
 no accounts, no chat, no machine ids, no pane ids.
 
 ## Starting the engine
@@ -71,18 +71,28 @@ refused with `error.code = "unsupported-protocol"`. Until a supported `hello`
 arrives, every other request is refused the same way; `capabilities` and
 `shutdown` are the two that answer without a handshake.
 
-## macOS status
+## macOS
 
-The macOS source build accepts `hello` (protocol 2), `capabilities` and
-`shutdown` on stdio. `capabilities` does not prompt: it reports active displays
-(with pixel and point dimensions, origin and scale), keyboard layout, console
-session and current Screen Recording/Accessibility grant states. Its
-`capture.backends` and `encode.codecs` are empty, input controls and clipboard
-read/write are false, even when the grants are present. `session.open` accepts
-only an absent source or `{"kind":"display"}`; it may request missing grants
-for `control` or `view`, but never opens a session, produces an offer or sends a
-frame. Other session methods are not implemented. The Linux examples and
-lifecycle below are not a claim of macOS support.
+macOS speaks protocol 3 and shares the session lifecycle below. It captures the
+selected display with ScreenCaptureKit, encodes VP9, and uses the same WebRTC
+offer, ICE, control-channel, lease, and metrics flow as Linux. Capture currently
+uses ScreenCaptureKit image requests at the session frame cap; the backend may
+supply fewer frames. Audio is not captured.
+
+`capabilities` is non-prompting and reports active displays (pixel and point
+dimensions, origin and scale), the current keyboard layout, console state, and
+Screen Recording/Accessibility grant states. A `display` source accepts an
+optional `display_id` from `capture.displays`; an absent ID selects the main
+display. Screen Recording consent is requested by `session.open` when capture
+is needed. Control may request Accessibility consent; if it remains unavailable,
+open fails with `input-unavailable`. Enable **System Settings → Privacy &
+Security → Accessibility → DesklinkHost** and reconnect. No TCC state is
+pre-seeded or bypassed.
+
+macOS clipboard read/write is plain text and requires the session's `clipboard`
+permission. `restore_token` is not supported by this native backend; a new
+session may require fresh consent. The macOS engine requires a VP9-enabled build
+(`DESKLINK_VPX_STATIC_DIR`) for `serve`.
 
 ## Capabilities
 
@@ -132,7 +142,8 @@ without kernel input access a portal session may request `view`, but an open
 requesting `control` is refused. X display capture uses XTest instead and does
 not require that grant. The muxr host and WebSocket bridge report clipboard
 unavailable for an X display, regardless of the engine's Wayland clipboard
-probe. The engine never asks for privileges on its own.
+probe. On Linux the engine never asks for privileges on its own; macOS may
+request Screen Recording or Accessibility consent at `session.open`.
 
 `capabilities` is safe to call before any consent has been given and must not
 trigger a capture request.
@@ -142,6 +153,7 @@ trigger a capture request.
 ```jsonc
 {"id":4,"method":"session.open","params":{
   "source": {"kind":"portal"},          // or {"kind":"x11","display":":99"}
+                                           // macOS: {"kind":"display","display_id":123}
   "permissions": ["view","control","clipboard"],
   "max_width": 3840, "max_height": 2160, // encode box (default); never upscales
   "bitrate_kbps": 0,                    // 0 (default): sized to the encoded surface
@@ -165,20 +177,20 @@ Result:
 
 `source` selects the desktop. `portal` (or absent) asks the compositor for a
 screen cast, which is the only path that carries a Wayland user's consent;
-`x11` reads a named X display's root window and applies input through XTest. The
-choice is capability-based rather than a table of desktops: the portal when there
-is one, an X display otherwise. It is normally the *consumer's* decision, because
-a client is not in a position to know which of the two a machine can offer.
+`x11` reads a named X display's root window and applies input through XTest;
+`display` selects a macOS display by the ID reported in capabilities (or the
+main display when omitted). The choice is normally the *consumer's* decision,
+because a client is not in a position to know which backend a machine can offer.
 
-`permissions` are the engine's authority for this session. The engine enforces
-them on every input and clipboard action and never infers them from a source, a
-peer or an SDP. `control` without a working input backend is refused at
-`session.open` with `error.code = "input-unavailable"` — the consumer must ask
-for `view` explicitly instead.
+`permissions` are the engine's authority for this session. `view` is required
+to open a session. The engine enforces the remaining scopes on every input and
+clipboard action and never infers them from a source, a peer or an SDP.
+`control` without a working input backend is refused at `session.open` with
+`error.code = "input-unavailable"` — the consumer must ask for `view` explicitly instead.
 
-`max_fps` defaults to 30. It caps the encoded frame rate and the X11 capture
-loop; portal capture offers it as the preferred PipeWire frame rate (clamped
-to the offered 0–1000 fps range). The source may still supply fewer frames.
+`max_fps` defaults to 30 and is bounded to 1–60. It caps the encoded frame
+rate and X11 capture loop; portal capture offers it as the preferred PipeWire
+frame rate. A source may still supply fewer frames.
 
 `session.open` is where the capture request happens, which is where the user's
 consent appears. It is not implicit and it is not retried silently.
@@ -322,9 +334,11 @@ physical effect.
 The engine holds its own pressed-key/button state. `close`, `release_all`,
 control-channel loss and process exit all synthesize releases for exactly the
 keys and buttons this session pressed, so a dropped connection cannot leave a
-modifier stuck down on the desktop. `input.text` in `capabilities` states the
-characters the compiled layout can actually produce; anything else is refused
-with `text-unsupported` and the honest workaround is the explicit clipboard.
+modifier stuck down on the desktop. On Linux, `input.text` in `capabilities` states the characters the compiled
+layout can produce. macOS reports Unicode text support and currently maps
+`key.character` chords through a US ANSI virtual-key map; the reported keyboard
+layout is diagnostic, not proof that this map matches it. Anything outside the
+map is refused with `text-unsupported`.
 
 ## Latest frame over the local protocol
 

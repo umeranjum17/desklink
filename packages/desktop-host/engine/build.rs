@@ -10,8 +10,9 @@
 //!   over `uinput`/`libevdev`, built by its own CMake project into a static
 //!   library and called through its documented C API.
 //!
-//! macOS does not build either shim. Its capture and input backends arrive in
-//! later slices; Linux runtime access is still checked through `/dev/uinput`.
+//! macOS builds only the libvpx shim; ScreenCaptureKit, Quartz input and
+//! AppKit clipboard use native frameworks. Linux runtime input access is still
+//! checked through `/dev/uinput`.
 //!
 //! `DESKLINK_VPX_STATIC_DIR` names a libvpx install prefix (`include/`, `lib/`)
 //! to link statically instead. The prebuilt engine uses it, because libvpx's

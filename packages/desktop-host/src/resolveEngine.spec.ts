@@ -28,7 +28,7 @@ describe('macOS engine flag', () => {
             vi.stubEnv('DESKLINK_MACOS', '1');
             expect(resolveEngine('')).toBeNull();
             expect(explainMissingEngine('')).toBe(
-                'No macOS desktop engine is available yet; DESKLINK_MACOS=1 only enables candidate resolution, not Mac capture or input.',
+                'No macOS desktop engine is available; build the VP9-enabled engine or set MUXR_DESKLINK_ENGINE to its signed path.',
             );
             expect(resolveEngine(process.execPath)).toEqual({ command: process.execPath, args: ['serve'], origin: 'configured' });
             expect(explainMissingEngine(process.execPath)).toBeNull();

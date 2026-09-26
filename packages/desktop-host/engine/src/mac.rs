@@ -1,5 +1,4 @@
 use serde_json::{json, Value};
-use std::io::{self, BufRead, Write};
 use std::os::raw::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -30,10 +29,9 @@ type DisplayModeRef = *const c_void;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
-    fn CGPreflightScreenCaptureAccess() -> bool;
-    fn CGRequestScreenCaptureAccess() -> bool;
-    fn CGPreflightPostEventAccess() -> bool;
-    fn CGRequestPostEventAccess() -> bool;
+    pub(crate) fn CGPreflightScreenCaptureAccess() -> bool;
+    pub(crate) fn CGPreflightPostEventAccess() -> bool;
+    pub(crate) fn CGRequestPostEventAccess() -> bool;
     fn CGGetActiveDisplayList(max: u32, displays: *mut DisplayId, count: *mut u32) -> i32;
     fn CGMainDisplayID() -> DisplayId;
     fn CGDisplayPixelsWide(display: DisplayId) -> usize;
@@ -64,7 +62,7 @@ unsafe extern "C" {
     static kCFRunLoopDefaultMode: CfTypeRef;
 }
 
-fn displays() -> Vec<Value> {
+pub(crate) fn displays() -> Vec<Value> {
     let mut ids = [0; 16];
     let mut count = 0;
     let result = unsafe { CGGetActiveDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut count) };
@@ -94,7 +92,17 @@ fn displays() -> Vec<Value> {
     }).collect()
 }
 
-fn on_console() -> bool {
+pub(crate) fn display_geometry(id: DisplayId) -> Option<(f64, f64, f64, f64)> {
+    let bounds = unsafe { CGDisplayBounds(id) };
+    (bounds.size.width > 0.0 && bounds.size.height > 0.0).then_some((
+        bounds.origin.x,
+        bounds.origin.y,
+        bounds.size.width,
+        bounds.size.height,
+    ))
+}
+
+pub(crate) fn on_console() -> bool {
     let dictionary = unsafe { CGSessionCopyCurrentDictionary() };
     if dictionary.is_null() {
         return false;
@@ -107,7 +115,26 @@ fn on_console() -> bool {
     result
 }
 
-fn keyboard_layout() -> String {
+pub(crate) fn tcc_responsible_app_name() -> String {
+    if let Ok(executable) = std::env::current_exe() {
+        let path = executable.to_string_lossy();
+        if let Some((bundle, _)) = path.split_once(".app/Contents/MacOS/") {
+            if let Some(name) = std::path::Path::new(bundle)
+                .file_name()
+                .and_then(|name| name.to_str())
+            {
+                return name.to_owned();
+            }
+        }
+    }
+    match std::env::var("TERM_PROGRAM").as_deref() {
+        Ok("Apple_Terminal") => String::from("Terminal"),
+        Ok("iTerm.app") => String::from("iTerm"),
+        _ => String::from("Node.js"),
+    }
+}
+
+pub(crate) fn keyboard_layout() -> String {
     let source = unsafe { TISCopyCurrentKeyboardLayoutInputSource() };
     if source.is_null() {
         return String::from("unknown");
@@ -135,34 +162,35 @@ fn keyboard_layout() -> String {
     }
 }
 
+#[cfg(not(desklink_vpx))]
 fn capabilities() -> Value {
     let capture_granted = unsafe { CGPreflightScreenCaptureAccess() };
     let input_granted = unsafe { CGPreflightPostEventAccess() };
     json!({
-        "protocol": 2,
+        "protocol": 3,
         "engine": format!("desklink-host/{}", env!("CARGO_PKG_VERSION")),
         "platform": "macos",
         "session": { "kind": "quartz", "on_console": on_console() },
         "capture": {
             "mechanism": "screencapturekit",
-            "backends": [],
+            "backends": ["screencapturekit"],
             "formats": ["bgra"],
             "cursor": "embedded",
             "audio": false,
             "displays": displays(),
             "grant": if capture_granted { "granted" } else { "missing-screen-recording" },
             "unavailable_reason": if capture_granted { Value::Null } else { json!({
-                "reason": "Screen Recording permission has not been granted to desklink-host.",
-                "remedy": "Allow desklink-host in System Settings › Privacy & Security › Screen & System Audio Recording on the Mac, then reconnect."
+                "reason": format!("Screen Recording permission has not been granted to {}.", tcc_responsible_app_name()),
+                "remedy": format!("Allow {} in System Settings › Privacy & Security › Screen & System Audio Recording, then reconnect.", tcc_responsible_app_name())
             }) }
         },
         "encode": { "codecs": [], "hardware": false },
         "input": {
             "mechanism": "quartz-cgevent",
-            "pointer": false,
-            "wheel": false,
-            "keyboard": false,
-            "text": ["unicode"],
+            "pointer": input_granted,
+            "wheel": input_granted,
+            "keyboard": input_granted,
+            "text": ["unicode", "us-ansi-keymap"],
             "layout": keyboard_layout(),
             "grant": if input_granted { "granted" } else { "missing-accessibility" },
             "unavailable_reason": if input_granted { Value::Null } else { json!({
@@ -170,94 +198,8 @@ fn capabilities() -> Value {
                 "remedy": "Allow desklink-host in System Settings › Privacy & Security › Accessibility on the Mac, then reconnect."
             }) }
         },
-        "clipboard": { "read": false, "write": false, "mime": ["text/plain;charset=utf-8"], "maxBytes": 262144 }
+        "clipboard": { "read": true, "write": true, "mime": ["text/plain;charset=utf-8"], "maxBytes": crate::clipboard::MAX_CLIPBOARD_BYTES }
     })
-}
-
-fn reply(id: Value, result: Option<Value>, error: Option<(&str, &str)>) -> Value {
-    let mut response = json!({ "id": id });
-    if let Some(result) = result {
-        response["result"] = result;
-    }
-    if let Some((code, message)) = error {
-        response["error"] = json!({ "code": code, "message": message });
-    }
-    response
-}
-
-fn dispatch(request: &Value, hello_seen: &mut bool) -> Value {
-    let id = request.get("id").cloned().unwrap_or(Value::Null);
-    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-    match method {
-        "hello" => {
-            let version = request
-                .pointer("/params/protocol")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            if version != 2 {
-                return reply(
-                    id,
-                    None,
-                    Some(("unsupported-protocol", "this engine speaks protocol 2")),
-                );
-            }
-            *hello_seen = true;
-            reply(id, Some(capabilities()), None)
-        }
-        "capabilities" => reply(id, Some(capabilities()), None),
-        "shutdown" => reply(id, Some(json!({})), None),
-        "session.open" if !*hello_seen => reply(
-            id,
-            None,
-            Some((
-                "unsupported-protocol",
-                "send `hello` with protocol 2 before anything else",
-            )),
-        ),
-        "session.open" => {
-            if !on_console() {
-                return reply(
-                    id,
-                    None,
-                    Some((
-                        "no-screen",
-                        "no active console session is available on the Mac",
-                    )),
-                );
-            }
-            let params = &request["params"];
-            let source = &params["source"];
-            if !source.is_null() && source["kind"] != "display" {
-                return reply(
-                    id,
-                    None,
-                    Some(("source", "only a macOS display source is supported")),
-                );
-            }
-            let permissions = params["permissions"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            if permissions.iter().any(|p| p == "control")
-                && !unsafe { CGPreflightPostEventAccess() }
-            {
-                let _ = unsafe { CGRequestPostEventAccess() };
-                return reply(id, None, Some(("input-unavailable", "Allow desklink-host in System Settings › Privacy & Security › Accessibility on the Mac, then reconnect.")));
-            }
-            if permissions.iter().any(|p| p == "view")
-                && !unsafe { CGPreflightScreenCaptureAccess() }
-            {
-                let _ = unsafe { CGRequestScreenCaptureAccess() };
-                return reply(id, None, Some(("capture-permission", "Allow desklink-host in System Settings › Privacy & Security › Screen & System Audio Recording on the Mac, then reconnect.")));
-            }
-            reply(
-                id,
-                None,
-                Some(("source", "ScreenCaptureKit session support is added in M3.")),
-            )
-        }
-        _ => reply(id, None, Some(("operation", "unknown method"))),
-    }
 }
 
 fn ensure_disclaimed() -> Result<(), String> {
@@ -337,7 +279,7 @@ fn ensure_disclaimed() -> Result<(), String> {
     }
 }
 
-fn request_screen_capture_content() -> Result<(), String> {
+pub(crate) fn request_screen_capture_content() -> Result<(), String> {
     use block2::RcBlock;
     use objc2_screen_capture_kit::SCShareableContent;
 
@@ -387,7 +329,90 @@ fn encode_probe() -> Result<(), String> {
     Ok(())
 }
 
-fn capture_probe(seconds: u64) -> Result<(), String> {
+pub(crate) fn capture_display(
+    display_id: DisplayId,
+) -> Result<(Vec<u8>, usize, usize, usize), String> {
+    use block2::RcBlock;
+    use objc2_core_foundation::{
+        CGPoint as NativePoint, CGRect as NativeRect, CGSize as NativeSize,
+    };
+    use objc2_screen_capture_kit::SCScreenshotManager;
+
+    let bounds = unsafe { CGDisplayBounds(display_id) };
+    let rect = NativeRect {
+        origin: NativePoint {
+            x: bounds.origin.x,
+            y: bounds.origin.y,
+        },
+        size: NativeSize {
+            width: bounds.size.width,
+            height: bounds.size.height,
+        },
+    };
+    let ready = Arc::new((
+        Mutex::new(None::<Result<(Vec<u8>, usize, usize, usize), String>>),
+        Condvar::new(),
+    ));
+    let callback_state = ready.clone();
+    let callback = RcBlock::new(
+        move |image: *mut objc2_core_graphics::CGImage, error: *mut objc2_foundation::NSError| {
+            let frame = if !error.is_null() || image.is_null() {
+                Err(String::from(
+                    "ScreenCaptureKit returned an error or no image",
+                ))
+            } else {
+                let image = unsafe { &*image };
+                let provider = objc2_core_graphics::CGImage::data_provider(Some(image));
+                let data = provider
+                    .as_deref()
+                    .and_then(|provider| objc2_core_graphics::CGDataProvider::data(Some(provider)));
+                match data {
+                    Some(data) => {
+                        let width = objc2_core_graphics::CGImage::width(Some(image));
+                        let height = objc2_core_graphics::CGImage::height(Some(image));
+                        let length = data.length().max(0) as usize;
+                        let pointer = data.byte_ptr();
+                        let stride = if height > 0 { length / height } else { 0 };
+                        if width == 0 || height == 0 || stride < width * 4 || pointer.is_null() {
+                            Err(String::from(
+                                "ScreenCaptureKit returned an invalid BGRA image",
+                            ))
+                        } else {
+                            let bytes =
+                                unsafe { std::slice::from_raw_parts(pointer, length) }.to_vec();
+                            Ok((bytes, width, height, stride))
+                        }
+                    }
+                    None => Err(String::from("ScreenCaptureKit image has no pixel data")),
+                }
+            };
+            let (lock, wake) = &*callback_state;
+            if let Ok(mut result) = lock.lock() {
+                *result = Some(frame);
+                wake.notify_one();
+            }
+        },
+    );
+    unsafe {
+        SCScreenshotManager::captureImageInRect_completionHandler(rect, Some(&callback));
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (lock, wake) = &*ready;
+    let mut result = lock
+        .lock()
+        .map_err(|_| String::from("capture lock poisoned"))?;
+    while result.is_none() && Instant::now() < deadline {
+        let (next, _) = wake
+            .wait_timeout(result, deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| String::from("capture wait failed"))?;
+        result = next;
+    }
+    result
+        .take()
+        .unwrap_or_else(|| Err(String::from("ScreenCaptureKit timed out")))
+}
+
+fn capture_probe(seconds: u64) -> Result<Value, String> {
     use block2::RcBlock;
     use objc2_core_foundation::{
         CGPoint as NativePoint, CGRect as NativeRect, CGSize as NativeSize,
@@ -496,21 +521,26 @@ pub fn run() -> i32 {
     }
     match command.as_str() {
         "version" | "--version" | "-V" => println!("{}", env!("CARGO_PKG_VERSION")),
-        "capabilities" => println!("{}", serde_json::to_string_pretty(&capabilities()).unwrap()),
+        "capabilities" => {
+            #[cfg(desklink_vpx)]
+            let value = crate::session::capabilities();
+            #[cfg(not(desklink_vpx))]
+            let value = capabilities();
+            println!("{}", serde_json::to_string_pretty(&value).unwrap());
+        }
         "serve" => {
-            let stdin = io::stdin();
-            let mut hello_seen = false;
-            for line in stdin.lock().lines() {
-                let Ok(line) = line else { return 1; };
-                let (response, shutdown) = match serde_json::from_str::<Value>(&line) {
-                    Ok(request) => {
-                        let shutdown = request.get("method").and_then(Value::as_str) == Some("shutdown");
-                        (dispatch(&request, &mut hello_seen), shutdown)
-                    }
-                    Err(_) => (reply(Value::Null, None, Some(("malformed", "request is not valid JSON"))), false),
+            #[cfg(desklink_vpx)]
+            {
+                let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+                    Ok(runtime) => runtime,
+                    Err(error) => { eprintln!("error: cannot start the runtime: {error}"); return 1; }
                 };
-                if writeln!(io::stdout().lock(), "{}", response).is_err() { return 1; }
-                if shutdown { return 0; }
+                return crate::report(runtime.block_on(crate::serve()));
+            }
+            #[cfg(not(desklink_vpx))]
+            {
+                eprintln!("serve requires a VP9-enabled build; set DESKLINK_VPX_STATIC_DIR and rebuild");
+                return 1;
             }
         }
         "encode-probe" => {
@@ -538,7 +568,7 @@ pub fn run() -> i32 {
             let result = if unsafe { CGPreflightScreenCaptureAccess() } {
                 capture_probe(seconds)
             } else {
-                request_screen_capture_content().and_then(|_| Err(String::from("capture-permission: allow DesklinkHost in System Settings › Privacy & Security › Screen & System Audio Recording, then reconnect")))
+                request_screen_capture_content().and_then(|_| Err(format!("capture-permission: allow {} in System Settings › Privacy & Security › Screen & System Audio Recording, then reconnect", tcc_responsible_app_name())))
             };
             let output = result.as_ref().map_or_else(
                 |error| serde_json::json!({"error": error}),
@@ -557,7 +587,14 @@ pub fn run() -> i32 {
                 return 1;
             }
         }
-        "setup-input" => println!("Accessibility permission is required for desktop input; no settings were changed."),
+        "setup-input" => {
+            if crate::input::probe().is_ok() {
+                println!("Accessibility permission is already granted to {}.", tcc_responsible_app_name());
+            } else {
+                let _ = crate::input::request_access();
+                println!("If the Accessibility alert did not open, allow {} in System Settings › Privacy & Security › Accessibility.", tcc_responsible_app_name());
+            }
+        }
         _ => println!("desklink-host {}\nUSAGE: desklink-host [serve|capabilities|capture-probe|encode-probe|setup-input|version]", env!("CARGO_PKG_VERSION")),
     }
     0
@@ -567,15 +604,16 @@ pub fn run() -> i32 {
 mod tests {
     use super::*;
 
+    #[cfg(desklink_vpx)]
     #[test]
-    fn capabilities_are_non_prompting_and_report_staged_backends_as_unavailable() {
-        let value = capabilities();
+    fn session_capabilities_are_non_prompting_and_expose_mac_features() {
+        let value = crate::session::capabilities();
+        assert_eq!(value["protocol"], crate::protocol::PROTOCOL_VERSION);
         assert_eq!(value["platform"], "macos");
-        assert_eq!(value["session"]["kind"], "quartz");
-        assert_eq!(value["capture"]["backends"], json!([]));
-        assert_eq!(value["input"]["pointer"], false);
-        assert_eq!(value["clipboard"]["read"], false);
+        assert_eq!(value["capture"]["mechanism"], "screencapturekit");
+        assert_eq!(value["encode"]["codecs"], json!(["vp9"]));
         assert!(value["capture"]["displays"].is_array());
+        assert!(value["clipboard"]["read"].as_bool().unwrap());
         assert!(matches!(
             value["capture"]["grant"].as_str(),
             Some("granted" | "missing-screen-recording")
@@ -584,20 +622,5 @@ mod tests {
             value["input"]["grant"].as_str(),
             Some("granted" | "missing-accessibility")
         ));
-
-        let mut hello = false;
-        let response = dispatch(
-            &json!({"id": 3, "method": "hello", "params": {"protocol": 2}}),
-            &mut hello,
-        );
-        assert!(hello);
-        assert_eq!(response["id"], 3);
-        assert_eq!(response["result"]["platform"], "macos");
-
-        let invalid_source = dispatch(
-            &json!({"id": 4, "method": "session.open", "params": {"source": {"kind": "portal"}}}),
-            &mut hello,
-        );
-        assert_eq!(invalid_source["error"]["code"], "source");
     }
 }

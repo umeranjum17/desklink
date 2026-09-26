@@ -67,12 +67,15 @@ const overlay = document.getElementById('overlay');
 const status = document.getElementById('status');
 const reconnect = document.getElementById('reconnect');
 const keyboard = document.getElementById('remote-keyboard');
+const keyboardButton = document.getElementById('keyboard');
 const copy = document.getElementById('copy');
 const paste = document.getElementById('paste');
 
 let socket = null;
 let peer = null;
 let channel = null;
+let currentSessionId = null;
+let pendingRemoteCandidates = [];
 let surface = { width: 0, height: 0 };
 let nextSeq = 0;
 let pending = new Map();
@@ -265,10 +268,16 @@ async function start() {
   try {
     const capabilities = await request('capabilities');
     const clipboardAvailable = capabilities.clipboard?.read === true && capabilities.clipboard?.write === true;
-    const session = await request('session.open', {
-      permissions: clipboardAvailable ? ['view', 'control', 'clipboard'] : ['view', 'control'],
-      max_fps: 30,
-    });
+    const controlAvailable = capabilities.input?.pointer === true && capabilities.input?.keyboard === true;
+    const permissions = ['view'];
+    if (controlAvailable) permissions.push('control');
+    if (clipboardAvailable) permissions.push('clipboard');
+    const session = await request('session.open', { permissions, max_fps: 30 });
+    currentSessionId = session.sessionId;
+    keyboard.disabled = !controlAvailable;
+    keyboardButton.disabled = !controlAvailable;
+    keyboardButton.title = controlAvailable ? '' : capabilities.input?.unavailable_reason?.remedy ?? 'This session is view-only';
+    video.style.pointerEvents = controlAvailable ? 'auto' : 'none';
     copy.hidden = !clipboardAvailable;
     paste.hidden = !clipboardAvailable;
     surface = session.geometry.encoded;
@@ -332,6 +341,9 @@ async function start() {
     // The engine is the offerer, so this side waits for the offer and answers.
     const offer = await waitForOffer();
     await pc.setRemoteDescription({ type: 'offer', sdp: offer });
+    for (const pending of pendingRemoteCandidates.splice(0)) {
+      if (pending.sessionId === session.sessionId) await pc.addIceCandidate(pending.candidate);
+    }
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     await request('session.description', {
@@ -371,6 +383,8 @@ function teardown(message) {
   peer?.close();
   peer = null;
   channel = null;
+  currentSessionId = null;
+  pendingRemoteCandidates = [];
   video.srcObject = null;
   copy.hidden = true;
   paste.hidden = true;
@@ -390,6 +404,21 @@ function connectSocket() {
       pending.delete(message.id);
       if (message.error) waiting.reject(new Error(`${message.error.code}: ${message.error.message}`));
       else waiting.resolve(message.result);
+      return;
+    }
+    if (message.event === 'session.candidate') {
+      const params = message.params;
+      if (currentSessionId !== null && params.sessionId !== currentSessionId) return;
+      const candidate = {
+        candidate: params.candidate,
+        sdpMid: params.sdpMid,
+        sdpMLineIndex: params.sdpMLineIndex,
+      };
+      if (peer?.remoteDescription) {
+        void peer.addIceCandidate(candidate).catch(() => undefined);
+      } else {
+        pendingRemoteCandidates.push({ sessionId: params.sessionId, candidate });
+      }
       return;
     }
     if (message.event === 'session.description') {
