@@ -124,7 +124,7 @@ impl X11Desktop {
             self.width,
             self.height,
             stride,
-            crate::capture::PixelFormat::Bgrx,
+            crate::convert::PixelFormat::Bgrx,
             width,
             height,
         )

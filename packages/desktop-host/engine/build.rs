@@ -21,6 +21,7 @@
 use std::path::{Path, PathBuf};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("cargo:rustc-check-cfg=cfg(desklink_vpx)");
     println!("cargo:rerun-if-changed=native/vpx_shim.c");
     println!("cargo:rerun-if-changed=native/inputtino_shim.cpp");
     println!("cargo:rerun-if-changed=Info.plist");
@@ -61,6 +62,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .compile("dlinputkey");
         build_inputtino(&PathBuf::from(std::env::var("OUT_DIR")?))?;
     } else if target_os == "macos" {
+        if let Some(prefix) = std::env::var_os("DESKLINK_VPX_STATIC_DIR").map(PathBuf::from) {
+            cc::Build::new()
+                .file("native/vpx_shim.c")
+                .include(prefix.join("include"))
+                .compile("dlvpx");
+            println!(
+                "cargo:rustc-link-search=native={}",
+                prefix.join("lib").display()
+            );
+            println!("cargo:rustc-link-lib=static=vpx");
+            println!("cargo:rustc-cfg=desklink_vpx");
+        }
         println!("cargo:rustc-link-lib=framework=CoreGraphics");
         println!("cargo:rustc-link-lib=framework=ApplicationServices");
         println!("cargo:rustc-link-lib=framework=Carbon");

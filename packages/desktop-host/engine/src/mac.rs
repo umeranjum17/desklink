@@ -367,7 +367,27 @@ fn request_screen_capture_content() -> Result<(), String> {
     }
 }
 
-fn capture_probe(seconds: u64) -> Result<Value, String> {
+#[cfg(desklink_vpx)]
+fn encode_probe() -> Result<(), String> {
+    let mut frame = crate::convert::I420 {
+        width: 640,
+        height: 360,
+        data: vec![96; 640 * 360 + 2 * 320 * 180],
+    };
+    frame.data[640 * 360..].fill(128);
+    let mut encoder = crate::encoder::Encoder::new(640, 360, 1000, 30, 1)
+        .map_err(|error| format!("VP9 encoder initialization failed: {error:#}"))?;
+    let packet = encoder
+        .encode(&frame, true)
+        .map_err(|error| format!("VP9 encoding failed: {error:#}"))?;
+    println!(
+        "{}",
+        serde_json::json!({"codec":"vp9", "width":640, "height":360, "bytes":packet.data.len(), "keyframe":packet.keyframe})
+    );
+    Ok(())
+}
+
+fn capture_probe(seconds: u64) -> Result<(), String> {
     use block2::RcBlock;
     use objc2_core_foundation::{
         CGPoint as NativePoint, CGRect as NativeRect, CGSize as NativeSize,
@@ -493,6 +513,18 @@ pub fn run() -> i32 {
                 if shutdown { return 0; }
             }
         }
+        "encode-probe" => {
+            #[cfg(desklink_vpx)]
+            if let Err(error) = encode_probe() {
+                eprintln!("encode-probe: {error}");
+                return 1;
+            }
+            #[cfg(not(desklink_vpx))]
+            {
+                eprintln!("encode-probe requires DESKLINK_VPX_STATIC_DIR");
+                return 1;
+            }
+        }
         "capture-probe" => {
             let mut seconds = 3;
             let mut output_path = None;
@@ -526,7 +558,7 @@ pub fn run() -> i32 {
             }
         }
         "setup-input" => println!("Accessibility permission is required for desktop input; no settings were changed."),
-        _ => println!("desklink-host {}\nUSAGE: desklink-host [serve|capabilities|capture-probe|setup-input|version]", env!("CARGO_PKG_VERSION")),
+        _ => println!("desklink-host {}\nUSAGE: desklink-host [serve|capabilities|capture-probe|encode-probe|setup-input|version]", env!("CARGO_PKG_VERSION")),
     }
     0
 }

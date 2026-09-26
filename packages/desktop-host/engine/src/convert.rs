@@ -5,7 +5,17 @@
 //! downscale is the correct filter when the encoded surface is smaller than the
 //! source — it is the only one that does not alias the desktop's text.
 
-use crate::capture::PixelFormat;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PixelFormat {
+    Bgrx,
+    Rgbx,
+    Bgra,
+    Rgba,
+    Bgr,
+    Rgb,
+    Unsupported,
+}
 
 /// A tightly packed I420 frame; the plane strides are the frame width/2 so the
 /// buffer is exactly what `vpx_image_t` wants when we hand libvpx three planes.

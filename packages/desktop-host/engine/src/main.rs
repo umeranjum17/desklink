@@ -10,9 +10,11 @@
 mod capture;
 #[cfg(target_os = "linux")]
 mod clipboard;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod convert;
 #[cfg(target_os = "linux")]
+mod encoder;
+#[cfg(all(target_os = "macos", desklink_vpx))]
 mod encoder;
 #[cfg(target_os = "linux")]
 mod input;
