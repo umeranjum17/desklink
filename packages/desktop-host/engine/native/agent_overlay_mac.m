@@ -40,11 +40,22 @@
     CGFloat edge = endingAt ? fmax(0, 1 - (now-endingAt)/0.7) : 1;
     if (edge > 0) {
         NSRect bounds = self.bounds;
-        [[NSColor colorWithCalibratedRed:0.28 green:0.67 blue:0.96 alpha:0.10*edge] set];
+        [[NSColor colorWithCalibratedRed:0.28 green:0.67 blue:0.96 alpha:0.75*edge] set];
         NSBezierPath *border = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(bounds, 4, 4) xRadius:12 yRadius:12];
         border.lineWidth = 5; [border stroke];
     }
     if (!positioned) return;
+    NSBezierPath *pointer = [NSBezierPath bezierPath];
+    [pointer moveToPoint:NSMakePoint(cursor.x, cursor.y)];
+    [pointer lineToPoint:NSMakePoint(cursor.x+2, cursor.y-24)];
+    [pointer lineToPoint:NSMakePoint(cursor.x+8, cursor.y-18)];
+    [pointer lineToPoint:NSMakePoint(cursor.x+15, cursor.y-31)];
+    [pointer lineToPoint:NSMakePoint(cursor.x+21, cursor.y-28)];
+    [pointer lineToPoint:NSMakePoint(cursor.x+14, cursor.y-15)];
+    [pointer lineToPoint:NSMakePoint(cursor.x+24, cursor.y-14)];
+    [pointer closePath];
+    [[NSColor colorWithCalibratedRed:0.16 green:0.60 blue:1 alpha:1] set]; [pointer fill];
+    [[NSColor whiteColor] set]; pointer.lineWidth = 2; [pointer stroke];
     for (int i = 3; i >= 0; i--) {
         CGFloat radius = 12 + i*5;
         CGFloat alpha = 0.13 * (1.0 - i/5.0);
@@ -100,6 +111,8 @@ int desklink_agent_overlay_main(int display_id) {
         window.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary;
         AgentOverlayView *view = [[AgentOverlayView alloc] initWithFrame:NSMakeRect(0,0,screen.frame.size.width,screen.frame.size.height)];
         window.contentView = view;
+        NSPoint mouse = [NSEvent mouseLocation];
+        [view event:'M' x:mouse.x-screen.frame.origin.x y:NSMaxY(screen.frame)-mouse.y];
         [window orderFrontRegardless];
         puts("READY"); fflush(stdout);
         [NSTimer scheduledTimerWithTimeInterval:1.0/60 target:view selector:@selector(tick) userInfo:nil repeats:YES];

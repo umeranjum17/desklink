@@ -245,7 +245,7 @@ always does.
 
 ```jsonc
 {"event":"session.state","params":{"sessionId":"…",
-  "capture":"streaming",              // consented|streaming|ended
+  "capture":"streaming",              // consented|streaming|stopped|ended
   "transport":"connected",            // new|connecting|connected|failed|closed
   "firstFrame":true}}                 // false until a frame has been encoded
 ```

@@ -16,8 +16,9 @@ if (process.argv[2] === '--bridge') {
     ['start', [], ['control','source','display','timeout']], ['stop', [], []],
     ['screen', [], ['query','region','full','fields']], ['diff', [], ['include-animating','fields']],
     ['look', ['target'], ['region','out']], ['click', ['target'], ['button','double','wait']],
-    ['type', ['text'], ['into','submit']], ['press', ['key'], []],
-    ['scroll', ['direction'], ['at','amount']], ['drag', ['from','to'], []],
+    ['type', ['text'], ['into','submit','wait']], ['press', ['key'], ['wait']],
+    ['scroll', ['direction'], ['at','amount','wait']], ['drag', ['from','to'], ['wait']],
+    ['batch', ['steps'], []],
     ['wait', [], ['timeout']], ['clipboard read', [], ['full']],
     ['clipboard write', ['text'], []], ['setup hooks', [], []],
   ];

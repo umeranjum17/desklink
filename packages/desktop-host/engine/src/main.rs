@@ -292,6 +292,7 @@ async fn probe_portal(seconds: u64) -> Result<()> {
             let _ = tx.send((frame.width, frame.height, seq));
         }),
         None,
+        Box::new(|reason| eprintln!("{reason}")),
     )?;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(seconds);

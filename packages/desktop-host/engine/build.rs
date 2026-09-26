@@ -39,6 +39,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=DESKLINK_MACOS_CLI");
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if let Some(prefix) = std::env::var_os("DESKLINK_VPX_STATIC_DIR").map(PathBuf::from) {
+        if !prefix.join("include/vpx/vp8cx.h").exists() || !prefix.join("lib/libvpx.a").exists() {
+            return Err(format!("DESKLINK_VPX_STATIC_DIR must be the libvpx install prefix containing include/vpx/vp8cx.h and lib/libvpx.a, not its lib directory: {}", prefix.display()).into());
+        }
+    }
     if target_os == "macos" && std::env::var_os("DESKLINK_MACOS_CLI").is_some() {
         println!("cargo:rustc-cfg=desklink_macos_cli");
     }

@@ -4,6 +4,7 @@
 #import <CoreMedia/CoreMedia.h>
 
 using FrameCallback = void (*)(void *, const uint8_t *, size_t, size_t, size_t, size_t);
+using StatusCallback = void (*)(void *, const char *, bool);
 
 @interface DLStreamOutput : NSObject <SCStreamOutput>
 @property(nonatomic, assign) void *context;
@@ -26,12 +27,55 @@ using FrameCallback = void (*)(void *, const uint8_t *, size_t, size_t, size_t, 
 }
 @end
 
-@interface DLStreamSession : NSObject
+@interface DLStreamSession : NSObject <SCStreamDelegate>
 @property(nonatomic, strong) SCStream *stream;
+@property(nonatomic, strong) SCContentFilter *filter;
+@property(nonatomic, strong) SCStreamConfiguration *config;
 @property(nonatomic, strong) DLStreamOutput *output;
 @property(nonatomic, strong) dispatch_queue_t queue;
+@property(nonatomic, assign) StatusCallback status;
+@property(nonatomic, assign) void *context;
+@property(atomic, assign) BOOL closing;
+@property(atomic, assign) BOOL restarting;
+- (NSError *)startStream;
 @end
 @implementation DLStreamSession
+- (NSError *)startStream {
+    __block NSError *failure = nil;
+    self.stream = [[SCStream alloc] initWithFilter:self.filter configuration:self.config delegate:self];
+    if (![self.stream addStreamOutput:self.output type:SCStreamOutputTypeScreen
+                    sampleHandlerQueue:self.queue error:&failure]) return failure;
+    dispatch_semaphore_t started = dispatch_semaphore_create(0);
+    [self.stream startCaptureWithCompletionHandler:^(NSError *err) {
+        failure = err;
+        dispatch_semaphore_signal(started);
+    }];
+    if (dispatch_semaphore_wait(started, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)))
+        return [NSError errorWithDomain:@"desklink.capture" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Timed out starting stream"}];
+    return failure;
+}
+- (void)stream:(SCStream *)stream didStopWithError:(NSError *)error {
+    if (self.closing || self.restarting || stream != self.stream) return;
+    self.restarting = YES;
+    NSString *reason = [NSString stringWithFormat:@"SCStream stopped (%@ %ld): %@", error.domain, (long)error.code, error.localizedDescription];
+    self.status(self.context, reason.UTF8String, false);
+    NSLog(@"%@; restarting capture", reason);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        for (int attempt = 1; attempt <= 3 && !self.closing; attempt++) {
+            [NSThread sleepForTimeInterval:attempt];
+            if (self.closing) break;
+            NSError *failure = [self startStream];
+            if (!failure) {
+                if (!self.closing) self.status(self.context, "SCStream restarted", true);
+                self.restarting = NO;
+                return;
+            }
+            NSLog(@"SCStream restart %d failed: %@", attempt, failure);
+        }
+        if (!self.closing) self.status(self.context, "SCStream restart exhausted", false);
+        self.restarting = NO;
+    });
+}
 @end
 
 static void fail(char *error, size_t capacity, NSString *message) {
@@ -40,7 +84,7 @@ static void fail(char *error, size_t capacity, NSString *message) {
 
 extern "C" void *dl_mac_stream_start(uint32_t display_id, size_t width, size_t height, uint32_t fps,
                                       uint32_t indicator_pid, void *context, FrameCallback callback,
-                                      char *error, size_t capacity) {
+                                      StatusCallback status, char *error, size_t capacity) {
     @autoreleasepool {
         dispatch_semaphore_t found = dispatch_semaphore_create(0);
         __block SCShareableContent *content = nil;
@@ -83,19 +127,13 @@ extern "C" void *dl_mac_stream_start(uint32_t display_id, size_t width, size_t h
         session.output.context = context;
         session.output.callback = callback;
         session.queue = dispatch_queue_create("dev.desklink.capture", DISPATCH_QUEUE_SERIAL);
-        session.stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:nil];
-        if (![session.stream addStreamOutput:session.output type:SCStreamOutputTypeScreen
-                          sampleHandlerQueue:session.queue error:&failure]) {
+        session.filter = filter;
+        session.config = config;
+        session.status = status;
+        session.context = context;
+        failure = [session startStream];
+        if (failure) {
             fail(error, capacity, failure.localizedDescription);
-            return nullptr;
-        }
-        dispatch_semaphore_t started = dispatch_semaphore_create(0);
-        [session.stream startCaptureWithCompletionHandler:^(NSError *err) {
-            failure = err;
-            dispatch_semaphore_signal(started);
-        }];
-        if (dispatch_semaphore_wait(started, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) || failure) {
-            fail(error, capacity, failure ? failure.localizedDescription : @"Timed out starting stream");
             dispatch_semaphore_t stopped = dispatch_semaphore_create(0);
             [session.stream stopCaptureWithCompletionHandler:^(NSError *err) {
                 (void)err;
@@ -113,6 +151,12 @@ extern "C" bool dl_mac_stream_stop(void *handle) {
     if (!handle) return true;
     @autoreleasepool {
         DLStreamSession *session = (__bridge_transfer DLStreamSession *)handle;
+        session.closing = YES;
+        for (int i = 0; session.restarting && i < 350; i++) [NSThread sleepForTimeInterval:0.1];
+        if (session.restarting) {
+            (void)CFBridgingRetain(session);
+            return false; // The restart still owns the callback context.
+        }
         dispatch_semaphore_t stopped = dispatch_semaphore_create(0);
         [session.stream stopCaptureWithCompletionHandler:^(NSError *err) {
             (void)err;
