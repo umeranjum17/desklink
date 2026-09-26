@@ -326,6 +326,19 @@ mod tests {
     }
 
     #[test]
+    fn still_pixels_keep_exact_source_colours_before_encoding() {
+        let src = [1, 2, 3, 0, 4, 5, 6, 0];
+        assert_eq!(
+            to_bgrx(&src, 2, 1, 8, PixelFormat::Bgrx, 2, 1).unwrap(),
+            src
+        );
+        assert_eq!(
+            to_bgrx(&src, 2, 1, 8, PixelFormat::Rgbx, 2, 1).unwrap(),
+            [3, 2, 1, 255, 6, 5, 4, 255]
+        );
+    }
+
+    #[test]
     fn unsupported_format_is_reported_not_guessed() {
         assert!(to_i420(&vec![0u8; 64], 4, 4, 16, PixelFormat::Unsupported, 2, 2).is_none());
     }

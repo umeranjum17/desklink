@@ -51,6 +51,9 @@ try {
   assert.match(events, /"kind":"button".*"phase":"up"/);
   assert.match(events, /"kind":"key".*"phase":"down"/);
   await run('stop');
+  assert.match(await run('start','--source','x11','--display',display),/permissions=view\n/);
+  assert.match(await run('screen','--query','zebra'),/0 items match "zebra"/);
+  await run('stop');
   if (process.env.DESKLINK_AXI_MEASURE_PATH) writeFileSync(process.env.DESKLINK_AXI_MEASURE_PATH,JSON.stringify(observations));
   console.log('engine: frame bytes and damage followed X client; CLI: click changed pixels and type reached X client');
 } finally {

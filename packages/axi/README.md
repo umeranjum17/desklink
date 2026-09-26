@@ -18,4 +18,6 @@ desklink-axi stop
 
 For an isolated integration proof run `DESKLINK_AXI_ENGINE=/path/to/engine CARGO_TARGET_DIR=/tmp/task-owned-target node packages/axi/test/flow.mjs` from the repository root. It launches and kills its own Xvfb process by exact PID.
 
-Measured on a private 1280×720 Xvfb client: `diff → click 100,100 → look @r1 → type abc` returned 77 + 77 + 39 + 30 = **223 text tokens** (`@anthropic-ai/tokenizer` 0.0.4), plus ~5 tokens for the 64×64 crop. Four full screenshots would cost ~4×1,229 = **4,916 image tokens** under the same published width×height/750 estimate (~22× difference). This is a short synthetic task, not a production-workload benchmark; the tokenizer is legacy, so absolute counts are approximate.
+`axi-axi validate "node bin/desklink-axi.js" --dir .` from `packages/axi`: V01–V12 pass; **12 pass, 0 fail, 0 warn, 0 skip, 4 advisory** (spec axi/1.0-2026-07).
+
+Measured on a private 1280×720 Xvfb client: `diff → click 100,100 → look @r1 → type abc` returned 79 + 79 + 39 + 30 = **227 text tokens** (`@anthropic-ai/tokenizer` 0.0.4), plus ~5 tokens for the 64×64 crop. Four full screenshots would cost ~4×1,229 = **4,916 image tokens** under the same published width×height/750 estimate (~21× difference). This is a short synthetic task, not a production-workload benchmark; the tokenizer is legacy, so absolute counts are approximate.

@@ -73,7 +73,7 @@ export async function serve(args: string[]): Promise<void> {
   }
   const dir = mkdtempSync(join(tmpdir(), 'desklink-axi-'));
   let baseline = 0;
-  type Item = { ref: string; text: string; x: number; y: number; words: {text:string;x:number;y:number;w:number;h:number}[] };
+  type Item = { ref: string; text: string; x: number; y: number; conf: number; line: string; words: {text:string;x:number;y:number;w:number;h:number}[] };
   let text: Item[] = []; 
   let regions: string[] = [];
   let motionRegion = '';
@@ -108,7 +108,7 @@ export async function serve(args: string[]): Promise<void> {
     for (const cols of result.stdout.split('\n').slice(1).map(line => line.split('\t'))) {
       if (cols.length < 12 || Number(cols[10]) < 0 || !cols[11]?.trim()) continue;
       const key = cols.slice(1,5).join(':');
-      if (!lines.has(key)) lines.set(key,{ref:`@${frame.seq}.${lines.size+1}`,text:'',x:Number(cols[6]),y:Number(cols[7]),words:[]});
+      if (!lines.has(key)) lines.set(key,{ref:`@${frame.seq}.${lines.size+1}`,text:'',x:Number(cols[6]),y:Number(cols[7]),conf:Number(cols[10]),line:key,words:[]});
       const item = lines.get(key)!;
       const word = { text:cols[11]!.trim(),x:box[0]!+Number(cols[6]),y:box[1]!+Number(cols[7]),w:Number(cols[8]),h:Number(cols[9]) };
       if (!item.text) { item.x=word.x; item.y=word.y; }
@@ -146,6 +146,10 @@ export async function serve(args: string[]): Promise<void> {
       if (args[0] === 'read') { const result = await engine.readClipboard(opened.sessionId); return `clipboard: ${args.includes('--full') ? result.text : result.text.slice(0,1000)} (${result.text.length} chars)`; }
       if (args[0] === 'write') { await engine.writeClipboard(opened.sessionId, args[1] ?? ''); return 'clipboard: written'; }
     }
+    if (['click','drag','type','scroll'].includes(command) && (args.some(arg=>arg.startsWith('@')) || args.includes('--into') || args.includes('--at'))) {
+      const current = await engine.request<{seq:number}>('session.frame',{session_id:opened.sessionId,since:baseline});
+      if (current.seq !== baseline) throw new Error(`stale-ref: frame ${baseline} is now ${current.seq}; run screen --query`);
+    }
     if (command === 'click' || command === 'drag') {
       const [x,y] = target(args[0]!);
       await act({ kind: 'pointer', phase: 'move', x, y });
@@ -163,7 +167,10 @@ export async function serve(args: string[]): Promise<void> {
       const modifiers = parts.map(p=>({ctrl:'Ctrl',control:'Control',alt:'Alt',shift:'Shift',meta:'Meta'}[p.toLowerCase()] ?? p));
       const key = name.length === 1 ? {character:name} : {name};
       await act({kind:'key',...key,down:true,modifiers}); await act({kind:'key',...key,down:false,modifiers});
-    } else if (command === 'scroll') await act({kind:'wheel',dy:args[0] === 'up' ? -Number(args.includes('--amount') ? args[args.indexOf('--amount')+1] : 3) : Number(args.includes('--amount') ? args[args.indexOf('--amount')+1] : 3)});
+    } else if (command === 'scroll') {
+      if (args.includes('--at')) { const [x,y]=target(args[args.indexOf('--at')+1]!); await act({kind:'pointer',phase:'move',x,y}); }
+      await act({kind:'wheel',dy:args[0] === 'up' ? -Number(args.includes('--amount') ? args[args.indexOf('--amount')+1] : 3) : Number(args.includes('--amount') ? args[args.indexOf('--amount')+1] : 3)});
+    }
     else if (command === 'wait') {
       const condition = args[0] ?? 'change';
       const before = baseline;
@@ -179,23 +186,44 @@ export async function serve(args: string[]): Promise<void> {
       }
       if (!matched) throw new Error('settle-timeout: condition not met before deadline');
     }
-    if (['click','drag','type','press','scroll'].includes(command)) await new Promise(r => setTimeout(r, 230));
+    if (['click','drag','type','press','scroll'].includes(command)) {
+      const wait = args.includes('--wait') ? args[args.indexOf('--wait')+1] : 'settle';
+      if (wait !== 'none') {
+        if (/^\d+$/.test(wait!)) await new Promise(r=>setTimeout(r,Number(wait)));
+        else {
+          const before = baseline, started=Date.now(), deadline=started+5000;
+          while (Date.now()<deadline) {
+            const state = await engine.request<{seq:number;still_ms:number}>('session.frame',{session_id:opened.sessionId,since:before});
+            if (wait === 'change' ? state.seq !== before : Date.now()-started>=150 && state.still_ms>=150) break;
+            await new Promise(r=>setTimeout(r,50));
+          }
+        }
+      }
+    }
     const frame = await capture(command !== 'look');
     if (command === 'look') {
+      const item = text.find(t=>t.ref === args[0]);
+      if (item && !item.ref.startsWith(`@${frame.seq}.`)) throw new Error(`stale-ref: ${args[0]}; run screen --query`);
+      if (args[0]?.startsWith('@') && !args[0].startsWith('@r') && !item) throw new Error(`stale-ref: ${args[0]}; run screen --query`);
       const requested = args.includes('--region') ? args[args.indexOf('--region')+1] : args[0]?.startsWith('@r') ? regions[Number(args[0].slice(2))-1] : undefined;
-      const box = requested ? requested.split(',').map(Number) : [0,0,frame.width,frame.height];
+      if (args[0]?.startsWith('@r') && !requested) throw new Error(`stale-ref: ${args[0]}; run diff`);
+      const box = requested ? requested.split(',').map(Number) : item ? [item.x,item.y,item.words.at(-1)!.x+item.words.at(-1)!.w-item.x,Math.max(...item.words.map(w=>w.y+w.h))-item.y] : [0,0,frame.width,frame.height];
       if (box.length !== 4 || box.some(n=>!Number.isInteger(n)) || box[0]!<0 || box[1]!<0 || box[2]!<=0 || box[3]!<=0 || box[0]!+box[2]!>frame.width || box[1]!+box[3]!>frame.height) throw new Error('coordinates: crop exceeds frame');
       const path = args.includes('--out') ? args[args.indexOf('--out')+1]! : join(dir, `look-${frame.seq}.png`);
       await image(frame,box,path);
       return `image: ${path}\nregion: ${box.join(',')} cost: ~${Math.round(box[2]!*box[3]!/750)} tokens to view`;
     }
-    if (command === 'screen' || command === 'home') text = await ocr(frame);
+    if (command === 'screen' || command === 'home') {
+      const region = args.includes('--region') ? args[args.indexOf('--region')+1]!.split(',').map(Number) : undefined;
+      if (region && (region.length!==4 || region.some(n=>!Number.isInteger(n)) || region[0]!<0 || region[1]!<0 || region[2]!<=0 || region[3]!<=0 || region[0]!+region[2]!>frame.width || region[1]!+region[3]!>frame.height)) throw new Error('coordinates: region exceeds frame');
+      text = await ocr(frame,region);
+    }
     if (command === 'home') return `session: open source=${source} ${display ?? ''} size=${frame.width}x${frame.height} permissions=view${control?',control':''}\nframe: ${frame.seq} settled=${frame.still_ms>=150} unseen=${frame.changed ? frame.damage.length : 0} region\nwindows: unavailable on this compositor\ntext[${Math.min(text.length,12)} of ${text.length}]{ref,text,x,y}:\n${text.slice(0,12).map(t=>`  ${t.ref},${JSON.stringify(t.text)},${t.x},${t.y}`).join('\n')}\nhelp[2]:\n  desklink-axi diff\n  desklink-axi screen --query "<words>"`;
     if (command === 'screen') {
       const query = args.includes('--query') ? args[args.indexOf('--query')+1] : undefined;
       const items = query ? text.filter(t => t.text.toLowerCase().includes(query.toLowerCase())) : text;
       const fields = args.includes('--fields') ? args[args.indexOf('--fields')+1]!.split(',') : ['ref','text','x','y'];
-      if (fields.some(field=>!['ref','text','x','y','w','h'].includes(field))) throw new Error('fields: valid fields are ref,text,x,y,w,h');
+      if (fields.some(field=>!['ref','text','x','y','w','h','conf','line'].includes(field))) throw new Error('fields: valid fields are ref,text,x,y,w,h,conf,line');
       const limit = args.includes('--full') ? items.length : 40;
       const rows = items.slice(0,limit).map(t => `  ${fields.map(field=>JSON.stringify(field === 'w' ? t.words.at(-1)!.x+t.words.at(-1)!.w-t.x : field === 'h' ? Math.max(...t.words.map(w=>w.y+w.h))-t.y : t[field as keyof Item])).join(',')}`).join('\n');
       return `screen: ${frame.width}x${frame.height} frame=${frame.seq} settled=${frame.still_ms>=150}\n${items.length ? `text[${Math.min(items.length,limit)} of ${items.length}]{${fields.join(',')}}:\n${rows}` : `text: 0 items match ${JSON.stringify(query ?? 'screen')} on frame ${frame.seq} (${text.length} items searched)`}${items.length>limit ? `\ntruncated: ${items.length-limit} more — use --full or --query` : ''}\nhelp[1]:\n  desklink-axi click @${frame.seq}.<n>`;
@@ -209,12 +237,14 @@ export async function serve(args: string[]): Promise<void> {
       const dirty = await ocr(frame,[x,y,right-x,bottom-y]);
       text = [...kept,...dirty].map((t,i)=>({...t,ref:`@${frame.seq}.${i+1}`}));
       const appeared = text.filter(t => !prev.some(p => p.text === t.text));
-      const gone = prev.filter(p=>!text.some(t=>t.text===p.text)).length;
+      const fields = args.includes('--fields') ? args[args.indexOf('--fields')+1]!.split(',') : ['ref','text','x','y'];
+      if (fields.some(field=>!['ref','text','x','y','w','h','conf','line'].includes(field))) throw new Error('fields: valid fields are ref,text,x,y,w,h,conf,line');
+      const gone =  prev.filter(p=>!text.some(t=>t.text===p.text)).length;
       const currentRegion = frame.damage[0] ?? '';
       motionCount = appeared.length || gone || currentRegion !== motionRegion ? 0 : motionCount + 1;
       motionRegion = currentRegion;
       if (motionCount >= 3 && !args.includes('--include-animating')) return `changed: none (animating region ${currentRegion} masked; use diff --include-animating)\nhelp[1]:\n  desklink-axi look @r1`;
-      return `changed: ${frame.damage.length} region since frame ${baseline-1}\nregions[${frame.damage.length}]{ref,box}:\n${frame.damage.map((d,i)=>`  @r${i+1},"${d}"`).join('\n')}\nappeared[${appeared.length}]{ref,text,x,y}:\n${appeared.slice(0,20).map(t=>`  ${t.ref},${JSON.stringify(t.text)},${t.x},${t.y}`).join('\n')}\ngone: ${gone} text items\nhelp[2]:\n  desklink-axi look @r1\n  desklink-axi screen --query "<words>"`; }
+      return `changed: ${frame.damage.length} region since frame ${baseline-1}\nregions[${frame.damage.length}]{ref,box}:\n${frame.damage.map((d,i)=>`  @r${i+1},"${d}"`).join('\n')}\nappeared[${Math.min(appeared.length,20)} of ${appeared.length}]{${fields.join(',')}}:\n${appeared.slice(0,20).map(t=>`  ${fields.map(field=>JSON.stringify(field === 'w' ? t.words.at(-1)!.x+t.words.at(-1)!.w-t.x : field === 'h' ? Math.max(...t.words.map(w=>w.y+w.h))-t.y : t[field as keyof Item])).join(',')}`).join('\n')}\ngone: ${gone} text items\nhelp[2]:\n  desklink-axi look @r1\n  desklink-axi screen --query "<words>"`; }
     return `changed: none since frame ${frame.seq} (still ${frame.still_ms}ms)\nhelp[1]:\n  desklink-axi screen --query "<words>"`;
   };
   const server: Server = createServer(socket => { let request = ''; socket.on('data', chunk => { request += chunk; if (!request.includes('\n')) return; const { command, args } = JSON.parse(request.split('\n')[0]!) as {command:string;args:string[]}; void output(command,args).then(result => socket.end(result+'\n'), error => socket.end(`error: ${error.message}\nsuggestion: desklink-axi ${error.message.includes('ocr') ? 'look' : 'screen'} --help\n`)); }); });
