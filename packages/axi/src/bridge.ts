@@ -63,6 +63,12 @@ function tileDamage(before: Buffer, after: Buffer, width: number, height: number
   return boxes;
 }
 
+function overlaps(a: string, b: string): boolean {
+  const [ax,ay,aw,ah] = a.split(',').map(Number);
+  const [bx,by,bw,bh] = b.split(',').map(Number);
+  return ax! < bx!+bw! && bx! < ax!+aw! && ay! < by!+bh! && by! < ay!+ah!;
+}
+
 export async function serve(args: string[]): Promise<void> {
   if (existsSync(socketPath)) throw new Error('session already running');
   const source = args.includes('--source') ? args[args.indexOf('--source') + 1] : 'auto';
@@ -80,12 +86,13 @@ export async function serve(args: string[]): Promise<void> {
     if (event.event !== 'session.frame.changed') events.push(event);
     if (event.event === 'session.frame.changed') {
       const now = Date.now();
+      const previous = [...motion];
+      motion.clear();
       for (const box of event.params.damage) {
         const region = box.join(',');
-        const prior = motion.get(region);
-        motion.set(region, {seq:event.params.seq,at:now,count:prior && prior.seq === event.params.seq-1 && now-prior.at<600 ? prior.count+1 : 1,reported:prior?.reported ?? false});
+        const prior = previous.find(([key,state]) => state.seq === event.params.seq-1 && now-state.at<600 && overlaps(key,region))?.[1];
+        motion.set(region, {seq:event.params.seq,at:now,count:prior ? prior.count+1 : 1,reported:prior?.reported ?? false});
       }
-      for (const [region,state] of motion) if (now-state.at>600) motion.delete(region);
     }
     if (offerReady && peer && event.event === 'session.candidate') peer.addRemoteCandidate(event.params.candidate, event.params.sdpMid || '0');
   } });
@@ -195,10 +202,12 @@ export async function serve(args: string[]): Promise<void> {
       if (args[0] === 'read') { const result = await engine.readClipboard(opened.sessionId); return `clipboard: ${args.includes('--full') ? result.text : result.text.slice(0,1000)} (${result.text.length} chars)`; }
       if (args[0] === 'write') { await engine.writeClipboard(opened.sessionId, args[1] ?? ''); return 'clipboard: written'; }
     }
+    const action = ['click','drag','type','press','scroll'].includes(command);
     if (['click','drag','type','scroll'].includes(command) && (args.some(arg=>arg.startsWith('@')) || args.includes('--into') || args.includes('--at'))) {
       const current = await engine.request<{seq:number}>('session.frame',{session_id:opened.sessionId,since:baseline});
       if (current.seq !== baseline) throw new Error(`stale-ref: frame ${baseline} is now ${current.seq}; run screen --query`);
     }
+    const preActionSeq = action ? (await engine.request<{seq:number}>('session.frame',{session_id:opened.sessionId,path:''})).seq : baseline;
     if (command === 'click' || command === 'drag') {
       const [x,y] = target(args[0]!);
       const [endX,endY] = command === 'drag' ? target(args[1]!) : [x,y];
@@ -255,18 +264,11 @@ export async function serve(args: string[]): Promise<void> {
         if (!found) throw new Error('settle-timeout: condition not met before deadline');
       }
     }
-    if (['click','drag','type','press','scroll'].includes(command)) {
+    if (action) {
       const wait = args.includes('--wait') ? args[args.indexOf('--wait')+1] : 'settle';
       if (wait !== 'none') {
         if (/^\d+$/.test(wait!)) await new Promise(r=>setTimeout(r,Number(wait)));
-        else {
-          if (wait === 'settle') {
-            await engine.request('session.frame',{session_id:opened.sessionId,after_seq:baseline,timeout_ms:500}).catch(error => {
-              if ((error as {code?:string}).code !== 'frame-timeout') throw error;
-            });
-          }
-          await engine.request('session.frame',{session_id:opened.sessionId,since:baseline,...(wait === 'change' ? {after_seq:baseline} : {still_ms:150}),timeout_ms:5000});
-        }
+        else await engine.request('session.frame',{session_id:opened.sessionId,since:baseline,after_seq:preActionSeq,...(wait === 'settle' ? {still_ms:150} : {}),timeout_ms:5000});
       }
     }
     const fields = args.includes('--fields') ? args[args.indexOf('--fields')+1]!.split(',') : ['ref','text','x','y'];
@@ -322,8 +324,9 @@ export async function serve(args: string[]): Promise<void> {
       if (frame.still_ms>=150) motion.clear();
       const animating: string[] = [];
       const visible: string[] = [];
-      for (const region of new Set([...frame.damage, ...[...motion].filter(([,state]) => state.count>=3 && Date.now()-state.at<600).map(([region]) => region)])) {
-        const state=motion.get(region);
+      const moving = [...motion].filter(([,state]) => state.count>=3 && Date.now()-state.at<600);
+      for (const region of [...frame.damage, ...moving.map(([key])=>key).filter(key=>!frame.damage.some(region=>overlaps(key,region)))]) {
+        const state=moving.find(([key])=>overlaps(key,region))?.[1];
         const [x,y,w,h] = region.split(',').map(Number);
         const textChanged = [...appeared,...unmatched].some(t => t.words.some(word => word.x<x!+w! && word.x+word.w>x! && word.y<y!+h! && word.y+word.h>y!));
         if (state && state.count>=3 && !textChanged && !args.includes('--include-animating')) {
@@ -348,7 +351,8 @@ export async function serve(args: string[]): Promise<void> {
         socket.end(result+'\n');
       } catch (error) {
         const message = (error as Error).message;
-        socket.end(`error: ${message}\nsuggestion: desklink-axi ${message.includes('ocr') ? 'look' : 'screen'} --help\n`);
+        const code = (error as {code?:string}).code;
+        socket.end(`error: ${code ? `${code}: ` : ''}${message}\nsuggestion: desklink-axi ${message.includes('ocr') ? 'look' : 'screen'} --help\n`);
       }
     });
   }); });

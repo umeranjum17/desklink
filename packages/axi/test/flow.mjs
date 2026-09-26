@@ -56,21 +56,28 @@ try {
   const looked = await run('look','@r1'); assert.match(looked,/image: .*\.png/);
   const imagePath = /image: (.*\.png)/.exec(looked)?.[1];
   assert(imagePath && readFileSync(imagePath).subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])));
-  const typed = await run('type','abc'); assert.match(typed,/changed:/);
+  const unchanged = spawn(process.execPath,[cli,'click','100,100'],{env});
+  let noChange = ''; for await (const part of unchanged.stdout) noChange += part;
+  assert.equal(await new Promise(r=>unchanged.on('exit',r)),1,noChange);
+  assert.match(noChange,/error: frame-timeout: frame condition not met before deadline/);
+  const typing = spawn(process.execPath,[cli,'type','abc'],{env});
+  let typed = ''; for await (const part of typing.stdout) typed += part;
+  assert.equal(await new Promise(r=>typing.on('exit',r)),1,typed);
+  assert.match(typed,/error: frame-timeout:/);
   assert.match(events, /"kind":"button".*"phase":"up"/);
   assert.match(events, /"kind":"key".*"phase":"down"/);
   await run('stop');
   target.kill('SIGTERM');
   await new Promise(r=>target.once('exit',r));
-  target = spawn(example, ['--animate'], { env, stdio:['ignore','pipe','pipe'] });
+  target = spawn(example, ['--animate','--move'], { env, stdio:['ignore','pipe','pipe'] });
   target.stdout.on('data',chunk=>events+=chunk);
   await new Promise((resolve,reject)=>{target.stdout.once('data',resolve);target.once('error',reject);});
   assert.match(await run('start','--control','--source','x11','--display',display),/permissions=view,control/);
   await run('diff'); // Establish the snapshot while the corner is looping.
-  await new Promise(r=>setTimeout(r,700)); // The CLI is absent; captured frames must still build the mask.
+  await new Promise(r=>setTimeout(r,3000)); // The CLI is absent; captured frames must still build the mask.
   const animated = await run('diff');
   const corner = /animating: (\d+),(\d+),(\d+),(\d+)/.exec(animated);
-  assert(corner && Number(corner[1]) >= 1184 && Number(corner[2]) < 96, animated);
+  assert(corner && Number(corner[1]) >= 1152 && Number(corner[2]) < 96, animated);
   const once = await run('click','100,100','--wait','1000');
   assert.match(once,/regions\[[1-9]/, events);
   assert.match(once,/@r\d+,"(?:64|96|128),/);

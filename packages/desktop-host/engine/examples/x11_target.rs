@@ -81,6 +81,8 @@ fn main() -> Result<()> {
     connection.flush()?;
 
     let animate = std::env::args().any(|arg| arg == "--animate");
+    let moving = std::env::args().any(|arg| arg == "--move");
+    let mut position = 0usize;
     let mut bright = false;
     let mut out = std::io::stdout();
     emit(
@@ -178,6 +180,23 @@ fn main() -> Result<()> {
             }
         }
         if animate {
+            if moving {
+                connection.change_gc(
+                    graphics,
+                    &x11rb::protocol::xproto::ChangeGCAux::new().foreground(0x00d04040),
+                )?;
+                connection.poly_fill_rectangle(
+                    window,
+                    graphics,
+                    &[Rectangle {
+                        x: (1168 + position * 32) as i16,
+                        y: 48,
+                        width: 32,
+                        height: 32,
+                    }],
+                )?;
+                position = (position + 1) % 3;
+            }
             bright = !bright;
             connection.change_gc(
                 graphics,
@@ -191,7 +210,11 @@ fn main() -> Result<()> {
                 window,
                 graphics,
                 &[Rectangle {
-                    x: 1200,
+                    x: if moving {
+                        (1168 + position * 32) as i16
+                    } else {
+                        1200
+                    },
                     y: 48,
                     width: 32,
                     height: 32,
