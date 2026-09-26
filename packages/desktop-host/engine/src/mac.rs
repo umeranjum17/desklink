@@ -1,6 +1,8 @@
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::os::raw::c_void;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -332,6 +334,107 @@ fn ensure_disclaimed() -> Result<(), String> {
     }
 }
 
+fn capture_probe(seconds: u64) -> Result<(), String> {
+    use block2::RcBlock;
+    use objc2_core_foundation::{
+        CGPoint as NativePoint, CGRect as NativeRect, CGSize as NativeSize,
+    };
+    use objc2_screen_capture_kit::SCScreenshotManager;
+
+    let bounds = unsafe { CGDisplayBounds(CGMainDisplayID()) };
+    let rect = NativeRect {
+        origin: NativePoint {
+            x: bounds.origin.x,
+            y: bounds.origin.y,
+        },
+        size: NativeSize {
+            width: bounds.size.width,
+            height: bounds.size.height,
+        },
+    };
+    let ready = Arc::new((
+        Mutex::new(None::<Result<(usize, usize, u64), String>>),
+        Condvar::new(),
+    ));
+    let callback_state = ready.clone();
+    let callback = RcBlock::new(
+        move |image: *mut objc2_core_graphics::CGImage, error: *mut objc2_foundation::NSError| {
+            let frame = if !error.is_null() || image.is_null() {
+                Err(String::from(
+                    "ScreenCaptureKit returned an error or no image",
+                ))
+            } else {
+                let image = unsafe { &*image };
+                let provider = objc2_core_graphics::CGImage::data_provider(Some(image));
+                let data = provider
+                    .as_deref()
+                    .and_then(|provider| objc2_core_graphics::CGDataProvider::data(Some(provider)));
+                match data {
+                    Some(data) => {
+                        let length = data.length().max(0) as usize;
+                        let pointer = data.byte_ptr();
+                        if length == 0 || pointer.is_null() {
+                            Err(String::from("ScreenCaptureKit image has empty pixel data"))
+                        } else {
+                            let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
+                            // ponytail: sample ~4096 bytes per frame; hash all pixels if collisions matter.
+                            let mut hash = 0xcbf29ce484222325u64;
+                            for byte in bytes.iter().step_by((length / 4096).max(1)) {
+                                hash = (hash ^ *byte as u64).wrapping_mul(0x100000001b3);
+                            }
+                            Ok((
+                                objc2_core_graphics::CGImage::width(Some(image)),
+                                objc2_core_graphics::CGImage::height(Some(image)),
+                                hash,
+                            ))
+                        }
+                    }
+                    None => Err(String::from("ScreenCaptureKit image has no pixel data")),
+                }
+            };
+            let (lock, wake) = &*callback_state;
+            if let Ok(mut result) = lock.lock() {
+                *result = Some(frame);
+                wake.notify_one();
+            }
+        },
+    );
+    let deadline = Instant::now() + Duration::from_secs(seconds.max(1));
+    let mut frames = 0u64;
+    let mut dimensions = (0, 0);
+    let mut distinct_frames = std::collections::BTreeSet::new();
+    while Instant::now() < deadline {
+        unsafe {
+            SCScreenshotManager::captureImageInRect_completionHandler(rect, Some(&callback));
+        }
+        let (lock, wake) = &*ready;
+        let mut result = lock
+            .lock()
+            .map_err(|_| String::from("capture-probe lock poisoned"))?;
+        while result.is_none() && Instant::now() < deadline {
+            let (next, _) = wake
+                .wait_timeout(result, Duration::from_millis(100))
+                .map_err(|_| String::from("capture-probe wait failed"))?;
+            result = next;
+        }
+        if let Some(frame) = result.take() {
+            let (width, height, hash) = frame?;
+            dimensions = (width, height);
+            distinct_frames.insert(hash);
+            frames += 1;
+        }
+    }
+    println!(
+        "{}",
+        serde_json::json!({"frames": frames, "distinct_frames": distinct_frames.len(), "source": {"kind":"screencapturekit", "width":dimensions.0, "height":dimensions.1}})
+    );
+    if frames == 0 {
+        Err(String::from("ScreenCaptureKit delivered no frames"))
+    } else {
+        Ok(())
+    }
+}
+
 pub fn run() -> i32 {
     let mut args = std::env::args().skip(1);
     let command = args.next().unwrap_or_else(|| "help".into());
@@ -366,8 +469,10 @@ pub fn run() -> i32 {
                 eprintln!("capture-permission: allow desklink-host in System Settings › Privacy & Security › Screen & System Audio Recording, then reconnect");
                 return 1;
             }
-            eprintln!("capture-probe requires M3 ScreenCaptureKit support");
-            return 1;
+            if let Err(error) = capture_probe(args.next().and_then(|value| value.parse().ok()).unwrap_or(3)) {
+                eprintln!("capture-probe: {error}");
+                return 1;
+            }
         }
         "setup-input" => println!("Accessibility permission is required for desktop input; no settings were changed."),
         _ => println!("desklink-host {}\nUSAGE: desklink-host [serve|capabilities|capture-probe|setup-input|version]", env!("CARGO_PKG_VERSION")),
