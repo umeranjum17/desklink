@@ -124,6 +124,9 @@ export function explainMissingEngine(configured = process.env.MUXR_DESKLINK_ENGI
         }
         return `The desktop engine at ${configured} is not an executable file.`;
     }
+    if (process.platform === 'darwin') {
+        return 'No macOS desktop engine is available yet; DESKLINK_MACOS=1 only enables candidate resolution, not Mac capture or input.';
+    }
     if (process.platform !== 'linux') {
         return `The desktop engine runs on Linux only; ${process.platform} is not supported yet.`;
     }
