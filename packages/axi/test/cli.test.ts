@@ -30,13 +30,8 @@ describe("desklink-axi AXI contract", () => {
     expect(help.status).toBe(0);
     expect(help.stdout).toContain('display');
     const result = run('start', '--source', 'display', '--display', '1');
-    if (process.platform === 'darwin') {
-      expect(result.status).toBe(1); // Syntax accepted; no engine in this smoke test.
-      expect(result.stdout).not.toContain('invalid value');
-    } else {
-      expect(result.status).toBe(2);
-      expect(result.stdout).toContain("invalid value 'display'");
-    }
+    expect(result.status).toBe(1); // Syntax accepted; no usable engine in this smoke test.
+    expect(result.stdout).not.toContain('invalid value');
   });
 
   it("unknown flag exits 2 naming valid flags (principle 6)", () => {
