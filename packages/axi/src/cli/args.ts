@@ -28,9 +28,18 @@ export function parseArgs(argv: string[], spec: CommandSpec): Parsed {
   }
   const positionals: string[] = [];
   let help = false;
+  let positionalOnly = false;
 
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i]!;
+    if (tok === "--" && !positionalOnly) {
+      positionalOnly = true;
+      continue;
+    }
+    if (positionalOnly) {
+      positionals.push(tok);
+      continue;
+    }
     if (tok === "--help") {
       help = true;
       continue;
@@ -44,6 +53,10 @@ export function parseArgs(argv: string[], spec: CommandSpec): Parsed {
         name = name.slice(0, eq);
       }
       const flagSpec = spec.flags.find((f) => f.name === name);
+      if (!flagSpec && spec.args?.[positionals.length]?.name === "text") {
+        positionals.push(tok);
+        continue;
+      }
       if (!flagSpec) {
         throw new UsageError(
           `unknown flag --${name}${forScope(spec)}`,
@@ -80,6 +93,10 @@ export function parseArgs(argv: string[], spec: CommandSpec): Parsed {
         flags[name] = value;
       }
     } else if (tok.startsWith("-") && tok.length > 1) {
+      if (spec.args?.[positionals.length]?.name === "text") {
+        positionals.push(tok);
+        continue;
+      }
       throw new UsageError(
         `unknown flag ${tok}${forScope(spec)}`,
         `${validFlagsHint(spec)} (short flags are not supported)`,

@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 const bin = fileURLToPath(new URL("../bin/desklink-axi.js", import.meta.url));
 
 function run(...args: string[]) {
-  return spawnSync("node", [bin, ...args], { encoding: "utf8" });
+  return spawnSync("node", [bin, ...args], { encoding: "utf8", env: { ...process.env, DESKLINK_AXI_SESSION: `cli-test-${process.pid}` } });
 }
 
 describe("desklink-axi AXI contract", () => {
@@ -37,6 +37,15 @@ describe("desklink-axi AXI contract", () => {
       const result = run(...args);
       expect(result.status).toBe(2);
       expect(result.stdout).toContain('error:');
+    }
+  });
+
+  it('accepts leading-dash text for both text commands', () => {
+    for (const args of [['type','-hello'], ['clipboard','write','-secret'], ['type','--','--hello']]) {
+      const result = run(...args);
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain('no-session:');
+      expect(result.stdout).not.toContain('unknown flag');
     }
   });
 

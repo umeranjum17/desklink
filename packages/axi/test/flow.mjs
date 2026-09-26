@@ -71,10 +71,8 @@ try {
   const animated = await run('diff');
   const corner = /animating: (\d+),(\d+),(\d+),(\d+)/.exec(animated);
   assert(corner && Number(corner[1]) >= 1184 && Number(corner[2]) < 96, animated);
-  await run('click','100,100','--wait','change');
-  await new Promise(r=>setTimeout(r,900));
-  const once = await run('diff');
-  assert.match(once,/regions\[[1-9]/);
+  const once = await run('click','100,100','--wait','1000');
+  assert.match(once,/regions\[[1-9]/, events);
   assert.match(once,/@r\d+,"(?:64|96|128),/);
   await run('stop');
   target.kill('SIGTERM');

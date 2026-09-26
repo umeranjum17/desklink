@@ -322,7 +322,7 @@ export async function serve(args: string[]): Promise<void> {
       if (frame.still_ms>=150) motion.clear();
       const animating: string[] = [];
       const visible: string[] = [];
-      for (const region of frame.damage) {
+      for (const region of new Set([...frame.damage, ...[...motion].filter(([,state]) => state.count>=3 && Date.now()-state.at<600).map(([region]) => region)])) {
         const state=motion.get(region);
         const [x,y,w,h] = region.split(',').map(Number);
         const textChanged = [...appeared,...unmatched].some(t => t.words.some(word => word.x<x!+w! && word.x+word.w>x! && word.y<y!+h! && word.y+word.h>y!));

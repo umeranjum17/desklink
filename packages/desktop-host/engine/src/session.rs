@@ -646,37 +646,44 @@ impl Session {
         let sink = Box::new(move |frame: I420, _seq: u64, raw: Vec<u8>| {
             let hashes = tile_hashes(&raw, frame.width, frame.height);
             if let Ok(mut held) = observed.lock() {
-                let seq = held.as_ref().map_or(
-                    1,
-                    |(seq, _, _, _, _, _, _): &(
-                        u64,
-                        Instant,
-                        usize,
-                        usize,
-                        Vec<u8>,
-                        Vec<u64>,
-                        Vec<u64>,
-                    )| seq + 1,
-                );
-                let previous = held
-                    .as_ref()
-                    .map(|(_, _, _, _, _, current, _)| current.clone())
-                    .unwrap_or_default();
-                let damage = dirty_regions(&hashes, &previous, frame.width, frame.height);
-                *held = Some((
-                    seq,
-                    Instant::now(),
-                    frame.width,
-                    frame.height,
-                    raw,
-                    hashes,
-                    previous,
-                ));
-                frame_tx_signal.send_replace(seq);
-                let _ = frame_events.send(Notice {
-                    session_id: frame_session_id.clone(),
-                    event: SessionEvent::Frame { seq, damage },
-                });
+                let unchanged =
+                    held.as_ref()
+                        .is_some_and(|(_, _, width, height, _, current, _)| {
+                            *width == frame.width && *height == frame.height && current == &hashes
+                        });
+                if !unchanged {
+                    let seq = held.as_ref().map_or(
+                        1,
+                        |(seq, _, _, _, _, _, _): &(
+                            u64,
+                            Instant,
+                            usize,
+                            usize,
+                            Vec<u8>,
+                            Vec<u64>,
+                            Vec<u64>,
+                        )| seq + 1,
+                    );
+                    let previous = held
+                        .as_ref()
+                        .map(|(_, _, _, _, _, current, _)| current.clone())
+                        .unwrap_or_default();
+                    let damage = dirty_regions(&hashes, &previous, frame.width, frame.height);
+                    *held = Some((
+                        seq,
+                        Instant::now(),
+                        frame.width,
+                        frame.height,
+                        raw,
+                        hashes,
+                        previous,
+                    ));
+                    frame_tx_signal.send_replace(seq);
+                    let _ = frame_events.send(Notice {
+                        session_id: frame_session_id.clone(),
+                        event: SessionEvent::Frame { seq, damage },
+                    });
+                }
             }
             if let Ok(mut m) = captured.lock() {
                 m.captured_frames += 1;
