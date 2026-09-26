@@ -337,7 +337,7 @@ fn ensure_disclaimed() -> Result<(), String> {
     }
 }
 
-fn request_screen_capture_content() {
+fn request_screen_capture_content() -> Result<(), String> {
     use block2::RcBlock;
     use objc2_screen_capture_kit::SCShareableContent;
 
@@ -347,8 +347,15 @@ fn request_screen_capture_content() {
         callback_state.store(true, Ordering::Release);
     });
     unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&completion) };
-    while !completed.load(Ordering::Acquire) {
-        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, 0) };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !completed.load(Ordering::Acquire) && Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, remaining.min(Duration::from_millis(100)).as_secs_f64(), 0) };
+    }
+    if completed.load(Ordering::Acquire) {
+        Ok(())
+    } else {
+        Err(String::from("capture-permission: timed out waiting for ScreenCaptureKit permission request"))
     }
 }
 
@@ -395,9 +402,8 @@ fn capture_probe(seconds: u64) -> Result<Value, String> {
                             Err(String::from("ScreenCaptureKit image has empty pixel data"))
                         } else {
                             let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
-                            // ponytail: sample ~4096 bytes per frame; hash all pixels if collisions matter.
                             let mut hash = 0xcbf29ce484222325u64;
-                            for byte in bytes.iter().step_by((length / 4096).max(1)) {
+                            for byte in bytes {
                                 hash = (hash ^ *byte as u64).wrapping_mul(0x100000001b3);
                             }
                             Ok((
@@ -492,8 +498,7 @@ pub fn run() -> i32 {
             let result = if unsafe { CGPreflightScreenCaptureAccess() } {
                 capture_probe(seconds)
             } else {
-                request_screen_capture_content();
-                Err(String::from("capture-permission: allow DesklinkHost in System Settings › Privacy & Security › Screen & System Audio Recording, then reconnect"))
+                request_screen_capture_content().and_then(|_| Err(String::from("capture-permission: allow DesklinkHost in System Settings › Privacy & Security › Screen & System Audio Recording, then reconnect")))
             };
             let output = result.as_ref().map_or_else(
                 |error| serde_json::json!({"error": error}),
