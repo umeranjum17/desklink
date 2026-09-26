@@ -81,7 +81,8 @@ export async function serve(args: string[]): Promise<void> {
   const display = args.includes('--display') ? args[args.indexOf('--display') + 1] : undefined;
   const control = args.includes('--control');
   const timeout = args.includes('--timeout') ? Number(args[args.indexOf('--timeout')+1]) : 120000;
-  if (process.platform !== 'linux') throw new Error('Linux only');
+  if (process.platform !== 'linux' && process.platform !== 'darwin') throw new Error('Linux or macOS only');
+  if (process.platform === 'darwin' ? !['auto','display'].includes(source ?? '') || (display !== undefined && !/^\d+$/.test(display)) : source === 'display') throw new Error('source: use display and a numeric --display on macOS, portal/x11 on Linux');
   const executable = resolveEngine(process.env.DESKLINK_AXI_ENGINE);
   if (!executable) throw new Error('desktop engine unavailable; set DESKLINK_AXI_ENGINE');
   const events: EngineEvent[] = [];
@@ -103,7 +104,9 @@ export async function serve(args: string[]): Promise<void> {
     if (offerReady && peer && event.event === 'session.candidate') peer.addRemoteCandidate(event.params.candidate, event.params.sdpMid || '0');
   } });
   const opened = await engine.openSession({
-    source: source === 'x11' || (source === 'auto' && display) ? { kind: 'x11', display } : { kind: 'portal' },
+    source: process.platform === 'darwin'
+      ? { kind: 'display', ...(display === undefined ? {} : { display_id: Number(display) }) }
+      : source === 'x11' || (source === 'auto' && display) ? { kind: 'x11', display } : { kind: 'portal' },
     permissions: control ? ['view', 'control', 'clipboard'] : ['view'], loopbackTcp: true,
   }, timeout);
   peer = control ? new PeerConnection('desklink-axi', { iceServers: [], bindAddress: '127.0.0.1', enableIceTcp: true }) : undefined;

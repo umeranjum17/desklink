@@ -76,7 +76,7 @@ arrives, every other request is refused the same way; `capabilities` and
 macOS speaks protocol 3 and shares the session lifecycle below. It captures the
 selected display with ScreenCaptureKit, encodes VP9, and uses the same WebRTC
 offer, ICE, control-channel, lease, and metrics flow as Linux. Capture currently
-uses ScreenCaptureKit image requests at the session frame cap; the backend may
+uses one bounded ScreenCaptureKit stream (three-frame queue); the backend may
 supply fewer frames. Audio is not captured.
 
 `capabilities` is non-prompting and reports active displays (pixel and point
@@ -192,7 +192,8 @@ clipboard action and never infers them from a source, a peer or an SDP.
 
 `max_fps` defaults to 30 and is bounded to 1–60. It caps the encoded frame
 rate and X11 capture loop; portal capture offers it as the preferred PipeWire
-frame rate. A source may still supply fewer frames.
+frame rate, and macOS sets its ScreenCaptureKit stream minimum frame interval.
+A source may still supply fewer frames.
 
 `session.open` is where the capture request happens, which is where the user's
 consent appears. It is not implicit and it is not retried silently.

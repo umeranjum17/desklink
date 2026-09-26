@@ -1,8 +1,8 @@
 # @desklink/axi
 
-A Linux desktop AXI. It runs a private bridge per session, captures read-only frames through `@desklink/host` protocol v3, and sends input only through a WebRTC `control` channel. The bridge's Unix socket lives in `$XDG_RUNTIME_DIR/desklink-axi` (or the OS temp directory), with `DESKLINK_AXI_SESSION` selecting an isolated socket. It opens a separate engine session; don't drive the desktop while someone else is controlling it.
+A Linux/macOS desktop AXI. It runs a private bridge per session, captures read-only frames through `@desklink/host` protocol v3, and sends input only through a WebRTC `control` channel. The bridge's Unix socket lives in `$XDG_RUNTIME_DIR/desklink-axi` (or the OS temp directory), with `DESKLINK_AXI_SESSION` selecting an isolated socket. It opens a separate engine session; don't drive the desktop while someone else is controlling it.
 
-Build: `npm install && npm run build` from the repository root. The engine is resolved by `@desklink/host`; set `DESKLINK_AXI_ENGINE` to an executable built from source if no packaged binary is installed. OCR needs the optional `tesseract` executable (`sudo pacman -S tesseract` or `sudo apt install tesseract-ocr`); `look` works without it.
+Build: `npm install && npm run build` from the repository root. The engine is resolved by `@desklink/host`; set `DESKLINK_AXI_ENGINE` to an executable built from source if no packaged binary is installed. On macOS set `DESKLINK_MACOS=1` and launch AXI from the app that owns Screen Recording and Accessibility grants; an SSH-launched process does not inherit those grants. OCR needs the optional `tesseract` executable (`sudo pacman -S tesseract` or `sudo apt install tesseract-ocr`); `look` works without it.
 
 ```
 desklink-axi start --control --source x11 --display :97
@@ -14,7 +14,7 @@ desklink-axi look @r1
 desklink-axi stop
 ```
 
-`start` defaults to view-only; without `--source x11 --display :N` it uses the portal, which can require a desktop consent prompt. Do not run it unattended against someone else's display. Input and clipboard read/write require `start --control`; view-only clipboard calls return a structured error naming that flag. `stop` releases held input. Actions wait for a post-action frame and stillness by default, with a bounded timeout; `click --wait settle|change|none|<milliseconds>` changes that wait. `wait change` and `wait settle` block on engine frame signals rather than polling. `diff` reports repeatedly changing regions separately as `animating`; `diff --include-animating` includes them among ordinary changes. `look` writes a PNG crop. `--help` lists the 14 commands and their flags. Errors are structured and the CLI does not prompt.
+`start` defaults to view-only; Linux uses the portal unless `--source x11 --display :N` is given, and macOS uses the main display unless `--source display --display <id>` is given. The portal can require a desktop consent prompt; macOS Screen Recording and Accessibility belong to the app that launches the bridge and its engine child. Do not run it unattended against someone else's display. Input and clipboard read/write require `start --control`; view-only clipboard calls return a structured error naming that flag. `stop` releases held input. Actions wait for a post-action frame and stillness by default, with a bounded timeout; `click --wait settle|change|none|<milliseconds>` changes that wait. `wait change` and `wait settle` block on engine frame signals rather than polling. `diff` reports repeatedly changing regions separately as `animating`; `diff --include-animating` includes them among ordinary changes. `look` writes a PNG crop. `--help` lists the 14 commands and their flags. Errors are structured and the CLI does not prompt.
 
 `desklink-axi setup hooks` adds a Claude `SessionStart` hook to `.claude/settings.local.json` in the current directory; it does not start capture.
 
