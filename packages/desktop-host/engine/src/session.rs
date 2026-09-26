@@ -61,6 +61,21 @@ pub struct Metrics {
     pub input_rejected: u64,
 }
 
+fn tile_hashes(raw: &[u8], width: usize, height: usize) -> Vec<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut hashes = Vec::new();
+    for y in (0..height).step_by(32) {
+        for x in (0..width).step_by(32) {
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            for row in y..(y + 32).min(height) {
+                raw[(row * width + x) * 4..(row * width + (x + 32).min(width)) * 4].hash(&mut hash);
+            }
+            hashes.push(hash.finish());
+        }
+    }
+    hashes
+}
+
 /// Which desktop is being captured.
 ///
 /// Dropping either variant stops its capture: the portal variant drops the
@@ -137,17 +152,17 @@ fn select_x11(
                     let started = Instant::now();
                     let frame = {
                         let mut desktop = lock(&desktop);
-                        desktop.capture(max_width, max_height)
+                        desktop.capture_with_pixels(max_width, max_height)
                     };
                     match frame {
-                        Ok(frame) => {
+                        Ok((frame, raw)) => {
                             use std::hash::{Hash, Hasher};
                             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                            frame.data.hash(&mut hasher);
+                            raw.hash(&mut hasher);
                             let hash = hasher.finish();
                             if last_hash != Some(hash) {
                                 last_hash = Some(hash);
-                                sink(frame, sequence);
+                                sink(frame, sequence, raw);
                                 sequence += 1;
                             }
                         }
@@ -456,6 +471,7 @@ struct Inner {
     source: SelectedSource,
     geometry: serde_json::Value,
     metrics: Arc<Mutex<Metrics>>,
+    latest: Arc<Mutex<Option<(u64, Instant, usize, usize, Vec<u8>, Vec<u64>, Vec<u64>)>>>,
     peer: Arc<VideoPeer>,
     encoder: Mutex<Encoder>,
     input: Mutex<Option<InputTarget>>,
@@ -561,8 +577,38 @@ impl Session {
 
         let metrics = Arc::new(Mutex::new(Metrics::default()));
         let (frame_tx, frame_rx) = latest_frame();
+        let latest = Arc::new(Mutex::new(None));
+        let observed = latest.clone();
         let captured = metrics.clone();
-        let sink = Box::new(move |frame: I420, _seq: u64| {
+        let sink = Box::new(move |frame: I420, _seq: u64, raw: Vec<u8>| {
+            let hashes = tile_hashes(&raw, frame.width, frame.height);
+            if let Ok(mut held) = observed.lock() {
+                let seq = held.as_ref().map_or(
+                    1,
+                    |(seq, _, _, _, _, _, _): &(
+                        u64,
+                        Instant,
+                        usize,
+                        usize,
+                        Vec<u8>,
+                        Vec<u64>,
+                        Vec<u64>,
+                    )| seq + 1,
+                );
+                let previous = held
+                    .as_ref()
+                    .map(|(_, _, _, _, _, current, _)| current.clone())
+                    .unwrap_or_default();
+                *held = Some((
+                    seq,
+                    Instant::now(),
+                    frame.width,
+                    frame.height,
+                    raw,
+                    hashes,
+                    previous,
+                ));
+            }
             if let Ok(mut m) = captured.lock() {
                 m.captured_frames += 1;
             }
@@ -694,6 +740,7 @@ impl Session {
             source,
             geometry,
             metrics,
+            latest,
             peer: Arc::new(peer),
             encoder: Mutex::new(encoder),
             input: Mutex::new(input),
@@ -737,6 +784,85 @@ impl Session {
 
     pub fn source(&self) -> &SelectedSource {
         &self.inner.source
+    }
+
+    /// Write only the requested lossless frame bytes; JSON carries metadata, never pixels.
+    pub fn frame(
+        &self,
+        since: Option<u64>,
+        path: &str,
+        region: Option<[usize; 4]>,
+    ) -> std::result::Result<serde_json::Value, SessionError> {
+        if !self.inner.permissions.contains(&Permission::View) {
+            return Err(SessionError::new(
+                "permission",
+                "view permission is required",
+            ));
+        }
+        let held = lock(&self.inner.latest);
+        let (seq, at, width, height, raw, hashes, previous) = held
+            .as_ref()
+            .ok_or_else(|| SessionError::new("frame", "the first frame has not arrived"))?;
+        let [x, y, w, h] = region.unwrap_or([0, 0, *width, *height]);
+        if w == 0
+            || h == 0
+            || x.checked_add(w).is_none_or(|end| end > *width)
+            || y.checked_add(h).is_none_or(|end| end > *height)
+        {
+            return Err(SessionError::new(
+                "coordinates",
+                "region exceeds the encoded surface",
+            ));
+        }
+        let damage = if since == Some(*seq) {
+            Vec::new()
+        } else if since == seq.checked_sub(1) && previous.len() == hashes.len() {
+            let dirty: Vec<_> = hashes
+                .iter()
+                .zip(previous)
+                .enumerate()
+                .filter_map(|(i, (now, before))| {
+                    if now == before {
+                        return None;
+                    }
+                    Some(((i % width.div_ceil(32)) * 32, (i / width.div_ceil(32)) * 32))
+                })
+                .collect();
+            if dirty.is_empty() {
+                Vec::new()
+            } else {
+                let x = dirty.iter().map(|(x, _)| *x).min().unwrap();
+                let y = dirty.iter().map(|(_, y)| *y).min().unwrap();
+                let right = dirty.iter().map(|(x, _)| x + 32).max().unwrap().min(*width);
+                let bottom = dirty
+                    .iter()
+                    .map(|(_, y)| y + 32)
+                    .max()
+                    .unwrap()
+                    .min(*height);
+                vec![[x, y, right - x, bottom - y]]
+            }
+        } else {
+            vec![[0, 0, *width, *height]]
+        };
+        // An empty path asks for metadata only; no pixels are copied or written.
+        let pixels = if path.is_empty() {
+            None
+        } else {
+            let mut pixels = Vec::with_capacity(w * h * 4);
+            for row in y..y + h {
+                pixels.extend_from_slice(&raw[(row * width + x) * 4..(row * width + x + w) * 4]);
+            }
+            Some(pixels)
+        };
+        let result = serde_json::json!({ "seq": seq, "still_ms": at.elapsed().as_millis() as u64,
+            "width": w, "height": h, "format": "bgrx", "damage": damage, "written": !path.is_empty() });
+        drop(held);
+        if let Some(pixels) = pixels {
+            std::fs::write(path, pixels)
+                .map_err(|error| SessionError::new("frame", error.to_string()))?;
+        }
+        Ok(result)
     }
 
     pub fn metrics(&self) -> Metrics {
@@ -1718,6 +1844,7 @@ mod tests {
                 "origin": { "x": 0, "y": 0 },
             }),
             metrics: Arc::new(Mutex::new(Metrics::default())),
+            latest: Arc::new(Mutex::new(None)),
             peer: Arc::new(peer),
             encoder: Mutex::new(Encoder::new(64, 64, 1000, 30, 1).expect("an encoder")),
             input: Mutex::new(Some(InputTarget {

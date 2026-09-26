@@ -19,6 +19,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+      - run: cd packages/axi && npx -y axi-axi validate 'node bin/desklink-axi.js' --dir .
       # What would be published, so a manifest change that drops a file shows here.
       - run: npm pack --dry-run --workspaces
 
@@ -31,7 +32,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config libclang-dev \
-            libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libevdev-dev libxcb1-dev
+            libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libevdev-dev libxcb1-dev xvfb tesseract-ocr
       - name: Rust (the version the release build pins)
         run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
       - uses: actions/cache@v4
@@ -41,3 +42,8 @@ jobs:
             packages/desktop-host/engine/target
           key: engine-${{ hashFiles('packages/desktop-host/engine/Cargo.lock') }}
       - run: cargo test --manifest-path packages/desktop-host/engine/Cargo.toml
+      - run: cargo build --manifest-path packages/desktop-host/engine/Cargo.toml
+      - run: npm ci && npm run build
+      - run: node packages/axi/test/flow.mjs
+        env:
+          DESKLINK_AXI_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/desklink-host

@@ -142,7 +142,7 @@ async function liveDesktop() {
     const reply = (message: Record<string, unknown>) => TestRenderer.act(() => {
         channel.onmessage?.({ data: JSON.stringify(message) });
     });
-    reply({ kind: 'hello', protocol: 2, geometry: GEOMETRY });
+    reply({ kind: 'hello', protocol: 3, geometry: GEOMETRY });
     sent = [];
     return { session, video, keyboard, channel, reply, rejected };
 }

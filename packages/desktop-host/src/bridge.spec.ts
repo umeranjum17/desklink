@@ -21,7 +21,7 @@ const out = (value) => process.stdout.write(JSON.stringify(value) + '\\n');
 readline.createInterface({ input: process.stdin }).on('line', (line) => {
   const request = JSON.parse(line);
   if (request.method === 'hello' || request.method === 'capabilities') return out({ id: request.id, result: {
-    protocol: 2, clipboard: { read: true, write: true, mime: [], maxBytes: 1024 },
+    protocol: 3, clipboard: { read: true, write: true, mime: [], maxBytes: 1024 },
   } });
   if (request.method === 'session.open') {
     out({ event: 'session.restoreToken', params: { sessionId: 'engine-1', token: 'test-private-grant' } });
@@ -129,7 +129,7 @@ describe('the bridge', () => {
     it('reports clipboard only for a source that can serve it', async () => {
         const x11 = await startBridge('t', false, { kind: 'x11', display: ':99' });
         const x11Socket = await connect(x11.port, 'token=t');
-        expect((await requestOn(x11Socket, 1, 'hello', { protocol: 2 })).clipboard)
+        expect((await requestOn(x11Socket, 1, 'hello', { protocol: 3 })).clipboard)
             .toMatchObject({ read: false, write: false });
         expect((await requestOn(x11Socket, 2, 'capabilities')).clipboard)
             .toMatchObject({ read: false, write: false });

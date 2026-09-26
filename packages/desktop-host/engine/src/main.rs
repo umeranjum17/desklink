@@ -244,7 +244,7 @@ async fn probe_portal(seconds: u64) -> Result<()> {
         0,
         0,
         30,
-        Box::new(move |frame, seq| {
+        Box::new(move |frame, seq, _raw| {
             let _ = tx.send((frame.width, frame.height, seq));
         }),
     )?;
@@ -547,6 +547,15 @@ async fn dispatch(
                 .await
                 .map_err(|reason| ErrorBody::new("clipboard", reason))?;
             Ok(serde_json::json!({ "written": true }))
+        }
+        "session.frame" => {
+            let session = require_session(current)?;
+            let params: protocol::FrameParams = serde_json::from_value(request.params.clone())
+                .map_err(|error| ErrorBody::new("malformed", error.to_string()))?;
+            check_session(session, &params.session_id, None)?;
+            session
+                .frame(params.since, &params.path, params.region)
+                .map_err(|error| ErrorBody::new(error.code, error.message))
         }
         "session.metrics" => {
             let session = require_session(current)?;

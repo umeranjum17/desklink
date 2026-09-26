@@ -84,6 +84,39 @@ fn layout(format: PixelFormat) -> Option<(usize, [usize; 3])> {
     }
 }
 
+/// A tightly packed pre-encode BGRX frame for still observations. At native
+/// resolution this copies each source colour exactly; a smaller encode box
+/// necessarily samples down to the geometry input uses.
+pub fn to_bgrx(
+    src: &[u8],
+    src_w: usize,
+    src_h: usize,
+    stride: usize,
+    format: PixelFormat,
+    width: usize,
+    height: usize,
+) -> Option<Vec<u8>> {
+    let (bytes, rgb) = layout(format)?;
+    let mut out = Vec::with_capacity(width * height * 4);
+    if matches!(format, PixelFormat::Bgrx | PixelFormat::Bgra) && width == src_w && height == src_h
+    {
+        for row in 0..height {
+            out.extend_from_slice(src.get(row * stride..row * stride + width * 4)?);
+        }
+        return Some(out);
+    }
+    for y in 0..height {
+        for x in 0..width {
+            let sx = x * src_w / width;
+            let sy = y * src_h / height;
+            let at = sy * stride + sx * bytes;
+            let pixel = src.get(at..at + bytes)?;
+            out.extend_from_slice(&[pixel[rgb[2]], pixel[rgb[1]], pixel[rgb[0]], 255]);
+        }
+    }
+    Some(out)
+}
+
 /// How many threads convert one frame. A 4K desktop is 8 million pixels, which
 /// one core converts in tens of milliseconds, the whole budget of a frame; a few
 /// bands bring that under the encoder's own cost without taking the machine.
