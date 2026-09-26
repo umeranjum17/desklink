@@ -24,6 +24,12 @@ struct CGRect {
 }
 
 type DisplayId = u32;
+
+unsafe extern "C" {
+    fn desklink_agent_overlay_main(display_id: i32) -> i32;
+    fn desklink_image_bgra(image: *const c_void, length: *mut usize, stride: *mut usize)
+        -> *mut u8;
+}
 type CfTypeRef = *const c_void;
 type DisplayModeRef = *const c_void;
 
@@ -363,28 +369,25 @@ pub(crate) fn capture_display(
                 ))
             } else {
                 let image = unsafe { &*image };
-                let provider = objc2_core_graphics::CGImage::data_provider(Some(image));
-                let data = provider
-                    .as_deref()
-                    .and_then(|provider| objc2_core_graphics::CGDataProvider::data(Some(provider)));
-                match data {
-                    Some(data) => {
-                        let width = objc2_core_graphics::CGImage::width(Some(image));
-                        let height = objc2_core_graphics::CGImage::height(Some(image));
-                        let length = data.length().max(0) as usize;
-                        let pointer = data.byte_ptr();
-                        let stride = if height > 0 { length / height } else { 0 };
-                        if width == 0 || height == 0 || stride < width * 4 || pointer.is_null() {
-                            Err(String::from(
-                                "ScreenCaptureKit returned an invalid BGRA image",
-                            ))
-                        } else {
-                            let bytes =
-                                unsafe { std::slice::from_raw_parts(pointer, length) }.to_vec();
-                            Ok((bytes, width, height, stride))
-                        }
-                    }
-                    None => Err(String::from("ScreenCaptureKit image has no pixel data")),
+                let width = objc2_core_graphics::CGImage::width(Some(image));
+                let height = objc2_core_graphics::CGImage::height(Some(image));
+                let mut length = 0;
+                let mut stride = 0;
+                let pointer = unsafe {
+                    desklink_image_bgra(
+                        image as *const _ as *const c_void,
+                        &mut length,
+                        &mut stride,
+                    )
+                };
+                if pointer.is_null() || width == 0 || height == 0 {
+                    Err(String::from(
+                        "ScreenCaptureKit image could not be converted to BGRA",
+                    ))
+                } else {
+                    let bytes = unsafe { std::slice::from_raw_parts(pointer, length) }.to_vec();
+                    unsafe { libc::free(pointer.cast()) };
+                    Ok((bytes, width, height, stride))
                 }
             };
             let (lock, wake) = &*callback_state;
@@ -411,6 +414,49 @@ pub(crate) fn capture_display(
     result
         .take()
         .unwrap_or_else(|| Err(String::from("ScreenCaptureKit timed out")))
+}
+
+#[cfg(all(desklink_vpx, not(desklink_macos_cli)))]
+fn indicator_demo(display_id: u32, path: &str) -> Result<(), String> {
+    use std::io::Write;
+    let (width, height) = (unsafe { CGDisplayPixelsWide(display_id) }, unsafe {
+        CGDisplayPixelsHigh(display_id)
+    });
+    let mut indicator = crate::indicator::Indicator::start(display_id, width, height)
+        .map_err(|error| error.to_string())?;
+    let (out_w, out_h) = crate::convert::fit(width, height, 960, 640);
+    let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+    for frame in 0..56 {
+        let t = frame as f64 / 55.0;
+        let x = ((0.15 + t * 0.7) * width as f64) as i64;
+        let y = ((0.35 + (t * std::f64::consts::TAU).sin() * 0.13) * height as f64) as i64;
+        indicator.event(if frame == 14 || frame == 35 { 'C' } else { 'M' }, x, y);
+        if frame == 24 {
+            indicator.event('T', -1, -1);
+        }
+        let (pixels, w, h, stride) = capture_display(display_id)?;
+        if frame == 0 {
+            eprintln!(
+                "demo capture: {w}x{h} stride={stride} bytes={}",
+                pixels.len()
+            );
+        }
+        let raw = crate::convert::to_bgrx(
+            &pixels,
+            w,
+            h,
+            stride,
+            crate::convert::PixelFormat::Bgra,
+            out_w,
+            out_h,
+        )
+        .ok_or_else(|| String::from("could not scale demo frame"))?;
+        file.write_all(&raw).map_err(|error| error.to_string())?;
+        std::thread::sleep(Duration::from_millis(65));
+    }
+    drop(indicator);
+    println!("{}x{} frames=56 path={path}", out_w, out_h);
+    Ok(())
 }
 
 fn capture_probe(seconds: u64) -> Result<Value, String> {
@@ -514,7 +560,10 @@ fn capture_probe(seconds: u64) -> Result<Value, String> {
 pub fn run() -> i32 {
     let mut args = std::env::args().skip(1);
     let command = args.next().unwrap_or_else(|| "help".into());
-    if matches!(command.as_str(), "serve" | "capabilities" | "capture-probe") {
+    if matches!(
+        command.as_str(),
+        "serve" | "capabilities" | "capture-probe" | "indicator-demo"
+    ) {
         #[cfg(not(desklink_macos_cli))]
         if let Err(error) = ensure_disclaimed() {
             eprintln!("error: {error}");
@@ -522,6 +571,10 @@ pub fn run() -> i32 {
         }
     }
     match command.as_str() {
+        "agent-overlay" => {
+            let display = args.next().and_then(|value| value.parse().ok()).unwrap_or(0);
+            return unsafe { desklink_agent_overlay_main(display) };
+        }
         "version" | "--version" | "-V" => println!("{}", env!("CARGO_PKG_VERSION")),
         "capabilities" => {
             #[cfg(desklink_vpx)]
@@ -555,6 +608,14 @@ pub fn run() -> i32 {
             {
                 eprintln!("encode-probe requires DESKLINK_VPX_STATIC_DIR");
                 return 1;
+            }
+        }
+        #[cfg(all(desklink_vpx, not(desklink_macos_cli)))]
+        "indicator-demo" => {
+            let display = args.next().and_then(|value| value.parse().ok()).unwrap_or(0);
+            let path = args.next().unwrap_or_else(|| String::from("indicator-demo.bgrx"));
+            if let Err(error) = indicator_demo(display, &path) {
+                eprintln!("indicator-demo: {error}"); return 1;
             }
         }
         "capture-probe" => {

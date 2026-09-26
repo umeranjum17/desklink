@@ -27,6 +27,7 @@ unsafe extern "C" {
         width: usize,
         height: usize,
         fps: u32,
+        indicator_pid: u32,
         context: *mut c_void,
         callback: extern "C" fn(*mut c_void, *const u8, usize, usize, usize, usize),
         error: *mut c_char,
@@ -95,6 +96,7 @@ pub fn start(
     height: usize,
     max_fps: u32,
     sink: FrameSink,
+    indicator_pid: Option<u32>,
 ) -> Result<Capture> {
     let state = Box::into_raw(Box::new(Mutex::new(State {
         sink,
@@ -109,6 +111,7 @@ pub fn start(
             width,
             height,
             max_fps,
+            indicator_pid.unwrap_or(0),
             state.cast(),
             receive_frame,
             error.as_mut_ptr(),

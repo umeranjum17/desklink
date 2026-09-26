@@ -108,6 +108,7 @@ export async function serve(args: string[]): Promise<void> {
       ? { kind: 'display', ...(display === undefined ? {} : { display_id: Number(display) }) }
       : source === 'x11' || (source === 'auto' && display) ? { kind: 'x11', display } : { kind: 'portal' },
     permissions: control ? ['view', 'control', 'clipboard'] : ['view'], loopbackTcp: true,
+    agentIndicator: control,
   }, timeout);
   peer = control ? new PeerConnection('desklink-axi', { iceServers: [], bindAddress: '127.0.0.1', enableIceTcp: true }) : undefined;
   let channel: DataChannel | undefined;

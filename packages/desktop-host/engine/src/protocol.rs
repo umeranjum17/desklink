@@ -116,6 +116,9 @@ pub struct OpenParams {
     /// whose only way here is a local forward (an SSH tunnel).
     #[serde(default)]
     pub loopback_tcp: bool,
+    /// Show local, capture-excluded feedback for an agent controlling this session.
+    #[serde(default)]
+    pub agent_indicator: bool,
 }
 
 /// The encode box when the consumer names none: a desktop's own pixels up to
@@ -363,5 +366,13 @@ mod tests {
             "the engine sizes the rate to the surface"
         );
         assert_eq!(params.max_fps, 30);
+        assert!(
+            !params.agent_indicator,
+            "human control has no overlay by default"
+        );
+        let agent: OpenParams =
+            serde_json::from_str(r#"{"permissions":["view","control"],"agent_indicator":true}"#)
+                .unwrap();
+        assert!(agent.agent_indicator);
     }
 }

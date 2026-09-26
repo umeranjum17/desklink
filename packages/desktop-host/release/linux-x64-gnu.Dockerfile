@@ -29,7 +29,7 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && apt-get -o Acquire::Check-Valid-Until=false update \
     && apt-get install -y --no-install-recommends \
         build-essential ca-certificates cmake curl git libclang-dev nasm pkg-config \
-        libevdev-dev libpipewire-0.3-dev libwayland-dev libxcb1-dev libxkbcommon-dev \
+        libevdev-dev libpipewire-0.3-dev libwayland-dev libxcb1-dev libxkbcommon-dev libxcursor-dev \
     && rm -rf /var/lib/apt/lists/*
 
 ARG RUSTUP_VERSION

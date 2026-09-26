@@ -27,6 +27,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=native/vpx_shim.c");
     println!("cargo:rerun-if-changed=native/inputtino_shim.cpp");
     println!("cargo:rerun-if-changed=native/mac_stream.mm");
+    println!("cargo:rerun-if-changed=native/agent_overlay_mac.m");
+    println!("cargo:rerun-if-changed=native/agent_overlay_x11.c");
+    println!("cargo:rerun-if-changed=native/agent_overlay_wayland.c");
     println!("cargo:rerun-if-changed=Info.plist");
     println!("cargo:rerun-if-changed=vendor/inputtino/src/uinput/include/inputtino/keyboard.hpp");
     println!("cargo:rerun-if-changed=vendor/inputtino/include/inputtino/input.h");
@@ -62,6 +65,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if target_os == "linux" {
         cc::Build::new()
+            .file("native/agent_overlay_x11.c")
+            .file("native/agent_overlay_wayland.c")
+            .compile("dlagentoverlay");
+        for lib in ["X11", "Xcursor", "wayland-client", "m"] {
+            println!("cargo:rustc-link-lib={lib}");
+        }
+        cc::Build::new()
             .cpp(true)
             .std("c++17")
             .include("vendor/inputtino/src/uinput/include")
@@ -74,7 +84,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .file("native/mac_stream.mm")
             .flag("-fobjc-arc")
             .compile("dlmacstream");
-        for framework in ["ScreenCaptureKit", "CoreVideo", "CoreMedia", "Foundation"] {
+        cc::Build::new()
+            .file("native/agent_overlay_mac.m")
+            .flag("-fobjc-arc")
+            .compile("dlagentoverlay");
+        for framework in [
+            "ScreenCaptureKit",
+            "CoreVideo",
+            "CoreMedia",
+            "Foundation",
+            "AppKit",
+            "QuartzCore",
+        ] {
             println!("cargo:rustc-link-lib=framework={framework}");
         }
         if let Some(prefix) = std::env::var_os("DESKLINK_VPX_STATIC_DIR").map(PathBuf::from) {

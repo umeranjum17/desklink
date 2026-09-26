@@ -81,6 +81,8 @@ export interface OpenSessionRequest {
     ttlSeconds?: number;
     /** Also listen for ICE over TCP on the loopback, for a client behind a local forward. */
     loopbackTcp?: boolean;
+    /** Local cursor feedback for an agent session; off for human phone control. */
+    agentIndicator?: boolean;
 }
 
 export interface OpenedSession {

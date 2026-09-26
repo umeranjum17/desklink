@@ -22,6 +22,8 @@ mod convert;
 mod encoder;
 #[cfg(all(target_os = "macos", desklink_vpx))]
 mod encoder;
+#[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
+mod indicator;
 #[cfg(target_os = "linux")]
 mod input;
 #[cfg(target_os = "macos")]
@@ -67,6 +69,12 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc as tokio_mpsc;
 
 #[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn desklink_agent_overlay_main(display: *const std::ffi::c_char) -> i32;
+    fn desklink_agent_overlay_wayland(source_w: i32, source_h: i32) -> i32;
+}
+
+#[cfg(target_os = "linux")]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("help");
@@ -84,6 +92,20 @@ fn main() {
         "version" | "--version" | "-V" => {
             println!("{}", env!("CARGO_PKG_VERSION"));
             0
+        }
+        "agent-overlay" => {
+            let display = args.get(1).map(String::as_str).unwrap_or("");
+            let display = std::ffi::CString::new(display).expect("valid X display");
+            unsafe { desklink_agent_overlay_main(display.as_ptr()) }
+        }
+        "agent-overlay-wayland" => {
+            let width = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+            let height = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(0);
+            if width <= 0 || height <= 0 {
+                2
+            } else {
+                unsafe { desklink_agent_overlay_wayland(width, height) }
+            }
         }
         "capabilities" => {
             println!(
@@ -269,6 +291,7 @@ async fn probe_portal(seconds: u64) -> Result<()> {
         Box::new(move |frame, seq, _raw| {
             let _ = tx.send((frame.width, frame.height, seq));
         }),
+        None,
     )?;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
@@ -495,6 +518,7 @@ async fn dispatch(
                 restore_token: params.restore_token,
                 ttl: params.ttl_seconds.map(Duration::from_secs),
                 loopback_tcp: params.loopback_tcp,
+                agent_indicator: params.agent_indicator,
                 ice_servers: params
                     .ice_servers
                     .into_iter()

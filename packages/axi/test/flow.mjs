@@ -15,6 +15,7 @@ let env;
 const cli = resolve('packages/axi/bin/desklink-axi.js');
 let client;
 let target;
+let overlay;
 let events = '';
 const observations = [];
 async function run(...args) {
@@ -48,6 +49,18 @@ try {
   const changed = await client.request('session.frame',{session_id:session.sessionId,since:first.seq,path,after_seq:first.seq,still_ms:150,timeout_ms:6000});
   assert(changed.still_ms>=150 && changed.damage.length > 0);
   assert.notDeepEqual(readFileSync(path),original);
+  const cleanFrame = readFileSync(path);
+  // Xcursor sprites live outside GetImage(root): motion and ripple must not
+  // create a different frame or damage region from an indicator-off session.
+  overlay = spawn(enginePath, ['agent-overlay', display], { env, stdio: ['pipe','pipe','pipe'] });
+  await new Promise((resolve,reject) => {overlay.stdout.once('data',resolve);overlay.once('error',reject);});
+  overlay.stdin.write('M 100 100\nC 100 100\n');
+  await new Promise(r=>setTimeout(r,600));
+  const cursorOnly = await client.request('session.frame',{session_id:session.sessionId,path,since:changed.seq});
+  assert.equal(cursorOnly.seq,changed.seq, 'cursor motion and ripple add no frame damage');
+  assert.deepEqual(readFileSync(path),cleanFrame, 'indicator-on and indicator-off captures match');
+  overlay.stdin.end();
+  await new Promise(r=>overlay.once('exit',r)); overlay = undefined;
   await client.stop(); client = undefined;
   const started = await run('start','--control','--source','x11','--display',display);
   assert.match(started,/permissions=view,control/);
@@ -59,7 +72,8 @@ try {
   }
   assert.doesNotMatch(events, /"kind":"button"/, 'rejected delay must not send input');
   const before = await run('diff'); assert.match(before,/changed:/);
-  const clicked = await run('click','100,100'); assert.match(clicked,/changed: [1-9]/);
+  const clicked = await run('click','100,100'); assert.match(clicked,/changed: [1-9]/, events);
+  assert.match(events, /"kind":"button".*"phase":"up"/, 'the click reached the app beneath the indicator');
   const looked = await run('look','@r1'); assert.match(looked,/image: .*\.png/);
   const imagePath = /image: (.*\.png)/.exec(looked)?.[1];
   assert(imagePath && readFileSync(imagePath).subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])));
@@ -105,6 +119,7 @@ try {
   console.log('engine: frame bytes and damage followed X client; CLI: click changed pixels and type reached X client');
 } finally {
   if (client) await client.stop().catch(()=>{});
+  if (overlay) { overlay.stdin.end(); overlay.kill('SIGTERM'); }
   if (target) target.kill('SIGTERM');
   xvfb.kill('SIGTERM');
   rmSync(dir,{recursive:true,force:true});
