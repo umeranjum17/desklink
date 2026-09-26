@@ -63,8 +63,10 @@ The one step no install does for you is [kernel input access](#kernel-input-acce
 and only the portal backend needs it.
 
 There is no prebuilt engine for any other platform. Another Linux (arm64, musl)
-can [build it from source](#building-from-source). macOS and Windows are not
-supported: `capabilities` there says the engine runs on Linux only.
+can [build it from source](#building-from-source). macOS remote desktop is not
+available yet: engine resolution is off by default there, and setting
+`DESKLINK_MACOS=1` only allows a configured or local candidate engine to be
+resolved; it does not provide Mac capture or input. Windows remains unsupported.
 
 Point `MUXR_DESKLINK_ENGINE` at a binary built elsewhere if you have one. The
 package never searches `PATH` for a same-named program: "a binary called
