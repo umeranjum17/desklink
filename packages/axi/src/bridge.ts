@@ -89,7 +89,10 @@ export async function serve(args: string[]): Promise<void> {
   if (process.platform !== 'linux' && process.platform !== 'darwin') throw new Error('Linux or macOS only');
   if (process.platform === 'darwin' ? !['auto','display'].includes(source ?? '') || (display !== undefined && !/^\d+$/.test(display)) : source === 'display') throw new Error('source: use display and a numeric --display on macOS, portal/x11 on Linux');
   const executable = resolveEngine(process.env.DESKLINK_AXI_ENGINE);
-  if (!executable) throw new Error('desktop engine unavailable; set DESKLINK_AXI_ENGINE');
+  if (!executable) throw new Error(process.platform === 'darwin' && process.env.DESKLINK_MACOS !== '1'
+    ? 'macOS engine disabled; set DESKLINK_MACOS=1 (and DESKLINK_AXI_ENGINE for a source build)'
+    : 'desktop engine unavailable; set DESKLINK_AXI_ENGINE');
+  mkdirSync(join(socketPath, '..'), { recursive: true, mode: 0o700 });
   const events: EngineEvent[] = [];
   const tokenFailure: { current?: Error } = {};
   const checkToken = () => { if (tokenFailure.current) throw new Error(`cannot persist portal restore token: ${tokenFailure.current.message}`); };
@@ -208,7 +211,7 @@ export async function serve(args: string[]): Promise<void> {
   };
   const target = (value: string): [number, number] => {
     if (/^\d+,\d+$/.test(value)) return value.split(',').map(Number) as [number, number];
-    if (value.startsWith('@') && !value.startsWith(`@${baseline}.`)) throw new Error(`stale-ref: ${value}; run screen --query`);
+    if (value.startsWith('@') && !text.some(t=>t.ref === value)) throw new Error(`stale-ref: ${value}; run screen --query`);
     const matches = text.filter(t => t.ref === value || t.text.toLowerCase().includes(value.toLowerCase()));
     if (matches.length !== 1) throw new Error(`${matches.length ? 'ambiguous' : 'not-found'}: ${value}; run screen --query`);
     const item = matches[0]!;
@@ -222,6 +225,23 @@ export async function serve(args: string[]): Promise<void> {
     let pendingDamage: string[] | undefined;
     let waitSeen = baseline;
     if (command === 'start') return `session: open source=${source} ${display ?? ''} size=${opened.geometry.encoded.width}x${opened.geometry.encoded.height} permissions=view${control ? ',control' : ''}`;
+    if (command === 'health') {
+      const state = events.filter(event=>event.event === 'session.state' || event.event === 'session.capture.stopped').at(-1);
+      if (state?.event === 'session.capture.stopped') return `capture: stopped; reason: ${state.params.reason}`;
+      const frame = await engine.request<{seq:number}>('session.frame',{session_id:opened.sessionId,path:''}).catch(() => undefined);
+      return state?.event === 'session.state' ? `capture: ${state.params.capture}; transport: ${state.params.transport}; frame: ${frame?.seq ?? 'unavailable'}` : 'capture: starting';
+    }
+    if (command === 'batch') {
+      let steps: unknown;
+      try { steps = JSON.parse(args[0] ?? ''); } catch { throw new Error('batch: expected JSON array of [verb, ...args] steps'); }
+      if (!Array.isArray(steps) || !steps.length || steps.length > 30 || steps.some(step => !Array.isArray(step) || !['click','type','press','scroll','wait'].includes(step[0]) || step.slice(1).some((arg:unknown) => typeof arg !== 'string'))) throw new Error('batch: expected 1–30 [click|type|press|scroll|wait, ...args] steps');
+      const results: string[] = [];
+      for (const [index, step] of steps.entries()) {
+        try { results.push(`${index+1}: ${await output(step[0], step.slice(1))}`); }
+        catch (error) { results.push(`${index+1}: error: ${(error as Error).message}`); break; }
+      }
+      return `${results.at(-1)?.includes(': error:') ? 'error: ' : ''}batch: ${results.length}/${steps.length} steps\n${results.join('\n')}`;
+    }
     if (command === 'stop') {
       try { await engine.closeSession(opened.sessionId); }
       finally {
@@ -237,13 +257,23 @@ export async function serve(args: string[]): Promise<void> {
       if (args[0] === 'write') { await engine.writeClipboard(opened.sessionId, args[1] ?? ''); return 'clipboard: written'; }
     }
     const action = ['click','drag','type','press','scroll'].includes(command);
-    const actionWait = action && args.includes('--wait') ? args[args.indexOf('--wait')+1] : 'settle';
+    const actionWait = action && args.includes('--wait') ? args[args.indexOf('--wait')+1] : 'none';
     const actionDelay = action && /^\d+$/.test(actionWait!) ? boundedDelay(actionWait!) : undefined;
-    if (['click','drag','type','scroll'].includes(command) && (args.some(arg=>arg.startsWith('@')) || args.includes('--into') || args.includes('--at'))) {
-      const current = await engine.request<{seq:number}>('session.frame',{session_id:opened.sessionId,since:baseline});
-      if (current.seq !== baseline) throw new Error(`stale-ref: frame ${baseline} is now ${current.seq}; run screen --query`);
+    if (action && args.some(arg => /^@\d+\.\d+$/.test(arg))) {
+      const current = await capture(baseline);
+      observed = undefined; // Validation must not consume the diff baseline.
+      if (current.seq !== baseline) {
+        for (const ref of args.filter(arg => /^@\d+\.\d+$/.test(arg))) {
+          const item = text.find(t => t.ref === ref);
+          if (!item) throw new Error(`stale-ref: ${ref}; run screen --query`);
+          const x = Math.max(0,item.x-32), y = Math.max(0,item.y-32);
+          const right = Math.min(current.width,item.words.at(-1)!.x+item.words.at(-1)!.w+32);
+          const bottom = Math.min(current.height,Math.max(...item.words.map(w=>w.y+w.h))+32);
+          if (!(await ocr(current,[x,y,right-x,bottom-y])).some(t => t.text === item.text && Math.abs(t.x-item.x)<12 && Math.abs(t.y-item.y)<12)) throw new Error(`stale-ref: ${ref} moved or changed; run screen --query`);
+        }
+      }
     }
-    const preActionSeq = action ? (await engine.request<{seq:number}>('session.frame',{session_id:opened.sessionId,path:''})).seq : baseline;
+    const preActionSeq = action && actionWait !== 'none' ? (await engine.request<{seq:number}>('session.frame',{session_id:opened.sessionId,path:''})).seq : baseline;
     if (command === 'click' || command === 'drag') {
       const [x,y] = target(args[0]!);
       const [endX,endY] = command === 'drag' ? target(args[1]!) : [x,y];
@@ -300,12 +330,18 @@ export async function serve(args: string[]): Promise<void> {
         }
         if (!found) throw new Error('settle-timeout: condition not met before deadline');
       }
+      return `wait: ${condition} met`;
     }
     if (action) {
-      if (actionWait !== 'none') {
+      if (actionWait === 'none') return 'input: applied';
+      try {
         if (actionDelay !== undefined) await new Promise(r=>setTimeout(r,actionDelay));
         else await engine.request('session.frame',{session_id:opened.sessionId,since:baseline,after_seq:preActionSeq,...(actionWait === 'settle' ? {still_ms:150} : {}),timeout_ms:5000});
+      } catch (error) {
+        if ((error as {code?:string}).code === 'frame-timeout') return 'input: applied; frame: timed out';
+        throw error;
       }
+      return 'input: applied; frame: ready';
     }
     const fields = args.includes('--fields') ? args[args.indexOf('--fields')+1]!.split(',') : ['ref','text','x','y'];
     if (fields.some(field=>!['ref','text','x','y','w','h','conf','line'].includes(field))) throw new Error('fields: valid fields are ref,text,x,y,w,h,conf,line');
@@ -326,7 +362,16 @@ export async function serve(args: string[]): Promise<void> {
     if (command === 'screen' || command === 'home') {
       const region = args.includes('--region') ? args[args.indexOf('--region')+1]!.split(',').map(Number) : undefined;
       if (region && (region.length!==4 || region.some(n=>!Number.isInteger(n)) || region[0]!<0 || region[1]!<0 || region[2]!<=0 || region[3]!<=0 || region[0]!+region[2]!>frame.width || region[1]!+region[3]!>frame.height)) throw new Error('coordinates: region exceeds frame');
-      text = await ocr(frame,region);
+      const query = args.includes('--query') ? args[args.indexOf('--query')+1] : undefined;
+      const prior = query && !region && !args.includes('--full') ? text.filter(t=>t.text.toLowerCase().includes(query.toLowerCase())) : [];
+      if (prior.length === 1) {
+        const item = prior[0]!;
+        const x=Math.max(0,item.x-64), y=Math.max(0,item.y-64);
+        const right=Math.min(frame.width,item.words.at(-1)!.x+item.words.at(-1)!.w+64);
+        const bottom=Math.min(frame.height,Math.max(...item.words.map(w=>w.y+w.h))+64);
+        const found = await ocr(frame,[x,y,right-x,bottom-y]);
+        text = found.some(t=>t.text.toLowerCase().includes(query!.toLowerCase())) ? found : await ocr(frame,region);
+      } else text = await ocr(frame,region);
     }
     if (command === 'home') return `session: open source=${source} ${display ?? ''} size=${frame.width}x${frame.height} permissions=view${control?',control':''}\nframe: ${frame.seq} settled=${frame.still_ms>=150} unseen=${frame.changed ? frame.damage.length : 0} region\nwindows: unavailable on this compositor\ntext[${Math.min(text.length,12)} of ${text.length}]{ref,text,x,y}:\n${text.slice(0,12).map(t=>`  ${t.ref},${JSON.stringify(t.text)},${t.x},${t.y}`).join('\n')}\nhelp[2]:\n  desklink-axi diff\n  desklink-axi screen --query "<words>"`;
     if (command === 'screen') {
@@ -334,7 +379,7 @@ export async function serve(args: string[]): Promise<void> {
       const items = query ? text.filter(t => t.text.toLowerCase().includes(query.toLowerCase())) : text;
       const limit = args.includes('--full') ? items.length : 40;
       const rows = items.slice(0,limit).map(t => `  ${fields.map(field=>JSON.stringify(field === 'w' ? t.words.at(-1)!.x+t.words.at(-1)!.w-t.x : field === 'h' ? Math.max(...t.words.map(w=>w.y+w.h))-t.y : t[field as keyof Item])).join(',')}`).join('\n');
-      return `screen: ${frame.width}x${frame.height} frame=${frame.seq} settled=${frame.still_ms>=150}\n${items.length ? `text[${Math.min(items.length,limit)} of ${items.length}]{${fields.join(',')}}:\n${rows}` : `text: 0 items match ${JSON.stringify(query ?? 'screen')} on frame ${frame.seq} (${text.length} items searched)`}${items.length>limit ? `\ntruncated: ${items.length-limit} more — use --full or --query` : ''}\nhelp[1]:\n  desklink-axi click @${frame.seq}.<n>`;
+      return `screen: ${frame.width}x${frame.height} frame=${frame.seq} settled=${frame.still_ms>=150} estimated_tokens=~${Math.ceil(items.slice(0,limit).reduce((n,t)=>n+t.text.length+35,0)/4)}\n${items.length ? `text[${Math.min(items.length,limit)} of ${items.length}]{${fields.join(',')}}:\n${rows}` : `text: 0 items match ${JSON.stringify(query ?? 'screen')} on frame ${frame.seq} (${text.length} items searched)`}${items.length>limit ? `\ntruncated: ${items.length-limit} more — use --full or --query` : ''}\nhelp[1]:\n  desklink-axi click @${frame.seq}.<n>`;
     }
     if (frame.changed) {
       const prev = text;

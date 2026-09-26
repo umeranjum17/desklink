@@ -196,6 +196,7 @@ pub fn start(
     max_fps: u32,
     sink: FrameSink,
     indicator_position: Option<Arc<Mutex<Option<(i64, i64)>>>>,
+    on_stop: Box<dyn Fn(String) + Send>,
 ) -> Result<Capture> {
     let PortalSession { fd, source, .. } = session;
     let geometry = Arc::new(Mutex::new(None));
@@ -221,6 +222,7 @@ pub fn start(
                     max_fps,
                     sink,
                     indicator_position,
+                    on_stop,
                     geometry,
                     frames,
                     dropped,
@@ -267,6 +269,7 @@ fn run_loop(
     max_fps: u32,
     sink: FrameSink,
     indicator_position: Option<Arc<Mutex<Option<(i64, i64)>>>>,
+    on_stop: Box<dyn Fn(String) + Send>,
     geometry: Arc<Mutex<Option<StreamGeometry>>>,
     frames: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
@@ -301,6 +304,7 @@ fn run_loop(
         format: None,
         buffer_type: String::from("unknown"),
         sink,
+        on_stop,
         mask: indicator_position.map(IndicatorMask::new),
         geometry,
         frames,
@@ -312,6 +316,14 @@ fn run_loop(
     let mut ready = Some(ready);
     let _listener = stream
         .add_local_listener_with_user_data(&mut state)
+        .state_changed({ let main_loop = main_loop.clone(); move |_, state, old, new| {
+            let reason = match new {
+                pw::stream::StreamState::Error(message) => Some(format!("PipeWire stream stopped: {message}")),
+                pw::stream::StreamState::Unconnected if old == pw::stream::StreamState::Streaming => Some(String::from("PipeWire stream disconnected")),
+                _ => None,
+            };
+            if let Some(reason) = reason { (state.on_stop)(reason); main_loop.quit(); }
+        } })
         .param_changed(|_, state, id, param| {
             if id != pw::spa::param::ParamType::Format.as_raw() {
                 return;
@@ -557,6 +569,7 @@ struct StreamState {
     format: Option<PixelFormat>,
     buffer_type: String,
     sink: FrameSink,
+    on_stop: Box<dyn Fn(String) + Send>,
     mask: Option<IndicatorMask>,
     geometry: Arc<Mutex<Option<StreamGeometry>>>,
     frames: Arc<AtomicU64>,

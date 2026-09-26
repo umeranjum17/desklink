@@ -173,6 +173,7 @@ fn select_x11(
     max_fps: u32,
     metrics: Arc<Mutex<Metrics>>,
     sink: capture::FrameSink,
+    on_stop: Box<dyn Fn(String) + Send>,
 ) -> Result<Selected> {
     let desktop = Arc::new(Mutex::new(X11Desktop::connect(display)?));
     let (width, height) = {
@@ -228,6 +229,7 @@ fn select_x11(
                             // A display that has gone away is not recoverable by
                             // retrying, so stop rather than spin on the error.
                             if error.to_string().contains("the X11 connection dropped") {
+                                on_stop(format!("X11 capture stopped: {error}"));
                                 break;
                             }
                         }
@@ -521,6 +523,7 @@ pub enum SessionEvent {
         damage: Vec<[usize; 4]>,
     },
     RestoreToken(String),
+    CaptureStopped { reason: String },
     Revoked {
         reason: String,
     },
@@ -547,6 +550,7 @@ struct Inner {
     geometry: serde_json::Value,
     metrics: Arc<Mutex<Metrics>>,
     latest: Arc<Mutex<Option<FrameSnapshot>>>,
+    capture_error: Arc<Mutex<Option<String>>>,
     frame_changes: tokio::sync::watch::Receiver<u64>,
     peer: Arc<VideoPeer>,
     encoder: Mutex<Encoder>,
@@ -722,10 +726,26 @@ impl Session {
         let metrics = Arc::new(Mutex::new(Metrics::default()));
         let mut indicator = None;
         let (frame_tx, frame_rx) = latest_frame();
-        let latest = Arc::new(Mutex::new(None));
+        let latest = Arc::new(Mutex::new(None::<FrameSnapshot>));
         let observed = latest.clone();
+        let frame_sequence = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let capture_error = Arc::new(Mutex::new(None::<String>));
+        let stopped_error = capture_error.clone();
+        let stopped_latest = latest.clone();
+        let stopped_events = events.clone();
+        let stopped_id = id.clone();
         let (frame_tx_signal, frame_changes) = tokio::sync::watch::channel(0u64);
         let captured = metrics.clone();
+        let stop_signal = frame_tx_signal.clone();
+        let on_capture_status = move |running: bool, reason: String| {
+            if let Ok(mut error) = stopped_error.lock() { *error = if running { None } else { Some(reason.clone()) }; }
+            if let Ok(mut frame) = stopped_latest.lock() { *frame = None; }
+            stop_signal.send_replace(0);
+            let _ = stopped_events.send(Notice { session_id: stopped_id.clone(),
+                event: if running { SessionEvent::State { capture: "streaming", transport: String::from("connected"), first_frame: false } }
+                    else { SessionEvent::CaptureStopped { reason } } });
+        };
+        let capture_status = Arc::new(on_capture_status);
         let frame_events = events.clone();
         let frame_session_id = id.clone();
         let sink = Box::new(move |frame: I420, _seq: u64, raw: Vec<u8>| {
@@ -737,9 +757,7 @@ impl Session {
                             *width == frame.width && *height == frame.height && current == &hashes
                         });
                 if !unchanged {
-                    let seq = held
-                        .as_ref()
-                        .map_or(1, |(seq, _, _, _, _, _, _): &FrameSnapshot| seq + 1);
+                    let seq = frame_sequence.fetch_add(1, Ordering::Relaxed) + 1;
                     let previous = held
                         .as_ref()
                         .map(|(_, _, _, _, _, current, _)| current.clone())
@@ -785,6 +803,7 @@ impl Session {
                 max_fps,
                 metrics.clone(),
                 sink,
+                Box::new({ let status = capture_status.clone(); move |reason| status(false, reason) }),
             )
             .map_err(|error| SessionError::new("source", format!("{error:#}")))?,
             _ => {
@@ -833,6 +852,7 @@ impl Session {
                     max_fps,
                     sink,
                     indicator.as_ref().map(crate::indicator::Indicator::pid),
+                    Box::new({ let status = capture_status.clone(); move |running, reason| status(running, reason) }),
                 )
                 .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
                 #[cfg(target_os = "linux")]
@@ -845,6 +865,7 @@ impl Session {
                     indicator
                         .as_ref()
                         .map(crate::indicator::Indicator::position),
+                    Box::new({ let status = capture_status.clone(); move |reason| status(false, reason) }),
                 )
                 .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
                 #[cfg(target_os = "linux")]
@@ -962,6 +983,7 @@ impl Session {
             geometry,
             metrics,
             latest,
+            capture_error,
             frame_changes,
             peer: Arc::new(peer),
             encoder: Mutex::new(encoder),
@@ -1018,6 +1040,9 @@ impl Session {
         let mut changes = self.inner.frame_changes.clone();
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms.min(120_000));
         loop {
+            if let Some(reason) = lock(&self.inner.capture_error).clone() {
+                return Err(SessionError::new("stream-stopped", reason));
+            }
             let (seq, still) = self
                 .inner
                 .latest
@@ -1060,6 +1085,9 @@ impl Session {
                 "permission",
                 "view permission is required",
             ));
+        }
+        if let Some(reason) = lock(&self.inner.capture_error).clone() {
+            return Err(SessionError::new("stream-stopped", reason));
         }
         let held = lock(&self.inner.latest);
         let (seq, at, width, height, raw, hashes, previous) = held
@@ -2142,6 +2170,7 @@ mod tests {
             }),
             metrics: Arc::new(Mutex::new(Metrics::default())),
             latest: Arc::new(Mutex::new(None)),
+            capture_error: Arc::new(Mutex::new(None)),
             frame_changes: tokio::sync::watch::channel(0).1,
             peer: Arc::new(peer),
             encoder: Mutex::new(Encoder::new(64, 64, 1000, 30, 1).expect("an encoder")),
@@ -2439,6 +2468,18 @@ mod tests {
         inner.clipboard_read(String::from("read"));
         inner.clipboard_write(String::from("write"), String::from("secret"));
         assert_eq!(inner.metrics.lock().unwrap().input_rejected, 2);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_capture_never_serves_the_last_frame() {
+        let (events, _) = tokio_mpsc::unbounded_channel();
+        let (mut inner, _) = test_inner(events).await;
+        Arc::get_mut(&mut inner).unwrap().permissions.push(Permission::View);
+        let session = Session { inner };
+        *lock(&session.inner.latest) = Some((1, Instant::now(), 2, 2, vec![0;16], vec![1], vec![]));
+        *lock(&session.inner.capture_error) = Some(String::from("SCStreamErrorDomain -3821"));
+        assert_eq!(session.frame(None, "", None).unwrap_err().code, "stream-stopped");
+        assert_eq!(session.wait_frame(None, None, 10).await.unwrap_err().code, "stream-stopped");
     }
 
     #[tokio::test]

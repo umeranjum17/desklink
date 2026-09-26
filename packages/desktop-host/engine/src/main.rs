@@ -292,6 +292,7 @@ async fn probe_portal(seconds: u64) -> Result<()> {
             let _ = tx.send((frame.width, frame.height, seq));
         }),
         None,
+        Box::new(|reason| eprintln!("{reason}")),
     )?;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
@@ -454,6 +455,10 @@ fn render_event(notice: session::Notice) -> Option<String> {
         session::SessionEvent::RestoreToken(token) => (
             "session.restoreToken",
             serde_json::json!({ "sessionId": session_id, "token": token }),
+        ),
+        session::SessionEvent::CaptureStopped { reason } => (
+            "session.capture.stopped",
+            serde_json::json!({ "sessionId": session_id, "reason": reason }),
         ),
         session::SessionEvent::Revoked { reason } => (
             "session.revoked",

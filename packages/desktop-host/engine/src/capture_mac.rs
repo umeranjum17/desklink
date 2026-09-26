@@ -11,6 +11,7 @@ struct State {
     sequence: u64,
     width: usize,
     height: usize,
+    status: Box<dyn Fn(bool, String) + Send>,
 }
 
 pub struct Capture {
@@ -30,10 +31,20 @@ unsafe extern "C" {
         indicator_pid: u32,
         context: *mut c_void,
         callback: extern "C" fn(*mut c_void, *const u8, usize, usize, usize, usize),
+        status: extern "C" fn(*mut c_void, *const c_char, bool),
         error: *mut c_char,
         capacity: usize,
     ) -> *mut c_void;
     fn dl_mac_stream_stop(handle: *mut c_void) -> bool;
+}
+
+extern "C" fn stream_status(context: *mut c_void, reason: *const c_char, running: bool) {
+    let state = unsafe { &*(context as *const Mutex<State>) };
+    if let Ok(state) = state.lock() {
+        let reason = if reason.is_null() { String::from("stream stopped") }
+            else { unsafe { CStr::from_ptr(reason) }.to_string_lossy().into_owned() };
+        (state.status)(running, reason);
+    }
 }
 
 extern "C" fn receive_frame(
@@ -97,12 +108,14 @@ pub fn start(
     max_fps: u32,
     sink: FrameSink,
     indicator_pid: Option<u32>,
+    status: Box<dyn Fn(bool, String) + Send>,
 ) -> Result<Capture> {
     let state = Box::into_raw(Box::new(Mutex::new(State {
         sink,
         sequence: 0,
         width,
         height,
+        status,
     })));
     let mut error = [0i8; 512];
     let handle = unsafe {
@@ -114,6 +127,7 @@ pub fn start(
             indicator_pid.unwrap_or(0),
             state.cast(),
             receive_frame,
+            stream_status,
             error.as_mut_ptr(),
             error.len(),
         )

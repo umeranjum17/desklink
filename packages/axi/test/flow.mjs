@@ -111,12 +111,13 @@ for (const [signal,code] of [['SIGTERM',143],['SIGINT',130]]) process.once(signa
 });
 async function run(...args) {
   await verifyXvfb();
+  const started = performance.now();
   const child = spawn(process.execPath, [cli, ...args], { env });
   let out = ''; for await (const part of child.stdout) out += part;
   const code = await new Promise(r => child.on('exit', r));
   assert.equal(code, 0, `${args.join(' ')}: ${out}`);
   recordProcesses();
-  observations.push({ command: args.join(' '), output: out }); return out;
+  observations.push({ command: args.join(' '), ms: Math.round(performance.now()-started), output: out }); return out;
 }
 try {
   remember(xvfb.pid,'Xvfb');
@@ -164,7 +165,9 @@ try {
   }
   assert.doesNotMatch(events, /"kind":"button"/, 'rejected delay must not send input');
   const before = await run('diff'); assert.match(before,/changed:/);
-  const clicked = await run('click','100,100'); assert.match(clicked,/changed: [1-9]/, events);
+  const clicked = await run('click','100,100'); assert.match(clicked,/input: applied/, events);
+  assert.match(await run('wait','change','--timeout','5000'),/wait: change met/);
+  assert.match(await run('diff'),/changed: [1-9]/, events);
   assert.match(events, /"kind":"button".*"phase":"up"/, 'the click reached the app beneath the indicator');
   const looked = await run('look','@r1'); assert.match(looked,/image: .*\.png/);
   const imagePath = /image: (.*\.png)/.exec(looked)?.[1];
@@ -172,15 +175,21 @@ try {
   await verifyXvfb();
   const unchanged = spawn(process.execPath,[cli,'click','100,100'],{env});
   let noChange = ''; for await (const part of unchanged.stdout) noChange += part;
-  assert.equal(await new Promise(r=>unchanged.on('exit',r)),1,noChange);
-  assert.match(noChange,/error: frame-timeout: frame condition not met before deadline/);
+  assert.equal(await new Promise(r=>unchanged.on('exit',r)),0,noChange);
+  assert.match(noChange,/input: applied/);
+  const waited = await run('click','100,100','--wait','change');
+  assert.match(waited,/input: applied; frame: timed out/);
   await verifyXvfb();
   const expectedText = 'AXI_SYNTHETIC_726';
   const typing = spawn(process.execPath,[cli,'type',expectedText],{env});
   let typed = ''; for await (const part of typing.stdout) typed += part;
-  assert.equal(await new Promise(r=>typing.on('exit',r)),1,typed);
-  assert.match(typed,/error: frame-timeout:/);
+  assert.equal(await new Promise(r=>typing.on('exit',r)),0,typed);
+  assert.match(typed,/input: applied/);
   assert.equal(readFileSync(typedPath,'utf8'),expectedText,'saved X-client buffer must equal typed text');
+  await run('press','a'); await run('type','single'); await run('wait','10');
+  const batched = await run('batch',JSON.stringify([['press','a'],['type','batch'],['wait','10']]));
+  assert.match(batched,/batch: 3\/3 steps/);
+  assert.match(batched,/1: input: applied/);
   assert.match(events, /"kind":"button".*"phase":"up"/);
   assert.match(events, /"kind":"key".*"phase":"down"/);
   recordProcesses();
@@ -202,8 +211,8 @@ try {
   const corner = /animating: (\d+),(\d+),(\d+),(\d+)/.exec(animated);
   assert(corner && Number(corner[1]) >= 1152 && Number(corner[2]) < 96, animated);
   const once = await run('click','100,100','--wait','1000');
-  assert.match(once,/regions\[[1-9]/, events);
-  assert.match(once,/@r\d+,"(?:64|96|128),/);
+  assert.match(once,/input: applied; frame: ready/, events);
+  assert.match(await run('diff'),/regions\[[1-9]/, events);
   await run('stop');
   target.kill('SIGTERM');
   await new Promise(r=>target.once('exit',r));
