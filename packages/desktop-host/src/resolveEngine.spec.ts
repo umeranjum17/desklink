@@ -16,9 +16,11 @@ describe('macOS engine flag', () => {
 
     it('gates resolution and explains missing engines on Darwin', () => {
         const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+        const arch = Object.getOwnPropertyDescriptor(process, 'arch')!;
         Object.defineProperty(process, 'platform', { value: 'darwin' });
+        Object.defineProperty(process, 'arch', { value: 'arm64' });
         try {
-            expect(platformTag()).toBe(`darwin-${process.arch}`);
+            expect(platformTag()).toBe('darwin-arm64');
             vi.stubEnv('DESKLINK_MACOS', '0');
             expect(resolveEngine('/some/configured/engine')).toBeNull();
             expect(explainMissingEngine('/some/configured/engine')).toBe(
@@ -28,7 +30,7 @@ describe('macOS engine flag', () => {
             vi.stubEnv('DESKLINK_MACOS', '1');
             expect(resolveEngine('')).toBeNull();
             expect(explainMissingEngine('')).toBe(
-                'No macOS desktop engine is available; build the VP9-enabled engine or set MUXR_DESKLINK_ENGINE to its signed path.',
+                `The prebuilt desktop engine for darwin-${process.arch} is missing. It arrives as the optional dependency @desklink/host-darwin-${process.arch}: reinstall without omitting optional dependencies, or point MUXR_DESKLINK_ENGINE at an engine built from source.`,
             );
             expect(resolveEngine(process.execPath)).toEqual({ command: process.execPath, args: ['serve'], origin: 'configured' });
             expect(explainMissingEngine(process.execPath)).toBeNull();
@@ -37,6 +39,7 @@ describe('macOS engine flag', () => {
             );
         } finally {
             Object.defineProperty(process, 'platform', platform);
+            Object.defineProperty(process, 'arch', arch);
         }
     });
 });

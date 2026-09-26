@@ -24,7 +24,7 @@ export interface ResolvedEngine {
 }
 
 /** Platforms with a published platform package. */
-const PREBUILT_PLATFORMS = ['linux-x64-gnu'];
+const PREBUILT_PLATFORMS = ['linux-x64-gnu', 'darwin-arm64'];
 
 export function macosEngineEnabled(platform = process.platform, flag = process.env.DESKLINK_MACOS): boolean {
     return platform !== 'darwin' || flag === '1';
@@ -125,7 +125,11 @@ export function explainMissingEngine(configured = process.env.MUXR_DESKLINK_ENGI
         return `The desktop engine at ${configured} is not an executable file.`;
     }
     if (process.platform === 'darwin') {
-        return 'No macOS desktop engine is available; build the VP9-enabled engine or set MUXR_DESKLINK_ENGINE to its signed path.';
+        const tag = platformTag();
+        if (PREBUILT_PLATFORMS.includes(tag)) {
+            return `The prebuilt desktop engine for ${tag} is missing. It arrives as the optional dependency @desklink/host-${tag}: reinstall without omitting optional dependencies, or point MUXR_DESKLINK_ENGINE at an engine built from source.`;
+        }
+        return `There is no prebuilt desktop engine for ${tag}. Build it from source (see the @desklink/host README) and point MUXR_DESKLINK_ENGINE at the binary.`;
     }
     if (process.platform !== 'linux') {
         return `The desktop engine runs on Linux only; ${process.platform} is not supported yet.`;

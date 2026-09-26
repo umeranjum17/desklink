@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-check-cfg=cfg(desklink_vpx)");
+    println!("cargo:rustc-check-cfg=cfg(desklink_macos_cli)");
     println!("cargo:rerun-if-changed=native/vpx_shim.c");
     println!("cargo:rerun-if-changed=native/inputtino_shim.cpp");
     println!("cargo:rerun-if-changed=Info.plist");
@@ -31,8 +32,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=vendor/inputtino/CMakeLists.txt");
 
     println!("cargo:rerun-if-env-changed=DESKLINK_VPX_STATIC_DIR");
+    println!("cargo:rerun-if-env-changed=DESKLINK_MACOS_CLI");
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "macos" && std::env::var_os("DESKLINK_MACOS_CLI").is_some() {
+        println!("cargo:rustc-cfg=desklink_macos_cli");
+    }
     if target_os == "linux" {
         let static_vpx = std::env::var_os("DESKLINK_VPX_STATIC_DIR").map(PathBuf::from);
         let mut shim = cc::Build::new();
@@ -78,13 +83,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rustc-link-lib=framework=CoreGraphics");
         println!("cargo:rustc-link-lib=framework=ApplicationServices");
         println!("cargo:rustc-link-lib=framework=Carbon");
-        println!("cargo:rustc-link-arg-bins=-sectcreate");
-        println!("cargo:rustc-link-arg-bins=__TEXT");
-        println!("cargo:rustc-link-arg-bins=__info_plist");
-        println!(
-            "cargo:rustc-link-arg-bins={}",
-            Path::new("Info.plist").canonicalize()?.display()
-        );
+        // The dev harness embeds its bundle identity for local TCC qualification.
+        // The published CLI must inherit the responsible app's TCC identity instead.
+        if std::env::var_os("DESKLINK_MACOS_CLI").is_none() {
+            println!("cargo:rustc-link-arg-bins=-sectcreate");
+            println!("cargo:rustc-link-arg-bins=__TEXT");
+            println!("cargo:rustc-link-arg-bins=__info_plist");
+            println!(
+                "cargo:rustc-link-arg-bins={}",
+                Path::new("Info.plist").canonicalize()?.display()
+            );
+        }
     }
     Ok(())
 }

@@ -4,6 +4,7 @@
  * does that, platform package first.
  *
  *   node release/pack.mjs --engine dist-desklink/engine-linux-x64-gnu
+ *   node release/pack.mjs --engine dist-desklink/engine-darwin-arm64 --platform darwin-arm64
  *
  * The engine comes from `release/build-engine.sh`; tarballs go to
  * `dist-desklink/` at the repository root. Compile the package (`tsc --build`) first.
@@ -16,7 +17,22 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const { values } = parseArgs({ options: { engine: { type: 'string' } } });
+const { values } = parseArgs({ options: { engine: { type: 'string' }, platform: { type: 'string' } } });
+const platforms = {
+    'linux-x64-gnu': {
+        os: 'linux', cpu: 'x64', libc: 'glibc', tag: 'linux-x64-gnu',
+        description: 'Linux x64 (glibc 2.36 or newer)',
+        readme: 'At run time the engine loads libpipewire-0.3, libxkbcommon, libevdev and libstdc++ from the system. libvpx and inputtino are linked into it; their licences are in the included notices.',
+    },
+    'darwin-arm64': {
+        os: 'darwin', cpu: 'arm64', tag: 'darwin-arm64',
+        description: 'macOS arm64',
+        readme: 'This is an unsigned CLI binary. Screen Recording and Accessibility permissions belong to the responsible app that launches it (for example Terminal, iTerm, or a Node.js host), not to a DesklinkHost.app bundle. Enable the macOS engine with DESKLINK_MACOS=1. libvpx is linked statically; notices are included.',
+    },
+};
+const platformTagValue = values.platform ?? 'linux-x64-gnu';
+const platform = platforms[platformTagValue];
+if (platform === undefined) throw new Error(`unsupported platform package: ${platformTagValue}`);
 const out = join(execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: packageRoot, encoding: 'utf8' }).trim(), 'dist-desklink');
 const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
 if (!values.engine) throw new Error('engine output missing: pass --engine <dir> from release/build-engine.sh');
@@ -27,6 +43,9 @@ for (const file of ['desklink-host', ...notices, 'provenance.json']) {
 }
 const sha256 = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
 const provenance = JSON.parse(readFileSync(join(engine, 'provenance.json'), 'utf8'));
+if (provenance.target !== (platformTagValue === 'darwin-arm64' ? 'aarch64-apple-darwin' : 'x86_64-unknown-linux-gnu')) {
+    throw new Error(`${engine}/provenance.json targets ${provenance.target}, not ${platformTagValue}`);
+}
 if (provenance.sha256 !== sha256(join(engine, 'desklink-host'))) {
     throw new Error(`${engine}/desklink-host is not the executable its provenance.json describes`);
 }
@@ -37,7 +56,10 @@ const compiled = join(packageRoot, 'dist', 'resolveEngine.js');
 if (!existsSync(compiled)) throw new Error(`${manifest.name} is not compiled: run tsc --build first`);
 // The same tag the runtime resolver looks for, so the two cannot disagree.
 const { platformTag } = await import(pathToFileURL(compiled).href);
-const platformName = `${manifest.name}-${platformTag('linux', 'x64', true)}`;
+if (platformTag(platform.os, platform.cpu, platform.libc !== undefined) !== platform.tag) {
+    throw new Error(`runtime tag disagrees with release platform ${platform.tag}`);
+}
+const platformName = `${manifest.name}-${platform.tag}`;
 const stage = join(out, 'stage');
 rmSync(stage, { recursive: true, force: true });
 mkdirSync(stage, { recursive: true });
@@ -83,23 +105,22 @@ for (const file of ['LICENSE', 'NOTICE']) copyFileSync(join(packageRoot, file), 
 writeFileSync(join(platformStage, 'README.md'), `# ${platformName}
 
 The prebuilt engine executable for [\`${manifest.name}\`](https://www.npmjs.com/package/${manifest.name})
-on Linux x64 with glibc 2.36 or newer. Install \`${manifest.name}\`, not this:
-it is selected and found automatically.
+on ${platform.description}. Install \`${manifest.name}\`, not this: it is selected and found automatically.
 
-At run time the engine loads libpipewire-0.3, libxkbcommon, libevdev and
-libstdc++ from the system. libvpx and inputtino are linked into it; their
-licences, and those of every linked crate, are in \`THIRD_PARTY_LICENSES.txt\`,
+${platform.readme}
+
+Licences for the engine's linked dependencies are in \`THIRD_PARTY_LICENSES.txt\`,
 and the Rust standard library's in \`COPYRIGHT-rust-library.html\`.
-\`provenance.json\` records the source commit and the pinned build inputs.
+\`provenance.json\` records the target and source commit.
 `);
 writeJson(join(platformStage, 'package.json'), {
     name: platformName,
     version: manifest.version,
-    description: `Prebuilt ${manifest.name} engine for Linux x64 (glibc 2.36 or newer)`,
+    description: `Prebuilt ${manifest.name} engine for ${platform.description}`,
     license: manifest.license,
-    os: ['linux'],
-    cpu: ['x64'],
-    libc: ['glibc'],
+    os: [platform.os],
+    cpu: [platform.cpu],
+    ...(platform.libc === undefined ? {} : { libc: [platform.libc] }),
     executable: 'desklink-host',
     files: ['desklink-host', ...notices, 'provenance.json', 'NOTICE'],
 });

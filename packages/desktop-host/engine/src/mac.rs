@@ -202,6 +202,7 @@ fn capabilities() -> Value {
     })
 }
 
+#[cfg(not(desklink_macos_cli))]
 fn ensure_disclaimed() -> Result<(), String> {
     if std::env::var("DESKLINK_DISCLAIMED").as_deref() == Ok("1") {
         return Ok(());
@@ -514,6 +515,7 @@ pub fn run() -> i32 {
     let mut args = std::env::args().skip(1);
     let command = args.next().unwrap_or_else(|| "help".into());
     if matches!(command.as_str(), "serve" | "capabilities" | "capture-probe") {
+        #[cfg(not(desklink_macos_cli))]
         if let Err(error) = ensure_disclaimed() {
             eprintln!("error: {error}");
             return 1;

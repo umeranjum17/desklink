@@ -85,9 +85,11 @@ Screen Recording/Accessibility grant states. A `display` source accepts an
 optional `display_id` from `capture.displays`; an absent ID selects the main
 display. Screen Recording consent is requested by `session.open` when capture
 is needed. Control may request Accessibility consent; if it remains unavailable,
-open fails with `input-unavailable`. Enable **System Settings → Privacy &
-Security → Accessibility → DesklinkHost** and reconnect. No TCC state is
-pre-seeded or bypassed.
+open fails with `input-unavailable`. TCC permissions attach to the responsible
+launching app (for example Terminal, iTerm, or the Node.js host), not to a
+separate DesklinkHost.app bundle. Enable that app in **System Settings → Privacy
+& Security → Screen & System Audio Recording** and **Accessibility**, then
+reconnect. No TCC state is pre-seeded or bypassed.
 
 macOS clipboard read/write is plain text and requires the session's `clipboard`
 permission. `restore_token` is not supported by this native backend; a new

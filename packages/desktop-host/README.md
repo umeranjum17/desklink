@@ -72,21 +72,23 @@ can [build it from source](#building-from-source). Windows remains unsupported.
 
 The macOS engine shares protocol v3's WebRTC session path: selected-display
 ScreenCaptureKit capture, VP9 encoding, Quartz pointer/keyboard events, and
-plain-text NSPasteboard operations. `capabilities` is non-prompting. `session.open`
-requests Screen Recording consent when needed; control may request Accessibility
-consent. If Accessibility remains unavailable, allow **DesklinkHost** in
-**System Settings → Privacy & Security → Accessibility** and reconnect. Nothing
-pre-seeds or bypasses TCC. macOS currently uses a US ANSI virtual-key map for
-character chords (the current input layout is diagnostic); free-form text uses
-Unicode key events.
+plain-text NSPasteboard operations. `capabilities` is non-prompting; `session.open`
+requests Screen Recording and, for control, Accessibility consent when needed.
+TCC belongs to the app responsible for launching the unsigned CLI: typically
+Terminal, iTerm, or a Node.js host. Grant that app in **System Settings → Privacy
+& Security → Screen & System Audio Recording** and **Accessibility**; the CLI does
+not install a separate DesklinkHost.app or pre-seed/bypass TCC. macOS currently
+uses a US ANSI virtual-key map for character chords (the current input layout is
+diagnostic); free-form text uses Unicode key events.
 
-Build with Rust 1.97+ and `DESKLINK_VPX_STATIC_DIR` pointing at a static libvpx
-prefix. `cargo test --bin desklink-host --manifest-path engine/Cargo.toml` avoids
-the Linux-only X11 example. `capture-probe` still provides a local image-capture
-diagnostic; `--out` is useful when launching the app bundle through `open`, which
-cannot pipe stdout. See the [macOS protocol](docs/PROTOCOL.md#macos). Engine
-resolution remains opt-in on macOS (`DESKLINK_MACOS=1` and an explicit engine
-path or local build).
+The published engine is an **unsigned macOS arm64 CLI** in the optional
+`@desklink/host-darwin-arm64` platform package; no Developer ID identity or
+notarization is required. The macOS engine remains opt-in (`DESKLINK_MACOS=1`).
+To build and pack it, build on an Apple Silicon Mac with Rust 1.97+ and static
+Homebrew libvpx, then run `release/build-engine-macos-arm64.sh` and
+`node release/pack.mjs --engine dist-desklink/engine-darwin-arm64 --platform darwin-arm64`.
+The app-bundled signed harness is only for local TCC qualification, not npm
+installation. See the [macOS protocol](docs/PROTOCOL.md#macos).
 
 Point `MUXR_DESKLINK_ENGINE` at a binary built elsewhere if you have one. The
 package never searches `PATH` for a same-named program: "a binary called
@@ -103,8 +105,9 @@ cargo build --release --manifest-path engine/Cargo.toml
 ```
 
 On macOS, prefix the launcher commands with `DESKLINK_MACOS=1` to resolve the
-local candidate; the engine can run the local capture probe but cannot open a
-desktop session.
+local candidate. The app-bundled dev harness is not the npm package; a source
+build is an unsigned CLI and its TCC permissions are attributed to the
+responsible launching app.
 
 On Linux, a source build links system libraries through `pkg-config` (and
 libxcb directly), compiles `native/vpx_shim.c` against libvpx's headers, and
