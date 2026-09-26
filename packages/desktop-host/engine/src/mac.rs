@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::os::raw::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -59,6 +60,8 @@ unsafe extern "C" {
     fn CFBooleanGetValue(value: CfTypeRef) -> bool;
     fn CFStringGetCString(value: CfTypeRef, buffer: *mut i8, size: isize, encoding: u32) -> bool;
     fn CFRelease(value: CfTypeRef);
+    fn CFRunLoopRunInMode(mode: CfTypeRef, seconds: f64, return_after_source_handled: u8) -> i32;
+    static kCFRunLoopDefaultMode: CfTypeRef;
 }
 
 fn displays() -> Vec<Value> {
@@ -338,8 +341,15 @@ fn request_screen_capture_content() {
     use block2::RcBlock;
     use objc2_screen_capture_kit::SCShareableContent;
 
-    let completion = RcBlock::new(|_content, _error| {});
+    let completed = Arc::new(AtomicBool::new(false));
+    let callback_state = completed.clone();
+    let completion = RcBlock::new(move |_content, _error| {
+        callback_state.store(true, Ordering::Release);
+    });
     unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&completion) };
+    while !completed.load(Ordering::Acquire) {
+        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, 0) };
+    }
 }
 
 fn capture_probe(seconds: u64) -> Result<Value, String> {
