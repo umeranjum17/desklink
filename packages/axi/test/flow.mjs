@@ -74,13 +74,13 @@ try {
   assert.match(events, /"kind":"button".*"phase":"up"/);
   assert.match(events, /"kind":"key".*"phase":"down"/);
   await run('stop');
+  assert.match(await run('start','--control','--source','x11','--display',display),/permissions=view,control/);
+  await run('diff'); // Establish the snapshot before the corner starts looping.
   target.kill('SIGTERM');
   await new Promise(r=>target.once('exit',r));
   target = spawn(example, ['--animate','--move'], { env, stdio:['ignore','pipe','pipe'] });
   target.stdout.on('data',chunk=>events+=chunk);
   await new Promise((resolve,reject)=>{target.stdout.once('data',resolve);target.once('error',reject);});
-  assert.match(await run('start','--control','--source','x11','--display',display),/permissions=view,control/);
-  await run('diff'); // Establish the snapshot while the corner is looping.
   await new Promise(r=>setTimeout(r,3000)); // The CLI is absent; captured frames must still build the mask.
   const animated = await run('diff');
   const corner = /animating: (\d+),(\d+),(\d+),(\d+)/.exec(animated);
