@@ -35,6 +35,34 @@ export async function call(command: string, args: string[] = []): Promise<string
   });
 }
 
+function tileDamage(before: Buffer, after: Buffer, width: number, height: number): number[][] {
+  const columns = Math.ceil(width / 32), rows = Math.ceil(height / 32);
+  const dirty = new Set<number>();
+  for (let row=0;row<rows;row++) for (let col=0;col<columns;col++) {
+    const x=col*32, y=row*32, bytes=Math.min(32,width-x)*4;
+    for (let line=y;line<Math.min(y+32,height);line++) {
+      const offset=(line*width+x)*4;
+      if (!before.subarray(offset,offset+bytes).equals(after.subarray(offset,offset+bytes))) { dirty.add(row*columns+col); break; }
+    }
+  }
+  const boxes: number[][] = [];
+  while (dirty.size) {
+    const first=dirty.values().next().value!;
+    dirty.delete(first);
+    const stack=[first];
+    let left=first%columns,right=left,top=Math.floor(first/columns),bottom=top;
+    while (stack.length) {
+      const tile=stack.pop()!, col=tile%columns,row=Math.floor(tile/columns);
+      left=Math.min(left,col);right=Math.max(right,col);top=Math.min(top,row);bottom=Math.max(bottom,row);
+      for (const neighbor of [row>0?tile-columns:-1,row+1<rows?tile+columns:-1,col>0?tile-1:-1,col+1<columns?tile+1:-1]) {
+        if (dirty.delete(neighbor)) stack.push(neighbor);
+      }
+    }
+    boxes.push([left*32,top*32,Math.min(width,(right+1)*32)-left*32,Math.min(height,(bottom+1)*32)-top*32]);
+  }
+  return boxes;
+}
+
 export async function serve(args: string[]): Promise<void> {
   if (existsSync(socketPath)) throw new Error('session already running');
   const source = args.includes('--source') ? args[args.indexOf('--source') + 1] : 'auto';
@@ -82,21 +110,23 @@ export async function serve(args: string[]): Promise<void> {
   type Item = { ref: string; text: string; x: number; y: number; conf: number; line: string; words: {text:string;x:number;y:number;w:number;h:number}[] };
   let text: Item[] = []; 
   let regions: string[] = [];
-  let motionRegion = '';
-  let motionCount = 0;
-  let motionSeq = 0;
+  const motion = new Map<string, {seq:number;at:number;count:number;reported:boolean}>();
+  let lastFrame: {seq:number;width:number;height:number;raw:Buffer} | undefined;
   let observed: {seq:number;damage:string[]} | undefined;
-  const capture = async () => {
+  const capture = async (since = baseline, wait: {after_seq?:number;still_ms?:number;timeout_ms?:number} = {}) => {
     const path = join(dir, 'frame.raw');
-    const frame = await engine.request<{seq:number;still_ms:number;width:number;height:number;damage:number[][]}>('session.frame', { session_id: opened.sessionId, since: baseline, path });
-    const changed = frame.seq !== baseline;
-    const damage = frame.damage.map(box => box.join(','));
+    const frame = await engine.request<{seq:number;still_ms:number;width:number;height:number;damage:number[][]}>('session.frame', { session_id: opened.sessionId, since, path, ...wait });
+    const raw = readFileSync(path);
+    const damage = lastFrame?.seq === since && lastFrame.width === frame.width && lastFrame.height === frame.height
+      ? tileDamage(lastFrame.raw, raw, frame.width, frame.height).map(box => box.join(','))
+      : frame.damage.map(box => box.join(','));
+    lastFrame = {seq:frame.seq,width:frame.width,height:frame.height,raw};
     observed = {seq:frame.seq,damage};
-    return { ...frame, changed, damage, path, previous: baseline };
+    return { ...frame, changed: frame.seq !== baseline, damage, raw, previous: baseline };
   };
   const image = async (frame: Awaited<ReturnType<typeof capture>>, box: number[], path: string) => {
     const { PNG } = await import('pngjs');
-    const raw = (await import('node:fs')).readFileSync(frame.path);
+    const raw = frame.raw;
     const [x,y,w,h] = box;
     const png = new PNG({ width: w!, height: h! });
     for (let row=0;row<h!;row++) for (let col=0;col<w!;col++) {
@@ -147,6 +177,8 @@ export async function serve(args: string[]): Promise<void> {
     return [Math.floor((start.x + end.x + end.w)/2), Math.floor((start.y + end.y + end.h)/2)];
   };
   const output = async (command: string, args: string[]) => {
+    let pendingDamage: string[] | undefined;
+    let waitSeen = baseline;
     if (command === 'start') return `session: open source=${source} ${display ?? ''} size=${opened.geometry.encoded.width}x${opened.geometry.encoded.height} permissions=view${control ? ',control' : ''}`;
     if (command === 'stop') { await engine.closeSession(opened.sessionId); peer?.close(); await engine.stop(); server.close(); if (existsSync(socketPath)) unlinkSync(socketPath); rmSync(dir, { recursive: true, force: true }); return 'session: stopped'; }
     if (command === 'clipboard') {
@@ -192,19 +224,21 @@ export async function serve(args: string[]): Promise<void> {
         if (Number(condition) > deadline - Date.now()) throw new Error('settle-timeout: condition not met before deadline');
         await new Promise(r=>setTimeout(r,Number(condition)));
       } else if (condition === 'change' || condition === 'settle') {
-        await engine.request('session.frame', {session_id:opened.sessionId, since:baseline, ...(condition === 'change' ? {after_seq:baseline} : {}), timeout_ms:Math.max(0,deadline-Date.now())});
+        await engine.request('session.frame', {session_id:opened.sessionId, since:baseline, ...(condition === 'change' ? {after_seq:baseline} : {still_ms:150}), timeout_ms:Math.max(0,deadline-Date.now())});
       } else {
         let seen = baseline, found = false;
         while (Date.now() < deadline) {
-          const f = await engine.request<{seq:number;damage:number[][]}>('session.frame', {session_id:opened.sessionId,since:seen,after_seq:seen,timeout_ms:Math.max(0,deadline-Date.now())});
-          const snapshot = await capture();
-          const bounds = snapshot.damage.length ? snapshot.damage.map(box=>box.split(',').map(Number)) : [[0,0,snapshot.width,snapshot.height]];
-          for (const box of bounds) {
-            const [x,y,w,h] = box;
-            if ((await ocr(snapshot,[Math.max(0,x!-32),Math.max(0,y!-32),Math.min(snapshot.width-Math.max(0,x!-32),w!+64),Math.min(snapshot.height-Math.max(0,y!-32),h!+64)])).some(t=>t.text.toLowerCase().includes(condition.toLowerCase()))) { found = true; break; }
+          const snapshot = await capture(seen, {after_seq:seen,timeout_ms:Math.max(0,deadline-Date.now())});
+          pendingDamage ??= [];
+          pendingDamage.push(...snapshot.damage);
+          waitSeen = snapshot.seq;
+          for (const box of snapshot.damage) {
+            const [x,y,w,h] = box.split(',').map(Number);
+            const left=Math.max(0,x!-32),top=Math.max(0,y!-32);
+            if ((await ocr(snapshot,[left,top,Math.min(snapshot.width-left,w!+64),Math.min(snapshot.height-top,h!+64)])).some(t=>t.text.toLowerCase().includes(condition.toLowerCase()))) { found = true; break; }
           }
           if (found) break;
-          seen = f.seq;
+          seen = snapshot.seq;
         }
         if (!found) throw new Error('settle-timeout: condition not met before deadline');
       }
@@ -215,13 +249,14 @@ export async function serve(args: string[]): Promise<void> {
         if (/^\d+$/.test(wait!)) await new Promise(r=>setTimeout(r,Number(wait)));
         else {
           if (wait === 'settle') await new Promise(r=>setTimeout(r,150));
-          await engine.request('session.frame',{session_id:opened.sessionId,since:baseline,...(wait === 'change' ? {after_seq:baseline} : {}),timeout_ms:5000});
+          await engine.request('session.frame',{session_id:opened.sessionId,since:baseline,...(wait === 'change' ? {after_seq:baseline} : {still_ms:150}),timeout_ms:5000});
         }
       }
     }
     const fields = args.includes('--fields') ? args[args.indexOf('--fields')+1]!.split(',') : ['ref','text','x','y'];
     if (fields.some(field=>!['ref','text','x','y','w','h','conf','line'].includes(field))) throw new Error('fields: valid fields are ref,text,x,y,w,h,conf,line');
-    const frame = await capture();
+    const frame = await capture(pendingDamage ? waitSeen : baseline);
+    if (pendingDamage) frame.damage = [...new Set([...pendingDamage,...frame.damage])];
     if (command === 'look') {
       const item = text.find(t=>t.ref === args[0]);
       if (item && !item.ref.startsWith(`@${frame.seq}.`)) throw new Error(`stale-ref: ${args[0]}; run screen --query`);
@@ -249,23 +284,61 @@ export async function serve(args: string[]): Promise<void> {
     }
     if (frame.changed) {
       const prev = text;
-      const bounds = (frame.damage.length ? frame.damage : [`0,0,${frame.width},${frame.height}`]).map(d=>d.split(',').map(Number));
-      const x = Math.max(0,Math.min(...bounds.map(b=>b[0]!))-32), y = Math.max(0,Math.min(...bounds.map(b=>b[1]!))-32);
-      const right = Math.min(frame.width,Math.max(...bounds.map(b=>b[0]!+b[2]!))+32), bottom = Math.min(frame.height,Math.max(...bounds.map(b=>b[1]!+b[3]!))+32);
-      const kept = prev.filter(t=>!t.words.some(w=>w.x<right && w.x+w.w>x && w.y<bottom && w.y+w.h>y));
-      const dirty = await ocr(frame,[x,y,right-x,bottom-y]);
-      text = [...kept,...dirty].map((t,i)=>({...t,ref:`@${frame.seq}.${i+1}`}));
-      const appeared = text.filter(t => !prev.some(p => p.text === t.text));
-      const gone =  prev.filter(p=>!text.some(t=>t.text===p.text)).length;
-      const region = frame.damage[0] ?? '';
-      motionCount = frame.previous === frame.seq - 1 && motionSeq === frame.previous && region === motionRegion && !appeared.length && !gone ? motionCount + 1 : 0;
-      motionRegion = region;
-      motionSeq = frame.seq;
-      const motion = motionCount >= 3 && !args.includes('--include-animating') ? `\nanimating: ${region} (candidate; changed pixels retained)` : '';
-      return `changed: ${frame.damage.length} region since frame ${frame.previous}\nregions[${frame.damage.length}]{ref,box}:\n${frame.damage.map((d,i)=>`  @r${i+1},"${d}"`).join('\n')}\nappeared[${Math.min(appeared.length,20)} of ${appeared.length}]{${fields.join(',')}}:\n${appeared.slice(0,20).map(t=>`  ${fields.map(field=>JSON.stringify(field === 'w' ? t.words.at(-1)!.x+t.words.at(-1)!.w-t.x : field === 'h' ? Math.max(...t.words.map(w=>w.y+w.h))-t.y : t[field as keyof Item])).join(',')}`).join('\n')}\ngone: ${gone} text items${motion}\nhelp[2]:\n  desklink-axi look @r1\n  desklink-axi screen --query "<words>"`; }
+      let kept = [...prev];
+      const dirty: Item[] = [];
+      for (const region of frame.damage) {
+        const [rx,ry,rw,rh] = region.split(',').map(Number);
+        const x=Math.max(0,rx!-32),y=Math.max(0,ry!-32);
+        const right=Math.min(frame.width,rx!+rw!+32),bottom=Math.min(frame.height,ry!+rh!+32);
+        kept = kept.filter(t=>!t.words.some(w=>w.x<right && w.x+w.w>x && w.y<bottom && w.y+w.h>y));
+        dirty.push(...await ocr(frame,[x,y,right-x,bottom-y]));
+      }
+      text = [...kept,...dirty.filter((t,i)=>!dirty.slice(0,i).some(p=>p.text===t.text && Math.abs(p.x-t.x)<12 && Math.abs(p.y-t.y)<12))]
+        .map((t,i)=>({...t,ref:`@${frame.seq}.${i+1}`}));
+      const unmatched = [...prev];
+      const appeared = text.filter(t => {
+        const index=unmatched.findIndex(p=>p.text===t.text && Math.abs(p.x-t.x)<12 && Math.abs(p.y-t.y)<12);
+        if (index<0) return true;
+        unmatched.splice(index,1);
+        return false;
+      });
+      const gone=unmatched.length;
+      const now=Date.now();
+      if (appeared.length || gone || frame.still_ms>=150 || frame.seq !== frame.previous+1 ||
+          frame.damage.some(region=>!motion.has(region) && [...motion.values()].some(state=>state.count>=2))) motion.clear();
+      const animating: string[] = [];
+      const visible: string[] = [];
+      for (const region of frame.damage) {
+        const prior=motion.get(region);
+        const state = prior && prior.seq===frame.previous && now-prior.at<600
+          ? {seq:frame.seq,at:now,count:prior.count+1,reported:prior.reported}
+          : {seq:frame.seq,at:now,count:1,reported:false};
+        motion.set(region,state);
+        if (state.count>=3 && !args.includes('--include-animating')) {
+          if (!state.reported) { animating.push(region); state.reported=true; }
+        } else visible.push(region);
+      }
+      if (observed) observed.damage=visible;
+      const changed = visible.length ? `${visible.length} region since frame ${frame.previous}` : `none since frame ${frame.previous}`;
+      return `changed: ${changed}\nregions[${visible.length}]{ref,box}:\n${visible.map((d,i)=>`  @r${i+1},"${d}"`).join('\n')}\nappeared[${Math.min(appeared.length,20)} of ${appeared.length}]{${fields.join(',')}}:\n${appeared.slice(0,20).map(t=>`  ${fields.map(field=>JSON.stringify(field === 'w' ? t.words.at(-1)!.x+t.words.at(-1)!.w-t.x : field === 'h' ? Math.max(...t.words.map(w=>w.y+w.h))-t.y : t[field as keyof Item])).join(',')}`).join('\n')}\ngone: ${gone} text items${animating.length ? `\nanimating[${animating.length}]{box}:\n${animating.map(box=>`  "${box}"`).join('\n')}` : ''}\nhelp[2]:\n  desklink-axi look @r1\n  desklink-axi screen --query "<words>"`; }
+    if (frame.still_ms>=150) motion.clear();
     return `changed: none since frame ${frame.seq} (still ${frame.still_ms}ms)\nhelp[1]:\n  desklink-axi screen --query "<words>"`;
   };
-  const server: Server = createServer(socket => { let request = ''; socket.on('data', chunk => { request += chunk; if (!request.includes('\n')) return; const { command, args } = JSON.parse(request.split('\n')[0]!) as {command:string;args:string[]}; observed = undefined; void output(command,args).then(result => { if (observed && command !== 'look') { baseline = observed.seq; if (observed.damage.length) regions = observed.damage; } socket.end(result+'\n'); }, error => socket.end(`error: ${error.message}\nsuggestion: desklink-axi ${error.message.includes('ocr') ? 'look' : 'screen'} --help\n`)); }); });
+  let commands = Promise.resolve();
+  const server: Server = createServer(socket => { let request = ''; socket.on('data', chunk => { request += chunk; if (!request.includes('\n')) return;
+    const { command, args } = JSON.parse(request.split('\n')[0]!) as {command:string;args:string[]};
+    commands = commands.then(async () => {
+      observed = undefined;
+      try {
+        const result = await output(command,args);
+        if (observed && command !== 'look') { baseline = observed.seq; regions = observed.damage; }
+        socket.end(result+'\n');
+      } catch (error) {
+        const message = (error as Error).message;
+        socket.end(`error: ${message}\nsuggestion: desklink-axi ${message.includes('ocr') ? 'look' : 'screen'} --help\n`);
+      }
+    });
+  }); });
   try { await engine.request('session.frame', {session_id:opened.sessionId,after_seq:0,timeout_ms:timeout}); }
   catch (error) { peer?.close(); await engine.stop(); rmSync(dir,{recursive:true,force:true}); throw error; }
   server.listen(socketPath, () => chmodSync(socketPath, 0o600));

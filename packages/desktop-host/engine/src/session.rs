@@ -790,19 +790,22 @@ impl Session {
         &self.inner.source
     }
 
-    pub async fn wait_frame(&self, after_seq: Option<u64>, timeout_ms: u64) -> std::result::Result<(), SessionError> {
+    pub async fn wait_frame(&self, after_seq: Option<u64>, still_ms: Option<u64>, timeout_ms: u64) -> std::result::Result<(), SessionError> {
         let mut changes = self.inner.frame_changes.clone();
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms.min(120_000));
         loop {
             let (seq, still) = self.inner.latest.lock().ok()
                 .and_then(|held| held.as_ref().map(|(seq, at, ..)| (*seq, at.elapsed())))
                 .unwrap_or((0, Duration::ZERO));
-            if seq > 0 && after_seq.map_or(still >= Duration::from_millis(150), |after| seq > after) {
+            if seq > 0 && (after_seq.is_some_and(|after| seq > after)
+                || still_ms.or(if after_seq.is_none() { Some(150) } else { None })
+                    .is_some_and(|target| still >= Duration::from_millis(target))) {
                 return Ok(());
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() { return Err(SessionError::new("frame-timeout", "frame condition not met before deadline")); }
-            let until_still = if seq > 0 && after_seq.is_none() { Duration::from_millis(150).saturating_sub(still) } else { remaining };
+            let until_still = if seq > 0 { still_ms.or(if after_seq.is_none() { Some(150) } else { None })
+                .map_or(remaining, |target| Duration::from_millis(target).saturating_sub(still)) } else { remaining };
             let _ = tokio::time::timeout(remaining.min(until_still), changes.changed()).await;
         }
     }
@@ -838,31 +841,31 @@ impl Session {
         let damage = if since == Some(*seq) {
             Vec::new()
         } else if since == seq.checked_sub(1) && previous.len() == hashes.len() {
-            let dirty: Vec<_> = hashes
-                .iter()
-                .zip(previous)
-                .enumerate()
-                .filter_map(|(i, (now, before))| {
-                    if now == before {
-                        return None;
+            let columns = width.div_ceil(32);
+            let mut dirty: Vec<bool> = hashes.iter().zip(previous).map(|(now, before)| now != before).collect();
+            let mut regions = Vec::new();
+            for index in 0..dirty.len() {
+                if !dirty[index] { continue; }
+                dirty[index] = false;
+                let mut stack = vec![index];
+                let (mut left, mut top, mut right, mut bottom) = (index % columns, index / columns, index % columns, index / columns);
+                while let Some(tile) = stack.pop() {
+                    let col = tile % columns;
+                    let row = tile / columns;
+                    left = left.min(col);
+                    right = right.max(col);
+                    top = top.min(row);
+                    bottom = bottom.max(row);
+                    for neighbor in [tile.checked_sub(columns), (row + 1 < height.div_ceil(32)).then_some(tile + columns),
+                        (col > 0).then_some(tile - 1), (col + 1 < columns).then_some(tile + 1)].into_iter().flatten() {
+                        if dirty[neighbor] { dirty[neighbor] = false; stack.push(neighbor); }
                     }
-                    Some(((i % width.div_ceil(32)) * 32, (i / width.div_ceil(32)) * 32))
-                })
-                .collect();
-            if dirty.is_empty() {
-                Vec::new()
-            } else {
-                let x = dirty.iter().map(|(x, _)| *x).min().unwrap();
-                let y = dirty.iter().map(|(_, y)| *y).min().unwrap();
-                let right = dirty.iter().map(|(x, _)| x + 32).max().unwrap().min(*width);
-                let bottom = dirty
-                    .iter()
-                    .map(|(_, y)| y + 32)
-                    .max()
-                    .unwrap()
-                    .min(*height);
-                vec![[x, y, right - x, bottom - y]]
+                }
+                let x = left * 32;
+                let y = top * 32;
+                regions.push([x, y, ((right + 1) * 32).min(*width) - x, ((bottom + 1) * 32).min(*height) - y]);
             }
+            regions
         } else {
             vec![[0, 0, *width, *height]]
         };

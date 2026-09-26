@@ -138,6 +138,8 @@ pub struct FrameParams {
     #[serde(default)]
     pub after_seq: Option<u64>,
     #[serde(default)]
+    pub still_ms: Option<u64>,
+    #[serde(default)]
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub path: String,

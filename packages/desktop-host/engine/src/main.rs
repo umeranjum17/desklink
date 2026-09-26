@@ -553,8 +553,8 @@ async fn dispatch(
             let params: protocol::FrameParams = serde_json::from_value(request.params.clone())
                 .map_err(|error| ErrorBody::new("malformed", error.to_string()))?;
             check_session(session, &params.session_id, None)?;
-            if params.after_seq.is_some() || params.timeout_ms.is_some() {
-                session.wait_frame(params.after_seq, params.timeout_ms.unwrap_or(5000)).await
+            if params.after_seq.is_some() || params.still_ms.is_some() || params.timeout_ms.is_some() {
+                session.wait_frame(params.after_seq, params.still_ms, params.timeout_ms.unwrap_or(5000)).await
                     .map_err(|error| ErrorBody::new(error.code, error.message))?;
             }
             session
