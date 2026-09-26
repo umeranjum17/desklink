@@ -1,4 +1,5 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 import {
@@ -87,6 +88,10 @@ export class EngineClient {
             }
         }
         const child = spawn(command, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
+        if (env.DESKLINK_AXI_ENGINE_PID_FILE && child.pid) {
+            try { appendFileSync(env.DESKLINK_AXI_ENGINE_PID_FILE, `${child.pid}\n`); }
+            catch (error) { child.kill('SIGKILL'); throw error; }
+        }
         const client = new EngineClient(child, options);
         try {
             await client.request('hello', { protocol: PROTOCOL_VERSION });

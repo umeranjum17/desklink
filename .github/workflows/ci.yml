@@ -32,7 +32,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config libclang-dev \
-            libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libevdev-dev libxcb1-dev libxcursor-dev xvfb tesseract-ocr
+            libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libevdev-dev libxcb1-dev libxcursor-dev xvfb x11-utils xauth tesseract-ocr
       - name: Rust (the version the release build pins)
         run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
       - uses: actions/cache@v4
