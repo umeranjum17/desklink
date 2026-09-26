@@ -83,6 +83,15 @@ impl X11Desktop {
     /// compositor this is every window drawn onto the framebuffer, which is what
     /// the viewer expects to see.
     pub fn capture(&mut self, max_width: usize, max_height: usize) -> Result<I420> {
+        self.capture_with_pixels(max_width, max_height)
+            .map(|(frame, _)| frame)
+    }
+
+    pub fn capture_with_pixels(
+        &mut self,
+        max_width: usize,
+        max_height: usize,
+    ) -> Result<(I420, Vec<u8>)> {
         let image = self
             .connection
             .get_image(
@@ -110,7 +119,7 @@ impl X11Desktop {
         // The server's depth is the only field that can tell us how the pixel is
         // packed; the engine assumes the byte order every TrueColor server uses.
         let _ = self.depth;
-        to_i420(
+        let frame = to_i420(
             &image.data,
             self.width,
             self.height,
@@ -119,7 +128,18 @@ impl X11Desktop {
             width,
             height,
         )
-        .context("the captured X11 pixels are not a format this engine can read")
+        .context("the captured X11 pixels are not a format this engine can read")?;
+        let raw = crate::convert::to_bgrx(
+            &image.data,
+            self.width,
+            self.height,
+            stride,
+            crate::capture::PixelFormat::Bgrx,
+            width,
+            height,
+        )
+        .context("the captured X11 pixels could not be copied")?;
+        Ok((frame, raw))
     }
 
     fn flush(&self) -> Result<()> {

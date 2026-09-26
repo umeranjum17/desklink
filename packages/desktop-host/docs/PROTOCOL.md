@@ -1,4 +1,4 @@
-# desklink local control protocol (v2)
+# desklink local control protocol (v3)
 
 The host engine is a per-user, on-demand process. A consumer that already owns
 the user's session starts it and talks to it over an inherited private channel —
@@ -57,13 +57,13 @@ Request parameters use the engine's own snake_case names (`session_id`,
 ## Handshake
 
 ```jsonc
-{"id":1,"method":"hello","params":{"protocol":2}}
+{"id":1,"method":"hello","params":{"protocol":3}}
 ```
 
 Result:
 
 ```jsonc
-{"protocol":2,"engine":"desklink-host/0.1.0","platform":"linux", /* the rest of Capabilities */ }
+{"protocol":3,"engine":"desklink-host/0.1.0","platform":"linux", /* the rest of Capabilities */ }
 ```
 
 The consumer must send `hello` first, and a version the engine does not speak is
@@ -92,7 +92,7 @@ lifecycle below are not a claim of macOS support.
 
 ```jsonc
 {
-  "protocol": 2,
+  "protocol": 3,
   "engine": "desklink-host/0.1.0",
   "platform": "linux",
   "session": {"kind": "wayland"},
@@ -304,7 +304,7 @@ are JSON, one per message:
 The engine answers on the same channel:
 
 ```jsonc
-{"kind":"hello","protocol":2,"geometry":{…}}     // once, when the channel opens
+{"kind":"hello","protocol":3,"geometry":{…}}     // once, when the channel opens
 {"kind":"ack","seq":44}
 {"kind":"rejected","seq":44,"code":"coordinates","message":"(9000,4) is outside the 1280x720 surface"}
 {"kind":"clipboard","request":"…","text":"…","truncated":false}   // an empty "text" with "error" when the read failed
@@ -325,6 +325,31 @@ keys and buttons this session pressed, so a dropped connection cannot leave a
 modifier stuck down on the desktop. `input.text` in `capabilities` states the
 characters the compiled layout can actually produce; anything else is refused
 with `text-unsupported` and the honest workaround is the explicit clipboard.
+
+## Latest frame over the local protocol
+
+`session.frame` requires `view` permission. It writes the latest pre-encode frame as
+packed BGRX bytes to the caller's path, with optional `[x,y,w,h]` `region`.
+The directory must already exist and be private to the caller; pixels never
+travel through JSON. `seq` advances only when capture changes, `still_ms` is
+elapsed time since that capture, and `damage` bounds the changed 32-pixel
+tiles since `since` (full frame when the requested sequence is older than the
+previous capture). A request with the current sequence reports empty damage;
+omitting `path` requests metadata only (`written: false`). `after_seq` waits for
+`seq` to exceed that value; `still_ms` waits for that many milliseconds
+of stillness. When both are supplied, both conditions must hold.
+`timeout_ms` alone waits for 150 ms of stillness. The default deadline is 5 s;
+`timeout_ms` can extend it to at most 120 s. An unmet condition returns
+`frame-timeout`. Damage is grouped by connected 32-pixel tiles.
+Each changed capture emits a local `session.frame.changed` event with `sessionId`,
+`seq` and `damage`, allowing a co-located consumer to track animation across
+observations. Neither the event nor this file-writing method is forwarded by
+the remote WebSocket bridge.
+
+```json
+{"id":20,"method":"session.frame","params":{"session_id":"…","since":7,"path":"/run/user/1000/frame.raw"}}
+{"id":20,"result":{"seq":8,"still_ms":210,"width":1280,"height":720,"format":"bgrx","damage":[[32,32,32,32]],"written":true}}
+```
 
 ## Clipboard over the local protocol
 

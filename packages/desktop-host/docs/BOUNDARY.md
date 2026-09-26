@@ -1,7 +1,8 @@
-# Boundary sketch — two packages, one consumer
+# Boundary sketch — host and React Native client
 
-Written before implementation as the contract the code has to satisfy. Status
-markers are honest: `[decided]`, `[open]`.
+Written before implementation for the host/client split; the separate agent CLI
+is listed in the [repository README](../../../README.md). Status markers are
+honest: `[decided]`, `[open]`.
 
 ## Why two packages and not one
 

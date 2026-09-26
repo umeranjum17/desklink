@@ -80,6 +80,10 @@ fn main() -> Result<()> {
     )?;
     connection.flush()?;
 
+    let animate = std::env::args().any(|arg| arg == "--animate");
+    let moving = std::env::args().any(|arg| arg == "--move");
+    let mut position = 0usize;
+    let mut bright = false;
     let mut out = std::io::stdout();
     emit(
         &mut out,
@@ -88,84 +92,136 @@ fn main() -> Result<()> {
     );
 
     loop {
-        let event = connection
-            .wait_for_event()
-            .context("the X connection dropped")?;
-        match event {
-            Event::Expose(_) => {
-                paint(&connection, window, graphics, marker)?;
-                connection.flush()?;
-            }
-            Event::MotionNotify(motion) => {
-                emit(
-                    &mut out,
-                    "pointer",
-                    &[
-                        ("x", motion.event_x.to_string()),
-                        ("y", motion.event_y.to_string()),
-                    ],
-                );
-            }
-            Event::ButtonPress(press) => {
-                emit(
-                    &mut out,
-                    "button",
-                    &[
-                        ("x", press.event_x.to_string()),
-                        ("y", press.event_y.to_string()),
-                        ("button", press.detail.to_string()),
-                        ("phase", String::from("down")),
-                    ],
-                );
-            }
-            Event::ButtonRelease(release) => {
-                // A press and release at the same place is what the phone sends
-                // for a tap; recording the marker there makes the click visible in
-                // the captured picture as well as in this log.
-                if release.detail == 1 {
-                    marker = Some((release.event_x, release.event_y));
+        let event = if animate {
+            connection.poll_for_event()?
+        } else {
+            Some(
+                connection
+                    .wait_for_event()
+                    .context("the X connection dropped")?,
+            )
+        };
+        if let Some(event) = event {
+            match event {
+                Event::Expose(_) => {
                     paint(&connection, window, graphics, marker)?;
-                }
-                emit(
-                    &mut out,
-                    "button",
-                    &[
-                        ("x", release.event_x.to_string()),
-                        ("y", release.event_y.to_string()),
-                        ("button", release.detail.to_string()),
-                        ("phase", String::from("up")),
-                    ],
-                );
-                connection.flush()?;
-            }
-            Event::KeyPress(press) => {
-                emit(
-                    &mut out,
-                    "key",
-                    &[
-                        ("keycode", press.detail.to_string()),
-                        ("phase", String::from("down")),
-                    ],
-                );
-                if press.detail == 9 {
-                    // Escape: the lab's own stop key.
-                    emit(&mut out, "quit", &[]);
-                    connection.destroy_window(window)?;
                     connection.flush()?;
-                    return Ok(());
                 }
+                Event::MotionNotify(motion) => {
+                    emit(
+                        &mut out,
+                        "pointer",
+                        &[
+                            ("x", motion.event_x.to_string()),
+                            ("y", motion.event_y.to_string()),
+                        ],
+                    );
+                }
+                Event::ButtonPress(press) => {
+                    emit(
+                        &mut out,
+                        "button",
+                        &[
+                            ("x", press.event_x.to_string()),
+                            ("y", press.event_y.to_string()),
+                            ("button", press.detail.to_string()),
+                            ("phase", String::from("down")),
+                        ],
+                    );
+                }
+                Event::ButtonRelease(release) => {
+                    // A press and release at the same place is what the phone sends
+                    // for a tap; recording the marker there makes the click visible in
+                    // the captured picture as well as in this log.
+                    if release.detail == 1 {
+                        marker = Some((release.event_x, release.event_y));
+                        paint(&connection, window, graphics, marker)?;
+                    }
+                    emit(
+                        &mut out,
+                        "button",
+                        &[
+                            ("x", release.event_x.to_string()),
+                            ("y", release.event_y.to_string()),
+                            ("button", release.detail.to_string()),
+                            ("phase", String::from("up")),
+                        ],
+                    );
+                    connection.flush()?;
+                }
+                Event::KeyPress(press) => {
+                    emit(
+                        &mut out,
+                        "key",
+                        &[
+                            ("keycode", press.detail.to_string()),
+                            ("phase", String::from("down")),
+                        ],
+                    );
+                    if press.detail == 9 {
+                        // Escape: the lab's own stop key.
+                        emit(&mut out, "quit", &[]);
+                        connection.destroy_window(window)?;
+                        connection.flush()?;
+                        return Ok(());
+                    }
+                }
+                Event::KeyRelease(release) => {
+                    emit(
+                        &mut out,
+                        "key",
+                        &[
+                            ("keycode", release.detail.to_string()),
+                            ("phase", String::from("up")),
+                        ],
+                    );
+                }
+                _ => {}
             }
-            Event::KeyRelease(release) => {
-                emit(
-                    &mut out,
-                    "key",
-                    &[
-                        ("keycode", release.detail.to_string()),
-                        ("phase", String::from("up")),
-                    ],
-                );
+        }
+        if animate {
+            if moving {
+                connection.change_gc(
+                    graphics,
+                    &x11rb::protocol::xproto::ChangeGCAux::new().foreground(0x00d04040),
+                )?;
+                connection.poly_fill_rectangle(
+                    window,
+                    graphics,
+                    &[Rectangle {
+                        x: (1168 + position * 32) as i16,
+                        y: 48,
+                        width: 32,
+                        height: 32,
+                    }],
+                )?;
+                position = (position + 1) % 3;
             }
-            _ => {}
+            bright = !bright;
+            connection.change_gc(
+                graphics,
+                &x11rb::protocol::xproto::ChangeGCAux::new().foreground(if bright {
+                    0x00ffffff
+                } else {
+                    0x00000000
+                }),
+            )?;
+            connection.poly_fill_rectangle(
+                window,
+                graphics,
+                &[Rectangle {
+                    x: if moving {
+                        (1168 + position * 32) as i16
+                    } else {
+                        1200
+                    },
+                    y: 48,
+                    width: 32,
+                    height: 32,
+                }],
+            )?;
+            connection.flush()?;
+            std::thread::sleep(std::time::Duration::from_millis(80));
         }
     }
 }

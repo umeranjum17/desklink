@@ -7,6 +7,7 @@ channel your application already trusts.
 | --- | --- |
 | [`@desklink/host`](packages/desktop-host) | The per-user engine: screen capture, VP9 encode, WebRTC, pointer/keyboard/clipboard input, behind a [versioned local protocol](packages/desktop-host/docs/PROTOCOL.md). A prebuilt engine ships for Linux x64 (glibc 2.36+). |
 | [`@desklink/react-native`](packages/desktop-client) | A view and a session that render that desktop in a React Native app (Android, web) and turn touch, keyboard and clipboard into its input. |
+| [`@desklink/axi`](packages/axi) | A [Linux desktop CLI](packages/axi/README.md) for agents: text and changed regions by default, image crops on request. |
 
 Where each piece's responsibility ends is in
 [docs/BOUNDARY.md](packages/desktop-host/docs/BOUNDARY.md).
@@ -29,7 +30,7 @@ the compositor for consent first; input needs [kernel input access](packages/des
 
 ```sh
 npm install
-npm run build          # compile @desklink/host
+npm run build          # compile @desklink/host and @desklink/axi
 npm test               # the TypeScript packages' tests
 npm run test:engine    # the Rust engine's tests; needs the native libraries CI installs
 ```

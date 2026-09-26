@@ -88,7 +88,8 @@ export class EngineClient {
         const child = spawn(command, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
         const client = new EngineClient(child, options);
         try {
-            await client.request('hello', { protocol: PROTOCOL_VERSION });
+            // The macOS diagnostic-only engine still speaks v2 until its session work lands.
+            await client.request('hello', { protocol: process.platform === 'darwin' ? 2 : PROTOCOL_VERSION });
         } catch (error) {
             // A refused or timed-out handshake must not leave a child running
             // with its exit still wired to the caller's state.
@@ -112,7 +113,7 @@ export class EngineClient {
             const event = parsed as unknown as EngineEvent;
             // Setup notifications are drained by the consumer; queue them so a
             // slow reader cannot lose an offer or a candidate.
-            this.queue.push(event);
+            if (event.event !== 'session.frame.changed' || options.onEvent === undefined) this.queue.push(event);
             options.onEvent?.(event);
             return;
         }

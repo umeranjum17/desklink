@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// A request from the consumer to the engine.
 #[derive(Debug, Deserialize)]
@@ -128,6 +128,23 @@ fn default_bitrate() -> u32 {
 }
 fn default_fps() -> u32 {
     30
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FrameParams {
+    pub session_id: String,
+    #[serde(default)]
+    pub since: Option<u64>,
+    #[serde(default)]
+    pub after_seq: Option<u64>,
+    #[serde(default)]
+    pub still_ms: Option<u64>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub region: Option<[usize; 4]>,
 }
 
 #[derive(Debug, Deserialize)]

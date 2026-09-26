@@ -55,7 +55,7 @@ pub struct StreamGeometry {
     pub buffer_type: String,
 }
 
-pub type FrameSink = Box<dyn Fn(I420, u64) + Send + 'static>;
+pub type FrameSink = Box<dyn Fn(I420, u64, Vec<u8>) + Send + 'static>;
 
 /// A running capture. Dropping it quits the PipeWire loop and joins its thread.
 pub struct Capture {
@@ -393,7 +393,17 @@ fn run_loop(
                         }
                     }
                     state.frames.fetch_add(1, Ordering::Relaxed);
-                    (state.sink)(i420, seq);
+                    if let Some(raw) = crate::convert::to_bgrx(
+                        chunk_bytes,
+                        w,
+                        h,
+                        stride,
+                        format,
+                        state.box_w,
+                        state.box_h,
+                    ) {
+                        (state.sink)(i420, seq, raw);
+                    }
                     // The first frame the loop actually delivers is the only
                     // proof capture started; sending this when `run_loop`
                     // returns would be after the main loop quits, too late for

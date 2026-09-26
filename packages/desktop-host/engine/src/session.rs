@@ -61,11 +61,81 @@ pub struct Metrics {
     pub input_rejected: u64,
 }
 
-/// Which desktop is being captured.
-///
-/// Dropping either variant stops its capture: the portal variant drops the
-/// PipeWire stream, which is what releases the compositor's consent, and the X11
-/// variant stops reading the server.
+fn tile_hashes(raw: &[u8], width: usize, height: usize) -> Vec<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut hashes = Vec::new();
+    for y in (0..height).step_by(32) {
+        for x in (0..width).step_by(32) {
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            for row in y..(y + 32).min(height) {
+                raw[(row * width + x) * 4..(row * width + (x + 32).min(width)) * 4].hash(&mut hash);
+            }
+            hashes.push(hash.finish());
+        }
+    }
+    hashes
+}
+
+/// Group changed 32-pixel tiles without merging unrelated regions.
+fn dirty_regions(hashes: &[u64], previous: &[u64], width: usize, height: usize) -> Vec<[usize; 4]> {
+    if hashes.len() != previous.len() {
+        return vec![[0, 0, width, height]];
+    }
+    let columns = width.div_ceil(32);
+    let mut dirty: Vec<bool> = hashes
+        .iter()
+        .zip(previous)
+        .map(|(now, before)| now != before)
+        .collect();
+    let mut regions = Vec::new();
+    for index in 0..dirty.len() {
+        if !dirty[index] {
+            continue;
+        }
+        dirty[index] = false;
+        let mut stack = vec![index];
+        let (mut left, mut top, mut right, mut bottom) = (
+            index % columns,
+            index / columns,
+            index % columns,
+            index / columns,
+        );
+        while let Some(tile) = stack.pop() {
+            let col = tile % columns;
+            let row = tile / columns;
+            left = left.min(col);
+            right = right.max(col);
+            top = top.min(row);
+            bottom = bottom.max(row);
+            for neighbor in [
+                tile.checked_sub(columns),
+                (row + 1 < height.div_ceil(32)).then_some(tile + columns),
+                (col > 0).then(|| tile - 1),
+                (col + 1 < columns).then_some(tile + 1),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if dirty[neighbor] {
+                    dirty[neighbor] = false;
+                    stack.push(neighbor);
+                }
+            }
+        }
+        let x = left * 32;
+        let y = top * 32;
+        regions.push([
+            x,
+            y,
+            ((right + 1) * 32).min(width) - x,
+            ((bottom + 1) * 32).min(height) - y,
+        ]);
+    }
+    regions
+}
+
+/// Dropping either variant stops its capture: the portal releases consent and
+/// the X11 variant stops reading its server.
 enum FrameSource {
     Portal(Capture),
     X11(X11Capture),
@@ -137,17 +207,17 @@ fn select_x11(
                     let started = Instant::now();
                     let frame = {
                         let mut desktop = lock(&desktop);
-                        desktop.capture(max_width, max_height)
+                        desktop.capture_with_pixels(max_width, max_height)
                     };
                     match frame {
-                        Ok(frame) => {
+                        Ok((frame, raw)) => {
                             use std::hash::{Hash, Hasher};
                             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                            frame.data.hash(&mut hasher);
+                            raw.hash(&mut hasher);
                             let hash = hasher.finish();
                             if last_hash != Some(hash) {
                                 last_hash = Some(hash);
-                                sink(frame, sequence);
+                                sink(frame, sequence, raw);
                                 sequence += 1;
                             }
                         }
@@ -432,6 +502,10 @@ pub enum SessionEvent {
         transport: String,
         first_frame: bool,
     },
+    Frame {
+        seq: u64,
+        damage: Vec<[usize; 4]>,
+    },
     RestoreToken(String),
     Revoked {
         reason: String,
@@ -447,6 +521,8 @@ pub struct Notice {
     pub event: SessionEvent,
 }
 
+type FrameSnapshot = (u64, Instant, usize, usize, Vec<u8>, Vec<u64>, Vec<u64>);
+
 /// Everything a session's background tasks need, shared rather than borrowed so
 /// the consumer can own the `Session` handle while the pipeline runs.
 struct Inner {
@@ -456,6 +532,8 @@ struct Inner {
     source: SelectedSource,
     geometry: serde_json::Value,
     metrics: Arc<Mutex<Metrics>>,
+    latest: Arc<Mutex<Option<FrameSnapshot>>>,
+    frame_changes: tokio::sync::watch::Receiver<u64>,
     peer: Arc<VideoPeer>,
     encoder: Mutex<Encoder>,
     input: Mutex<Option<InputTarget>>,
@@ -561,8 +639,45 @@ impl Session {
 
         let metrics = Arc::new(Mutex::new(Metrics::default()));
         let (frame_tx, frame_rx) = latest_frame();
+        let latest = Arc::new(Mutex::new(None));
+        let observed = latest.clone();
+        let (frame_tx_signal, frame_changes) = tokio::sync::watch::channel(0u64);
         let captured = metrics.clone();
-        let sink = Box::new(move |frame: I420, _seq: u64| {
+        let frame_events = events.clone();
+        let frame_session_id = id.clone();
+        let sink = Box::new(move |frame: I420, _seq: u64, raw: Vec<u8>| {
+            let hashes = tile_hashes(&raw, frame.width, frame.height);
+            if let Ok(mut held) = observed.lock() {
+                let unchanged =
+                    held.as_ref()
+                        .is_some_and(|(_, _, width, height, _, current, _)| {
+                            *width == frame.width && *height == frame.height && current == &hashes
+                        });
+                if !unchanged {
+                    let seq = held
+                        .as_ref()
+                        .map_or(1, |(seq, _, _, _, _, _, _): &FrameSnapshot| seq + 1);
+                    let previous = held
+                        .as_ref()
+                        .map(|(_, _, _, _, _, current, _)| current.clone())
+                        .unwrap_or_default();
+                    let damage = dirty_regions(&hashes, &previous, frame.width, frame.height);
+                    *held = Some((
+                        seq,
+                        Instant::now(),
+                        frame.width,
+                        frame.height,
+                        raw,
+                        hashes,
+                        previous,
+                    ));
+                    frame_tx_signal.send_replace(seq);
+                    let _ = frame_events.send(Notice {
+                        session_id: frame_session_id.clone(),
+                        event: SessionEvent::Frame { seq, damage },
+                    });
+                }
+            }
             if let Ok(mut m) = captured.lock() {
                 m.captured_frames += 1;
             }
@@ -694,6 +809,8 @@ impl Session {
             source,
             geometry,
             metrics,
+            latest,
+            frame_changes,
             peer: Arc::new(peer),
             encoder: Mutex::new(encoder),
             input: Mutex::new(input),
@@ -737,6 +854,100 @@ impl Session {
 
     pub fn source(&self) -> &SelectedSource {
         &self.inner.source
+    }
+
+    pub async fn wait_frame(
+        &self,
+        after_seq: Option<u64>,
+        still_ms: Option<u64>,
+        timeout_ms: u64,
+    ) -> std::result::Result<(), SessionError> {
+        let mut changes = self.inner.frame_changes.clone();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms.min(120_000));
+        loop {
+            let (seq, still) = self
+                .inner
+                .latest
+                .lock()
+                .ok()
+                .and_then(|held| held.as_ref().map(|(seq, at, ..)| (*seq, at.elapsed())))
+                .unwrap_or((0, Duration::ZERO));
+            let target = still_ms.or(if after_seq.is_none() { Some(150) } else { None });
+            let advanced = after_seq.is_none_or(|after| seq > after);
+            if seq > 0 && advanced && target.is_none_or(|ms| still >= Duration::from_millis(ms)) {
+                return Ok(());
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(SessionError::new(
+                    "frame-timeout",
+                    "frame condition not met before deadline",
+                ));
+            }
+            let until_still = if seq > 0 && advanced {
+                target.map_or(remaining, |ms| {
+                    Duration::from_millis(ms).saturating_sub(still)
+                })
+            } else {
+                remaining
+            };
+            let _ = tokio::time::timeout(remaining.min(until_still), changes.changed()).await;
+        }
+    }
+
+    /// Write only the requested lossless frame bytes; JSON carries metadata, never pixels.
+    pub fn frame(
+        &self,
+        since: Option<u64>,
+        path: &str,
+        region: Option<[usize; 4]>,
+    ) -> std::result::Result<serde_json::Value, SessionError> {
+        if !self.inner.permissions.contains(&Permission::View) {
+            return Err(SessionError::new(
+                "permission",
+                "view permission is required",
+            ));
+        }
+        let held = lock(&self.inner.latest);
+        let (seq, at, width, height, raw, hashes, previous) = held
+            .as_ref()
+            .ok_or_else(|| SessionError::new("frame", "the first frame has not arrived"))?;
+        let [x, y, w, h] = region.unwrap_or([0, 0, *width, *height]);
+        if w == 0
+            || h == 0
+            || x.checked_add(w).is_none_or(|end| end > *width)
+            || y.checked_add(h).is_none_or(|end| end > *height)
+        {
+            return Err(SessionError::new(
+                "coordinates",
+                "region exceeds the encoded surface",
+            ));
+        }
+        let damage = if since == Some(*seq) {
+            Vec::new()
+        } else if since == seq.checked_sub(1) && previous.len() == hashes.len() {
+            dirty_regions(hashes, previous, *width, *height)
+        } else {
+            vec![[0, 0, *width, *height]]
+        };
+        // An empty path asks for metadata only; no pixels are copied or written.
+        let pixels = if path.is_empty() {
+            None
+        } else {
+            let mut pixels = Vec::with_capacity(w * h * 4);
+            for row in y..y + h {
+                pixels.extend_from_slice(&raw[(row * width + x) * 4..(row * width + x + w) * 4]);
+            }
+            Some(pixels)
+        };
+        let result = serde_json::json!({ "seq": seq, "still_ms": at.elapsed().as_millis() as u64,
+            "width": w, "height": h, "format": "bgrx", "damage": damage, "written": !path.is_empty() });
+        drop(held);
+        if let Some(pixels) = pixels {
+            std::fs::write(path, pixels)
+                .map_err(|error| SessionError::new("frame", error.to_string()))?;
+        }
+        Ok(result)
     }
 
     pub fn metrics(&self) -> Metrics {
@@ -1640,6 +1851,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tile_damage_at_origin_does_not_underflow_or_hide_other_tiles() {
+        assert_eq!(
+            dirty_regions(&[1, 0, 0, 1], &[0; 4], 64, 64),
+            vec![[0, 0, 32, 32], [32, 32, 32, 32]]
+        );
+    }
+
+    #[test]
     fn a_small_source_is_never_upscaled() {
         assert_eq!(fit(1000, 600, 1280, 800), (1000, 600));
     }
@@ -1718,6 +1937,8 @@ mod tests {
                 "origin": { "x": 0, "y": 0 },
             }),
             metrics: Arc::new(Mutex::new(Metrics::default())),
+            latest: Arc::new(Mutex::new(None)),
+            frame_changes: tokio::sync::watch::channel(0).1,
             peer: Arc::new(peer),
             encoder: Mutex::new(Encoder::new(64, 64, 1000, 30, 1).expect("an encoder")),
             input: Mutex::new(Some(InputTarget {
