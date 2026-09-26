@@ -11,6 +11,9 @@ particular application.
 
 ## What it does
 
+The following working desktop path is Linux-only; the macOS source build currently
+reports capabilities but cannot open a desktop session (see [macOS status](#macos-status)).
+
 - **Capture** through the XDG Desktop Portal (`ScreenCast`) and PipeWire, with
   compositor consent, or from an explicitly selected X display's root window.
   The portal path asks for shared-memory buffers rather than DMA-BUFs, keeping
@@ -63,10 +66,16 @@ The one step no install does for you is [kernel input access](#kernel-input-acce
 and only the portal backend needs it.
 
 There is no prebuilt engine for any other platform. Another Linux (arm64, musl)
-can [build it from source](#building-from-source). macOS remote desktop is not
-available yet: engine resolution is off by default there, and setting
+can [build it from source](#building-from-source). Windows remains unsupported.
+
+### macOS status
+
+A macOS source build can report displays and current permissions without
+prompting, but cannot open a remote desktop session even after grants. See the
+[protocol's macOS status](docs/PROTOCOL.md#macos-status) for supported commands
+and wire behavior. Engine resolution is off by default on macOS;
 `DESKLINK_MACOS=1` only allows a configured or local candidate engine to be
-resolved; it does not provide Mac capture or input. Windows remains unsupported.
+resolved, not a working session.
 
 Point `MUXR_DESKLINK_ENGINE` at a binary built elsewhere if you have one. The
 package never searches `PATH` for a same-named program: "a binary called
@@ -82,9 +91,13 @@ cargo build --release --manifest-path engine/Cargo.toml
 ./bin/desklink-host.mjs capabilities
 ```
 
-A source build links system libraries through `pkg-config` (and libxcb
-directly), compiles `native/vpx_shim.c` against libvpx's headers, and builds
-the vendored inputtino project with CMake. On a clean machine, install:
+On macOS, prefix the launcher commands with `DESKLINK_MACOS=1` to resolve the
+local candidate; this does not enable desktop capture.
+
+On Linux, a source build links system libraries through `pkg-config` (and
+libxcb directly), compiles `native/vpx_shim.c` against libvpx's headers, and
+builds the vendored inputtino project with CMake. On a clean Linux machine,
+install:
 
 | Need | Debian/Ubuntu | Fedora | Arch |
 |---|---|---|---|
@@ -103,7 +116,10 @@ prebuilt package; in particular, libxcb is not a prebuilt runtime requirement.
 Nothing is downloaded by the build itself. The engine step in `yarn run check`
 skips with a list of missing prerequisites when any of these is absent; direct
 `cargo test --manifest-path engine/Cargo.toml` does not skip and needs them
-installed. Only a machine with all of them compiles and tests the crate.
+installed. Only a Linux machine with all of them compiles and tests the crate.
+On macOS the source build does not use these Linux native libraries or shims;
+run `cargo test --bin desklink-host --manifest-path engine/Cargo.toml` for its
+binary tests (the full test command also builds a Linux-only example).
 
 ### Kernel input access
 
@@ -127,7 +143,7 @@ session instead uses XTest and does not need `/dev/uinput`.
 
 ## Licence and provenance
 
-Apache-2.0. The engine links two permissive native libraries — libvpx
+Apache-2.0. The Linux engine links two permissive native libraries — libvpx
 (BSD-3-Clause) and inputtino (MIT, vendored under `engine/vendor/`) — and calls
 the portal over D-Bus rather than linking it. See `NOTICE`. The prebuilt engine
 links libvpx statically and carries every licence text it owes, including each

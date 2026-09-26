@@ -5,8 +5,10 @@ the user's session starts it and talks to it over an inherited private channel â
 the engine never opens a public listener, never runs as root, and never installs
 a service.
 
-This document is the engine's whole public surface. It contains no application
-concepts: no accounts, no chat, no machine ids, no pane ids.
+This document describes the working Linux engine protocol. The macOS source
+build currently implements only the diagnostic subset described in
+[macOS status](#macos-status). The protocol contains no application concepts:
+no accounts, no chat, no machine ids, no pane ids.
 
 ## Starting the engine
 
@@ -68,6 +70,19 @@ The consumer must send `hello` first, and a version the engine does not speak is
 refused with `error.code = "unsupported-protocol"`. Until a supported `hello`
 arrives, every other request is refused the same way; `capabilities` and
 `shutdown` are the two that answer without a handshake.
+
+## macOS status
+
+The macOS source build accepts `hello` (protocol 2), `capabilities` and
+`shutdown` on stdio. `capabilities` does not prompt: it reports active displays
+(with pixel and point dimensions, origin and scale), keyboard layout, console
+session and current Screen Recording/Accessibility grant states. Its
+`capture.backends` and `encode.codecs` are empty, input controls and clipboard
+read/write are false, even when the grants are present. `session.open` accepts
+only an absent source or `{"kind":"display"}`; it may request missing grants
+for `control` or `view`, but never opens a session, produces an offer or sends a
+frame. Other session methods are not implemented. The Linux examples and
+lifecycle below are not a claim of macOS support.
 
 ## Capabilities
 
