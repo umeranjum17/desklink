@@ -113,7 +113,7 @@ export class EngineClient {
             const event = parsed as unknown as EngineEvent;
             // Setup notifications are drained by the consumer; queue them so a
             // slow reader cannot lose an offer or a candidate.
-            this.queue.push(event);
+            if (event.event !== 'session.frame.changed' || options.onEvent === undefined) this.queue.push(event);
             options.onEvent?.(event);
             return;
         }

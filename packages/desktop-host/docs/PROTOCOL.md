@@ -337,10 +337,13 @@ tiles since `since` (full frame when the requested sequence is older than the
 previous capture). A request with the current sequence reports empty damage;
 omitting `path` requests metadata only (`written: false`). `after_seq` waits for
 `seq` to exceed that value; `still_ms` waits for that many milliseconds
-of stillness. When both are supplied, either condition releases the wait.
+of stillness. When both are supplied, both conditions must hold.
 `timeout_ms` alone waits for 150 ms of stillness. A deadline (at most 120 s)
 returns `frame-timeout`. Damage is grouped by connected 32-pixel tiles.
-This file-writing method is local-only and is refused by the remote WebSocket bridge.
+Each changed capture emits a local `session.frame.changed` event with `sessionId`,
+`seq` and `damage`, allowing a co-located consumer to track animation across
+observations. Neither the event nor this file-writing method is forwarded by
+the remote WebSocket bridge.
 
 ```json
 {"id":20,"method":"session.frame","params":{"session_id":"…","since":7,"path":"/run/user/1000/frame.raw"}}

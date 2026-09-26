@@ -402,6 +402,10 @@ fn render_event(notice: session::Notice) -> Option<String> {
             "session.state",
             serde_json::json!({ "sessionId": session_id, "capture": capture, "transport": transport, "firstFrame": first_frame }),
         ),
+        session::SessionEvent::Frame { seq, damage } => (
+            "session.frame.changed",
+            serde_json::json!({ "sessionId": session_id, "seq": seq, "damage": damage }),
+        ),
         session::SessionEvent::RestoreToken(token) => (
             "session.restoreToken",
             serde_json::json!({ "sessionId": session_id, "token": token }),
@@ -553,8 +557,17 @@ async fn dispatch(
             let params: protocol::FrameParams = serde_json::from_value(request.params.clone())
                 .map_err(|error| ErrorBody::new("malformed", error.to_string()))?;
             check_session(session, &params.session_id, None)?;
-            if params.after_seq.is_some() || params.still_ms.is_some() || params.timeout_ms.is_some() {
-                session.wait_frame(params.after_seq, params.still_ms, params.timeout_ms.unwrap_or(5000)).await
+            if params.after_seq.is_some()
+                || params.still_ms.is_some()
+                || params.timeout_ms.is_some()
+            {
+                session
+                    .wait_frame(
+                        params.after_seq,
+                        params.still_ms,
+                        params.timeout_ms.unwrap_or(5000),
+                    )
+                    .await
                     .map_err(|error| ErrorBody::new(error.code, error.message))?;
             }
             session

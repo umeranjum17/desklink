@@ -97,6 +97,7 @@ export type EngineEvent =
               sdpMLineIndex: number | null;
           };
       }
+    | { event: 'session.frame.changed'; params: { sessionId: string; seq: number; damage: number[][] } }
     | { event: 'session.state'; params: { sessionId: string; capture: string; transport: string; firstFrame: boolean } }
     | { event: 'session.restoreToken'; params: { sessionId: string; token: string } }
     | { event: 'session.revoked'; params: { sessionId: string; reason: string } };

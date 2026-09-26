@@ -104,7 +104,7 @@ export class Bridge {
             // to the attached controllers watching this session.
             onEvent: (event) => {
                 options.engineOptions?.onEvent?.(event);
-                if (event.event === 'session.restoreToken') return;
+                if (event.event === 'session.restoreToken' || event.event === 'session.frame.changed') return;
                 const line = JSON.stringify(event);
                 for (const socket of sockets.clients) {
                     if (socket.readyState === socket.OPEN) socket.send(line);

@@ -76,11 +76,66 @@ fn tile_hashes(raw: &[u8], width: usize, height: usize) -> Vec<u64> {
     hashes
 }
 
-/// Which desktop is being captured.
-///
-/// Dropping either variant stops its capture: the portal variant drops the
-/// PipeWire stream, which is what releases the compositor's consent, and the X11
-/// variant stops reading the server.
+/// Group changed 32-pixel tiles without merging unrelated regions.
+fn dirty_regions(hashes: &[u64], previous: &[u64], width: usize, height: usize) -> Vec<[usize; 4]> {
+    if hashes.len() != previous.len() {
+        return vec![[0, 0, width, height]];
+    }
+    let columns = width.div_ceil(32);
+    let mut dirty: Vec<bool> = hashes
+        .iter()
+        .zip(previous)
+        .map(|(now, before)| now != before)
+        .collect();
+    let mut regions = Vec::new();
+    for index in 0..dirty.len() {
+        if !dirty[index] {
+            continue;
+        }
+        dirty[index] = false;
+        let mut stack = vec![index];
+        let (mut left, mut top, mut right, mut bottom) = (
+            index % columns,
+            index / columns,
+            index % columns,
+            index / columns,
+        );
+        while let Some(tile) = stack.pop() {
+            let col = tile % columns;
+            let row = tile / columns;
+            left = left.min(col);
+            right = right.max(col);
+            top = top.min(row);
+            bottom = bottom.max(row);
+            for neighbor in [
+                tile.checked_sub(columns),
+                (row + 1 < height.div_ceil(32)).then_some(tile + columns),
+                (col > 0).then(|| tile - 1),
+                (col + 1 < columns).then_some(tile + 1),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if dirty[neighbor] {
+                    dirty[neighbor] = false;
+                    stack.push(neighbor);
+                }
+            }
+        }
+        let x = left * 32;
+        let y = top * 32;
+        regions.push([
+            x,
+            y,
+            ((right + 1) * 32).min(width) - x,
+            ((bottom + 1) * 32).min(height) - y,
+        ]);
+    }
+    regions
+}
+
+/// Dropping either variant stops its capture: the portal releases consent and
+/// the X11 variant stops reading its server.
 enum FrameSource {
     Portal(Capture),
     X11(X11Capture),
@@ -447,6 +502,10 @@ pub enum SessionEvent {
         transport: String,
         first_frame: bool,
     },
+    Frame {
+        seq: u64,
+        damage: Vec<[usize; 4]>,
+    },
     RestoreToken(String),
     Revoked {
         reason: String,
@@ -582,6 +641,8 @@ impl Session {
         let observed = latest.clone();
         let (frame_tx_signal, frame_changes) = tokio::sync::watch::channel(0u64);
         let captured = metrics.clone();
+        let frame_events = events.clone();
+        let frame_session_id = id.clone();
         let sink = Box::new(move |frame: I420, _seq: u64, raw: Vec<u8>| {
             let hashes = tile_hashes(&raw, frame.width, frame.height);
             if let Ok(mut held) = observed.lock() {
@@ -601,6 +662,7 @@ impl Session {
                     .as_ref()
                     .map(|(_, _, _, _, _, current, _)| current.clone())
                     .unwrap_or_default();
+                let damage = dirty_regions(&hashes, &previous, frame.width, frame.height);
                 *held = Some((
                     seq,
                     Instant::now(),
@@ -611,6 +673,10 @@ impl Session {
                     previous,
                 ));
                 frame_tx_signal.send_replace(seq);
+                let _ = frame_events.send(Notice {
+                    session_id: frame_session_id.clone(),
+                    event: SessionEvent::Frame { seq, damage },
+                });
             }
             if let Ok(mut m) = captured.lock() {
                 m.captured_frames += 1;
@@ -790,22 +856,41 @@ impl Session {
         &self.inner.source
     }
 
-    pub async fn wait_frame(&self, after_seq: Option<u64>, still_ms: Option<u64>, timeout_ms: u64) -> std::result::Result<(), SessionError> {
+    pub async fn wait_frame(
+        &self,
+        after_seq: Option<u64>,
+        still_ms: Option<u64>,
+        timeout_ms: u64,
+    ) -> std::result::Result<(), SessionError> {
         let mut changes = self.inner.frame_changes.clone();
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms.min(120_000));
         loop {
-            let (seq, still) = self.inner.latest.lock().ok()
+            let (seq, still) = self
+                .inner
+                .latest
+                .lock()
+                .ok()
                 .and_then(|held| held.as_ref().map(|(seq, at, ..)| (*seq, at.elapsed())))
                 .unwrap_or((0, Duration::ZERO));
-            if seq > 0 && (after_seq.is_some_and(|after| seq > after)
-                || still_ms.or(if after_seq.is_none() { Some(150) } else { None })
-                    .is_some_and(|target| still >= Duration::from_millis(target))) {
+            let target = still_ms.or(if after_seq.is_none() { Some(150) } else { None });
+            let advanced = after_seq.is_none_or(|after| seq > after);
+            if seq > 0 && advanced && target.is_none_or(|ms| still >= Duration::from_millis(ms)) {
                 return Ok(());
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() { return Err(SessionError::new("frame-timeout", "frame condition not met before deadline")); }
-            let until_still = if seq > 0 { still_ms.or(if after_seq.is_none() { Some(150) } else { None })
-                .map_or(remaining, |target| Duration::from_millis(target).saturating_sub(still)) } else { remaining };
+            if remaining.is_zero() {
+                return Err(SessionError::new(
+                    "frame-timeout",
+                    "frame condition not met before deadline",
+                ));
+            }
+            let until_still = if seq > 0 && advanced {
+                target.map_or(remaining, |ms| {
+                    Duration::from_millis(ms).saturating_sub(still)
+                })
+            } else {
+                remaining
+            };
             let _ = tokio::time::timeout(remaining.min(until_still), changes.changed()).await;
         }
     }
@@ -841,31 +926,7 @@ impl Session {
         let damage = if since == Some(*seq) {
             Vec::new()
         } else if since == seq.checked_sub(1) && previous.len() == hashes.len() {
-            let columns = width.div_ceil(32);
-            let mut dirty: Vec<bool> = hashes.iter().zip(previous).map(|(now, before)| now != before).collect();
-            let mut regions = Vec::new();
-            for index in 0..dirty.len() {
-                if !dirty[index] { continue; }
-                dirty[index] = false;
-                let mut stack = vec![index];
-                let (mut left, mut top, mut right, mut bottom) = (index % columns, index / columns, index % columns, index / columns);
-                while let Some(tile) = stack.pop() {
-                    let col = tile % columns;
-                    let row = tile / columns;
-                    left = left.min(col);
-                    right = right.max(col);
-                    top = top.min(row);
-                    bottom = bottom.max(row);
-                    for neighbor in [tile.checked_sub(columns), (row + 1 < height.div_ceil(32)).then_some(tile + columns),
-                        (col > 0).then_some(tile - 1), (col + 1 < columns).then_some(tile + 1)].into_iter().flatten() {
-                        if dirty[neighbor] { dirty[neighbor] = false; stack.push(neighbor); }
-                    }
-                }
-                let x = left * 32;
-                let y = top * 32;
-                regions.push([x, y, ((right + 1) * 32).min(*width) - x, ((bottom + 1) * 32).min(*height) - y]);
-            }
-            regions
+            dirty_regions(hashes, previous, *width, *height)
         } else {
             vec![[0, 0, *width, *height]]
         };
@@ -1788,6 +1849,14 @@ fn opaque_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tile_damage_at_origin_does_not_underflow_or_hide_other_tiles() {
+        assert_eq!(
+            dirty_regions(&[1, 0, 0, 1], &[0; 4], 64, 64),
+            vec![[0, 0, 32, 32], [32, 32, 32, 32]]
+        );
+    }
 
     #[test]
     fn a_small_source_is_never_upscaled() {

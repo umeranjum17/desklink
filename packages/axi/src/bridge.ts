@@ -73,10 +73,20 @@ export async function serve(args: string[]): Promise<void> {
   const executable = resolveEngine(process.env.DESKLINK_AXI_ENGINE);
   if (!executable) throw new Error('desktop engine unavailable; set DESKLINK_AXI_ENGINE');
   const events: EngineEvent[] = [];
+  const motion = new Map<string, {seq:number;at:number;count:number;reported:boolean}>();
   let peer: PeerConnection | undefined;
   let offerReady = false;
   const engine = await EngineClient.start(executable.command, executable.args, { requestTimeoutMs: 125000, onEvent: event => {
-    events.push(event);
+    if (event.event !== 'session.frame.changed') events.push(event);
+    if (event.event === 'session.frame.changed') {
+      const now = Date.now();
+      for (const box of event.params.damage) {
+        const region = box.join(',');
+        const prior = motion.get(region);
+        motion.set(region, {seq:event.params.seq,at:now,count:prior && prior.seq === event.params.seq-1 && now-prior.at<600 ? prior.count+1 : 1,reported:prior?.reported ?? false});
+      }
+      for (const [region,state] of motion) if (now-state.at>600) motion.delete(region);
+    }
     if (offerReady && peer && event.event === 'session.candidate') peer.addRemoteCandidate(event.params.candidate, event.params.sdpMid || '0');
   } });
   const opened = await engine.openSession({
@@ -110,7 +120,6 @@ export async function serve(args: string[]): Promise<void> {
   type Item = { ref: string; text: string; x: number; y: number; conf: number; line: string; words: {text:string;x:number;y:number;w:number;h:number}[] };
   let text: Item[] = []; 
   let regions: string[] = [];
-  const motion = new Map<string, {seq:number;at:number;count:number;reported:boolean}>();
   let lastFrame: {seq:number;width:number;height:number;raw:Buffer} | undefined;
   let observed: {seq:number;damage:string[]} | undefined;
   const capture = async (since = baseline, wait: {after_seq?:number;still_ms?:number;timeout_ms?:number} = {}) => {
@@ -228,7 +237,10 @@ export async function serve(args: string[]): Promise<void> {
       } else {
         let seen = baseline, found = false;
         while (Date.now() < deadline) {
-          const snapshot = await capture(seen, {after_seq:seen,timeout_ms:Math.max(0,deadline-Date.now())});
+          const snapshot = await capture(seen, {after_seq:seen,timeout_ms:Math.max(0,deadline-Date.now())}).catch(error => {
+            if ((error as {code?:string}).code === 'frame-timeout') throw new Error('settle-timeout: condition not met before deadline');
+            throw error;
+          });
           pendingDamage ??= [];
           pendingDamage.push(...snapshot.damage);
           waitSeen = snapshot.seq;
@@ -248,7 +260,11 @@ export async function serve(args: string[]): Promise<void> {
       if (wait !== 'none') {
         if (/^\d+$/.test(wait!)) await new Promise(r=>setTimeout(r,Number(wait)));
         else {
-          if (wait === 'settle') await new Promise(r=>setTimeout(r,150));
+          if (wait === 'settle') {
+            await engine.request('session.frame',{session_id:opened.sessionId,after_seq:baseline,timeout_ms:500}).catch(error => {
+              if ((error as {code?:string}).code !== 'frame-timeout') throw error;
+            });
+          }
           await engine.request('session.frame',{session_id:opened.sessionId,since:baseline,...(wait === 'change' ? {after_seq:baseline} : {still_ms:150}),timeout_ms:5000});
         }
       }
@@ -303,24 +319,20 @@ export async function serve(args: string[]): Promise<void> {
         return false;
       });
       const gone=unmatched.length;
-      const now=Date.now();
-      if (appeared.length || gone || frame.still_ms>=150 || frame.seq !== frame.previous+1 ||
-          frame.damage.some(region=>!motion.has(region) && [...motion.values()].some(state=>state.count>=2))) motion.clear();
+      if (frame.still_ms>=150) motion.clear();
       const animating: string[] = [];
       const visible: string[] = [];
       for (const region of frame.damage) {
-        const prior=motion.get(region);
-        const state = prior && prior.seq===frame.previous && now-prior.at<600
-          ? {seq:frame.seq,at:now,count:prior.count+1,reported:prior.reported}
-          : {seq:frame.seq,at:now,count:1,reported:false};
-        motion.set(region,state);
-        if (state.count>=3 && !args.includes('--include-animating')) {
+        const state=motion.get(region);
+        const [x,y,w,h] = region.split(',').map(Number);
+        const textChanged = [...appeared,...unmatched].some(t => t.words.some(word => word.x<x!+w! && word.x+word.w>x! && word.y<y!+h! && word.y+word.h>y!));
+        if (state && state.count>=3 && !textChanged && !args.includes('--include-animating')) {
           if (!state.reported) { animating.push(region); state.reported=true; }
         } else visible.push(region);
       }
       if (observed) observed.damage=visible;
       const changed = visible.length ? `${visible.length} region since frame ${frame.previous}` : `none since frame ${frame.previous}`;
-      return `changed: ${changed}\nregions[${visible.length}]{ref,box}:\n${visible.map((d,i)=>`  @r${i+1},"${d}"`).join('\n')}\nappeared[${Math.min(appeared.length,20)} of ${appeared.length}]{${fields.join(',')}}:\n${appeared.slice(0,20).map(t=>`  ${fields.map(field=>JSON.stringify(field === 'w' ? t.words.at(-1)!.x+t.words.at(-1)!.w-t.x : field === 'h' ? Math.max(...t.words.map(w=>w.y+w.h))-t.y : t[field as keyof Item])).join(',')}`).join('\n')}\ngone: ${gone} text items${animating.length ? `\nanimating[${animating.length}]{box}:\n${animating.map(box=>`  "${box}"`).join('\n')}` : ''}\nhelp[2]:\n  desklink-axi look @r1\n  desklink-axi screen --query "<words>"`; }
+      return `changed: ${changed}\nregions[${visible.length}]{ref,box}:\n${visible.map((d,i)=>`  @r${i+1},"${d}"`).join('\n')}\nappeared[${Math.min(appeared.length,20)} of ${appeared.length}]{${fields.join(',')}}:\n${appeared.slice(0,20).map(t=>`  ${fields.map(field=>JSON.stringify(field === 'w' ? t.words.at(-1)!.x+t.words.at(-1)!.w-t.x : field === 'h' ? Math.max(...t.words.map(w=>w.y+w.h))-t.y : t[field as keyof Item])).join(',')}`).join('\n')}\ngone: ${gone} text items${animating.length ? `\nanimating[${animating.length}]{box}:\n${animating.map(box=>`  "${box}"`).join('\n')}\nanimating: ${animating.join('; ')}` : ''}\nhelp[2]:\n  desklink-axi look @r1\n  desklink-axi screen --query "<words>"`; }
     if (frame.still_ms>=150) motion.clear();
     return `changed: none since frame ${frame.seq} (still ${frame.still_ms}ms)\nhelp[1]:\n  desklink-axi screen --query "<words>"`;
   };
@@ -331,7 +343,8 @@ export async function serve(args: string[]): Promise<void> {
       observed = undefined;
       try {
         const result = await output(command,args);
-        if (observed && command !== 'look') { baseline = observed.seq; regions = observed.damage; }
+        const completed = observed as {seq:number;damage:string[]} | undefined;
+        if (completed && command !== 'look') { baseline = completed.seq; regions = completed.damage; }
         socket.end(result+'\n');
       } catch (error) {
         const message = (error as Error).message;

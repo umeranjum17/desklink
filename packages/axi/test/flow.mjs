@@ -7,11 +7,11 @@ import { EngineClient } from '@desklink/host';
 import assert from 'node:assert/strict';
 
 const dir = mkdtempSync(join(tmpdir(), 'desklink-axi-flow-'));
-const display = `:${180 + process.pid % 60}`;
 const enginePath = process.env.DESKLINK_AXI_ENGINE;
 assert(enginePath && existsSync(enginePath), 'set DESKLINK_AXI_ENGINE to this task’s built engine');
-const xvfb = spawn('Xvfb', [display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], { stdio: 'ignore' });
-const env = { ...process.env, DISPLAY: display, DESKLINK_AXI_SESSION: `flow-${process.pid}`, DESKLINK_AXI_ENGINE: enginePath };
+const xvfb = spawn('Xvfb', ['-displayfd', '1', '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], { stdio: ['ignore','pipe','pipe'] });
+let display;
+let env;
 const cli = resolve('packages/axi/bin/desklink-axi.js');
 let client;
 let target;
@@ -25,20 +25,28 @@ async function run(...args) {
   observations.push({ command: args.join(' '), output: out }); return out;
 }
 try {
-  await new Promise(r => setTimeout(r, 500));
+  const number = await Promise.race([
+    new Promise((resolve,reject) => { let text=''; xvfb.stdout.on('data', chunk => { text+=chunk; if (text.includes('\n')) resolve(text.trim().split('\n')[0]); }); xvfb.on('exit', code => reject(new Error(`Xvfb exited ${code} before display readiness`))); xvfb.on('error',reject); }),
+    new Promise((_,reject)=>setTimeout(()=>reject(new Error('Xvfb display readiness timed out')),5000)),
+  ]);
+  assert(/^\d+$/.test(number) && xvfb.exitCode===null, 'private Xvfb owns its assigned display');
+  display = `:${number}`;
+  env = { ...process.env, DISPLAY: display, DESKLINK_AXI_SESSION: `flow-${process.pid}`, DESKLINK_AXI_ENGINE: enginePath };
   client = await EngineClient.start(enginePath, ['serve'], {}, env);
   const session = await client.openSession({ source: {kind:'x11',display}, permissions:['view'] });
   const path = join(dir, 'frame.raw');
   const first = await client.request('session.frame',{session_id:session.sessionId,path,after_seq:0,timeout_ms:3000});
   assert(first.seq > 0);
   const original = readFileSync(path);
+  await new Promise(r=>setTimeout(r,180));
+  await assert.rejects(client.request('session.frame',{session_id:session.sessionId,after_seq:first.seq,still_ms:150,timeout_ms:50}),{code:'frame-timeout'});
   const build = spawn('cargo', ['build','-q','--manifest-path','packages/desktop-host/engine/Cargo.toml','--example','x11_target'], { env, stdio:'ignore' });
   assert.equal(await new Promise(r=>build.on('exit',r)),0,'X client builds');
   const example = join(process.env.CARGO_TARGET_DIR ?? 'packages/desktop-host/engine/target','debug','examples','x11_target');
   target = spawn(example, [], { env, stdio:['ignore','pipe','pipe'] });
   target.stdout.on('data', chunk => events += chunk);
-  const changed = await client.request('session.frame',{session_id:session.sessionId,since:first.seq,path,after_seq:first.seq,timeout_ms:6000});
-  assert(changed.damage.length > 0);
+  const changed = await client.request('session.frame',{session_id:session.sessionId,since:first.seq,path,after_seq:first.seq,still_ms:150,timeout_ms:6000});
+  assert(changed.still_ms>=150 && changed.damage.length > 0);
   assert.notDeepEqual(readFileSync(path),original);
   await client.stop(); client = undefined;
   const started = await run('start','--control','--source','x11','--display',display);
@@ -52,7 +60,33 @@ try {
   assert.match(events, /"kind":"button".*"phase":"up"/);
   assert.match(events, /"kind":"key".*"phase":"down"/);
   await run('stop');
+  target.kill('SIGTERM');
+  await new Promise(r=>target.once('exit',r));
+  target = spawn(example, ['--animate'], { env, stdio:['ignore','pipe','pipe'] });
+  target.stdout.on('data',chunk=>events+=chunk);
+  await new Promise((resolve,reject)=>{target.stdout.once('data',resolve);target.once('error',reject);});
+  assert.match(await run('start','--control','--source','x11','--display',display),/permissions=view,control/);
+  await run('diff'); // Establish the snapshot while the corner is looping.
+  await new Promise(r=>setTimeout(r,700)); // The CLI is absent; captured frames must still build the mask.
+  const animated = await run('diff');
+  const corner = /animating: (\d+),(\d+),(\d+),(\d+)/.exec(animated);
+  assert(corner && Number(corner[1]) >= 1184 && Number(corner[2]) < 96, animated);
+  await run('click','100,100','--wait','change');
+  await new Promise(r=>setTimeout(r,900));
+  const once = await run('diff');
+  assert.match(once,/regions\[[1-9]/);
+  assert.match(once,/@r\d+,"(?:64|96|128),/);
+  await run('stop');
+  target.kill('SIGTERM');
+  await new Promise(r=>target.once('exit',r));
+  target = undefined;
   assert.match(await run('start','--source','x11','--display',display),/permissions=view\n/);
+  for (const operation of [['read'],['write','private text']]) {
+    const child = spawn(process.execPath,[cli,'clipboard',...operation],{env});
+    let output=''; for await (const part of child.stdout) output+=part;
+    assert.equal(await new Promise(r=>child.on('exit',r)),1);
+    assert.match(output,/clipboard requires start --control/);
+  }
   assert.match(await run('screen','--query','zebra'),/0 items match "zebra"/);
   await run('stop');
   if (process.env.DESKLINK_AXI_MEASURE_PATH) writeFileSync(process.env.DESKLINK_AXI_MEASURE_PATH,JSON.stringify(observations));
