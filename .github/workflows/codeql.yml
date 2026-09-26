@@ -1,0 +1,49 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'cpp', 'javascript-typescript', 'rust' ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native prerequisites
+        if: matrix.language == 'cpp' || matrix.language == 'rust'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \\
+            build-essential cmake pkg-config libclang-dev \\
+            libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libevdev-dev libxcb1-dev
+      - name: Rust toolchain
+        if: matrix.language == 'rust'
+        run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/desktop-host/engine/target
+          key: codeql-${{ matrix.language }}-${{ runner.os }}-${{ hashFiles('packages/desktop-host/engine/Cargo.lock') }}
+          restore-keys: |
+            codeql-${{ matrix.language }}-${{ runner.os }}-
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: autobuild
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}
