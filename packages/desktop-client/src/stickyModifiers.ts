@@ -1,18 +1,18 @@
 import type { ControlMessage } from './protocol';
 
 /**
- * Ctrl and Shift for a touch keyboard, which has neither.
+ * Desktop modifiers for a touch keyboard.
  *
  * The cycle is the terminal key row's: one tap arms a modifier for the next
  * key, a second tap locks it, a third lets it go. An armed modifier travels
  * with the key it modifies, as that key's own chord, so the desktop never holds
  * a modifier on its own and nothing can be left pressed between keys.
  */
-export type StickyModifier = 'Control' | 'Shift';
+export type StickyModifier = 'Control' | 'Shift' | 'Alt' | 'Meta';
 export type StickyState = 'off' | 'once' | 'lock';
 export type StickyModifiers = Readonly<Record<StickyModifier, StickyState>>;
 
-export const NO_MODIFIERS: StickyModifiers = { Control: 'off', Shift: 'off' };
+export const NO_MODIFIERS: StickyModifiers = { Control: 'off', Shift: 'off', Alt: 'off', Meta: 'off' };
 
 const AFTER_TAP: Record<StickyState, StickyState> = { off: 'once', once: 'lock', lock: 'off' };
 
@@ -22,7 +22,7 @@ export function tapModifier(current: StickyModifiers, name: StickyModifier): Sti
 
 /** The modifiers the next key carries, in the engine's names. */
 export function armedModifiers(current: StickyModifiers): StickyModifier[] {
-    return (['Control', 'Shift'] as const).filter((name) => current[name] !== 'off');
+    return (['Control', 'Shift', 'Alt', 'Meta'] as const).filter((name) => current[name] !== 'off');
 }
 
 /** What stays armed once a key has used the modifiers: a lock stays, the rest let go. */
@@ -30,6 +30,8 @@ export function afterKey(current: StickyModifiers): StickyModifiers {
     return {
         Control: current.Control === 'lock' ? 'lock' : 'off',
         Shift: current.Shift === 'lock' ? 'lock' : 'off',
+        Alt: current.Alt === 'lock' ? 'lock' : 'off',
+        Meta: current.Meta === 'lock' ? 'lock' : 'off',
     };
 }
 

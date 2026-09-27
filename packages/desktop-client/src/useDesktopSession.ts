@@ -125,7 +125,7 @@ export interface DesktopSession {
     /** Hold the screen in landscape while the desktop is shown, or follow the phone again. */
     setOrientation: (mode: 'landscape' | 'auto') => void;
     send: (message: ControlMessage) => void;
-    /** Ctrl and Shift as sticky keys: off, armed for the next key, or locked. */
+    /** Desktop modifiers as sticky keys: off, armed for the next key, or locked. */
     modifiers: StickyModifiers;
     /** Tap a sticky modifier: off, then armed for the next key, then locked, then off. */
     tapModifier: (name: StickyModifier) => void;
@@ -218,7 +218,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
 
     const applyModifiers = useCallback((next: StickyModifiers) => {
         const current = modifiersRef.current;
-        if (next.Control === current.Control && next.Shift === current.Shift) return;
+        if (next.Control === current.Control && next.Shift === current.Shift && next.Alt === current.Alt && next.Meta === current.Meta) return;
         modifiersRef.current = next;
         setModifiers(next);
         // The phone's keyboard is the session's own only while a modifier waits

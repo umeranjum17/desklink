@@ -535,7 +535,7 @@ describe('the keys a phone keyboard lacks', () => {
         const { session, keyboard, reply, rejected } = await liveDesktop();
 
         TestRenderer.act(() => session.current.tapModifier('Control'));
-        expect(session.current.modifiers).toEqual({ Control: 'once', Shift: 'off' });
+        expect(session.current.modifiers).toEqual({ Control: 'once', Shift: 'off', Alt: 'off', Meta: 'off' });
 
         // The phone's keyboard capitalises on its own; Ctrl+V is still Ctrl+V.
         dispatch(keyboard, 'beforeinput', { inputType: 'insertText', data: 'V' });
@@ -543,7 +543,7 @@ describe('the keys a phone keyboard lacks', () => {
             { kind: 'key', character: 'v', modifiers: ['Control'], down: true },
             { kind: 'key', character: 'v', modifiers: ['Control'], down: false },
         ]);
-        expect(session.current.modifiers).toEqual({ Control: 'off', Shift: 'off' });
+        expect(session.current.modifiers).toEqual({ Control: 'off', Shift: 'off', Alt: 'off', Meta: 'off' });
 
         // Spent: the next character is plain text again.
         sent = [];
@@ -568,6 +568,28 @@ describe('the keys a phone keyboard lacks', () => {
         reply({ kind: 'rejected', seq: 9, code: 'text-unsupported', message: 'the active layout cannot produce' });
         expect(rejected).toEqual(['text-unsupported']);
         expect(session.current.snapshot.failure).toBeNull();
+    });
+
+    it('chords Alt+Tab and Super+number, spending once while preserving locked modifiers', async () => {
+        const { session, keyboard } = await liveDesktop();
+        TestRenderer.act(() => session.current.tapModifier('Alt'));
+        TestRenderer.act(() => session.current.pressKey('Tab')());
+        expect(sent).toEqual([
+            { kind: 'key', name: 'Tab', modifiers: ['Alt'], down: true },
+            { kind: 'key', name: 'Tab', modifiers: ['Alt'], down: false },
+        ]);
+        expect(session.current.modifiers.Alt).toBe('off');
+        sent = [];
+        TestRenderer.act(() => session.current.tapModifier('Meta'));
+        TestRenderer.act(() => session.current.tapModifier('Meta'));
+        TestRenderer.act(() => session.current.tapModifier('Control'));
+        TestRenderer.act(() => session.current.tapModifier('Alt'));
+        dispatch(keyboard, 'beforeinput', { inputType: 'insertText', data: '2' });
+        expect(sent).toEqual([
+            { kind: 'key', character: '2', modifiers: ['Control', 'Alt', 'Meta'], down: true },
+            { kind: 'key', character: '2', modifiers: ['Control', 'Alt', 'Meta'], down: false },
+        ]);
+        expect(session.current.modifiers).toEqual({ Control: 'off', Shift: 'off', Alt: 'off', Meta: 'lock' });
     });
 
     it('keeps a locked Shift across keys, and releases a held key with the modifiers it went down with', async () => {

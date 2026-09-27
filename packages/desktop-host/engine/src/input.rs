@@ -108,6 +108,18 @@ pub mod keycode {
     pub const PAGE_UP: i16 = 104;
     pub const PAGE_DOWN: i16 = 109;
     pub const DELETE: i16 = 111;
+    pub const F1: i16 = 59;
+    pub const F2: i16 = 60;
+    pub const F3: i16 = 61;
+    pub const F4: i16 = 62;
+    pub const F5: i16 = 63;
+    pub const F6: i16 = 64;
+    pub const F7: i16 = 65;
+    pub const F8: i16 = 66;
+    pub const F9: i16 = 67;
+    pub const F10: i16 = 68;
+    pub const F11: i16 = 87;
+    pub const F12: i16 = 88;
 }
 
 /// Why the input backend is unavailable, so the consumer can say something true
