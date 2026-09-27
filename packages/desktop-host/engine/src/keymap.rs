@@ -72,6 +72,18 @@ pub fn named_key(name: &str) -> Option<Keystroke> {
         "End" => keycode::END,
         "PageUp" => keycode::PAGE_UP,
         "PageDown" => keycode::PAGE_DOWN,
+        "F1" => keycode::F1,
+        "F2" => keycode::F2,
+        "F3" => keycode::F3,
+        "F4" => keycode::F4,
+        "F5" => keycode::F5,
+        "F6" => keycode::F6,
+        "F7" => keycode::F7,
+        "F8" => keycode::F8,
+        "F9" => keycode::F9,
+        "F10" => keycode::F10,
+        "F11" => keycode::F11,
+        "F12" => keycode::F12,
         _ => return None,
     };
     Some(Keystroke::simple(code))
@@ -309,7 +321,20 @@ mod tests {
     fn named_keys_and_modifiers_resolve_to_linux_key_codes() {
         assert_eq!(named_key("Enter").unwrap().code, keycode::ENTER);
         assert_eq!(named_key("ArrowLeft").unwrap().code, keycode::LEFT);
+        for (name, code) in [
+            ("Delete", keycode::DELETE), ("Home", keycode::HOME), ("End", keycode::END),
+            ("PageUp", keycode::PAGE_UP), ("PageDown", keycode::PAGE_DOWN),
+            ("F1", keycode::F1), ("F2", keycode::F2), ("F3", keycode::F3),
+            ("F4", keycode::F4), ("F5", keycode::F5), ("F6", keycode::F6),
+            ("F7", keycode::F7), ("F8", keycode::F8), ("F9", keycode::F9),
+            ("F10", keycode::F10), ("F11", keycode::F11), ("F12", keycode::F12),
+        ] {
+            assert_eq!(named_key(name).unwrap().code, code);
+            assert!(crate::input::native_keycode(code).is_ok(), "{name} must reach inputtino");
+        }
         assert_eq!(modifier_key("Control"), Some(keycode::LEFT_CTRL));
+        assert_eq!(modifier_key("Alt"), Some(keycode::LEFT_ALT));
+        assert_eq!(modifier_key("Super"), Some(keycode::LEFT_META));
         assert!(named_key("Frobnicate").is_none());
         assert!(modifier_key("Hyper").is_none());
     }
