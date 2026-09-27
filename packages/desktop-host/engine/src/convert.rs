@@ -349,6 +349,21 @@ mod tests {
     }
 
     #[test]
+    fn padded_bgra_rows_remain_aligned_in_stills_and_video() {
+        // ScreenCaptureKit pads 3420 BGRA pixels from 13680 to 13696 bytes/row.
+        let src = [
+            0, 0, 255, 255, 0, 0, 255, 255, 0, 255, 0, 0, // red row + green padding
+            255, 0, 0, 255, 255, 0, 0, 255, 0, 255, 0, 0, // blue row + green padding
+        ];
+        assert_eq!(
+            to_bgrx(&src, 2, 2, 12, PixelFormat::Bgra, 2, 2).unwrap(),
+            [src[0..8].to_vec(), src[12..20].to_vec()].concat()
+        );
+        let video = to_i420(&src, 2, 2, 12, PixelFormat::Bgra, 2, 2).unwrap();
+        assert_eq!(video.y_plane(), &[82, 82, 41, 41]);
+    }
+
+    #[test]
     fn unsupported_format_is_reported_not_guessed() {
         assert!(to_i420(&vec![0u8; 64], 4, 4, 16, PixelFormat::Unsupported, 2, 2).is_none());
     }

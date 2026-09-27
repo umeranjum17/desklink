@@ -184,8 +184,9 @@ export async function serve(args: string[]): Promise<void> {
     const imagePath = join(dir, 'ocr.png');
     await image(frame,box,imagePath);
     const { spawnSync } = await import('node:child_process');
-    const result = spawnSync('tesseract', [imagePath, 'stdout', 'tsv'], { encoding: 'utf8' });
-    if (result.error || result.status !== 0) throw new Error('ocr-unavailable: install tesseract (sudo pacman -S tesseract or sudo apt install tesseract-ocr)');
+    const homebrew = ['/opt/homebrew/bin/tesseract', '/usr/local/bin/tesseract'].find(existsSync);
+    const result = spawnSync(process.platform === 'darwin' && homebrew ? homebrew : 'tesseract', [imagePath, 'stdout', 'tsv'], { encoding: 'utf8' });
+    if (result.error || result.status !== 0) throw new Error('ocr-unavailable: install tesseract (brew install tesseract, sudo pacman -S tesseract or sudo apt install tesseract-ocr)');
     const lines = new Map<string, Item>();
     for (const cols of result.stdout.split('\n').slice(1).map(line => line.split('\t'))) {
       if (cols.length < 12 || Number(cols[10]) < 0 || !cols[11]?.trim()) continue;
