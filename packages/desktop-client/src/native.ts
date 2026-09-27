@@ -2,14 +2,9 @@ import { Platform } from 'react-native';
 import { requireOptionalNativeModule } from 'expo-modules-core';
 
 
-
 /**
- * The native session module.
- *
- * Everywhere but Android the module is absent, `desktopAvailable` is false, and
- * the package still exports its types plus the web surface — an application
- * renders one screen on every platform and branches on capability, not on
- * platform name.
+ * Android's native session module. Metro resolves `native.ios.ts` instead on
+ * iOS, where the receiver uses the app's react-native-webrtc binding.
  */
 export type NativeEventName =
     | 'ready'
