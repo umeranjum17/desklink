@@ -13,7 +13,7 @@ assert(enginePath && existsSync(enginePath), 'set DESKLINK_AXI_ENGINE to this ta
 const build = spawnSync('cargo', ['build','-q','--manifest-path','packages/desktop-host/engine/Cargo.toml','--example','x11_target'], { stdio:'ignore' });
 assert.equal(build.status,0,'X client builds');
 const example = join(process.env.CARGO_TARGET_DIR ?? 'packages/desktop-host/engine/target','debug','examples','x11_target');
-const number = Array.from({length:50},(_,i)=>150+i).find(n =>
+const number = Array.from({length:30},(_,i)=>170+i).find(n =>
   !existsSync(`/tmp/.X11-unix/X${n}`) && !existsSync(`/tmp/.X${n}-lock`));
 assert(number !== undefined, 'no unclaimed high X display');
 const display = `:${number}`;
@@ -186,6 +186,18 @@ try {
   assert.equal(await new Promise(r=>typing.on('exit',r)),0,typed);
   assert.match(typed,/input: applied/);
   assert.equal(readFileSync(typedPath,'utf8'),expectedText,'saved X-client buffer must equal typed text');
+  const beforeChords = events.length;
+  await run('press','Alt+Tab');
+  await run('press','Meta+2');
+  await run('press','F12');
+  await run('wait','100');
+  const chordEvents = [...events.slice(beforeChords).matchAll(/\{"kind":"key","keycode":(\d+),"phase":"(down|up)"\}/g)]
+    .map((match) => [match[2], Number(match[1])]);
+  assert.deepEqual(chordEvents, [
+    ['down',64], ['down',23], ['up',23], ['up',64], // Alt+Tab
+    ['down',133], ['down',11], ['up',11], ['up',133], // Super+2
+    ['down',96], ['up',96], // F12
+  ], `desktop must receive and release each chord: ${events.slice(beforeChords)}`);
   await run('press','a'); await run('type','single'); await run('wait','10');
   const batched = await run('batch',JSON.stringify([['press','a'],['type','batch'],['wait','10']]));
   assert.match(batched,/batch: 3\/3 steps/);
