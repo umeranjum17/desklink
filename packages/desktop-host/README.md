@@ -74,12 +74,28 @@ The macOS engine shares protocol v3's WebRTC session path: selected-display
 ScreenCaptureKit capture, VP9 encoding, Quartz pointer/keyboard events, and
 plain-text NSPasteboard operations. `capabilities` is non-prompting; `session.open`
 requests Screen Recording and, for control, Accessibility consent when needed.
-TCC belongs to the app responsible for launching the unsigned CLI: typically
-Terminal, iTerm, or a Node.js host. Grant that app in **System Settings → Privacy
-& Security → Screen & System Audio Recording** and **Accessibility**; the CLI does
-not install a separate DesklinkHost.app or pre-seed/bypass TCC. macOS currently
-uses a US ANSI virtual-key map for character chords (the current input layout is
-diagnostic); free-form text uses Unicode key events.
+For persistent grants, install the signed `DesklinkHost.app` at one fixed path.
+Build the engine on the Mac, then run
+`release/install-mac-app.sh <engine> <absolute path to DesklinkHost.app> [existing signing PEM]`
+from this package. It prefers a usable Developer ID Application or Apple
+Development identity in the login keychain; otherwise it imports the supplied
+existing certificate/key (to preserve existing grants), or creates one local
+certificate/key in `~/Library/Application Support/Desklink/signing.pem`, and
+trusts it in the login keychain. Unlock the login keychain in the Mac GUI if
+import or trust asks; never supply a person's password to automation. Do not
+regenerate that identity, move the app, or replace and re-sign its executable
+per run. Rebuild, install once at the **same path** with the same identity, and
+verify `codesign -dv --verbose=4 <app>` and `codesign -dr - <app>`; the designated
+requirement must be certificate-based, not a cdhash requirement. Signatures
+made from the same certificate have a stable designated requirement even when
+the binary hash changes. The app does not pre-seed or bypass TCC. Launch it
+from the logged-in Mac session, grant **Screen & System Audio Recording** and
+**Accessibility** to DesklinkHost once in System Settings, then launch twice
+and check `log show --last 5m --predicate 'process == "tccd"'` for new denials.
+TCC belongs to the responsible app: launching the unsigned CLI or a Node
+bridge from SSH/Terminal can instead request grants for Node or Terminal.
+macOS currently uses a US ANSI virtual-key map for character chords (the
+current input layout is diagnostic); free-form text uses Unicode key events.
 
 The published engine is an **unsigned macOS arm64 CLI** in the optional
 `@desklink/host-darwin-arm64` platform package; no Developer ID identity or
@@ -87,7 +103,7 @@ notarization is required. The macOS engine remains opt-in (`DESKLINK_MACOS=1`).
 To build and pack it, build on an Apple Silicon Mac with Rust 1.97+ and static
 Homebrew libvpx, then run `release/build-engine-macos-arm64.sh` and
 `node release/pack.mjs --engine dist-desklink/engine-darwin-arm64 --platform darwin-arm64`.
-The app-bundled signed harness is only for local TCC qualification, not npm
+The app-bundled signed harness is for local TCC qualification, not npm
 installation. See the [macOS protocol](docs/PROTOCOL.md#macos).
 
 Point `MUXR_DESKLINK_ENGINE` at a binary built elsewhere if you have one. The
