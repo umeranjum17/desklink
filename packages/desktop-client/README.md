@@ -16,14 +16,11 @@ repository it resolves through the workspace; anywhere else, install it from npm
 npx expo install @desklink/react-native      # or yarn add, then prebuild/rebuild
 ```
 
-Android as a native module, plus the browser, which brings its own WebRTC.
-`expo-module.config.json` declares the native side honestly rather than
-compiling an untested stub for other platforms; `ios/DEFERRED.md` lists exactly
-what an iOS backend has to implement.
-
-It compiles against the WebRTC binding the app already ships
-(`react-native-webrtc`) so there is one `org.webrtc` copy in the binary, and it
-never touches that binding's process-global decoder factory.
+Android uses an Expo native module; iOS uses the app's existing
+`react-native-webrtc` peer connection and `RTCView` from JavaScript. Both need a
+dev client or native build containing that binding. Web uses the browser's WebRTC.
+No second WebRTC binary is linked. The Android module has its own hardware-first
+decoder factory; iOS uses the decoder shipped by `react-native-webrtc`.
 
 ## Use
 
@@ -44,7 +41,7 @@ await desktop.connect();
 // On a deliberate control action, once the picture is live:
 desktop.setInputEnabled(true);
 desktop.showKeyboard();
-desktop.setOrientation('landscape');   // Android: hold the screen on its side; 'auto' to follow the phone
+desktop.setOrientation('landscape');   // Android only; iOS apps configure supported orientations themselves
 await desktop.pasteLocalToRemote(await Clipboard.getStringAsync());
 ```
 
@@ -61,29 +58,29 @@ import { desktopAvailable } from '@desklink/react-native/availability';
 
 ### What the package guarantees
 
-- **Hardware-first decoding.** The session builds its own peer connection with
-  a hardware-first decoder factory for VP9, falling back to software on phones
-  without a VP9 hardware decoder. No other WebRTC user in the app is affected.
+- **VP9 decoding.** Android builds a session-scoped hardware-first decoder
+  factory with software fallback. iOS uses the app's `react-native-webrtc`
+  decoder; neither platform links a second WebRTC stack.
 - **A sharp, zoomable picture.** The desktop fits the view by default; a pinch
   zooms up to 2.5 view pixels per desktop pixel and one finger moves around the
   zoomed desktop. On Android the decoded frame is copied once into the view's
   own texture and drawn with a multi-tap filter when it is shown smaller than
   its size, so a fitted 4K desktop does not alias and a pinch redraws at once.
-  `fitToView()` shows the whole desktop again.
+  iOS uses `RTCView`'s native renderer. `fitToView()` shows the whole desktop again.
 - **A pointer a phone can see.** Once a touch has sent the desktop's pointer
   somewhere, the view draws it there at a readable size, over a picture whose
-  own cursor is a few pixels tall or not captured at all. A mouse keeps its own.
+  own cursor is a few pixels tall or not captured at all. Android hides the
+  extra mark when a mouse is attached.
 - **The picture above the keyboard.** While the phone's keyboard is up, the
   picture sits above it and above the room the app keeps for its own controls
-  (`keyboardClearance`), moving with the keyboard as it slides. A picture too
-  tall for what is left keeps the pointer, where a tap just put the caret, in
-  sight.
+  (`keyboardClearance`). Android follows the keyboard animation and keeps the
+  pointer in sight; iOS follows the keyboard show/hide bounds.
 - **Contained geometry.** Touch maps through the picture's actual placement.
   A one-finger drag starting in the letterbox does not move the pointer; a
   second finger on the picture can still start a pinch or scroll. A drag that
   leaves the picture is held to its edge rather than released somewhere unseen.
-- **The gestures remote-desktop viewers settled on,** decided natively with a
-  slop threshold: tap to click, and a second tap close by is a double click on
+- **The gestures remote-desktop viewers settled on,** with a slop threshold:
+  tap to click, and a second tap close by is a double click on
   the same point; hold and release for a right click where the finger rested
   (every desktop app's context menu); hold then drag for the left button
   (select text, move a window); on the whole desktop a finger that moves
@@ -91,14 +88,14 @@ import { desktopAvailable } from '@desklink/react-native/availability';
   under the finger while the picture catches up; two fingers scroll the desktop
   under them, or pinch; a quick two-finger tap is a right click too. Scrolling
   is fractional wheel steps, smooth where the desktop supports high-resolution
-  wheels. Under congestion, only the latest unsent pointer position is kept;
-  other input follows that position in order.
+  wheels. Android coalesces pending pointer moves under congestion.
 - **The keys a phone lacks.** `modifiers`, `tapModifier` and `pressKey` give
   sticky Ctrl and Shift: tap arms one for the next key, tap again locks it.
   While one is armed, the next key or character the phone's keyboard types is
   sent as that key's chord, so Ctrl then v is Ctrl+V. The app draws the keys.
-- **Readiness is a rendered frame.** `status: 'live'` is set by the first frame
-  actually presented, not by a track arriving or ICE connecting.
+- **Readiness is a rendered frame.** Android marks the first draw; iOS uses
+  `RTCView`'s native video-dimensions callback, which fires after a decoded
+  picture arrives. Neither marks a track or ICE connection as live.
 - **Control starts off.** `setInputEnabled(true)` enables pointer, keyboard and
   clipboard input; `setInputEnabled(false)` blocks new input, releases held keys
   and buttons, and resets pending gestures. The app decides when to enable it
