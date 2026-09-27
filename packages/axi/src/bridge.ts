@@ -16,6 +16,7 @@ export async function call(command: string, args: string[] = []): Promise<string
     if (stale) unlinkSync(socketPath);
   }
   if (command === 'start' && !existsSync(socketPath)) {
+    if (process.platform === 'darwin') throw new Error('On macOS launch the signed DesklinkHost.app with --args axi-bridge <absolute desklink-axi.js> [start flags]; do not start the Node helper from Terminal or SSH.');
     mkdirSync(join(socketPath, '..'), { recursive: true, mode: 0o700 });
     const errorPath = `${socketPath}.error`;
     if (existsSync(errorPath)) unlinkSync(errorPath);

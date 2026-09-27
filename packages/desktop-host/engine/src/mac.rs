@@ -200,8 +200,8 @@ fn capabilities() -> Value {
             "layout": keyboard_layout(),
             "grant": if input_granted { "granted" } else { "missing-accessibility" },
             "unavailable_reason": if input_granted { Value::Null } else { json!({
-                "reason": "Accessibility permission has not been granted to desklink-host.",
-                "remedy": "Allow desklink-host in System Settings › Privacy & Security › Accessibility on the Mac, then reconnect."
+                "reason": format!("Accessibility permission has not been granted to {}.", tcc_responsible_app_name()),
+                "remedy": format!("Allow {} in System Settings › Privacy & Security › Accessibility on the Mac, then reconnect.", tcc_responsible_app_name())
             }) }
         },
         "clipboard": { "read": true, "write": true, "mime": ["text/plain;charset=utf-8"], "maxBytes": crate::clipboard::MAX_CLIPBOARD_BYTES }
@@ -581,7 +581,7 @@ pub fn run() -> i32 {
     let command = args.next().unwrap_or_else(|| "help".into());
     if matches!(
         command.as_str(),
-        "serve" | "capabilities" | "capture-probe" | "indicator-demo" | "axi-record"
+        "serve" | "capabilities" | "capture-probe" | "indicator-demo" | "axi-record" | "setup-input"
     ) {
         #[cfg(not(desklink_macos_cli))]
         if let Err(error) = ensure_disclaimed() {
