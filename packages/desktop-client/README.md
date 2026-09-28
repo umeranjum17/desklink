@@ -70,7 +70,8 @@ import { desktopAvailable } from '@desklink/react-native/availability';
 - **A pointer a phone can see.** Once a touch has sent the desktop's pointer
   somewhere, the view draws it there at a readable size, over a picture whose
   own cursor is a few pixels tall or not captured at all. Android hides the
-  extra mark when a mouse is attached.
+  extra mark when a mouse is attached, and the `device` profile draws no mark
+  on any platform — the screen being touched shows the finger itself.
 - **The picture above the keyboard.** While the phone's keyboard is up, the
   picture sits above it and above the room the app keeps for its own controls
   (`keyboardClearance`). Android follows the keyboard animation and keeps the
@@ -88,7 +89,14 @@ import { desktopAvailable } from '@desklink/react-native/availability';
   under the finger while the picture catches up; two fingers scroll the desktop
   under them, or pinch; a quick two-finger tap is a right click too. Scrolling
   is fractional wheel steps, smooth where the desktop supports high-resolution
-  wheels. Android coalesces pending pointer moves under congestion.
+  wheels. Android coalesces pending pointer moves under congestion. The
+  `gestures` prop reshapes one finger for what the picture shows, and can be
+  changed mid-session: `browser` scrolls the page under one finger (a tap
+  still clicks and a hold still right-clicks), `device` presses the screen —
+  the finger lands with the button down, drags with it held and lifts to
+  release, so a tap clicks and a hold holds with no long-press right click,
+  and no drawn pointer — while the default `desktop` is the trackpad above.
+  Two fingers scroll and pinch the same under every profile.
 - **The keys a phone lacks.** `modifiers`, `tapModifier` and `pressKey` give
   sticky Ctrl and Shift: tap arms one for the next key, tap again locks it.
   While one is armed, the next key or character the phone's keyboard types is
