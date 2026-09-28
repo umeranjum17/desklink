@@ -543,7 +543,9 @@ pub enum SessionEvent {
         generation: u64,
     },
     RestoreToken(String),
-    CaptureStopped { reason: String },
+    CaptureStopped {
+        reason: String,
+    },
     Revoked {
         reason: String,
     },
@@ -807,12 +809,25 @@ impl Session {
         let captured = metrics.clone();
         let stop_signal = frame_tx_signal.clone();
         let on_capture_status = move |running: bool, reason: String| {
-            if let Ok(mut error) = stopped_error.lock() { *error = if running { None } else { Some(reason.clone()) }; }
-            if let Ok(mut frame) = stopped_latest.lock() { *frame = None; }
+            if let Ok(mut error) = stopped_error.lock() {
+                *error = if running { None } else { Some(reason.clone()) };
+            }
+            if let Ok(mut frame) = stopped_latest.lock() {
+                *frame = None;
+            }
             stop_signal.send_replace(0);
-            let _ = stopped_events.send(Notice { session_id: stopped_id.clone(),
-                event: if running { SessionEvent::State { capture: "streaming", transport: String::from("connected"), first_frame: false } }
-                    else { SessionEvent::CaptureStopped { reason } } });
+            let _ = stopped_events.send(Notice {
+                session_id: stopped_id.clone(),
+                event: if running {
+                    SessionEvent::State {
+                        capture: "streaming",
+                        transport: String::from("connected"),
+                        first_frame: false,
+                    }
+                } else {
+                    SessionEvent::CaptureStopped { reason }
+                },
+            });
         };
         let capture_status = Arc::new(on_capture_status);
         let frame_events = events.clone();
@@ -872,7 +887,10 @@ impl Session {
                 max_fps,
                 metrics.clone(),
                 sink,
-                Box::new({ let status = capture_status.clone(); move |reason| status(false, reason) }),
+                Box::new({
+                    let status = capture_status.clone();
+                    move |reason| status(false, reason)
+                }),
             )
             .map_err(|error| SessionError::new("source", format!("{error:#}")))?,
             _ => {
@@ -921,7 +939,10 @@ impl Session {
                     max_fps,
                     sink,
                     indicator.as_ref().map(crate::indicator::Indicator::pid),
-                    Box::new({ let status = capture_status.clone(); move |running, reason| status(running, reason) }),
+                    Box::new({
+                        let status = capture_status.clone();
+                        move |running, reason| status(running, reason)
+                    }),
                 )
                 .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
                 #[cfg(target_os = "linux")]
@@ -934,7 +955,10 @@ impl Session {
                     indicator
                         .as_ref()
                         .map(crate::indicator::Indicator::position),
-                    Box::new({ let status = capture_status.clone(); move |reason| status(false, reason) }),
+                    Box::new({
+                        let status = capture_status.clone();
+                        move |reason| status(false, reason)
+                    }),
                 )
                 .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
                 #[cfg(target_os = "linux")]
@@ -2951,12 +2975,22 @@ mod tests {
     async fn a_stopped_capture_never_serves_the_last_frame() {
         let (events, _) = tokio_mpsc::unbounded_channel();
         let (mut inner, _) = test_inner(events).await;
-        Arc::get_mut(&mut inner).unwrap().permissions.push(Permission::View);
+        Arc::get_mut(&mut inner)
+            .unwrap()
+            .permissions
+            .push(Permission::View);
         let session = Session { inner };
-        *lock(&session.inner.latest) = Some((1, Instant::now(), 2, 2, vec![0;16], vec![1], vec![]));
+        *lock(&session.inner.latest) =
+            Some((1, Instant::now(), 2, 2, vec![0; 16], vec![1], vec![]));
         *lock(&session.inner.capture_error) = Some(String::from("SCStreamErrorDomain -3821"));
-        assert_eq!(session.frame(None, "", None).unwrap_err().code, "stream-stopped");
-        assert_eq!(session.wait_frame(None, None, 10).await.unwrap_err().code, "stream-stopped");
+        assert_eq!(
+            session.frame(None, "", None).unwrap_err().code,
+            "stream-stopped"
+        );
+        assert_eq!(
+            session.wait_frame(None, None, 10).await.unwrap_err().code,
+            "stream-stopped"
+        );
     }
 
     #[tokio::test]

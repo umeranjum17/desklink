@@ -27,9 +27,9 @@
  *   DESKLINK_CHROME          browser binary (default: the first of
  *                            google-chrome-stable, google-chrome, chromium)
  *
- * A machine with no Chrome skips the browser half with a printed reason rather
- * than passing silently: the engine half still runs, and the exit code says
- * whether a real browser was exercised.
+ * A machine with no Chrome skips the browser half with a printed reason and a
+ * passing exit: the fixture is still parsed, but no session opens and nothing
+ * decodes.
  */
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
