@@ -66,7 +66,9 @@ private const val MIN_WHEEL_STEP = 0.05f
  *  - press and hold: a right click on release, or drag after it to hold the left
  *    button (select text, move a window);
  *  - one finger: move around a zoomed-in desktop; on the whole desktop,
- *    move its pointer, which follows the finger without pressing a button;
+ *    move its pointer, which follows the finger without pressing a button —
+ *    unless `gestures` is `browser`, where it scrolls the page, or `device`,
+ *    where it lands with the button down and drags with it held;
  *  - two fingers: scroll the desktop under them, or pinch to zoom (and move) the
  *    picture; a quick two-finger tap is a right click.
  */
@@ -80,6 +82,19 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
   /** Encoded surface size, reported by the engine through the control channel. */
   private var surfaceWidth = 0
   private var surfaceHeight = 0
+
+  /** Which touch meaning this surface uses; a browser page and a device screen answer one finger differently. */
+  var gestures = "desktop"
+    private set
+
+  fun setGestures(value: String) {
+    if (value == gestures) return
+    // A held drag belongs to the old meaning: let go rather than release the
+    // button somewhere the finger never meant.
+    if (gesture == Gesture.DRAG) session?.sendCancel()
+    cancelGesture()
+    gestures = value
+  }
 
   // The picture's placement: surface pixels per desktop pixel, and where the
   // desktop's top-left corner sits in this view. `fitted` keeps a picture that
@@ -449,7 +464,8 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
   /** Send the desktop's pointer somewhere, and show it there. */
   private fun pointerTo(active: DesktopSession, phase: String, at: Pair<Int, Int>, withButton: Boolean = false) {
     active.sendPointer(phase, at.first, at.second, withButton)
-    if (!mouseInput) showPointer(at)
+    // A device screen shows the touch itself; a mark would be a second finger that lies.
+    if (!mouseInput && gestures != "device") showPointer(at)
   }
 
   private fun showPointer(at: Pair<Int, Int>) {
@@ -519,6 +535,25 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
     }
     when (event.actionMasked) {
       MotionEvent.ACTION_DOWN -> {
+        // A device screen is pressed, not pointed at: the finger lands with the
+        // button down, drags with it held, and lifts to release. A tap is the
+        // same down and up with no move, so it clicks for free, and a hold
+        // holds for free — there is no long press to arm.
+        if (gestures == "device") {
+          downX = event.x
+          downY = event.y
+          lastX = event.x
+          lastY = event.y
+          val at = point(event.x, event.y)
+          if (at == null) {
+            gesture = Gesture.LETTERBOX
+          } else {
+            gesture = Gesture.DRAG
+            lastTapPoint = null
+            pointerTo(active, "down", at)
+          }
+          return true
+        }
         downOnPicture = point(event.x, event.y) != null
         gesture = if (fitted && !downOnPicture) Gesture.LETTERBOX else Gesture.PENDING
         downX = event.x
@@ -573,6 +608,15 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
         Gesture.PENDING -> if (hypot(event.x - downX, event.y - downY) > touchSlop) {
           removeCallbacks(longPress)
           lastTapPoint = null
+          // A page scrolls under one finger; the desktop's pointer rides along
+          // so the scroll lands where the finger is.
+          if (gestures == "browser") {
+            gesture = Gesture.SCROLL
+            lastX = event.x
+            lastY = event.y
+            point(event.x, event.y)?.let { pointerTo(active, "move", it) }
+            return true
+          }
           // The whole desktop has nowhere to move to, so the finger moves the
           // desktop's pointer instead, without a button.
           gesture = if (!fitted) Gesture.PAN else if (downOnPicture) Gesture.HOVER else Gesture.LETTERBOX
@@ -599,6 +643,15 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
         Gesture.DRAG -> dragTo(active, event.x, event.y)
 
         Gesture.TWO, Gesture.PINCH, Gesture.SCROLL -> if (event.pointerCount >= 2) twoFingers(active, event)
+        else if (gesture == Gesture.SCROLL && gestures == "browser") {
+          // One finger dragging a page: content follows it, in pixel deltas
+          // turned to detents like the two-finger scroll.
+          wheelX -= (event.x - lastX) / scale / PIXELS_PER_DETENT
+          wheelY -= (event.y - lastY) / scale / PIXELS_PER_DETENT
+          lastX = event.x
+          lastY = event.y
+          flushWheel(active, force = false)
+        }
 
         else -> {}
       }
@@ -618,6 +671,7 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
         removeCallbacks(longPress)
         when (gesture) {
           Gesture.PENDING -> tap(active, event.x, event.y)
+          Gesture.SCROLL -> flushWheel(active, force = true)
           Gesture.HOVER -> hoverTo(active, event.x, event.y)
           Gesture.ARMED -> point(downX, downY)?.let { rightClick(active, it) }
           Gesture.DRAG -> endDrag(active, event.x, event.y)

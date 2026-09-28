@@ -1,6 +1,8 @@
 import * as React from 'react';
 import { StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
 
+import type { GestureProfile } from './protocol';
+
 export interface DesktopViewProps {
     /** The session handle from `useDesktopSession`. */
     sessionId: string | null;
@@ -14,6 +16,11 @@ export interface DesktopViewProps {
      * controls, in points. While the keyboard is up the picture sits above both.
      */
     keyboardClearance?: number;
+    /**
+     * Which touch meaning the surface uses: a desktop pointer, a browser page
+     * (one finger scrolls), or a device screen (one finger presses and drags).
+     */
+    gestures?: GestureProfile;
 }
 
 /**
@@ -25,18 +32,23 @@ export interface DesktopViewProps {
  * actually mounted rather than at module load, so an application that never
  * opens a desktop does not carry one in its first paint.
  */
-export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0 }: DesktopViewProps) {
+export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0, gestures = 'desktop' }: DesktopViewProps) {
     const mounted = React.useCallback(
         (node: unknown) => {
             const element = (node as HTMLElement | null) ?? null;
             if (sessionId === null) return;
             void import('./native').then((platform) => {
                 if (element === null || !platform.desktopAvailable) return;
-                platform.attachSurface(sessionId, element);
+                platform.attachSurface(sessionId, element, gestures);
             });
         },
-        [sessionId],
+        [sessionId, gestures],
     );
+
+    React.useEffect(() => {
+        if (sessionId === null) return;
+        void import('./native').then((platform) => platform.setGestures(sessionId, gestures));
+    }, [sessionId, gestures]);
 
     React.useEffect(() => {
         if (sessionId === null) return;

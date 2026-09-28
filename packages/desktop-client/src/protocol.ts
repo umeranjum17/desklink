@@ -18,6 +18,14 @@ export const PROTOCOL_VERSION = 3;
 
 export type Permission = 'view' | 'control' | 'clipboard';
 
+/**
+ * Which touch meaning a surface uses. `desktop` is the trackpad-shaped
+ * default; `browser` scrolls a page with one finger; `device` presses the
+ * screen with one finger, like the finger itself was there. The wire messages
+ * are the same under all three — only which gesture sends which changes.
+ */
+export type GestureProfile = 'desktop' | 'browser' | 'device';
+
 export interface IceServerConfig {
     urls: string[];
     username?: string;

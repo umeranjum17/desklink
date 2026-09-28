@@ -1,4 +1,5 @@
 import type { NativeDesklinkModule, NativeEventName, NativeSessionEvent } from './native';
+import type { GestureProfile } from './protocol';
 import { observeWebKeyboardMotion } from './webKeyboardMotion';
 
 /**
@@ -114,6 +115,8 @@ interface WebSession {
     longPress: ReturnType<typeof setTimeout> | null;
     /** While a sticky modifier waits for its key, typing is the session's to chord. */
     captured: boolean;
+    /** Which touch meaning this surface uses; a browser page and a device screen answer one finger differently. */
+    gestures: GestureProfile;
     inputEnabled: boolean;
     /** The word the keyboard is composing, and how much of it has already gone. */
     composition: string;
@@ -378,8 +381,9 @@ function cancelLongPress(session: WebSession): void {
 function pointer(session: WebSession, phase: 'move' | 'down' | 'up' | 'cancel', at: { x: number; y: number }, button?: number): void {
     control(session, { kind: 'pointer', phase, x: at.x, y: at.y, ...(button === undefined ? {} : { button }), seq: seq(session) });
     // A mouse brings its own cursor; a finger leaves nothing on the glass to
-    // show where the desktop's pointer went, so the mark does.
-    if (session.mouse || phase === 'cancel') return;
+    // show where the desktop's pointer went, so the mark does. A device screen
+    // shows the touch itself, so a mark would be a second finger that lies.
+    if (session.mouse || phase === 'cancel' || session.gestures === 'device') return;
     session.pointerAt = { x: at.x, y: at.y };
     placePointer(session);
 }
@@ -391,13 +395,15 @@ function click(session: WebSession, at: { x: number; y: number }, button: number
 
 /**
  * Touch gestures, the ones mature remote-desktop viewers settled on — the same
- * as the native view's:
+ * as the native view's. The profile reshapes one finger only:
  *
  *  - tap: click where the finger lands; two taps: a double click on one spot;
  *  - press and hold: a right click on release, or drag after it to hold the
  *    left button (select text, move a window);
  *  - one finger: move around a zoomed-in desktop; on the whole desktop,
- *    move its pointer, which follows the finger without pressing a button;
+ *    move its pointer, which follows the finger without pressing a button —
+ *    unless the profile is `browser`, where it scrolls the page, or `device`,
+ *    where it lands with the button down and drags with it held;
  *  - two fingers: scroll the desktop under them, or pinch to zoom (and move)
  *    the picture; a quick two-finger tap is a right click.
  *
@@ -534,6 +540,27 @@ function attachGestures(session: WebSession): () => void {
         }
         session.touches.set(event.pointerId, { x, y });
         if (session.touches.size === 1) {
+            // A device screen is pressed, not pointed at: the finger lands with
+            // the button down, drags with it held, and lifts to release. A tap
+            // is the same down and up with no move, so it clicks for free, and
+            // a hold holds for free — there is no long press to arm.
+            if (session.gestures === 'device') {
+                session.downX = x;
+                session.downY = y;
+                session.lastX = x;
+                session.lastY = y;
+                const at = desktopPoint(session, x, y);
+                if (at === null) {
+                    session.gesture = 'letterbox';
+                    return;
+                }
+                session.gesture = 'drag';
+                session.lastTap = null;
+                pointer(session, 'down', at, 1);
+                session.dragX = at.x;
+                session.dragY = at.y;
+                return;
+            }
             session.downOnPicture = desktopPoint(session, x, y) !== null;
             session.gesture = session.view.fitted && !session.downOnPicture ? 'letterbox' : 'pending';
             session.downX = x;
@@ -586,6 +613,16 @@ function attachGestures(session: WebSession): () => void {
                 if (Math.hypot(x - session.downX, y - session.downY) > TOUCH_SLOP) {
                     cancelLongPress(session);
                     session.lastTap = null;
+                    // A page scrolls under one finger; the desktop's pointer
+                    // rides along so the scroll lands where the finger is.
+                    if (session.gestures === 'browser') {
+                        session.gesture = 'scroll';
+                        session.lastX = x;
+                        session.lastY = y;
+                        const at = desktopPoint(session, x, y);
+                        if (at !== null) pointer(session, 'move', at);
+                        return;
+                    }
                     // The whole desktop has nowhere to move to, so the finger
                     // moves the desktop's pointer instead, without a button.
                     session.gesture = session.view.fitted
@@ -620,6 +657,15 @@ function attachGestures(session: WebSession): () => void {
             case 'pinch':
             case 'scroll':
                 if (session.touches.size >= 2) twoFingers();
+                else if (session.gesture === 'scroll' && session.gestures === 'browser') {
+                    // One finger dragging a page: content follows it, in pixel
+                    // deltas turned to detents like the two-finger scroll.
+                    session.wheelX -= (x - session.lastX) / session.view.scale / PIXELS_PER_DETENT;
+                    session.wheelY -= (y - session.lastY) / session.view.scale / PIXELS_PER_DETENT;
+                    session.lastX = x;
+                    session.lastY = y;
+                    flushWheel(false);
+                }
                 return;
             default:
                 return;
@@ -662,6 +708,7 @@ function attachGestures(session: WebSession): () => void {
             return;
         }
         if (gesture === 'pending') tap(x, y);
+        else if (gesture === 'scroll') flushWheel(true);
         else if (gesture === 'hover') hoverTo(x, y);
         else if (gesture === 'armed') {
             const at = desktopPoint(session, session.downX, session.downY);
@@ -902,6 +949,7 @@ export const nativeDesklink: NativeDesklinkModule = {
             lastTap: null,
             longPress: null,
             captured: false,
+            gestures: 'desktop',
             inputEnabled: false,
             composition: '',
             compositionSent: '',
@@ -1130,9 +1178,37 @@ export const nativeDesklink: NativeDesklinkModule = {
  * surface, and removing the old one is what keeps a re-render from leaving two
  * live videos behind.
  */
-export function attachSurface(id: string, container: HTMLElement | null): void {
+/** Which touch meaning a surface uses; changing it mid-session is safe. */
+export function setGestures(id: string, gestures: GestureProfile): void {
     const session = sessions.get(id);
     if (session === undefined) return;
+    if (session.gestures === gestures) return;
+    // A held drag belongs to the old meaning: let go rather than release the
+    // button somewhere the finger never meant.
+    if (session.gesture === 'drag') endGestureDrag(session);
+    cancelLongPress(session);
+    session.gesture = 'none';
+    session.touches.clear();
+    session.gestures = gestures;
+    // A device screen shows the touch itself: a mark left over from another
+    // profile would be a finger that is not there.
+    if (gestures === 'device' && session.pointerAt !== null) {
+        session.pointerAt = null;
+        placePointer(session);
+    }
+}
+
+/** Release a held button at the finger's last point, or let go off the picture. */
+function endGestureDrag(session: WebSession): void {
+    const at = desktopPoint(session, session.lastX, session.lastY, true);
+    if (at !== null) pointer(session, 'up', at, 1);
+    else control(session, { kind: 'pointer', phase: 'cancel', x: 0, y: 0, seq: seq(session) });
+}
+
+export function attachSurface(id: string, container: HTMLElement | null, gestures: GestureProfile = 'desktop'): void {
+    const session = sessions.get(id);
+    if (session === undefined) return;
+    session.gestures = gestures;
     session.detach?.();
     session.detach = null;
     if (session.surface !== null) session.surface.remove();
