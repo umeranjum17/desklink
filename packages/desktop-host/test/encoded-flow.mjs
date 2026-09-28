@@ -357,13 +357,23 @@ async function startChrome(binary, pageUrl) {
         throw new Error(`timed out waiting for ${what}; page state ${state}`);
     };
 
+    const closed = { done: false };
     return {
         evaluate,
         send: (method, params) => send(method, params, session),
         until,
         close: async () => {
-            socket.close();
+            if (closed.done) return;
+            closed.done = true;
+            try {
+                socket.close();
+            } catch {
+                // An already-closed socket is not a failure to clean up after.
+            }
             chrome.kill('SIGKILL');
+            // The profile is the browser's, not ours: remove it only once the
+            // process is gone, so a restart of the flow never inherits it.
+            await new Promise((done) => chrome.once('exit', done));
             rmSync(profile, { recursive: true, force: true });
         },
     };
@@ -549,7 +559,16 @@ async function main() {
         );
         console.log('ok: the encoded source decodes in Chrome and its input comes back');
     } finally {
-        for (const step of cleanup.reverse()) await step();
+        // Every step runs even if an earlier one fails: a browser left behind
+        // holds a profile directory and an engine process, and the failure that
+        // caused the teardown must not be replaced by the teardown's own error.
+        for (const step of cleanup.reverse()) {
+            try {
+                await step();
+            } catch (error) {
+                console.error(`cleanup: ${error instanceof Error ? error.message : error}`);
+            }
+        }
     }
 }
 
