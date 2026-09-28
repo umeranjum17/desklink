@@ -469,7 +469,7 @@ fn x11_button(button: Button) -> u8 {
     }
 }
 
-fn lock<T>(mutex: &Arc<Mutex<T>>) -> std::sync::MutexGuard<'_, T> {
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     // A poisoned lock means a previous input call panicked while applying; the
     // desktop is then in unknown state, so the session is closed rather than
     // continuing to drive it.
@@ -594,7 +594,7 @@ struct Inner {
     pipeline: Arc<AtomicBool>,
     events: tokio_mpsc::UnboundedSender<Notice>,
     /// Present only for an encoded source.
-    encoded: Option<Encoded>,
+    encoded: Mutex<Option<Encoded>>,
 }
 
 /// A source whose video arrives already encoded.
@@ -1069,7 +1069,7 @@ impl Session {
             closed: AtomicBool::new(false),
             pipeline: pipeline.clone(),
             events: events.clone(),
-            encoded: None,
+            encoded: Mutex::new(None),
         });
 
         inner.notify(SessionEvent::Description {
@@ -1153,7 +1153,7 @@ impl Session {
             closed: AtomicBool::new(false),
             pipeline: Arc::new(AtomicBool::new(false)),
             events: events.clone(),
-            encoded: Some(Encoded {
+            encoded: Mutex::new(Some(Encoded {
                 codec,
                 transport: TransportOptions {
                     ice_servers: request.ice_servers,
@@ -1164,7 +1164,7 @@ impl Session {
                 },
                 peer_events,
                 feed,
-            }),
+            })),
         });
         inner.notify(SessionEvent::State {
             capture: "consented",
@@ -1187,15 +1187,16 @@ impl Session {
         keyframe: bool,
         data: Vec<u8>,
     ) -> std::result::Result<(), SessionError> {
-        let Some(encoded) = &self.inner.encoded else {
+        if self.inner.closed.load(Ordering::Relaxed) {
+            return Err(SessionError::new("session", "the session has ended"));
+        }
+        let encoded = lock(&self.inner.encoded);
+        let Some(encoded) = encoded.as_ref() else {
             return Err(SessionError::new(
                 "operation",
                 "this session has no encoded source to feed",
             ));
         };
-        if self.inner.closed.load(Ordering::Relaxed) {
-            return Err(SessionError::new("session", "the session has ended"));
-        }
         if data.is_empty() {
             return Err(SessionError::new(
                 "operation",
@@ -1239,7 +1240,7 @@ impl Session {
         still_ms: Option<u64>,
         timeout_ms: u64,
     ) -> std::result::Result<(), SessionError> {
-        if self.inner.encoded.is_some() {
+        if lock(&self.inner.encoded).is_some() {
             return Err(SessionError::new(
                 "operation",
                 "this session forwards an encoded stream and keeps no frame",
@@ -1294,7 +1295,7 @@ impl Session {
                 "view permission is required",
             ));
         }
-        if self.inner.encoded.is_some() {
+        if lock(&self.inner.encoded).is_some() {
             return Err(SessionError::new(
                 "operation",
                 "this session forwards an encoded stream and keeps no frame",
@@ -1435,6 +1436,7 @@ impl Inner {
         }
         self.control_open.store(false, Ordering::SeqCst);
         self.pipeline.store(false, Ordering::SeqCst);
+        drop(lock(&self.encoded).take());
         if let Ok(mut indicator) = self.indicator.lock() {
             indicator.take();
         }
@@ -1551,7 +1553,7 @@ impl Inner {
             *last = seq;
         }
         let feedback = match &message {
-            ControlMessage::Pointer { phase, x, y, .. } if self.encoded.is_none() => {
+            ControlMessage::Pointer { phase, x, y, .. } if lock(&self.encoded).is_none() => {
                 let (x, y) = to_source_pixels(*x, *y, self.encoded_size(), &self.source);
                 Some((
                     if matches!(phase, PointerPhase::Down) {
@@ -1570,7 +1572,7 @@ impl Inner {
         // A source the consumer feeds is a device the consumer drives. Nothing is
         // applied to this machine: the message travels back as an event, and the
         // consumer injects it where the picture actually came from.
-        if self.encoded.is_some() {
+        if lock(&self.encoded).is_some() {
             self.forward(message);
             return;
         }
@@ -2259,20 +2261,19 @@ fn spawn_encoded(inner: &Arc<Inner>, mut feed: tokio_mpsc::Receiver<FedAccessUni
                     }
                     continue;
                 };
-                let Some(encoded) = &inner.encoded else {
-                    return;
+                let (transport, peer_events, codec) = {
+                    let encoded = lock(&inner.encoded);
+                    let Some(encoded) = encoded.as_ref() else {
+                        return;
+                    };
+                    let codec = match encoded.codec {
+                        EncodedCodec::H264 => VideoCodec::H264 {
+                            profile_level_id: profile,
+                        },
+                    };
+                    (encoded.transport.clone(), encoded.peer_events.clone(), codec)
                 };
-                let codec = match encoded.codec {
-                    EncodedCodec::H264 => VideoCodec::H264 {
-                        profile_level_id: profile,
-                    },
-                };
-                let offered = VideoPeer::offer(
-                    encoded.transport.clone(),
-                    encoded.peer_events.clone(),
-                    codec,
-                )
-                .await;
+                let offered = VideoPeer::offer(transport, peer_events, codec).await;
                 match offered {
                     Ok((peer, offer)) => {
                         let peer = Arc::new(peer);
@@ -2357,7 +2358,7 @@ fn spawn_peer_events(inner: &Arc<Inner>, mut events: tokio_mpsc::UnboundedReceiv
                     // captured desktop manages this in its encode loop; a fed one
                     // has to ask — and everything sent before the transport
                     // connected was dropped, so this is not optional.
-                    if inner.encoded.is_some() && matches!(state, State::Connected) {
+                    if lock(&inner.encoded).is_some() && matches!(state, State::Connected) {
                         inner.notify(SessionEvent::KeyframeRequest {
                             generation: inner.generation,
                         });
@@ -2474,6 +2475,71 @@ fn opaque_id() -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn a_closed_encoded_session_ends_the_tasks_its_channels_park() {
+        let (events, _received) = tokio_mpsc::unbounded_channel();
+        let (peer_events, peer_events_rx) = tokio_mpsc::unbounded_channel::<PeerEvent>();
+        let (feed, feed_rx) = tokio_mpsc::channel::<FedAccessUnit>(FEED_BACKLOG);
+        let inner = Arc::new(Inner {
+            id: String::from("encoded-session"),
+            generation: 1,
+            permissions: Vec::new(),
+            source: SelectedSource {
+                node_id: 0,
+                width: 640,
+                height: 480,
+                position: None,
+                source_type: Some(String::from("encoded")),
+                origin_x: 0,
+                origin_y: 0,
+            },
+            geometry: serde_json::json!({
+                "source": { "width": 640, "height": 480 },
+                "encoded": { "width": 640, "height": 480 },
+                "origin": { "x": 0, "y": 0 },
+            }),
+            metrics: Arc::new(Mutex::new(Metrics::default())),
+            latest: Arc::new(Mutex::new(None)),
+            capture_error: Arc::new(Mutex::new(None)),
+            frame_changes: tokio::sync::watch::channel(0).1,
+            peer: Mutex::new(None),
+            encoder: Mutex::new(None),
+            input: Mutex::new(None),
+            indicator: Mutex::new(None),
+            capture: Mutex::new(None),
+            layout: Mutex::new(None),
+            last_seq: Mutex::new(0),
+            control_open: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            pipeline: Arc::new(AtomicBool::new(false)),
+            events,
+            encoded: Mutex::new(Some(Encoded {
+                codec: EncodedCodec::H264,
+                transport: TransportOptions {
+                    ice_servers: Vec::new(),
+                    loopback_tcp: false,
+                    pace_bps: 20_000_000.0,
+                },
+                peer_events,
+                feed,
+            })),
+        });
+        spawn_peer_events(&inner, peer_events_rx);
+        spawn_encoded(&inner, feed_rx);
+        inner.close("test").await;
+        for _ in 0..100 {
+            if Arc::strong_count(&inner) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            Arc::strong_count(&inner),
+            1,
+            "closing must end the tasks whose channels the close takes away",
+        );
+    }
+
     #[test]
     fn tile_damage_at_origin_does_not_underflow_or_hide_other_tiles() {
         assert_eq!(
@@ -2583,7 +2649,7 @@ mod tests {
             closed: AtomicBool::new(false),
             pipeline: Arc::new(AtomicBool::new(true)),
             events,
-            encoded: None,
+            encoded: Mutex::new(None),
         });
         (inner, recorded)
     }

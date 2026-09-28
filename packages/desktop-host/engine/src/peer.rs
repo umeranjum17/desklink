@@ -114,7 +114,10 @@ fn h264_codec(profile_level_id: &str) -> RTCRtpCodecParameters {
 /// rather than at `session.open`.
 pub fn h264_profile_level_id(annex_b: &[u8]) -> Option<String> {
     for nalu in AnnexBNalUnits::new(annex_b) {
-        if nalu.first().copied()? & 0x1f == SPS_NAL_TYPE && nalu.len() >= 4 {
+        let Some(&first) = nalu.first() else {
+            continue;
+        };
+        if first & 0x1f == SPS_NAL_TYPE && nalu.len() >= 4 {
             return Some(format!("{:02x}{:02x}{:02x}", nalu[1], nalu[2], nalu[3]));
         }
     }
@@ -940,6 +943,13 @@ mod tests {
             h264_profile_level_id(&[0x00, 0x00, 0x01, 0x65, 0x88]),
             None,
             "a stream with no SPS cannot start a session",
+        );
+        let mut adjacent = vec![0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01];
+        adjacent.extend_from_slice(&[0x67, 0x42, 0xc0, 0x29]);
+        assert_eq!(
+            h264_profile_level_id(&adjacent).as_deref(),
+            Some("42c029"),
+            "an empty NAL between start codes is skipped, not fatal to the scan",
         );
     }
 
