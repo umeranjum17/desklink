@@ -85,9 +85,10 @@ fn decode_wm_class(data: &[u8]) -> Option<String> {
     strings.next().map(latin1)
 }
 
-/// `_NET_WM_NAME` is UTF-8; the `WM_NAME` fallback is Latin-1. Empty is no title.
-fn decode_title(data: &[u8]) -> Option<String> {
-    let title = String::from_utf8_lossy(data).trim().to_owned();
+/// A title is the trimmed text; empty is no title. The caller decodes the
+/// property's bytes (`_NET_WM_NAME` is UTF-8; the `WM_NAME` fallback Latin-1).
+fn decode_title(title: &str) -> Option<String> {
+    let title = title.trim().to_owned();
     (!title.is_empty()).then_some(title)
 }
 
@@ -435,11 +436,11 @@ fn snapshot(
         };
         let title = property(net_wm_name, utf8_string, u32::MAX)
             .map(|reply| reply.value)
-            .and_then(|value| decode_title(&value))
+            .and_then(|value| decode_title(&String::from_utf8_lossy(&value)))
             .or_else(|| {
                 property(AtomEnum::WM_NAME.into(), AtomEnum::STRING.into(), u32::MAX)
                     .map(|reply| reply.value)
-                    .and_then(|value| decode_title(&value))
+                    .and_then(|value| decode_title(&latin1(&value)))
             });
         let class = property(AtomEnum::WM_CLASS.into(), AtomEnum::STRING.into(), u32::MAX)
             .map(|reply| reply.value)
@@ -515,15 +516,19 @@ mod tests {
     #[test]
     fn titles_come_from_either_name_property_and_blank_is_none() {
         assert_eq!(
-            decode_title("Pricing — Acme Store".as_bytes()),
+            decode_title("Pricing — Acme Store"),
             Some(String::from("Pricing — Acme Store"))
         );
         assert_eq!(
-            decode_title("PPF probe - Google Chrome".as_bytes()),
+            decode_title("PPF probe - Google Chrome"),
             Some(String::from("PPF probe - Google Chrome"))
         );
-        assert_eq!(decode_title(b"   "), None);
-        assert_eq!(decode_title(b""), None);
+        assert_eq!(decode_title("   "), None);
+        assert_eq!(decode_title(""), None);
+        assert_eq!(
+            decode_title(&latin1(b"Gr\xf6\xdfe")),
+            Some(String::from("Gr\u{00f6}\u{00df}e"))
+        );
     }
 
     #[test]
