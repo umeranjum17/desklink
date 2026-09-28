@@ -265,7 +265,7 @@ try {
   const frameRef = refOf(tree1.out, 'AXI A11y Bench');
   assert(saveRef && nameRef && agreeRef && chooseRef && growRef && frameRef, `tree rows incomplete:\n${tree1.out}`);
   // Icon-only button: a button row with an empty name must exist (OCR cannot name it).
-  const iconRef = /  "?(@a\d+\.\d+)","button","",/.exec(tree1.out)?.[1];
+  const iconRef = /  "?(@a\d+\.\d+)","(?:push )?button","",/.exec(tree1.out)?.[1];
   assert(iconRef, `icon-only button missing from tree:\n${tree1.out}`);
 
   // Coordinate and OCR fallbacks still exist next to the semantic path.
@@ -344,11 +344,11 @@ try {
   assert.match(marks.out, /marks\[\d+\]\{mark,ref,label,role\}:/);
   // The icon-only button: chosen through the marks map, not by pixels. Its AX
   // name is empty so its mark label falls back to the action name "Click".
-  const iconMarkRef = /^\s+\d+,"(@a\d+\.\d+)","Click","button"$/m.exec(marks.out)?.[1];
+  const iconMarkRef = /^\s+\d+,"(@a\d+\.\d+)","Click","(?:push )?button"$/m.exec(marks.out)?.[1];
   assert(iconMarkRef, `icon-only button not marked:\n${marks.out}`);
   // OCR-blindness: no text AXI can read falls inside the icon button's box.
   const treeMarks = await runOk('tree', '--full');
-  const iconBox = /  "?(@a\d+\.\d+)","button","","",(\d+),(\d+),(\d+),(\d+)/.exec(treeMarks.out);
+  const iconBox = /  "?(@a\d+\.\d+)","(?:push )?button","","",(\d+),(\d+),(\d+),(\d+)/.exec(treeMarks.out);
   assert(iconBox, `icon button box missing from tree:\n${treeMarks.out}`);
   const screenFull = await runOk('screen', '--full');
   const inside = [...screenFull.out.matchAll(/^\s+"@\d+\.\d+",.*?,(\d+),(\d+)$/gm)]
