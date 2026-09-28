@@ -2277,8 +2277,18 @@ fn spawn_encoded(inner: &Arc<Inner>, mut feed: tokio_mpsc::Receiver<FedAccessUni
                 match offered {
                     Ok((peer, offer)) => {
                         let peer = Arc::new(peer);
-                        if let Ok(mut held) = inner.peer.lock() {
-                            *held = Some(peer.clone());
+                        let stored = {
+                            let mut held = lock(&inner.peer);
+                            if inner.closed.load(Ordering::SeqCst) {
+                                false
+                            } else {
+                                *held = Some(peer.clone());
+                                true
+                            }
+                        };
+                        if !stored {
+                            peer.close().await;
+                            return;
                         }
                         inner.notify(SessionEvent::Description {
                             generation: inner.generation,
