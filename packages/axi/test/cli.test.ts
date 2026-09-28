@@ -62,4 +62,34 @@ describe("desklink-axi AXI contract", () => {
     const r = run();
     expect(r.stderr.trim()).toBe("");
   });
+
+  it("parses and refuses non-loopback browser endpoints (explicit opt-in only)", async () => {
+    const { parseEndpoint } = await import("../dist/browser-lane.js");
+    expect(parseEndpoint("127.0.0.1:9222")).toBe("127.0.0.1:9222");
+    expect(parseEndpoint("http://localhost:9333/")).toBe("localhost:9333");
+    expect(parseEndpoint("[::1]:9222")).toBe("[::1]:9222");
+    expect(() => parseEndpoint("10.1.2.3:9222")).toThrow(/loopback/);
+    expect(() => parseEndpoint("example.com:9222")).toThrow(/loopback/);
+    expect(() => parseEndpoint("127.0.0.1")).toThrow(/invalid CDP endpoint/);
+  });
+
+  it("browser attach refuses non-loopback endpoints with exit 2", () => {
+    const r = run("browser", "attach", "--cdp", "10.1.2.3:9222");
+    expect(r.status).toBe(2);
+    expect(r.stdout).toContain("loopback");
+  });
+
+  it("browser commands require an explicit attach or launch first", () => {
+    for (const args of [["browser", "tabs"], ["browser", "snapshot"], ["browser", "click", "@e1"], ["browser", "upload", "@e1", "/tmp/x"]]) {
+      const r = run(...args);
+      expect(r.status).toBe(1);
+      expect(r.stdout).toContain("no-browser:");
+    }
+  });
+
+  it("browser click rejects malformed refs", () => {
+    const r = run("browser", "click", "12,34");
+    expect(r.status).toBe(2);
+    expect(r.stdout).toContain("invalid ref");
+  });
 });

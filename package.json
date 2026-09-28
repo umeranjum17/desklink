@@ -8,6 +8,7 @@
     ],
     "scripts": {
         "build": "tsc --build packages/desktop-host && npm run build --workspace @desklink/axi",
+        "smoke": "npm run smoke --workspace @desklink/axi",
         "test": "vitest run",
         "test:engine": "cargo test --manifest-path packages/desktop-host/engine/Cargo.toml"
     },

@@ -1,6 +1,7 @@
 import { dispatch, type Registry, type CommandModule } from './cli/router.js';
 import { homeCommand, rootHelp } from './commands/home.js';
 import { call, serve, socketPath } from './bridge.js';
+import { browserCommands } from './browser-lane.js';
 import { writeFileSync } from 'node:fs';
 import { print } from './output/toon.js';
 import { installHooks } from './hooks.js';
@@ -24,6 +25,7 @@ if (process.argv[2] === '--bridge') {
     ['clipboard write', ['text'], []], ['setup hooks', [], []],
   ];
   const commands: Record<string, CommandModule> = {};
+  Object.assign(commands, browserCommands());
   for (const [name, required, flags] of definitions) commands[name] = {
     spec: { name, summary: `${name} on the live desktop`, args: required.map(arg => ({name:arg,required:true,description:arg})), flags: flags.map(flag => ({name:flag,type: ['control','full','double','submit','include-animating'].includes(flag) ? 'boolean' : 'string', values: flag === 'source' ? ['auto','portal','x11','display'] : flag === 'button' ? ['left','right'] : undefined, description:flag})), examples: [`desklink-axi ${name} ${required.map(arg=>`<${arg}>`).join(' ')}`] },
     async run(parsed) {
