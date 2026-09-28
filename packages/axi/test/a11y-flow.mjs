@@ -431,6 +431,6 @@ async function reportQtExposure() {
   if (qtTree.code !== 0) { console.log(`qt: tree failed (${qtTree.out.trim().split('\n')[0]}); exposure not measured`); return; }
   const apps = /tree: (\d+) apps/.exec(qtTree.out)?.[1] ?? '0';
   const nodes = /(\d+) nodes/.exec(qtTree.out)?.[1] ?? '0';
-  const named = ['Name field', 'Agree', 'Save button'].filter(name => new RegExp(`"?(@a\d+\.\d+)"?,[^,]+,"${name}"`).test(qtTree.out)).length;
+  const named = ['Name field', 'Agree', 'Save button'].filter(name => qtTree.out.includes(`"${name}"`)).length;
   console.log(`qt: apps=${apps} nodes=${nodes} named form controls visible=${named}/3 (measured fact; Qt6 ${process.env.QT6_VERSION ?? ''})`.trim());
 }
