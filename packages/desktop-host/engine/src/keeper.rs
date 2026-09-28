@@ -178,14 +178,22 @@ pub fn keep(display: Option<&str>, out: &mut impl Write) -> Result<()> {
     }
 
     // Created if missing: a fresh Xvfb may not have them yet, and this keeper
-    // is the only client that reads them on this screen.
-    let net_wm_name = intern(&conn, "_NET_WM_NAME")?;
-    let utf8_string = intern(&conn, "UTF8_STRING")?;
-    let net_wm_pid = intern(&conn, "_NET_WM_PID")?;
+    // is the only client that reads them on this screen. With the claim won, a
+    // failed request is the display going away — the keeper's normal end.
+    let (Some(net_wm_name), Some(utf8_string), Some(net_wm_pid)) = (
+        intern(&conn, "_NET_WM_NAME"),
+        intern(&conn, "UTF8_STRING"),
+        intern(&conn, "_NET_WM_PID"),
+    ) else {
+        return Ok(());
+    };
 
     // Windows already on the screen when the keeper starts join the kiosk.
+    let Ok(Ok(tree)) = conn.query_tree(root).map(|cookie| cookie.reply()) else {
+        return Ok(());
+    };
     let mut tracked: VecDeque<Window> = VecDeque::new();
-    for window in conn.query_tree(root)?.reply()?.children {
+    for window in tree.children {
         track(&conn, window, &mut tracked, screen_w, screen_h);
     }
     let _ = refocus(&conn, &tracked);
@@ -449,8 +457,14 @@ fn snapshot(
     windows
 }
 
-fn intern(conn: &RustConnection, name: &str) -> Result<Atom> {
-    Ok(conn.intern_atom(false, name.as_bytes())?.reply()?.atom)
+/// Interns an atom, or `None` when the connection is gone; the caller has
+/// already won the WM claim, so there is nothing left to refuse.
+fn intern(conn: &RustConnection, name: &str) -> Option<Atom> {
+    conn.intern_atom(false, name.as_bytes())
+        .ok()?
+        .reply()
+        .ok()
+        .map(|reply| reply.atom)
 }
 
 fn write_line(out: &mut impl Write, line: &str) -> Result<()> {
