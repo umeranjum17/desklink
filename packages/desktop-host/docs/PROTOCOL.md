@@ -63,7 +63,7 @@ Request parameters use the engine's own snake_case names (`session_id`,
 Result:
 
 ```jsonc
-{"protocol":3,"engine":"desklink-host/0.1.0","platform":"linux", /* the rest of Capabilities */ }
+{"protocol":3,"engine":"desklink-host/0.2.0","platform":"linux", /* the rest of Capabilities */ }
 ```
 
 The consumer must send `hello` first, and a version the engine does not speak is
@@ -105,7 +105,7 @@ session may require fresh consent. The macOS engine requires a VP9-enabled build
 ```jsonc
 {
   "protocol": 3,
-  "engine": "desklink-host/0.1.0",
+  "engine": "desklink-host/0.2.0",
   "platform": "linux",
   "session": {"kind": "wayland"},
   "x11": {"available": true, "size": [2560, 1440]},
@@ -125,9 +125,14 @@ session may require fresh consent. The macOS engine requires a VP9-enabled build
     "unavailable_reason": null,
     "grant": "granted"
   },
-  "clipboard": {"read": true, "write": true, "mime": ["text/plain;charset=utf-8"], "maxBytes": 262144}
+  "clipboard": {"read": true, "write": true, "mime": ["text/plain;charset=utf-8"], "maxBytes": 262144},
+  "encoded": {"codecs": ["h264"]}
 }
 ```
+
+`encoded` lists the codecs this build will carry when the consumer supplies the
+video itself (see *Encoded sources*): a consumer reads it rather than inferring
+support from the engine's version string.
 
 `input.mechanism` names the build's portal input path, `inputtino/uinput`,
 where the engine creates its own virtual devices. A session opened against an X
@@ -156,6 +161,7 @@ trigger a capture request.
 {"id":4,"method":"session.open","params":{
   "source": {"kind":"portal"},          // or {"kind":"x11","display":":99"}
                                            // macOS: {"kind":"display","display_id":123}
+                                           // or {"kind":"encoded","codec":"h264","width":486,"height":1080}
   "permissions": ["view","control","clipboard"],
   "max_width": 3840, "max_height": 2160, // encode box (default); never upscales
   "bitrate_kbps": 0,                    // 0 (default): sized to the encoded surface
@@ -182,8 +188,9 @@ Result:
 screen cast, which is the only path that carries a Wayland user's consent;
 `x11` reads a named X display's root window and applies input through XTest;
 `display` selects a macOS display by the ID reported in capabilities (or the
-main display when omitted). The choice is normally the *consumer's* decision,
-because a client is not in a position to know which backend a machine can offer.
+main display when omitted); `encoded` carries video the consumer encoded itself.
+The choice is normally the *consumer's* decision, because a client is not in a
+position to know which backend a machine can offer.
 
 `permissions` are the engine's authority for this session. `view` is required
 to open a session. The engine enforces the remaining scopes on every input and
@@ -353,6 +360,111 @@ layout can produce. macOS reports Unicode text support and currently maps
 `key.character` chords through a US ANSI virtual-key map; the reported keyboard
 layout is diagnostic, not proof that this map matches it. Anything outside the
 map is refused with `text-unsupported`.
+
+## Encoded sources
+
+An `encoded` source is video the **consumer** produced: a phone mirror from a
+device helper, a simulator, a camera. The engine captures nothing, encodes
+nothing and holds no input device for it; it packetizes what it is handed and
+returns the client's control messages to the consumer, which owns whatever
+device the picture came from. That is the whole point of the source: the helper
+that already speaks H.264 keeps its own encoder, and the engine keeps the
+WebRTC, congestion and teardown logic that is already proven on this path.
+
+```jsonc
+{"source": {"kind":"encoded","codec":"h264","width":486,"height":1080}}
+```
+
+`codec` is `h264`, the only one this build carries (`capabilities.encoded`).
+`width`/`height` are the stream's own pixel size, chosen by the consumer because
+it is the only party that knows them (`1..7680` by `1..4320`). Nothing is scaled:
+`geometry.source` and `geometry.encoded` are both that size, the client aims at
+those pixels, and the consumer maps them to its device. `max_width`/
+`max_height`/`bitrate_kbps` are ignored for this source, and `permissions` works
+as it does anywhere else — with one difference: `control` needs no local input
+backend, because nothing is applied locally.
+
+`session.open` returns before any offer exists. The offer must name the profile
+the stream actually is (`packetization-mode=1` and the SPS's own
+`profile-level-id`), and the only place that is written down is the stream's own
+SPS, so the engine sends `session.description` **after** the first fed access
+unit that carries one. A consumer must therefore not wait for the offer before
+it starts feeding, and a consumer that never feeds an SPS gets no offer at all.
+
+### Feeding access units
+
+```jsonc
+{"id":8,"method":"session.feed","params":{
+  "session_id":"…",
+  "keyframe":true,                       // this unit is an IDR
+  "data_b64":"AAAA…"                     // one Annex-B access unit, base64
+}}
+```
+
+```jsonc
+{"id":8,"result":{"accepted":true}}
+```
+
+One request is one access unit: start codes and all, exactly as the encoder
+emitted it, with SPS/PPS in the unit that carries the IDR. `keyframe` is the
+consumer's own statement about the unit; the engine uses it for `session.metrics`
+and for nothing else, because the RTP payloader reads the NAL types itself. The
+reply acknowledges the hand-off, not the picture: units are packetized behind
+the request, and `session.metrics` reports what was sent and what was dropped.
+
+Base64 in the same JSON line keeps one ordered channel and one inherited fd.
+Measured, that is not a close call: one second of a 2 Mbit/s stream is 250 KB,
+and base64 costs about 0.09 ms to encode on the consumer's side and 1.0 ms to
+decode on the engine's — roughly a tenth of one per cent of a core, against the
+5 % that would have justified a second fd. Decoded units are
+limited to 8 MiB (`malformed` beyond that); a unit the buffer cannot hold right
+away is **dropped, not queued** — a live picture is worth more than a backlog of
+stale ones — and is counted in `dropped_frames`.
+
+An access unit is dropped until the transport connects, because nothing sent
+before it arrives. The engine therefore asks for a key frame the moment the
+transport connects (below); a consumer that ignores that request shows a black
+picture.
+
+### Key frames the engine cannot make
+
+```jsonc
+{"event":"session.keyframeRequest","params":{"sessionId":"…","generation":1}}
+```
+
+Raised when the receiver reports a loss it cannot repair (RTCP PLI or FIR), and
+once when the transport connects. The consumer responds by feeding a keyframe
+access unit — for a device helper, "reset the video stream". This is the encoded
+source's version of the reference frame the engine's own encode loop sends when
+the same thing happens on a captured desktop.
+
+### Input belongs to the consumer
+
+For this source only, the control channel is **forwarded, not applied**:
+`pointer`, `wheel`, `key`, `text` and `release_all` arrive as events, and the
+consumer injects them wherever the picture came from (a device helper's own
+touch injection, for instance). Coordinates are the encoded surface's own
+pixels, exactly as a client sends them.
+
+```jsonc
+{"event":"session.input","params":{"sessionId":"…",
+  "input":{"kind":"pointer","phase":"down","x":100,"y":200,"button":1,"seq":4}}}
+```
+
+The event carries the control message as it arrived. The engine still validates
+permission, ordering and replay before forwarding, so the client keeps the same
+`ack`/`rejected` behaviour and a replayed gesture still cannot be delivered
+twice. `ack` means "accepted for this session", not "applied to a desktop" —
+`session.metrics.input_forwarded` counts what was handed on, and `input_applied`
+stays zero. Clipboard messages are answered with an empty `clipboard` reply and
+an error, because this source has no desktop clipboard: the device's clipboard
+is the consumer's to carry.
+
+`session.frame` and `session.wait_frame` are refused with `error.code =
+"operation"` — there is no lossless frame to read — and `captured_frames`,
+`refined_frames` and `target_kbps` stay at zero while `encoded_frames`,
+`encoded_bytes`, `key_frames` and `encode_micros` describe what was packetized
+and sent.
 
 ## Latest frame over the local protocol
 

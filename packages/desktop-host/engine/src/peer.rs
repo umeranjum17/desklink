@@ -16,7 +16,7 @@ use rtc::interceptor::{
 };
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_VP9};
+use rtc::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_H264, MIME_TYPE_VP9};
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::event::RTCPeerConnectionIceEvent;
 use rtc::peer_connection::sdp::RTCSessionDescription;
@@ -25,7 +25,7 @@ use rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtc::rtcp::receiver_report::ReceiverReport;
 use rtc::rtp_transceiver::rtp_sender::{
-    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters, RTCPFeedback,
     RtpCodecKind,
 };
 use rtc::rtp_transceiver::PayloadType;
@@ -49,6 +49,23 @@ const VP9_CLOCK_RATE: u32 = 90_000;
 /// this one is the common convention and keeps packet captures readable.
 pub const VP9_PAYLOAD_TYPE: PayloadType = 98;
 
+/// H.264's RTP clock is 90 kHz (RFC 6184), the same as VP9's.
+const H264_CLOCK_RATE: u32 = 90_000;
+
+/// Payload type the engine offers H.264 on, again a dynamic-range convention.
+pub const H264_PAYLOAD_TYPE: PayloadType = 102;
+
+/// Which video track this peer carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VideoCodec {
+    /// VP9 in flexible mode, encoded by this engine from captured frames.
+    Vp9,
+    /// H.264 the consumer encoded and feeds. The profile-level-id is read from
+    /// the fed stream's own SPS, so a receiver's decoder is configured for the
+    /// profile actually arriving rather than for one the engine guessed.
+    H264 { profile_level_id: String },
+}
+
 fn vp9_codec() -> RTCRtpCodecParameters {
     RTCRtpCodecParameters {
         rtp_codec: RTCRtpCodec {
@@ -60,6 +77,88 @@ fn vp9_codec() -> RTCRtpCodecParameters {
         },
         payload_type: VP9_PAYLOAD_TYPE,
         ..Default::default()
+    }
+}
+
+/// H.264 with `packetization-mode=1`, which is what the device helpers emit and
+/// what every WebRTC receiver implements. Key frame requests are negotiated so
+/// the receiver has a defined way to ask; the engine turns one into a
+/// `session.keyframeRequest` for the consumer that owns the encoder.
+fn h264_codec(profile_level_id: &str) -> RTCRtpCodecParameters {
+    RTCRtpCodecParameters {
+        rtp_codec: RTCRtpCodec {
+            mime_type: MIME_TYPE_H264.to_owned(),
+            clock_rate: H264_CLOCK_RATE,
+            channels: 0,
+            sdp_fmtp_line: format!(
+                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id={profile_level_id}"
+            ),
+            rtcp_feedback: [("nack", ""), ("nack", "pli"), ("ccm", "fir")]
+                .into_iter()
+                .map(|(typ, parameter)| RTCPFeedback {
+                    typ: typ.to_owned(),
+                    parameter: parameter.to_owned(),
+                })
+                .collect(),
+        },
+        payload_type: H264_PAYLOAD_TYPE,
+        ..Default::default()
+    }
+}
+
+/// The `profile-level-id` an H.264 Annex-B stream declares, as the three bytes
+/// after an SPS NAL header: `profile_idc`, the constraint flags, `level_idc`.
+///
+/// This is the value the offer must carry, and it can only come from the stream
+/// itself, so a peer for a fed stream is built after the first access unit
+/// rather than at `session.open`.
+pub fn h264_profile_level_id(annex_b: &[u8]) -> Option<String> {
+    for nalu in AnnexBNalUnits::new(annex_b) {
+        if nalu.first().copied()? & 0x1f == SPS_NAL_TYPE && nalu.len() >= 4 {
+            return Some(format!("{:02x}{:02x}{:02x}", nalu[1], nalu[2], nalu[3]));
+        }
+    }
+    None
+}
+
+/// NAL type 7: sequence parameter set.
+const SPS_NAL_TYPE: u8 = 7;
+
+/// A byte stream's NAL units, delimited by the Annex-B start code
+/// (`00 00 01`, optionally preceded by zero bytes).
+struct AnnexBNalUnits<'a> {
+    rest: &'a [u8],
+}
+
+impl<'a> AnnexBNalUnits<'a> {
+    fn new(stream: &'a [u8]) -> Self {
+        Self { rest: stream }
+    }
+
+    fn start_code(stream: &[u8]) -> Option<usize> {
+        stream
+            .windows(3)
+            .position(|window| window == [0x00, 0x00, 0x01])
+    }
+}
+
+impl<'a> Iterator for AnnexBNalUnits<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let start = Self::start_code(self.rest)? + 3;
+        let body = &self.rest[start..];
+        let end = Self::start_code(body).map_or(body.len(), |next| {
+            // A four-byte start code includes the zero the three-byte search
+            // left at the end of the previous unit.
+            if next > 0 && body[next - 1] == 0x00 {
+                next - 1
+            } else {
+                next
+            }
+        });
+        self.rest = &body[end..];
+        Some(&body[..end])
     }
 }
 
@@ -80,9 +179,13 @@ pub enum PeerEvent {
     ControlClosed,
     /// A control message arrived from the client.
     ControlMessage(String),
+    /// The far end asked for a fresh reference frame (RTCP PLI or FIR) on a
+    /// track this engine does not encode itself, so the consumer must supply one.
+    KeyframeRequest,
 }
 
 /// Transport settings the consumer chose for this session.
+#[derive(Debug, Clone)]
 pub struct TransportOptions {
     pub ice_servers: Vec<(String, Option<String>, Option<String>)>,
     /// Listen for ICE over TCP on the loopback too. A phone that reaches this
@@ -231,12 +334,14 @@ impl Interceptor for FeedbackForwarder {
 
 /// Read the video sender's feedback until the peer closes it (by aborting this
 /// task: the track's feedback channel outlives a closed peer): key frame
-/// requests set `wants_keyframe`, receiver reports queue their loss fraction.
+/// requests set `wants_keyframe`, receiver reports queue their loss fraction,
+/// and a track whose encoder lives in the consumer is told to ask for one.
 async fn serve_feedback(
     track: Arc<TrackLocalStaticRTP>,
     ssrc: u32,
     wants_keyframe: Arc<AtomicBool>,
     loss: Arc<Mutex<Vec<u8>>>,
+    keyframe_requests: Option<tokio::sync::mpsc::UnboundedSender<PeerEvent>>,
 ) {
     loop {
         // The track is bound once the answer is applied; until then, and after
@@ -249,6 +354,9 @@ async fn serve_feedback(
             let packet = packet.as_any();
             if packet.is::<PictureLossIndication>() || packet.is::<FullIntraRequest>() {
                 wants_keyframe.store(true, Ordering::SeqCst);
+                if let Some(requests) = &keyframe_requests {
+                    let _ = requests.send(PeerEvent::KeyframeRequest);
+                }
             } else if let Some(report) = packet.downcast_ref::<ReceiverReport>() {
                 let mut queue = lock(&loss);
                 queue.extend(
@@ -269,6 +377,99 @@ async fn serve_feedback(
 /// path MTU a desktop stream meets, DTLS/SRTP and TURN overhead included.
 const RTP_MTU: usize = 1200;
 const RTP_HEADER: usize = 12;
+
+/// One encoded track's packetizer. The engine builds RTP headers itself either
+/// way — the payloaders below only decide how a frame's bytes are split — so the
+/// codec only changes which ones run.
+enum Packetizer {
+    Vp9(Vp9Packetizer),
+    H264(H264Packetizer),
+}
+
+impl Packetizer {
+    fn packetize(
+        &mut self,
+        frame: &[u8],
+        keyframe: bool,
+        captured: Instant,
+        ssrc: u32,
+        payload_type: PayloadType,
+    ) -> Result<Vec<rtc::rtp::Packet>> {
+        match self {
+            Self::Vp9(packetizer) => {
+                Ok(packetizer.packetize(frame, keyframe, captured, ssrc, payload_type))
+            }
+            Self::H264(packetizer) => {
+                packetizer.packetize(frame, captured, ssrc, payload_type)
+            }
+        }
+    }
+}
+
+/// H.264 over RTP (RFC 6184), packetization mode 1: single NAL units, STAP-A for
+/// the parameter sets, FU-A for anything over the MTU. The fragmentation itself
+/// is webrtc-rs's own H.264 payloader (`RTCRtpCodec::payloader`), which already
+/// implements those three payload shapes; only the RTP header is built here, so
+/// the timestamp is the arrival time of the access unit rather than the moment
+/// each fragment happened to be written.
+struct H264Packetizer {
+    sequence: u16,
+    timestamp_base: u32,
+    started: Instant,
+    payloader: Box<dyn rtc::rtp::packetizer::Payloader>,
+}
+
+impl H264Packetizer {
+    fn new(payloader: Box<dyn rtc::rtp::packetizer::Payloader>) -> Self {
+        Self {
+            sequence: rand::random(),
+            timestamp_base: rand::random(),
+            started: Instant::now(),
+            payloader,
+        }
+    }
+
+    fn packetize(
+        &mut self,
+        access_unit: &[u8],
+        arrived: Instant,
+        ssrc: u32,
+        payload_type: PayloadType,
+    ) -> Result<Vec<rtc::rtp::Packet>> {
+        let payloads = self
+            .payloader
+            .payload(RTP_MTU - RTP_HEADER, &bytes::Bytes::copy_from_slice(access_unit))
+            .map_err(|error| anyhow::anyhow!("the H.264 payloader refused an access unit: {error}"))?;
+        let ticks = (arrived
+            .saturating_duration_since(self.started)
+            .as_secs_f64()
+            * H264_CLOCK_RATE as f64) as u64 as u32;
+        let timestamp = self.timestamp_base.wrapping_add(ticks);
+        let last = payloads.len().saturating_sub(1);
+        Ok(payloads
+            .into_iter()
+            .enumerate()
+            .map(|(index, payload)| {
+                let sequence_number = self.sequence;
+                self.sequence = self.sequence.wrapping_add(1);
+                rtc::rtp::Packet {
+                    header: rtc::rtp::Header {
+                        version: 2,
+                        // The marker ends an access unit, which is what a video
+                        // receiver uses to hand a complete picture to its decoder.
+                        marker: index == last,
+                        payload_type,
+                        sequence_number,
+                        timestamp,
+                        ssrc,
+                        ..Default::default()
+                    },
+                    payload,
+                }
+            })
+            .collect())
+    }
+}
 
 /// VP9 over RTP (RFC 9628) in flexible mode, one layer.
 ///
@@ -377,7 +578,7 @@ pub struct VideoPeer {
     /// True while the transport is connected: frames sent before it are lost.
     connected: Arc<AtomicBool>,
     track: Arc<TrackLocalStaticRTP>,
-    packetizer: Mutex<Vp9Packetizer>,
+    packetizer: Mutex<Packetizer>,
     ssrc: u32,
     control: Arc<dyn DataChannel>,
     payload_type: PayloadType,
@@ -401,14 +602,18 @@ impl VideoPeer {
     pub async fn offer(
         options: TransportOptions,
         events: tokio::sync::mpsc::UnboundedSender<PeerEvent>,
+        codec: VideoCodec,
     ) -> Result<(Self, String)> {
         let runtime = default_runtime().context("no WebRTC runtime is enabled")?;
 
         let mut media_engine = MediaEngine::default();
-        let video_codec = vp9_codec();
+        let video_codec = match &codec {
+            VideoCodec::Vp9 => vp9_codec(),
+            VideoCodec::H264 { profile_level_id } => h264_codec(profile_level_id),
+        };
         media_engine
             .register_codec(video_codec.clone(), RtpCodecKind::Video)
-            .context("failed to offer VP9")?;
+            .with_context(|| format!("failed to offer {codec:?}"))?;
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)?
             .with(
                 Slot::Pacer,
@@ -437,6 +642,10 @@ impl VideoPeer {
         let wants_keyframe = Arc::new(AtomicBool::new(true));
         let connected = Arc::new(AtomicBool::new(false));
         let control_events = events.clone();
+        // A track this engine encodes itself needs no notification: the pipeline
+        // reads `wants_keyframe` directly. A fed track's encoder lives in the
+        // consumer, so a key frame request has to travel back as an event.
+        let keyframe_requests = matches!(codec, VideoCodec::H264 { .. }).then(|| events.clone());
         let peer = PeerConnectionBuilder::<std::net::SocketAddr>::new()
             .with_configuration(builder.build())
             .with_media_engine(media_engine)
@@ -502,7 +711,18 @@ impl VideoPeer {
             ssrc,
             wants_keyframe.clone(),
             loss.clone(),
+            keyframe_requests,
         ));
+
+        let packetizer = match &codec {
+            VideoCodec::Vp9 => Packetizer::Vp9(Vp9Packetizer::new()),
+            VideoCodec::H264 { .. } => Packetizer::H264(H264Packetizer::new(
+                video_codec
+                    .rtp_codec
+                    .payloader()
+                    .context("the media engine has no H.264 payloader")?,
+            )),
+        };
 
         let offer = peer.create_offer(None).await?;
         peer.set_local_description(offer.clone()).await?;
@@ -513,7 +733,7 @@ impl VideoPeer {
                 wants_keyframe,
                 connected,
                 track,
-                packetizer: Mutex::new(Vp9Packetizer::new()),
+                packetizer: Mutex::new(packetizer),
                 ssrc,
                 control,
                 payload_type,
@@ -585,7 +805,8 @@ impl VideoPeer {
     }
 
     /// Packetize one encoded frame and hand it to the track, paced by the
-    /// interceptor chain. `captured` is when its picture was taken.
+    /// interceptor chain. `captured` is when its picture was taken — for a fed
+    /// stream, when its access unit arrived.
     pub async fn send_frame(&self, data: &[u8], keyframe: bool, captured: Instant) -> Result<()> {
         let packets = lock(&self.packetizer).packetize(
             data,
@@ -593,7 +814,7 @@ impl VideoPeer {
             captured,
             self.ssrc,
             self.payload_type,
-        );
+        )?;
         for packet in packets {
             self.track
                 .write_rtp_with_extensions(packet, &[])
@@ -673,6 +894,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_encoded_offer_carries_the_streams_own_profile_and_level() {
+        let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_peer, offer) = VideoPeer::offer(
+            TransportOptions {
+                ice_servers: Vec::new(),
+                loopback_tcp: false,
+                pace_bps: 20_000_000.0,
+            },
+            events,
+            VideoCodec::H264 {
+                profile_level_id: String::from("42c029"),
+            },
+        )
+        .await
+        .expect("a peer connection");
+        assert!(
+            offer.contains("H264/90000"),
+            "the encoded track must be offered as H.264: {offer}",
+        );
+        assert!(
+            offer.contains("packetization-mode=1;profile-level-id=42c029"),
+            "the offer must name the fed SPS's own profile-level-id: {offer}",
+        );
+        assert!(
+            !offer.contains("VP9"),
+            "an encoded source must not also offer the codec it cannot encode: {offer}",
+        );
+    }
+
+    #[test]
+    fn the_profile_level_id_comes_from_the_sps_in_the_stream() {
+        // A leading zero byte, a four-byte start code and a three-byte one, so
+        // the scanner is exercised on both forms.
+        let mut stream = vec![0x00, 0x00, 0x00, 0x01];
+        stream.extend_from_slice(&[0x67, 0x42, 0xc0, 0x29, 0x8c, 0x8d]);
+        stream.extend_from_slice(&[0x00, 0x00, 0x01, 0x68, 0xce, 0x3c, 0x80]);
+        stream.extend_from_slice(&[0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00]);
+        assert_eq!(
+            h264_profile_level_id(&stream).as_deref(),
+            Some("42c029"),
+            "profile_idc, constraint flags and level_idc, as the SDP needs them",
+        );
+        assert_eq!(
+            h264_profile_level_id(&[0x00, 0x00, 0x01, 0x65, 0x88]),
+            None,
+            "a stream with no SPS cannot start a session",
+        );
+    }
+
+    #[test]
+    fn a_fed_keyframe_is_packetized_as_parameter_sets_then_a_slice() {
+        let mut stream = vec![0x00, 0x00, 0x00, 0x01];
+        stream.extend_from_slice(&[0x67, 0x42, 0xc0, 0x29, 0x8c, 0x8d]);
+        stream.extend_from_slice(&[0x00, 0x00, 0x01, 0x68, 0xce, 0x3c, 0x80]);
+        stream.extend_from_slice(&[0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00]);
+        let payloader = h264_codec("42c029")
+            .rtp_codec
+            .payloader()
+            .expect("the media engine has an H.264 payloader");
+        let mut packetizer = H264Packetizer::new(payloader);
+        let packets = packetizer
+            .packetize(
+                &stream,
+                Instant::now(),
+                7,
+                H264_PAYLOAD_TYPE,
+            )
+            .expect("a keyframe packetizes");
+        assert_eq!(packets.len(), 2, "one STAP-A for the parameter sets, one slice");
+        assert_eq!(
+            packets[0].payload[0], 0x78,
+            "the parameter sets travel as a STAP-A",
+        );
+        assert_eq!(packets[1].payload[0], 0x65, "then the IDR slice itself");
+        assert!(
+            !packets[0].header.marker && packets[1].header.marker,
+            "the marker ends the access unit, not the first fragment of it",
+        );
+        assert_eq!(
+            packets[0].header.timestamp, packets[1].header.timestamp,
+            "an access unit is one instant",
+        );
+        assert_eq!(packets[0].header.payload_type, H264_PAYLOAD_TYPE);
+    }
+
+    #[tokio::test]
     async fn a_candidate_that_arrives_before_the_answer_is_not_refused() {
         let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (peer, _offer) = VideoPeer::offer(
@@ -682,6 +989,7 @@ mod tests {
                 pace_bps: 20_000_000.0,
             },
             events,
+            VideoCodec::Vp9,
         )
         .await
         .expect("a peer connection");
@@ -707,6 +1015,7 @@ mod tests {
                 pace_bps: 20_000_000.0,
             },
             events,
+            VideoCodec::Vp9,
         )
         .await
         .expect("a peer connection");
@@ -744,6 +1053,7 @@ mod tests {
                     pace_bps: 20_000_000.0,
                 },
                 events,
+                VideoCodec::Vp9,
             )
             .await
             .expect("a peer connection");

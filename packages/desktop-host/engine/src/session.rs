@@ -11,9 +11,13 @@ use crate::convert::{fit, I420};
 use crate::encoder::Encoder;
 use crate::input::{Button, HeldState, InputDevices};
 use crate::keymap::{self, Layout};
-use crate::peer::{PeerEvent, TransportOptions, VideoPeer};
+use crate::peer::{
+    h264_profile_level_id, PeerEvent, TransportOptions, VideoCodec, VideoPeer,
+};
 use crate::portal::{self, SelectedSource};
-use crate::protocol::{ControlMessage, ControlReply, Permission, PointerPhase, SourceRequest};
+use crate::protocol::{
+    ControlMessage, ControlReply, EncodedCodec, Permission, PointerPhase, SourceRequest,
+};
 use crate::x11::X11Desktop;
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,6 +63,11 @@ pub struct Metrics {
     pub target_kbps: u32,
     pub input_applied: u64,
     pub input_rejected: u64,
+    /// Access units the consumer fed to an encoded source.
+    pub fed_frames: u64,
+    /// Control messages forwarded back to the consumer that owns the device,
+    /// instead of being applied to a desktop this engine holds.
+    pub input_forwarded: u64,
 }
 
 fn tile_hashes(raw: &[u8], width: usize, height: usize) -> Vec<u64> {
@@ -470,6 +479,7 @@ fn lock<T>(mutex: &Arc<Mutex<T>>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// Why a session could not do what was asked, in the protocol's own vocabulary.
+#[derive(Debug)]
 pub struct SessionError {
     pub code: &'static str,
     pub message: String,
@@ -522,6 +532,18 @@ pub enum SessionEvent {
         seq: u64,
         damage: Vec<[usize; 4]>,
     },
+    /// One control-channel message from the client, for a source whose device
+    /// the consumer drives. The engine applied nothing locally.
+    Input {
+        input: serde_json::Value,
+    },
+    /// The far end needs a fresh reference frame and only the consumer can make
+    /// one: the encoder for this track is on its side. Raised by an RTCP PLI or
+    /// FIR, and once when the transport connects, because everything sent before
+    /// that was dropped.
+    KeyframeRequest {
+        generation: u64,
+    },
     RestoreToken(String),
     CaptureStopped { reason: String },
     Revoked {
@@ -552,12 +574,18 @@ struct Inner {
     latest: Arc<Mutex<Option<FrameSnapshot>>>,
     capture_error: Arc<Mutex<Option<String>>>,
     frame_changes: tokio::sync::watch::Receiver<u64>,
-    peer: Arc<VideoPeer>,
-    encoder: Mutex<Encoder>,
+    /// Built when the codec is known: with `session.open` for a captured
+    /// desktop, and with the first fed access unit for an encoded source, whose
+    /// offer has to name the profile the stream's own SPS declares.
+    peer: Mutex<Option<Arc<VideoPeer>>>,
+    /// Absent for an encoded source: the consumer is the encoder.
+    encoder: Mutex<Option<Encoder>>,
     input: Mutex<Option<InputTarget>>,
     indicator: Mutex<Option<crate::indicator::Indicator>>,
     capture: Mutex<Option<FrameSource>>,
-    layout: Mutex<Layout>,
+    /// Absent for an encoded source: there is no local keyboard to translate a
+    /// character through, because the client's keys are forwarded instead.
+    layout: Mutex<Option<Layout>>,
     last_seq: Mutex<u64>,
     control_open: AtomicBool,
     closed: AtomicBool,
@@ -565,7 +593,34 @@ struct Inner {
     /// from the lease as well as from the consumer.
     pipeline: Arc<AtomicBool>,
     events: tokio_mpsc::UnboundedSender<Notice>,
+    /// Present only for an encoded source.
+    encoded: Option<Encoded>,
 }
+
+/// A source whose video arrives already encoded.
+struct Encoded {
+    /// What the consumer said it would feed. Only H.264 exists today; the offer
+    /// is built from this rather than assumed, so a second codec is one arm here.
+    codec: EncodedCodec,
+    /// The transport settings the consumer chose in `session.open`, kept until
+    /// the peer that uses them can be built.
+    transport: TransportOptions,
+    /// Where the peer's events go once it exists.
+    peer_events: tokio_mpsc::UnboundedSender<PeerEvent>,
+    /// Access units waiting to be packetized.
+    feed: tokio_mpsc::Sender<FedAccessUnit>,
+}
+
+/// One access unit a consumer fed, with the keyframe flag it declared.
+struct FedAccessUnit {
+    keyframe: bool,
+    data: Vec<u8>,
+}
+
+/// How many fed access units may wait. A live stream drops the newest rather
+/// than queue: the packetizer is the only consumer, and a backlog of
+/// milliseconds-old pictures is worse than a gap the receiver asks to repair.
+const FEED_BACKLOG: usize = 8;
 
 pub struct Session {
     inner: Arc<Inner>,
@@ -633,6 +688,10 @@ pub fn capabilities() -> serde_json::Value {
         },
         "clipboard": { "read": clipboard, "write": clipboard && clipboard::writer_available(), "mime": ["text/plain;charset=utf-8"],
                        "maxBytes": clipboard::MAX_CLIPBOARD_BYTES },
+        // Video this engine does not capture or encode but can carry, so a
+        // consumer can tell an old engine from one that takes `session.feed`
+        // without guessing from a version string.
+        "encoded": { "codecs": ["h264"] },
     })
 }
 
@@ -687,6 +746,7 @@ pub fn capabilities() -> serde_json::Value {
         },
         "clipboard": { "read": true, "write": true, "mime": ["text/plain;charset=utf-8"],
             "maxBytes": clipboard::MAX_CLIPBOARD_BYTES },
+        "encoded": { "codecs": ["h264"] },
     })
 }
 
@@ -705,6 +765,17 @@ impl Session {
         let wants_control = request.permissions.contains(&Permission::Control);
         let wants_x11 = matches!(request.source, Some(SourceRequest::X11 { .. }));
         let max_fps = request.max_fps.clamp(1, 60);
+        // A source the consumer feeds needs no capture backend, no encoder and
+        // no local input device: the device the client drives is the consumer's,
+        // and the offer has to wait for the stream's own SPS.
+        if let Some(SourceRequest::Encoded {
+            codec,
+            width,
+            height,
+        }) = request.source.clone()
+        {
+            return Self::open_encoded(request, codec, width, height, events).await;
+        }
         // Which desktop decides which input path is even available: an X display
         // takes XTest, which cannot reach any other session, while a portal
         // desktop needs kernel input access.
@@ -963,9 +1034,11 @@ impl Session {
                 pace_bps: (bitrate_kbps as f64 * 3_000.0).max(20_000_000.0),
             },
             peer_events_tx,
+            VideoCodec::Vp9,
         )
         .await
         .map_err(|error| SessionError::new("transport", format!("{error:#}")))?;
+        let peer = Arc::new(peer);
 
         let generation = 1u64;
         let geometry = serde_json::json!({
@@ -985,17 +1058,18 @@ impl Session {
             latest,
             capture_error,
             frame_changes,
-            peer: Arc::new(peer),
-            encoder: Mutex::new(encoder),
+            peer: Mutex::new(Some(peer.clone())),
+            encoder: Mutex::new(Some(encoder)),
             input: Mutex::new(input),
             indicator: Mutex::new(indicator),
             capture: Mutex::new(Some(capture)),
-            layout: Mutex::new(layout),
+            layout: Mutex::new(Some(layout)),
             last_seq: Mutex::new(0),
             control_open: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             pipeline: pipeline.clone(),
             events: events.clone(),
+            encoded: None,
         });
 
         inner.notify(SessionEvent::Description {
@@ -1008,11 +1082,139 @@ impl Session {
             first_frame: false,
         });
 
-        spawn_pipeline(&inner, frame_rx, pipeline, max_fps, bitrate_kbps);
+        spawn_pipeline(&inner, peer, frame_rx, pipeline, max_fps, bitrate_kbps);
         spawn_peer_events(&inner, peer_events_rx);
         spawn_lease(&inner, request.ttl.unwrap_or(Duration::from_secs(3600)));
 
         Ok(Self { inner })
+    }
+
+    /// Open a session over video the consumer already encoded.
+    ///
+    /// Nothing is captured, encoded or driven locally: the engine packetizes
+    /// what it is fed and sends the client's control messages back to the
+    /// consumer, which owns the device. The peer is deliberately absent here —
+    /// the offer must name the profile-level-id of the stream's own SPS, and
+    /// that only exists once the first access unit arrives.
+    async fn open_encoded(
+        request: OpenRequest,
+        codec: EncodedCodec,
+        width: usize,
+        height: usize,
+        events: tokio_mpsc::UnboundedSender<Notice>,
+    ) -> std::result::Result<Self, SessionError> {
+        if width == 0 || height == 0 || width > 7680 || height > 4320 {
+            return Err(SessionError::new(
+                "source",
+                format!("an encoded surface must be 1..7680 by 1..4320 pixels, not {width}x{height}"),
+            ));
+        }
+        let id = opaque_id();
+        let generation = 1u64;
+        let metrics = Arc::new(Mutex::new(Metrics::default()));
+        // Nothing raises it, and nothing waits for it: an encoded source has no
+        // frame to read, only an encoded stream to forward.
+        let (_frame_signal, frame_changes) = tokio::sync::watch::channel(0u64);
+        let (peer_events, peer_events_rx) = tokio_mpsc::unbounded_channel::<PeerEvent>();
+        let (feed, feed_rx) = tokio_mpsc::channel::<FedAccessUnit>(FEED_BACKLOG);
+        let geometry = serde_json::json!({
+            "source": { "width": width, "height": height },
+            // Nothing is scaled: the client aims at the stream's own pixels, and
+            // the consumer maps them to its device.
+            "encoded": { "width": width, "height": height },
+            "origin": { "x": 0, "y": 0 },
+        });
+        let inner = Arc::new(Inner {
+            id,
+            generation,
+            permissions: request.permissions,
+            source: SelectedSource {
+                node_id: 0,
+                width: width as i32,
+                height: height as i32,
+                position: Some((0, 0)),
+                source_type: Some(String::from("encoded")),
+                origin_x: 0,
+                origin_y: 0,
+            },
+            geometry,
+            metrics,
+            latest: Arc::new(Mutex::new(None)),
+            capture_error: Arc::new(Mutex::new(None)),
+            frame_changes,
+            peer: Mutex::new(None),
+            encoder: Mutex::new(None),
+            input: Mutex::new(None),
+            indicator: Mutex::new(None),
+            capture: Mutex::new(None),
+            layout: Mutex::new(None),
+            last_seq: Mutex::new(0),
+            control_open: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            pipeline: Arc::new(AtomicBool::new(false)),
+            events: events.clone(),
+            encoded: Some(Encoded {
+                codec,
+                transport: TransportOptions {
+                    ice_servers: request.ice_servers,
+                    loopback_tcp: request.loopback_tcp,
+                    // A device stream is a few megabits; pacing exists to spread
+                    // a large frame, not to shape a rate this engine does not set.
+                    pace_bps: 20_000_000.0,
+                },
+                peer_events,
+                feed,
+            }),
+        });
+        inner.notify(SessionEvent::State {
+            capture: "consented",
+            transport: String::from("new"),
+            first_frame: false,
+        });
+        spawn_peer_events(&inner, peer_events_rx);
+        spawn_encoded(&inner, feed_rx);
+        spawn_lease(&inner, request.ttl.unwrap_or(Duration::from_secs(3600)));
+        Ok(Self { inner })
+    }
+
+    /// Take one access unit of an encoded source.
+    ///
+    /// The reply acknowledges the hand-off, not the picture: the unit is
+    /// packetized behind this request, and `session.metrics` reports what was
+    /// sent and what was dropped.
+    pub fn feed(
+        &self,
+        keyframe: bool,
+        data: Vec<u8>,
+    ) -> std::result::Result<(), SessionError> {
+        let Some(encoded) = &self.inner.encoded else {
+            return Err(SessionError::new(
+                "operation",
+                "this session has no encoded source to feed",
+            ));
+        };
+        if self.inner.closed.load(Ordering::Relaxed) {
+            return Err(SessionError::new("session", "the session has ended"));
+        }
+        if data.is_empty() {
+            return Err(SessionError::new(
+                "operation",
+                "an access unit cannot be empty",
+            ));
+        }
+        if let Ok(mut m) = self.inner.metrics.lock() {
+            m.fed_frames += 1;
+        }
+        if encoded
+            .feed
+            .try_send(FedAccessUnit { keyframe, data })
+            .is_err()
+        {
+            if let Ok(mut m) = self.inner.metrics.lock() {
+                m.dropped_frames += 1;
+            }
+        }
+        Ok(())
     }
 
     pub fn id(&self) -> &str {
@@ -1037,6 +1239,12 @@ impl Session {
         still_ms: Option<u64>,
         timeout_ms: u64,
     ) -> std::result::Result<(), SessionError> {
+        if self.inner.encoded.is_some() {
+            return Err(SessionError::new(
+                "operation",
+                "this session forwards an encoded stream and keeps no frame",
+            ));
+        }
         let mut changes = self.inner.frame_changes.clone();
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms.min(120_000));
         loop {
@@ -1084,6 +1292,12 @@ impl Session {
             return Err(SessionError::new(
                 "permission",
                 "view permission is required",
+            ));
+        }
+        if self.inner.encoded.is_some() {
+            return Err(SessionError::new(
+                "operation",
+                "this session forwards an encoded stream and keeps no frame",
             ));
         }
         if let Some(reason) = lock(&self.inner.capture_error).clone() {
@@ -1140,7 +1354,18 @@ impl Session {
     }
 
     pub async fn accept_answer(&self, sdp: String) -> Result<()> {
-        self.inner.peer.accept_answer(sdp).await.map(|_applied| ())
+        self.current_peer()?.accept_answer(sdp).await.map(|_applied| ())
+    }
+
+    /// The peer for this session, which an encoded source does not have until
+    /// its first access unit has named the codec.
+    fn current_peer(&self) -> Result<Arc<VideoPeer>> {
+        self.inner
+            .peer
+            .lock()
+            .ok()
+            .and_then(|peer| peer.clone())
+            .ok_or_else(|| anyhow::anyhow!("no offer has been made for this session yet"))
     }
 
     pub async fn add_candidate(
@@ -1149,8 +1374,7 @@ impl Session {
         sdp_mid: Option<String>,
         sdp_m_line_index: Option<u16>,
     ) -> Result<()> {
-        self.inner
-            .peer
+        self.current_peer()?
             .add_candidate(candidate, sdp_mid, sdp_m_line_index)
             .await
     }
@@ -1222,14 +1446,15 @@ impl Inner {
             }
             *input = None;
         }
-        let _ = self
-            .peer
-            .send_control(
-                &serde_json::to_string(&ControlReply::Revoked { reason })
-                    .unwrap_or_else(|_| String::from(r#"{"kind":"revoked","reason":"closed"}"#)),
-            )
-            .await;
-        self.peer.close().await;
+        if let Some(peer) = self.peer.lock().ok().and_then(|peer| peer.clone()) {
+            let _ = peer
+                .send_control(
+                    &serde_json::to_string(&ControlReply::Revoked { reason })
+                        .unwrap_or_else(|_| String::from(r#"{"kind":"revoked","reason":"closed"}"#)),
+                )
+                .await;
+            peer.close().await;
+        }
         // Dropping the capture stops the PipeWire stream and joins its thread,
         // which is what releases the compositor's consent for this session. It
         // has to happen synchronously, not when the last handle happens to fall
@@ -1256,7 +1481,10 @@ impl Inner {
     }
 
     fn clipboard_refusal(&self) -> Option<(&'static str, &'static str)> {
-        if self.source.source_type.as_deref() == Some("x11-root") || !wayland_clipboard_available()
+        if matches!(
+            self.source.source_type.as_deref(),
+            Some("x11-root") | Some("encoded")
+        ) || !wayland_clipboard_available()
         {
             return Some((
                 "clipboard-unsupported",
@@ -1279,9 +1507,14 @@ impl Inner {
 
     fn reply(&self, payload: &ControlReply<'_>) -> Result<()> {
         let text = serde_json::to_string(payload)?;
+        let Some(peer) = self.peer.lock().ok().and_then(|peer| peer.clone()) else {
+            // An encoded source has no peer until its first access unit, so a
+            // rejection raised before then has nowhere to go; the request that
+            // caused it is refused in the same breath.
+            return Ok(());
+        };
         // The channel is asynchronous; a failure here means the peer is gone,
         // which the connection-state handler closes anyway.
-        let peer = self.peer.clone();
         tokio::spawn(async move {
             let _ = peer.send_control(&text).await;
         });
@@ -1318,7 +1551,7 @@ impl Inner {
             *last = seq;
         }
         let feedback = match &message {
-            ControlMessage::Pointer { phase, x, y, .. } => {
+            ControlMessage::Pointer { phase, x, y, .. } if self.encoded.is_none() => {
                 let (x, y) = to_source_pixels(*x, *y, self.encoded_size(), &self.source);
                 Some((
                     if matches!(phase, PointerPhase::Down) {
@@ -1334,6 +1567,13 @@ impl Inner {
             ControlMessage::Key { down: true, .. } => Some(('T', -1, -1)),
             _ => None,
         };
+        // A source the consumer feeds is a device the consumer drives. Nothing is
+        // applied to this machine: the message travels back as an event, and the
+        // consumer injects it where the picture actually came from.
+        if self.encoded.is_some() {
+            self.forward(message);
+            return;
+        }
         let outcome = match message {
             ControlMessage::Pointer {
                 phase,
@@ -1384,6 +1624,41 @@ impl Inner {
             }
             Err((code, message)) => self.reject(seq, code, &message),
         }
+    }
+
+    /// Hand one client action back to the consumer, which owns the device this
+    /// stream came from. The audit trail is the event itself and the count in
+    /// `session.metrics`; nothing was applied here.
+    fn forward(&self, message: ControlMessage) {
+        let seq = message.seq();
+        // The clipboard belongs to the device the consumer drives, and this
+        // engine has none for this source; saying so is better than a request
+        // that never answers.
+        match &message {
+            ControlMessage::ClipboardRead { request, .. }
+            | ControlMessage::ClipboardWrite { request, .. } => {
+                let _ = self.reply(&ControlReply::Clipboard {
+                    request,
+                    text: String::new(),
+                    truncated: false,
+                    error: Some("this source's clipboard belongs to the consumer"),
+                });
+                return;
+            }
+            _ => {}
+        }
+        let input = match serde_json::to_value(&message) {
+            Ok(input) => input,
+            Err(_) => {
+                self.reject(seq, "operation", "unrecognised control message");
+                return;
+            }
+        };
+        self.notify(SessionEvent::Input { input });
+        if let Ok(mut m) = self.metrics.lock() {
+            m.input_forwarded += 1;
+        }
+        let _ = self.reply(&ControlReply::Ack { seq });
     }
 
     fn with_input<T>(
@@ -1462,10 +1737,13 @@ impl Inner {
         }
 
         let stroke = {
-            let layout = self
+            let held = self
                 .layout
                 .lock()
                 .map_err(|_| ("session", String::from("no keyboard layout")))?;
+            let layout = held
+                .as_ref()
+                .ok_or(("session", String::from("no keyboard layout")))?;
             if let Some(name) = name {
                 keymap::named_key(&name)
                     .ok_or(("text-unsupported", format!("unknown key {name}")))?
@@ -1512,12 +1790,15 @@ impl Inner {
         }
         #[cfg(target_os = "linux")]
         {
-            let layout = self
+            let held = self
                 .layout
                 .lock()
                 .map_err(|_| ("session", String::from("no keyboard layout")))?;
+            let layout = held
+                .as_ref()
+                .ok_or(("session", String::from("no keyboard layout")))?;
             let (plan, unreachable) = layout.plan_text(text);
-            drop(layout);
+            drop(held);
             if !unreachable.is_empty() {
                 return Err((
                     "text-unsupported",
@@ -1774,6 +2055,7 @@ enum Pass {
 /// the desktop goes still the last frame is coded once more, sharp.
 fn spawn_pipeline(
     inner: &Arc<Inner>,
+    peer: Arc<VideoPeer>,
     frame_rx: FrameReceiver,
     running: Arc<AtomicBool>,
     max_fps: u32,
@@ -1802,7 +2084,7 @@ fn spawn_pipeline(
                 let slot = last_sent.map_or(Duration::ZERO, |at| {
                     interval.saturating_sub(now.duration_since(at))
                 });
-                let connected = inner.peer.is_connected();
+                let connected = peer.is_connected();
                 let wait = if !connected {
                     // Nothing sent before the transport connects arrives; the
                     // first frame after it is a key frame.
@@ -1838,15 +2120,17 @@ fn spawn_pipeline(
                 if !running.load(Ordering::Relaxed) {
                     break;
                 }
-                if inner.peer.take_keyframe_request() || !connected {
+                if peer.take_keyframe_request() || !connected {
                     keyframe = true;
                 }
-                let reports = inner.peer.take_loss_reports();
+                let reports = peer.take_loss_reports();
                 if let Some(kbps) = rate.update(&reports, Instant::now()) {
-                    let applied = inner
-                        .encoder
-                        .lock()
-                        .map(|mut encoder| encoder.set_bitrate(kbps));
+                    let applied = inner.encoder.lock().map(|mut encoder| {
+                        encoder
+                            .as_mut()
+                            .map(|encoder| encoder.set_bitrate(kbps))
+                            .unwrap_or(Ok(()))
+                    });
                     if matches!(applied, Ok(Ok(()))) {
                         if let Ok(mut m) = inner.metrics.lock() {
                             m.target_kbps = kbps;
@@ -1877,9 +2161,12 @@ fn spawn_pipeline(
 
                 let started = Instant::now();
                 let packet = {
-                    let mut encoder = match inner.encoder.lock() {
-                        Ok(encoder) => encoder,
+                    let mut held = match inner.encoder.lock() {
+                        Ok(held) => held,
                         Err(_) => break,
+                    };
+                    let Some(encoder) = held.as_mut() else {
+                        break;
                     };
                     match pass {
                         Pass::Motion { keyframe } => encoder.encode(frame, keyframe),
@@ -1931,7 +2218,6 @@ fn spawn_pipeline(
                     Pass::Keepalive => {}
                 }
                 last_sent = Some(now);
-                let peer = inner.peer.clone();
                 if let Err(error) =
                     handle.block_on(peer.send_frame(&packet.data, packet.keyframe, now))
                 {
@@ -1951,6 +2237,97 @@ fn spawn_pipeline(
             }
         })
         .ok();
+}
+
+/// Packetize what a consumer feeds an encoded source, building the peer on the
+/// first access unit that carries an SPS.
+///
+/// That order is forced by the contract: the offer must name the profile the
+/// stream actually is, and the only place that is written down is the stream's
+/// own SPS. Until one arrives there is nothing that could be offered.
+fn spawn_encoded(inner: &Arc<Inner>, mut feed: tokio_mpsc::Receiver<FedAccessUnit>) {
+    let inner = inner.clone();
+    tokio::spawn(async move {
+        while let Some(unit) = feed.recv().await {
+            if inner.closed.load(Ordering::SeqCst) {
+                return;
+            }
+            if current_peer(&inner).is_none() {
+                let Some(profile) = h264_profile_level_id(&unit.data) else {
+                    if let Ok(mut m) = inner.metrics.lock() {
+                        m.dropped_frames += 1;
+                    }
+                    continue;
+                };
+                let Some(encoded) = &inner.encoded else {
+                    return;
+                };
+                let codec = match encoded.codec {
+                    EncodedCodec::H264 => VideoCodec::H264 {
+                        profile_level_id: profile,
+                    },
+                };
+                let offered = VideoPeer::offer(
+                    encoded.transport.clone(),
+                    encoded.peer_events.clone(),
+                    codec,
+                )
+                .await;
+                match offered {
+                    Ok((peer, offer)) => {
+                        let peer = Arc::new(peer);
+                        if let Ok(mut held) = inner.peer.lock() {
+                            *held = Some(peer.clone());
+                        }
+                        inner.notify(SessionEvent::Description {
+                            generation: inner.generation,
+                            sdp: offer,
+                        });
+                    }
+                    Err(error) => {
+                        revoke(&inner, format!("the transport refused the encoded stream: {error:#}"))
+                            .await;
+                        return;
+                    }
+                }
+            }
+            let Some(peer) = current_peer(&inner) else {
+                return;
+            };
+            let started = Instant::now();
+            let sent = peer.send_frame(&unit.data, unit.keyframe, started).await;
+            match sent {
+                Ok(()) => {
+                    if let Ok(mut m) = inner.metrics.lock() {
+                        m.encoded_frames += 1;
+                        m.encoded_bytes += unit.data.len() as u64;
+                        m.encode_micros += started.elapsed().as_micros() as u64;
+                        if unit.keyframe {
+                            m.key_frames += 1;
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("the video track refused a fed access unit: {error:#}");
+                    revoke(&inner, String::from("the connection to the phone was lost")).await;
+                    return;
+                }
+            }
+        }
+    });
+}
+
+fn current_peer(inner: &Arc<Inner>) -> Option<Arc<VideoPeer>> {
+    inner.peer.lock().ok().and_then(|peer| peer.clone())
+}
+
+/// End the session with a reason the consumer can show, exactly as the encode
+/// pipeline does when its transport goes away.
+async fn revoke(inner: &Arc<Inner>, reason: String) {
+    inner.notify(SessionEvent::Revoked {
+        reason: reason.clone(),
+    });
+    inner.close(&reason).await;
 }
 
 fn spawn_peer_events(inner: &Arc<Inner>, mut events: tokio_mpsc::UnboundedReceiver<PeerEvent>) {
@@ -1975,6 +2352,16 @@ fn spawn_peer_events(inner: &Arc<Inner>, mut events: tokio_mpsc::UnboundedReceiv
                 }
                 PeerEvent::State(state) => {
                     use webrtc::peer_connection::RTCPeerConnectionState as State;
+                    // The far end needs a reference frame to start from, and only
+                    // the consumer can make one for a stream it encodes. A
+                    // captured desktop manages this in its encode loop; a fed one
+                    // has to ask — and everything sent before the transport
+                    // connected was dropped, so this is not optional.
+                    if inner.encoded.is_some() && matches!(state, State::Connected) {
+                        inner.notify(SessionEvent::KeyframeRequest {
+                            generation: inner.generation,
+                        });
+                    }
                     // ICE loss need not close SCTP. Never leave a drag or chord
                     // held while waiting for that independent notification.
                     if matches!(state, State::Disconnected | State::Failed | State::Closed) {
@@ -2020,6 +2407,11 @@ fn spawn_peer_events(inner: &Arc<Inner>, mut events: tokio_mpsc::UnboundedReceiv
                             let _ = target.release_all();
                         }
                     }
+                }
+                PeerEvent::KeyframeRequest => {
+                    inner.notify(SessionEvent::KeyframeRequest {
+                        generation: inner.generation,
+                    });
                 }
                 PeerEvent::ControlMessage(text) => {
                     match serde_json::from_str::<ControlMessage>(&text) {
@@ -2144,6 +2536,7 @@ mod tests {
                 pace_bps: 20_000_000.0,
             },
             peer_events,
+            VideoCodec::Vp9,
         )
         .await
         .expect("a peer connection builds without a network");
@@ -2172,8 +2565,8 @@ mod tests {
             latest: Arc::new(Mutex::new(None)),
             capture_error: Arc::new(Mutex::new(None)),
             frame_changes: tokio::sync::watch::channel(0).1,
-            peer: Arc::new(peer),
-            encoder: Mutex::new(Encoder::new(64, 64, 1000, 30, 1).expect("an encoder")),
+            peer: Mutex::new(Some(Arc::new(peer))),
+            encoder: Mutex::new(Some(Encoder::new(64, 64, 1000, 30, 1).expect("an encoder"))),
             input: Mutex::new(Some(InputTarget {
                 applier: Applier::Recording(recorded.clone()),
                 held: HeldState::default(),
@@ -2184,12 +2577,13 @@ mod tests {
             })),
             capture: Mutex::new(None),
             indicator: Mutex::new(None),
-            layout: Mutex::new(Layout::from_environment().expect("a keymap")),
+            layout: Mutex::new(Some(Layout::from_environment().expect("a keymap"))),
             last_seq: Mutex::new(0),
             control_open: AtomicBool::new(true),
             closed: AtomicBool::new(false),
             pipeline: Arc::new(AtomicBool::new(true)),
             events,
+            encoded: None,
         });
         (inner, recorded)
     }
@@ -2487,7 +2881,7 @@ mod tests {
         let (events, mut received) = tokio_mpsc::unbounded_channel();
         let (inner, _recorded) = test_inner(events).await;
         let (frame_tx, frame_rx) = latest_frame();
-        spawn_pipeline(&inner, frame_rx, Arc::new(AtomicBool::new(true)), 30, 1000);
+        spawn_pipeline(&inner, current_peer(&inner).expect("the test's peer"), frame_rx, Arc::new(AtomicBool::new(true)), 30, 1000);
 
         // The encoder is 64x64; a 32x32 frame is the dimension mismatch that
         // used to be counted and dropped behind a permanently black picture.
@@ -2516,6 +2910,184 @@ mod tests {
         assert!(
             inner.revoked_reason().is_some(),
             "the session is closed, not left black"
+        );
+    }
+
+    /// A consumer-fed stream: a keyframe carrying SPS, PPS and an IDR slice.
+    fn fed_keyframe() -> Vec<u8> {
+        let mut stream = vec![0x00, 0x00, 0x00, 0x01];
+        stream.extend_from_slice(&[0x67, 0x42, 0xc0, 0x29, 0x8c, 0x8d]);
+        stream.extend_from_slice(&[0x00, 0x00, 0x01, 0x68, 0xce, 0x3c, 0x80]);
+        stream.extend_from_slice(&[0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00]);
+        stream
+    }
+
+    fn encoded_open() -> OpenRequest {
+        OpenRequest {
+            source: Some(SourceRequest::Encoded {
+                codec: EncodedCodec::H264,
+                width: 486,
+                height: 1080,
+            }),
+            permissions: vec![Permission::View, Permission::Control],
+            max_width: 3840,
+            max_height: 2160,
+            bitrate_kbps: 0,
+            max_fps: 30,
+            ice_servers: Vec::new(),
+            restore_token: None,
+            ttl: Some(Duration::from_secs(30)),
+            loopback_tcp: false,
+            agent_indicator: false,
+        }
+    }
+
+    async fn next_notice(received: &mut tokio_mpsc::UnboundedReceiver<Notice>) -> Notice {
+        tokio::time::timeout(Duration::from_secs(5), received.recv())
+            .await
+            .expect("a notification arrives")
+            .expect("the channel stays open")
+    }
+
+    #[tokio::test]
+    async fn an_encoded_session_opens_without_capture_encoder_or_input() {
+        let (events, _received) = tokio_mpsc::unbounded_channel();
+        let session = Session::open(encoded_open(), events)
+            .await
+            .expect("an encoded source needs no display and no input device");
+        let inner = &session.inner;
+        assert_eq!(session.restore_source(), "encoded");
+        assert_eq!(session.geometry()["encoded"]["width"], 486);
+        assert_eq!(session.geometry()["encoded"]["height"], 1080);
+        assert!(
+            inner.encoder.lock().unwrap().is_none(),
+            "the consumer is the encoder for this source"
+        );
+        assert!(
+            inner.capture.lock().unwrap().is_none(),
+            "there is nothing to capture"
+        );
+        assert!(
+            inner.input.lock().unwrap().is_none(),
+            "the client's input belongs to the consumer's device"
+        );
+        assert!(
+            inner.peer.lock().unwrap().is_none(),
+            "the offer waits for the stream's own SPS"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_offer_for_a_fed_stream_names_that_streams_own_profile() {
+        let (events, mut received) = tokio_mpsc::unbounded_channel();
+        let session = Session::open(encoded_open(), events)
+            .await
+            .expect("an encoded session");
+        let first = next_notice(&mut received).await;
+        assert!(
+            matches!(
+                first.event,
+                SessionEvent::State {
+                    capture: "consented",
+                    ..
+                }
+            ),
+            "the session is open before any offer exists: {:?}",
+            first.event,
+        );
+
+        session.feed(true, fed_keyframe()).expect("a keyframe is taken");
+        let offered = loop {
+            let notice = next_notice(&mut received).await;
+            if let SessionEvent::Description { sdp, .. } = notice.event {
+                break sdp;
+            }
+        };
+        assert!(
+            offered.contains("H264/90000"),
+            "the fed track is offered as H.264: {offered}"
+        );
+        assert!(
+            offered.contains("profile-level-id=42c029"),
+            "the profile-level-id comes from the fed SPS, not a default: {offered}"
+        );
+        assert_eq!(session.metrics().fed_frames, 1);
+    }
+
+    #[tokio::test]
+    async fn a_fed_stream_forwards_its_controls_instead_of_applying_them() {
+        let (events, mut received) = tokio_mpsc::unbounded_channel();
+        let session = Session::open(encoded_open(), events)
+            .await
+            .expect("an encoded session");
+        session.inner.control_open.store(true, Ordering::SeqCst);
+
+        session.inner.apply(ControlMessage::Pointer {
+            phase: PointerPhase::Down,
+            x: 10,
+            y: 20,
+            button: 1,
+            seq: 1,
+        });
+
+        let forwarded = loop {
+            let notice = next_notice(&mut received).await;
+            if let SessionEvent::Input { input } = notice.event {
+                break input;
+            }
+        };
+        assert_eq!(forwarded["kind"], "pointer");
+        assert_eq!(forwarded["phase"], "down");
+        assert_eq!(forwarded["x"], 10);
+        assert_eq!(forwarded["seq"], 1);
+        assert_eq!(session.metrics().input_forwarded, 1);
+        assert_eq!(
+            session.metrics().input_applied,
+            0,
+            "nothing was applied to this machine"
+        );
+
+        // The stream's own coordinates are what travels, so an encoded surface
+        // cannot be driven by a coordinate the far end never rendered.
+        session.inner.apply(ControlMessage::Pointer {
+            phase: PointerPhase::Move,
+            x: 9_000,
+            y: 20,
+            button: 1,
+            seq: 2,
+        });
+        assert_eq!(session.metrics().input_forwarded, 2);
+    }
+
+    #[tokio::test]
+    async fn a_capture_session_refuses_a_fed_stream() {
+        let (events, _received) = tokio_mpsc::unbounded_channel();
+        let (inner, _recorded) = test_inner(events).await;
+        let session = Session { inner };
+        assert_eq!(
+            session.feed(true, fed_keyframe()).unwrap_err().code,
+            "operation",
+            "only an encoded source takes access units",
+        );
+    }
+
+    #[tokio::test]
+    async fn an_encoded_session_has_no_frame_to_read() {
+        let (events, _received) = tokio_mpsc::unbounded_channel();
+        let session = Session::open(encoded_open(), events)
+            .await
+            .expect("an encoded session");
+        assert_eq!(
+            session.frame(None, "", None).unwrap_err().code,
+            "operation"
+        );
+        assert_eq!(
+            session.wait_frame(None, None, 10).await.unwrap_err().code,
+            "operation"
+        );
+        assert_eq!(
+            session.read_clipboard().await.unwrap_err(),
+            "clipboard is unavailable for this desktop source",
         );
     }
 
@@ -2602,7 +3174,7 @@ mod tests {
         let (events, _events_rx) = tokio_mpsc::unbounded_channel();
         let (inner, _recorded) = test_inner(events).await;
         let (frame_tx, frame_rx) = latest_frame();
-        spawn_pipeline(&inner, frame_rx, Arc::new(AtomicBool::new(true)), 20, 1000);
+        spawn_pipeline(&inner, current_peer(&inner).expect("the test's peer"), frame_rx, Arc::new(AtomicBool::new(true)), 20, 1000);
 
         // 40 frames over 200 ms is 200 fps; the requested 20 fps caps what leaves.
         for _ in 0..40 {

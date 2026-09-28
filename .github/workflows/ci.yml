@@ -67,3 +67,8 @@ jobs:
       - run: node packages/axi/test/a11y-flow.mjs
         env:
           DESKLINK_AXI_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/desklink-host
+      # The encoded source, decoded by a real Chrome through the client package's
+      # web implementation. It prints a skip and passes where no Chrome exists.
+      - run: node packages/desktop-host/test/encoded-flow.mjs
+        env:
+          DESKLINK_AXI_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/desklink-host

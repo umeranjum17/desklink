@@ -452,6 +452,14 @@ fn render_event(notice: session::Notice) -> Option<String> {
             "session.frame.changed",
             serde_json::json!({ "sessionId": session_id, "seq": seq, "damage": damage }),
         ),
+        session::SessionEvent::Input { input } => (
+            "session.input",
+            serde_json::json!({ "sessionId": session_id, "input": input }),
+        ),
+        session::SessionEvent::KeyframeRequest { generation } => (
+            "session.keyframeRequest",
+            serde_json::json!({ "sessionId": session_id, "generation": generation }),
+        ),
         session::SessionEvent::RestoreToken(token) => (
             "session.restoreToken",
             serde_json::json!({ "sessionId": session_id, "token": token }),
@@ -624,6 +632,19 @@ async fn dispatch(
             session
                 .frame(params.since, &params.path, params.region)
                 .map_err(|error| ErrorBody::new(error.code, error.message))
+        }
+        "session.feed" => {
+            let session = require_session(current)?;
+            let params: protocol::FeedParams = serde_json::from_value(request.params.clone())
+                .map_err(|error| ErrorBody::new("malformed", error.to_string()))?;
+            check_session(session, &params.session_id, None)?;
+            let data = params
+                .access_unit()
+                .map_err(|message| ErrorBody::new("malformed", message))?;
+            session
+                .feed(params.keyframe, data)
+                .map_err(|error| ErrorBody::new(error.code, error.message))?;
+            Ok(serde_json::json!({ "accepted": true }))
         }
         "session.metrics" => {
             let session = require_session(current)?;
