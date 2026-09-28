@@ -279,7 +279,7 @@ export async function serve(args: string[]): Promise<void> {
         const bound = /^@([A-Za-z][A-Za-z0-9_-]*)\.(\d+)$/.exec(arg);
         if (!bound) return arg;
         const items = bindings.get(bound[1]!);
-        if (!items) throw new Error(`batch: unknown binding @${bound[1]}; run a named snapshot step first`);
+        if (!items) return arg; // Not a named binding — tree (@a<gen>.<n>) and OCR refs flow to target().
         const item = items[Number(bound[2]) - 1];
         if (!item) throw new Error(`stale-ref: ${arg}; binding holds ${items.length} items`);
         const live = text.find(t => t.text === item.text && Math.abs(t.x - item.x) < 12 && Math.abs(t.y - item.y) < 12);
@@ -317,7 +317,7 @@ export async function serve(args: string[]): Promise<void> {
           results.push(`${label(index, step)} ${effect}`);
         } catch (error) {
           results.push(`${label(index, step)} error: ${(error as Error).message}`);
-          return `error: batch: ${results.length}/${steps.length} steps; ${footer()}\n${results.join('\n')}`;
+          return `error: batch: ${results.length - 1}/${steps.length} steps; ${footer()}\n${results.join('\n')}`;
         }
       }
       return `batch: ${results.length}/${steps.length} steps; ${footer()}\n${results.join('\n')}`;
