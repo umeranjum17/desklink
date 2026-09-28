@@ -185,6 +185,9 @@ try {
   let typed = ''; for await (const part of typing.stdout) typed += part;
   assert.equal(await new Promise(r=>typing.on('exit',r)),0,typed);
   assert.match(typed,/input: applied/);
+  // The X client saves asynchronously; on slow runners the file can lag the
+  // applied input by a moment. Bounded settle — the text must still land.
+  for (let i = 0; i < 20 && readFileSync(typedPath,'utf8') !== expectedText; i++) await new Promise(r=>setTimeout(r,100));
   assert.equal(readFileSync(typedPath,'utf8'),expectedText,'saved X-client buffer must equal typed text');
   const beforeChords = events.length;
   await run('press','Alt+Tab');
