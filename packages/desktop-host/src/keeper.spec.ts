@@ -91,6 +91,23 @@ describe('startDisplayKeeper', () => {
         }
     });
 
+    it('reports a keeper that could not spawn as dead on the exit detail', async () => {
+        let exit: { code: number | null; signal: NodeJS.Signals | null; error?: string } | undefined;
+        const keeper = startDisplayKeeper({
+            display: ':42',
+            engine: { command: '/nonexistent/desklink-engine', args: [] },
+            onExit: (detail) => (exit = detail),
+        });
+        try {
+            const detail = await until(() => exit);
+            expect(detail?.code).toBeNull();
+            expect(detail?.signal).toBeNull();
+            expect(detail?.error).toBeTruthy();
+        } finally {
+            await keeper.stop();
+        }
+    });
+
     it('stop() ends even a keeper that would linger', async () => {
         let exited = false;
         const keeper = startDisplayKeeper({

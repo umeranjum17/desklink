@@ -96,7 +96,11 @@ export function startDisplayKeeper(options: DisplayKeeperOptions): DisplayKeeper
     });
     const stderr = createInterface({ input: child.stderr });
     stderr.on('line', (line) => options.onDiagnostic?.(line));
-    child.on('error', (error) => options.onDiagnostic?.(`display keeper process error: ${error.message}`));
+    child.on('error', (error) => {
+        options.onDiagnostic?.(`display keeper process error: ${error.message}`);
+        // A process that never spawned emits no 'exit'; this is its only death.
+        if (child.pid === undefined) options.onExit?.({ code: null, signal: null, error: error.message });
+    });
     child.on('exit', (code, signal) => options.onExit?.({ code, signal, ...(refusal === undefined ? {} : { error: refusal }) }));
     return {
         stop: () =>

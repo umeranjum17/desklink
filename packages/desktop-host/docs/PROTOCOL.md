@@ -549,8 +549,8 @@ stdout JSON-lines stream, and closing the consumer's stdout end ends the keeper.
 
 The keeper fills the screen with every normal (non-override-redirect,
 input-output) top-level window at `0,0,W,H`, raises the newest one and keeps the
-input focus on it, so keyboard events an engine session injects on that display
-land where a person looking at the screen would expect. A top-level window
+input focus on the newest content window, so keyboard events an engine session
+injects on that display land where a person looking at the screen would expect. A top-level window
 smaller than 120 px on either side is not content — an emulator draws its side
 toolbar as a tiny second window — and is parked far off-screen instead, so a
 capture of the screen never shows it.
