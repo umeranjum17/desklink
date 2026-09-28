@@ -8,7 +8,7 @@ import { desktopInputEnabled, emitDesktopKeyboard, getDesktopSize, getDesktopStr
 type Point = { x: number; y: number };
 type Gesture = { start: Point; last: Point; time: number; mode: 'pending' | 'hover' | 'pan' | 'armed' | 'drag' | 'two' | 'scroll' | 'pinch' | 'spent'; span: number; focus: Point };
 
-export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0 }: DesktopViewProps) {
+export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0, gestures = 'desktop' }: DesktopViewProps) {
     const [revision, refresh] = React.useReducer((n: number) => n + 1, 0);
     const [bounds, setBounds] = React.useState({ width: 0, height: 0 });
     const [size, setSize] = React.useState(() => getDesktopSize(sessionId) ?? { width: 0, height: 0 });
@@ -36,6 +36,15 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         const hide = Keyboard.addListener('keyboardWillHide', () => setKeyboardHeight(0));
         return () => { show.remove(); hide.remove(); };
     }, []);
+    React.useEffect(() => {
+        if (gestures !== 'device') return;
+        setCursor(null);
+        const held = gesture.current;
+        if (held && (held.mode === 'pending' || held.mode === 'armed')) {
+            stopTimer();
+            held.mode = 'spent';
+        }
+    }, [gestures]);
     React.useEffect(() => {
         if (!sessionId) return;
         return registerDesktopView(sessionId, {
@@ -65,7 +74,8 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
     const send = (control: Record<string, unknown>) => { if (sessionId) nativeDesklink.sendControl(sessionId, JSON.stringify(control)); };
     const pointer = (phase: string, at: Point, button?: number) => {
         send({ kind: 'pointer', phase, x: at.x, y: at.y, ...(button ? { button } : {}) });
-        setCursor(at);
+        // A device screen shows the touch itself; a cursor would be a second finger that lies.
+        if (gestures !== 'device') setCursor(at);
     };
     const click = (at: Point, button = 1) => { pointer('down', at, button); pointer('up', at, button); };
     const stopTimer = () => { if (longPress.current) clearTimeout(longPress.current); longPress.current = null; };
@@ -79,6 +89,15 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         const touches = event.nativeEvent.touches;
         if (touches.length !== 1) return;
         const at = { x: touches[0].locationX, y: touches[0].locationY };
+        // A device screen is pressed, not pointed at: the finger lands with the
+        // button down. A tap is the same press lifted without moving, and a
+        // hold holds — there is no long press to arm.
+        if (gestures === 'device') {
+            const from = point(at.x, at.y);
+            gesture.current = { start: at, last: at, time: Date.now(), mode: from ? 'drag' : 'spent', span: 0, focus: at };
+            if (from) pointer('down', from, 1);
+            return;
+        }
         gesture.current = { start: at, last: at, time: Date.now(), mode: 'pending', span: 0, focus: at };
         stopTimer();
         longPress.current = setTimeout(() => {
@@ -108,14 +127,26 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
             } else if (g.mode === 'scroll') {
                 send({ kind: 'wheel', dx: -(center.x - g.focus.x) / scale / 120, dy: -(center.y - g.focus.y) / scale / 120 });
             }
-            g.span = distance; g.focus = center;
+            g.span = distance; g.focus = center; g.last = center;
             return;
         }
-        if (touches.length !== 1 || g.mode === 'spent' || g.mode === 'two' || g.mode === 'pinch' || g.mode === 'scroll') return;
+        if (touches.length !== 1 || g.mode === 'spent' || g.mode === 'two' || g.mode === 'pinch' || (g.mode === 'scroll' && gestures !== 'browser')) return;
         const at = { x: touches[0].locationX, y: touches[0].locationY };
         if (g.mode === 'pending' && Math.hypot(at.x - g.start.x, at.y - g.start.y) > 8) {
             stopTimer();
-            g.mode = zoom > 1 ? 'pan' : 'hover';
+            // A page scrolls under one finger; the desktop's pointer rides along
+            // so the scroll lands where the finger is.
+            if (gestures === 'browser') {
+                g.mode = 'scroll';
+                const under = point(at.x, at.y);
+                if (under) pointer('move', under);
+            } else g.mode = zoom > 1 ? 'pan' : 'hover';
+        }
+        if (g.mode === 'scroll') {
+            // Content follows the finger: moving it up scrolls the page down.
+            send({ kind: 'wheel', dx: -(at.x - g.last.x) / scale / 120, dy: -(at.y - g.last.y) / scale / 120 });
+            g.last = at; g.focus = at;
+            return;
         }
         if (g.mode === 'pan') {
             const dx = at.x - g.last.x;

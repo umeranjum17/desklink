@@ -126,6 +126,10 @@ class DesklinkModule : Module() {
         view.setKeyboardClearance(clearance ?: 0f)
       }
 
+      Prop("gestures") { view: DesktopView, gestures: String? ->
+        view.setGestures(gestures ?: "desktop")
+      }
+
       OnViewDestroys { view: DesktopView -> view.release() }
 
       OnViewDidUpdateProps { view: DesktopView ->

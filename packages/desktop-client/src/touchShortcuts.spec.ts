@@ -4,7 +4,7 @@ import TestRenderer from 'react-test-renderer';
 
 import type { Signaling } from './protocol';
 import { useDesktopSession, type DesktopSession } from './useDesktopSession';
-import { attachSurface, nativeDesklink, setKeyboardClearance } from './native.web';
+import { attachSurface, nativeDesklink, setGestures, setKeyboardClearance } from './native.web';
 import { observeWebKeyboardMotion } from './webKeyboardMotion';
 
 /** `act` refuses to flush state updates unless React is told this is a test. */
@@ -325,6 +325,63 @@ describe('touch on the desktop', () => {
         touch(video, 'pointerdown', 80, 90);
         touch(video, 'pointerup', 80, 90);
         expect(mark.style.display).toBe('block');
+    });
+    it('reshapes one finger for browser pages and device screens', async () => {
+        vi.useFakeTimers();
+        const { session, video } = await liveDesktop();
+        const id = session.current.nativeId!;
+        const mark = created[2]!;
+
+        // A page scrolls under one finger, while taps and holds keep their meaning.
+        setGestures(id, 'browser');
+        touch(video, 'pointerdown', 640, 360);
+        touch(video, 'pointerup', 640, 360);
+        expect(sent).toEqual(click(640, 360, 1));
+        sent = [];
+        touch(video, 'pointerdown', 640, 400);
+        touch(video, 'pointermove', 640, 370);
+        touch(video, 'pointermove', 640, 310);
+        touch(video, 'pointerup', 640, 310);
+        expect(sent[0]).toEqual({ kind: 'pointer', phase: 'move', x: 640, y: 370 });
+        expect(sent.slice(1).every((message) => message.kind === 'wheel')).toBe(true);
+        const scrolled = sent.slice(1).reduce((sum, message) => sum + (message.dy as number), 0);
+        expect(scrolled).toBeCloseTo(60 / 120, 2);
+        sent = [];
+        touch(video, 'pointerdown', 500, 400);
+        vi.advanceTimersByTime(400);
+        touch(video, 'pointerup', 500, 400);
+        expect(sent).toEqual([{ kind: 'pointer', phase: 'move', x: 500, y: 400 }, ...click(500, 400, 3)]);
+
+        // A device screen is pressed: the finger lands with the button down,
+        // drags with it held, and lifts to release. No mark follows it.
+        setGestures(id, 'device');
+        expect(mark.style.display).toBe('none');
+        sent = [];
+        touch(video, 'pointerdown', 300, 200);
+        expect(sent).toEqual([{ kind: 'pointer', phase: 'down', x: 300, y: 200, button: 1 }]);
+        expect(mark.style.display).toBe('none');
+        touch(video, 'pointermove', 360, 200);
+        touch(video, 'pointerup', 360, 200);
+        expect(sent).toEqual([
+            { kind: 'pointer', phase: 'down', x: 300, y: 200, button: 1 },
+            { kind: 'pointer', phase: 'move', x: 360, y: 200, button: 1 },
+            { kind: 'pointer', phase: 'up', x: 360, y: 200, button: 1 },
+        ]);
+        // A tap is the same press lifted without moving, and a hold holds:
+        // no right click either way.
+        sent = [];
+        touch(video, 'pointerdown', 100, 100);
+        touch(video, 'pointerup', 100, 100);
+        expect(sent).toEqual(click(100, 100, 1));
+        sent = [];
+        touch(video, 'pointerdown', 500, 400);
+        vi.advanceTimersByTime(1000);
+        touch(video, 'pointerup', 500, 400);
+        expect(sent).toEqual([
+            { kind: 'pointer', phase: 'down', x: 500, y: 400, button: 1 },
+            { kind: 'pointer', phase: 'up', x: 500, y: 400, button: 1 },
+        ]);
+        expect(mark.style.display).toBe('none');
     });
     it('keeps the latest buffered move without delaying clicks', async () => {
         vi.useFakeTimers();

@@ -3,6 +3,7 @@ import * as React from 'react';
 import { StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
 
 import { desktopAvailable } from './native';
+import type { GestureProfile } from './protocol';
 
 export interface DesktopViewProps {
     /** The session handle from `useDesktopSession`. */
@@ -18,6 +19,11 @@ export interface DesktopViewProps {
      * following the keyboard as it moves.
      */
     keyboardClearance?: number;
+    /**
+     * Which touch meaning the surface uses: a desktop pointer, a browser page
+     * (one finger scrolls), or a device screen (one finger presses and drags).
+     */
+    gestures?: GestureProfile;
 }
 
 interface NativeSurfaceProps {
@@ -26,6 +32,7 @@ interface NativeSurfaceProps {
     accessible?: boolean;
     accessibilityLabel?: string;
     keyboardClearance?: number;
+    gestures?: GestureProfile;
 }
 
 // The Expo view is resolved at module load; on a platform without it the
@@ -42,7 +49,7 @@ const NativeSurface: React.ComponentType<NativeSurfaceProps> | null = desktopAva
  * belong to the application, which mounts this wherever it wants the desktop
  * to appear.
  */
-export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0 }: DesktopViewProps) {
+export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0, gestures = 'desktop' }: DesktopViewProps) {
     if (NativeSurface == null || sessionId == null) {
         return (
             <View style={[styles.surface, style]}>
@@ -50,7 +57,7 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
             </View>
         );
     }
-    return <NativeSurface style={[styles.surface, style]} sessionId={sessionId} accessible={accessibilityLabel !== undefined} accessibilityLabel={accessibilityLabel} keyboardClearance={keyboardClearance} />;
+    return <NativeSurface style={[styles.surface, style]} sessionId={sessionId} accessible={accessibilityLabel !== undefined} accessibilityLabel={accessibilityLabel} keyboardClearance={keyboardClearance} gestures={gestures} />;
 }
 
 const styles = StyleSheet.create({
