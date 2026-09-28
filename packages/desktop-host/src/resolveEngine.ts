@@ -81,7 +81,7 @@ function buildCandidates(root: string): string[] {
     ];
 }
 
-export function resolveEngine(configured = process.env.MUXR_DESKLINK_ENGINE): ResolvedEngine | null {
+export function resolveEngine(configured = process.env.MUXR_DESKLINK_ENGINE, root = enginePackageRoot()): ResolvedEngine | null {
     if (!macosEngineEnabled()) return null;
     if (configured !== undefined && configured.trim() !== '') {
         if (!isExecutable(configured)) return null;
@@ -91,7 +91,7 @@ export function resolveEngine(configured = process.env.MUXR_DESKLINK_ENGINE): Re
     if (prebuilt !== null && isExecutable(prebuilt)) {
         return { command: prebuilt, args: ['serve'], origin: 'prebuilt' };
     }
-    for (const candidate of buildCandidates(enginePackageRoot())) {
+    for (const candidate of buildCandidates(root)) {
         if (isExecutable(candidate)) {
             return { command: candidate, args: ['serve'], origin: 'package' };
         }
@@ -112,11 +112,14 @@ function isExecutable(path: string): boolean {
  * Why the engine is missing, in words fit to show a user. `null` means it is
  * there.
  */
-export function explainMissingEngine(configured = process.env.MUXR_DESKLINK_ENGINE): string | null {
+export function explainMissingEngine(
+    configured = process.env.MUXR_DESKLINK_ENGINE,
+    root = enginePackageRoot(),
+): string | null {
     if (!macosEngineEnabled()) {
         return 'The macOS desktop engine is experimental and off; set DESKLINK_MACOS=1 to try it.';
     }
-    const resolved = resolveEngine(configured);
+    const resolved = resolveEngine(configured, root);
     if (resolved !== null) return null;
     if (configured !== undefined && configured.trim() !== '') {
         if (!existsSync(configured)) {

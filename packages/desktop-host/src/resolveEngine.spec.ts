@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { macosEngineEnabled, platformTag, resolveEngine, explainMissingEngine } from './resolveEngine.js';
 
 afterEach(() => {
@@ -28,8 +31,11 @@ describe('macOS engine flag', () => {
             );
 
             vi.stubEnv('DESKLINK_MACOS', '1');
-            expect(resolveEngine('')).toBeNull();
-            expect(explainMissingEngine('')).toBe(
+            // An empty root stands in for "no source build here", so the check
+            // does not depend on whether this machine has built the engine.
+            const noBuilds = mkdtempSync(join(tmpdir(), 'resolve-engine-'));
+            expect(resolveEngine('', noBuilds)).toBeNull();
+            expect(explainMissingEngine('', noBuilds)).toBe(
                 `The prebuilt desktop engine for darwin-${process.arch} is missing. It arrives as the optional dependency @desklink/host-darwin-${process.arch}: reinstall without omitting optional dependencies, or point MUXR_DESKLINK_ENGINE at an engine built from source.`,
             );
             expect(resolveEngine(process.execPath)).toEqual({ command: process.execPath, args: ['serve'], origin: 'configured' });

@@ -25,7 +25,7 @@ USAGE:
   desklink-host bridge [--listen H:P] [--token T] [--source portal|x11|display] [--display :0] [--display-id ID]
                                       re-serve the engine's protocol over a WebSocket and
                                       print the URL to open; no signaling of your own needed
-  desklink-host <engine command> ...  run the engine directly (serve, capture-probe, setup-input, version)
+  desklink-host <engine command> ...  run the engine directly (serve, keep, capture-probe, setup-input, version)
 
 Set MUXR_DESKLINK_ENGINE to use an engine built somewhere else.`);
         return 0;

@@ -30,6 +30,8 @@ mod input;
 #[path = "input_mac.rs"]
 mod input;
 #[cfg(target_os = "linux")]
+mod keeper;
+#[cfg(target_os = "linux")]
 mod keymap;
 #[cfg(target_os = "macos")]
 #[path = "keymap_mac.rs"]
@@ -115,6 +117,7 @@ fn main() {
             0
         }
         "serve" => report(runtime.block_on(serve())),
+        "keep" => keeper::command(&args[1..]),
         "capture-probe" => report(runtime.block_on(probe(
             args.get(1).and_then(|value| value.parse().ok()),
             args.get(2).map(String::as_str),
@@ -154,6 +157,9 @@ fn print_help() {
 
 USAGE:
   desklink-host serve            speak the local control protocol on stdin/stdout
+  desklink-host keep --display :N
+                                 keep one private X screen: kiosk geometry, focus,
+                                 and a JSON-lines window report on stdout
   desklink-host capabilities     print what this machine can do right now
   desklink-host capture-probe [seconds] [display]
                                  capture frames and report the stream; with a
