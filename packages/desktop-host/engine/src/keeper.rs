@@ -15,7 +15,7 @@
 //! by itself when the display goes away, which is the normal end of its life,
 //! and reports fatal refusals as one error line before exiting.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use std::collections::VecDeque;
 use std::io::{BufWriter, Write};
 use std::time::{Duration, Instant};
@@ -53,19 +53,25 @@ pub struct KeeperWindow {
     pub height: u16,
 }
 
+/// A window this size or larger on both sides is content; anything smaller is
+/// parked, and parked means never focused either.
+fn is_content(width: u16, height: u16) -> bool {
+    width >= MIN_CONTENT_SIDE && height >= MIN_CONTENT_SIDE
+}
+
 /// Where a top-level window of this size belongs on a screen of `screen_w` by
 /// `screen_h`: filling the screen, or parked off it when it is too small to be
 /// content.
 fn kiosk_geometry(width: u16, height: u16, screen_w: u16, screen_h: u16) -> (i32, i32, u32, u32) {
-    if width < MIN_CONTENT_SIDE || height < MIN_CONTENT_SIDE {
+    if is_content(width, height) {
+        (0, 0, u32::from(screen_w), u32::from(screen_h))
+    } else {
         (
             i32::from(PARKED_XY),
             i32::from(PARKED_XY),
             u32::from(width),
             u32::from(height),
         )
-    } else {
-        (0, 0, u32::from(screen_w), u32::from(screen_h))
     }
 }
 
@@ -125,12 +131,8 @@ pub fn command(args: &[String]) -> i32 {
             display = Some(remaining.next().cloned().unwrap_or_default());
         }
     }
-    let Some(display) = display.filter(|display| !display.is_empty()) else {
-        eprintln!("error: keep needs the display to keep: desklink-host keep --display :N");
-        return 2;
-    };
     let mut out = BufWriter::new(std::io::stdout().lock());
-    match keep(Some(&display), &mut out) {
+    match keep(display.as_deref(), &mut out) {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("error: {error:#}");
@@ -146,13 +148,13 @@ pub fn keep(display: Option<&str>, out: &mut impl Write) -> Result<()> {
     let Some(display) = display.filter(|display| !display.is_empty()) else {
         return fatal(out, "no display given");
     };
-    let (conn, screen_number) = RustConnection::connect(Some(display))
-        .with_context(|| format!("cannot open X display {display}"))?;
-    let screen = conn
-        .setup()
-        .roots
-        .get(screen_number)
-        .context("the X display has no screen")?;
+    let (conn, screen_number) = match RustConnection::connect(Some(display)) {
+        Ok(opened) => opened,
+        Err(error) => return fatal(out, &format!("cannot open X display {display}: {error}")),
+    };
+    let Some(screen) = conn.setup().roots.get(screen_number) else {
+        return fatal(out, "the X display has no screen");
+    };
     let root = screen.root;
     let (screen_w, screen_h) = (screen.width_in_pixels, screen.height_in_pixels);
 
@@ -163,15 +165,16 @@ pub fn keep(display: Option<&str>, out: &mut impl Write) -> Result<()> {
         &ChangeWindowAttributesAux::new()
             .event_mask(EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY),
     );
-    match claim
-        .map_err(|error| anyhow!("cannot keep {display:?}: {error}"))?
-        .check()
-    {
+    let claim = match claim {
+        Ok(cookie) => cookie,
+        Err(error) => return fatal(out, &format!("cannot keep {display:?}: {error}")),
+    };
+    match claim.check() {
         Ok(()) => {}
         Err(ReplyError::X11Error(error)) if error.error_code == ACCESS_ERROR => {
             return fatal(out, "another window manager");
         }
-        Err(error) => return Err(anyhow!("cannot keep {display:?}: {error}")),
+        Err(error) => return fatal(out, &format!("cannot keep {display:?}: {error}")),
     }
 
     // Created if missing: a fresh Xvfb may not have them yet, and this keeper
@@ -359,10 +362,19 @@ fn untrack(tracked: &mut VecDeque<Window>, window: Window) -> bool {
     tracked.len() != before
 }
 
-/// Puts the input focus on the newest tracked window, so keyboard events an
-/// engine session sends go to what the user would be looking at.
+/// Puts the input focus on the newest tracked content window, so keyboard
+/// events an engine session sends go to what the user would be looking at.
+/// Parked helpers are never focused: an off-screen window would swallow keys.
 fn refocus(conn: &RustConnection, tracked: &VecDeque<Window>) -> Result<()> {
-    if let Some(&window) = tracked.back() {
+    let newest = tracked
+        .iter()
+        .rev()
+        .copied()
+        .find(|&window| {
+            mapped_size(conn, window)
+                .is_some_and(|(width, height)| is_content(width, height))
+        });
+    if let Some(window) = newest {
         conn.set_input_focus(InputFocus::POINTER_ROOT, window, x11rb::CURRENT_TIME)?;
     }
     Ok(())
@@ -540,6 +552,15 @@ mod tests {
         assert_eq!(window["class"], serde_json::Value::Null);
         assert_eq!(window["pid"], serde_json::Value::Null);
         assert!(window.get("width").is_some());
+    }
+
+    #[test]
+    fn an_unopenable_display_is_refused_in_one_error_line() {
+        let mut out = Vec::new();
+        assert!(keep(Some("not a display"), &mut out).is_err());
+        let line: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
+        assert!(line["error"].as_str().is_some_and(|error| !error.is_empty()));
     }
 
     #[test]
