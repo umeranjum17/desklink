@@ -23,7 +23,10 @@ to `stderr`. One JSON object per line, no length prefix, UTF-8.
 Why stdio rather than a socket: the consumer already holds the process, so the
 channel inherits the consumer's own access control (same uid, same session, no
 filesystem permission to get wrong) and no second authorization mechanism has to
-exist. A consumer that wants a socket can wrap this process.
+exist. A consumer that wants a socket can wrap this process. (A screen that
+needs no protocol at all — a private `Xvfb` whose windows should simply be kept
+in order and reported — can run the engine as a display keeper instead; see
+"Display keeper" below.)
 
 Cancellation is by closing the consumer's end. The engine treats EOF on `stdin`
 exactly like `shutdown`: it releases held input, stops capture, closes peers, and
@@ -528,6 +531,58 @@ session that has already ended is refused with `error.code = "session"`.
 ```
 
 Closes every session and exits.
+
+## Display keeper
+
+```
+desklink-host keep --display :42
+```
+
+A kiosk window manager for one X screen the consumer created itself — typically
+one `Xvfb` per screen, with its own `-auth` cookie file. It is not for the
+user's desktop: it takes SubstructureRedirect on the root window, so it is that
+screen's window manager, and a display that already has one refuses the keeper.
+Authentication is the ambient `XAUTHORITY`; a screen the consumer created should
+have its own cookie file, and the keeper inherits whatever the consumer's
+environment carries. There is no handshake and no stdin: the contract is a
+stdout JSON-lines stream, and closing the consumer's stdout end ends the keeper.
+
+The keeper fills the screen with every normal (non-override-redirect,
+input-output) top-level window at `0,0,W,H`, raises the newest one and keeps the
+input focus on it, so keyboard events an engine session injects on that display
+land where a person looking at the screen would expect. A top-level window
+smaller than 120 px on either side is not content — an emulator draws its side
+toolbar as a tiny second window — and is parked far off-screen instead, so a
+capture of the screen never shows it.
+
+On startup, and after every change on the screen, it writes one line:
+
+```jsonc
+{"windows":[{"id":4194305,"title":"Pricing — Acme Store - Chromium","class":"Chromium","pid":31671,"width":1280,"height":800}]}
+```
+
+`windows` lists every visible top-level window, bottom of the stacking order
+first, newest last. `id` is the X window id; `title` comes from `_NET_WM_NAME`
+with `WM_NAME` as the fallback; `class` is the second string of `WM_CLASS` (the
+one consumers filter on, e.g. `Chromium`, `Google-chrome`); `pid` is
+`_NET_WM_PID`. Fields the window does not carry are `null`, never absent. A
+change is reported after 100 ms of quiet, and never later than 300 ms after the
+first unreported change, so a busy screen cannot starve its consumer.
+
+A refused startup is one error line and a non-zero exit:
+
+```jsonc
+{"error":"another window manager"}
+```
+
+The same shape reports a display that could not be opened. When the display
+goes away — an `Xvfb` the consumer stopped, most commonly — the keeper exits 0
+on its own; a consumer treats the process ending as the screen ending.
+
+The keeper deliberately does not decorate, move, resize on request, or remember
+anything across runs. A screen with no windows produces one `"windows":[]` line
+at startup and then nothing: the absence of a report is the absence of
+anything to show.
 
 ## What the engine deliberately does not do
 

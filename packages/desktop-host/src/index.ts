@@ -7,5 +7,6 @@
  */
 export * from './protocol.js';
 export { EngineClient, type EngineClientOptions } from './engineProcess.js';
+export { startDisplayKeeper, parseKeeperLine, type DisplayKeeper, type DisplayKeeperOptions, type KeeperWindow } from './keeper.js';
 export { resolveEngine, explainMissingEngine, enginePackageRoot, type ResolvedEngine } from './resolveEngine.js';
 export { Bridge, BRIDGE_PATH, type BridgeOptions } from './bridge.js';
