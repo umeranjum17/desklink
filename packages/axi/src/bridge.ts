@@ -1,11 +1,13 @@
 import { createServer, connect, type Server } from 'node:net';
-import { mkdirSync, existsSync, unlinkSync, mkdtempSync, rmSync, chmodSync, readFileSync, appendFileSync } from 'node:fs';
+import { mkdirSync, existsSync, unlinkSync, mkdtempSync, rmSync, chmodSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { EngineClient, resolveEngine, type EngineEvent } from '@desklink/host';
 import { PeerConnection, type DataChannel } from 'node-datachannel';
 import { saveToken, takeToken, tokenPath } from './token.js';
+import { A11yClient, A11yError, axRefPattern, isActionable, type A11yNode } from './atspi.js';
+import { dedupeCandidates, drawMarks, estimateMarksCost, type MarkBox } from './marks.js';
 
 export const socketPath = join(process.env.XDG_RUNTIME_DIR ?? join(tmpdir(), `desklink-axi-${process.getuid?.() ?? 'user'}`), 'desklink-axi', `${process.env.DESKLINK_AXI_SESSION ?? 'default'}.sock`);
 
@@ -157,6 +159,9 @@ export async function serve(args: string[]): Promise<void> {
   type Item = { ref: string; text: string; x: number; y: number; conf: number; line: string; words: {text:string;x:number;y:number;w:number;h:number}[] };
   let text: Item[] = []; 
   let regions: string[] = [];
+  const a11y = new A11yClient(process.env);
+  const axNodes = new Map<string, A11yNode>();
+  let routeNote: string | undefined;
   let lastFrame: {seq:number;width:number;height:number;raw:Buffer} | undefined;
   let observed: {seq:number;damage:string[]} | undefined;
   const capture = async (since = baseline, wait: {after_seq?:number;still_ms?:number;timeout_ms?:number} = {}) => {
@@ -171,6 +176,11 @@ export async function serve(args: string[]): Promise<void> {
     return { ...frame, changed: frame.seq !== baseline, damage, raw, previous: baseline };
   };
   const image = async (frame: Awaited<ReturnType<typeof capture>>, box: number[], path: string) => {
+    const png = await cropBuffer(frame, box);
+    const { PNG: P } = await import('pngjs');
+    (await import('node:fs')).writeFileSync(path, P.sync.write(png));
+  };
+  const cropBuffer = async (frame: Awaited<ReturnType<typeof capture>>, box: number[]) => {
     const { PNG } = await import('pngjs');
     const raw = frame.raw;
     const [x,y,w,h] = box;
@@ -179,7 +189,7 @@ export async function serve(args: string[]): Promise<void> {
       const from = ((y!+row)*frame.width+x!+col)*4, to=(row*w!+col)*4;
       png.data[to]=raw[from+2]!; png.data[to+1]=raw[from+1]!; png.data[to+2]=raw[from]!; png.data[to+3]=255;
     }
-    (await import('node:fs')).writeFileSync(path, PNG.sync.write(png));
+    return png;
   };
   const ocr = async (frame: Awaited<ReturnType<typeof capture>>, box = [0,0,frame.width,frame.height]) => {
     const imagePath = join(dir, 'ocr.png');
@@ -222,9 +232,17 @@ export async function serve(args: string[]): Promise<void> {
     const end = item.words[Math.max(index,0)+count-1] ?? start;
     return [Math.floor((start.x + end.x + end.w)/2), Math.floor((start.y + end.y + end.h)/2)];
   };
+  const axTarget = async (ref: string): Promise<A11yNode> => {
+    const node = axNodes.get(ref);
+    if (!node) throw new A11yError('stale-ref', `${ref} is not in any recent tree; run desklink-axi tree`);
+    const fresh = await a11y.revalidate(node);
+    if (!fresh.states.includes('enabled') || !fresh.states.includes('showing')) throw new A11yError('not-actionable', `${ref} (${fresh.role} ${JSON.stringify(fresh.name)}) is disabled or hidden`);
+    return fresh;
+  };
   const output = async (command: string, args: string[]) => {
     let pendingDamage: string[] | undefined;
     let waitSeen = baseline;
+    routeNote = undefined;
     if (command === 'start') return `session: open source=${source} ${display ?? ''} size=${opened.geometry.encoded.width}x${opened.geometry.encoded.height} permissions=view${control ? ',control' : ''}`;
     if (command === 'health') {
       const state = events.filter(event=>event.event === 'session.state' || event.event === 'session.capture.stopped').at(-1);
@@ -235,7 +253,7 @@ export async function serve(args: string[]): Promise<void> {
     if (command === 'batch') {
       let steps: unknown;
       try { steps = JSON.parse(args[0] ?? ''); } catch { throw new Error('batch: expected JSON array of [verb, ...args] steps'); }
-      if (!Array.isArray(steps) || !steps.length || steps.length > 30 || steps.some(step => !Array.isArray(step) || !['click','type','press','scroll','wait'].includes(step[0]) || step.slice(1).some((arg:unknown) => typeof arg !== 'string'))) throw new Error('batch: expected 1–30 [click|type|press|scroll|wait, ...args] steps');
+      if (!Array.isArray(steps) || !steps.length || steps.length > 30 || steps.some(step => !Array.isArray(step) || !['click','type','press','scroll','wait','tree','marks'].includes(step[0]) || step.slice(1).some((arg:unknown) => typeof arg !== 'string'))) throw new Error('batch: expected 1–30 [click|type|press|scroll|wait|tree|marks, ...args] steps');
       const results: string[] = [];
       for (const [index, step] of steps.entries()) {
         try { results.push(`${index+1}: ${await output(step[0], step.slice(1))}`); }
@@ -275,7 +293,32 @@ export async function serve(args: string[]): Promise<void> {
       }
     }
     const preActionSeq = action && actionWait !== 'none' ? (await engine.request<{seq:number}>('session.frame',{session_id:opened.sessionId,path:''})).seq : baseline;
+    const finishAction = async (): Promise<string> => {
+      const applied = routeNote ? `input: applied (${routeNote})` : 'input: applied';
+      if (actionWait === 'none') return applied;
+      try {
+        if (actionDelay !== undefined) await new Promise(r=>setTimeout(r,actionDelay));
+        else await engine.request('session.frame',{session_id:opened.sessionId,since:baseline,after_seq:preActionSeq,...(actionWait === 'settle' ? {still_ms:150} : {}),timeout_ms:5000});
+      } catch (error) {
+        if ((error as {code?:string}).code === 'frame-timeout') return `${applied}; frame: timed out`;
+        throw error;
+      }
+      return `${applied}; frame: ready`;
+    };
     if (command === 'click' || command === 'drag') {
+      if (axRefPattern.test(args[0] ?? '') && command === 'click') {
+        const node = await axTarget(args[0]!);
+        const fallback = `${node.x + Math.floor(node.w/2)},${node.y + Math.floor(node.h/2)}`;
+        try {
+          const action = await a11y.doAction(node);
+          routeNote = `atspi action ${JSON.stringify(action)}`;
+          return await finishAction();
+        } catch (error) {
+          if (!['a11y-error','a11y-unsupported','action-failed'].includes((error as A11yError).code)) throw error;
+          routeNote = 'coordinate fallback';
+          args[0] = fallback;
+        }
+      }
       const [x,y] = target(args[0]!);
       const [endX,endY] = command === 'drag' ? target(args[1]!) : [x,y];
       const button = args.includes('right') ? 3 : 1;
@@ -288,7 +331,17 @@ export async function serve(args: string[]): Promise<void> {
       } catch (error) { await act({kind:'release_all'}).catch(() => undefined); throw error; }
     } else if (command === 'type') {
       try {
-        if (args.includes('--into')) { const [x,y]=target(args[args.indexOf('--into')+1]!); await act({kind:'pointer',phase:'move',x,y}); await act({kind:'pointer',phase:'down',x,y}); await act({kind:'pointer',phase:'up',x,y}); }
+        if (args.includes('--into')) { const into = args[args.indexOf('--into')+1]!;
+          if (axRefPattern.test(into)) {
+            const node = await axTarget(into);
+            if (await a11y.grabFocus(node).catch(() => false)) routeNote = 'atspi focus';
+            else {
+              routeNote = 'coordinate focus';
+              const [x,y] = [node.x + Math.floor(node.w/2), node.y + Math.floor(node.h/2)];
+              await act({kind:'pointer',phase:'move',x,y}); await act({kind:'pointer',phase:'down',x,y}); await act({kind:'pointer',phase:'up',x,y});
+            }
+          } else { const [x,y]=target(into); await act({kind:'pointer',phase:'move',x,y}); await act({kind:'pointer',phase:'down',x,y}); await act({kind:'pointer',phase:'up',x,y}); }
+        }
         await act({ kind: 'text', text: args[0] ?? '' });
         if (args.includes('--submit')) { await act({kind:'key',name:'Enter',down:true}); await act({kind:'key',name:'Enter',down:false}); }
       } catch (error) { await act({kind:'release_all'}).catch(() => undefined); throw error; }
@@ -333,16 +386,24 @@ export async function serve(args: string[]): Promise<void> {
       }
       return `wait: ${condition} met`;
     }
+    if (command === 'tree') {
+      const axSnapshot = await a11y.snapshot();
+      for (const node of axSnapshot.nodes) axNodes.set(node.ref, node);
+      for (const ref of axNodes.keys()) { const seen = axRefPattern.exec(ref); if (seen && Number(seen[1]) < axSnapshot.gen - 20) axNodes.delete(ref); }
+      const query = args.includes('--query') ? args[args.indexOf('--query')+1] : undefined;
+      const items = query ? a11y.query(axSnapshot.nodes, query) : axSnapshot.nodes;
+      const limit = args.includes('--full') ? items.length : 40;
+      const treeFields = args.includes('--fields') ? args[args.indexOf('--fields')+1]!.split(',') : ['ref','role','name','value','x','y','w','h','states'];
+      if (treeFields.some(field=>!['ref','role','name','value','x','y','w','h','states'].includes(field))) throw new Error('fields: valid fields are ref,role,name,value,x,y,w,h,states');
+      const rows = items.slice(0,limit).map(node => `  ${treeFields.map(field => JSON.stringify(
+        field === 'states' ? node.states.filter(s=>s!=='visible' && s!=='sensitive').join('|') :
+        field === 'ref' || field === 'role' || field === 'name' || field === 'value' ? (field === 'ref' ? node.ref : field === 'role' ? node.role : field === 'name' ? node.name : node.value ?? '') :
+        node[field as 'x' | 'y' | 'w' | 'h']
+      )).join(',')}`).join('\n');
+      return `tree: ${axSnapshot.apps.length} apps ${axSnapshot.nodes.length} nodes gen=${axSnapshot.gen} estimated_tokens=~${Math.ceil(items.slice(0,limit).reduce((n,node)=>n+node.name.length+node.role.length+(node.value?.length ?? 0)+70,0)/4)}\n${items.length ? `ax[${Math.min(items.length,limit)} of ${items.length}]{${treeFields.join(',')}}:\n${rows}` : `ax: 0 nodes match ${JSON.stringify(query ?? 'tree')}`}${items.length>limit ? `\ntruncated: ${items.length-limit} more — use --full or --query` : ''}\nhelp[2]:\n  desklink-axi click @a${axSnapshot.gen}.<n>\n  desklink-axi type "<text>" --into @a${axSnapshot.gen}.<n>`;
+    }
     if (action) {
-      if (actionWait === 'none') return 'input: applied';
-      try {
-        if (actionDelay !== undefined) await new Promise(r=>setTimeout(r,actionDelay));
-        else await engine.request('session.frame',{session_id:opened.sessionId,since:baseline,after_seq:preActionSeq,...(actionWait === 'settle' ? {still_ms:150} : {}),timeout_ms:5000});
-      } catch (error) {
-        if ((error as {code?:string}).code === 'frame-timeout') return 'input: applied; frame: timed out';
-        throw error;
-      }
-      return 'input: applied; frame: ready';
+      return await finishAction();
     }
     const fields = args.includes('--fields') ? args[args.indexOf('--fields')+1]!.split(',') : ['ref','text','x','y'];
     if (fields.some(field=>!['ref','text','x','y','w','h','conf','line'].includes(field))) throw new Error('fields: valid fields are ref,text,x,y,w,h,conf,line');
@@ -359,6 +420,28 @@ export async function serve(args: string[]): Promise<void> {
       const path = args.includes('--out') ? args[args.indexOf('--out')+1]! : join(dir, `look-${frame.seq}.png`);
       await image(frame,box,path);
       return `image: ${path}\nregion: ${box.join(',')} cost: ~${Math.round(box[2]!*box[3]!/750)} tokens to view`;
+    }
+    if (command === 'marks') {
+      const region = args.includes('--region') ? args[args.indexOf('--region')+1]!.split(',').map(Number) : [0,0,frame.width,frame.height];
+      if (region.length!==4 || region.some(n=>!Number.isInteger(n)) || region[0]!<0 || region[1]!<0 || region[2]!<=0 || region[3]!<=0 || region[0]!+region[2]!>frame.width || region[1]!+region[3]!>frame.height) throw new Error('coordinates: region exceeds frame');
+      const [rx,ry,rw,rh] = region;
+      const axSnapshot = await a11y.snapshot();
+      for (const node of axSnapshot.nodes) axNodes.set(node.ref, node);
+      for (const ref of axNodes.keys()) { const seen = axRefPattern.exec(ref); if (seen && Number(seen[1]) < axSnapshot.gen - 20) axNodes.delete(ref); }
+      const axCandidates = axSnapshot.nodes.filter(node => isActionable(node) && node.x+node.w>rx! && node.x<rx!+rw! && node.y+node.h>ry! && node.y<ry!+rh!)
+        .slice(0,20)
+        .map(node => ({ ref: node.ref, label: node.name || node.action || node.role, role: node.role, x: Math.max(node.x,rx!), y: Math.max(node.y,ry!), w: Math.min(node.x+node.w,rx!+rw!)-Math.max(node.x,rx!), h: Math.min(node.y+node.h,ry!+rh!)-Math.max(node.y,ry!) }));
+      const ocrItems = await ocr(frame,region);
+      const kept = dedupeCandidates(axCandidates, ocrItems.map(item => ({ ref: item.ref, label: item.text, role: 'text', x: item.x, y: item.y, w: item.words.at(-1)!.x+item.words.at(-1)!.w-item.x, h: Math.max(...item.words.map(word=>word.y+word.h))-item.y })));
+      text = ocrItems.filter(item => kept.some(k => k.ref === item.ref));
+      const candidates = [...axCandidates, ...kept].slice(0,40);
+      const buffer = await cropBuffer(frame, [rx!,ry!,rw!,rh!]);
+      drawMarks(buffer.data, rw!, rh!, candidates.map((candidate, index): MarkBox => ({ mark: index+1, x: candidate.x-rx!, y: candidate.y-ry!, w: candidate.w, h: candidate.h })));
+      const { PNG } = await import('pngjs');
+      const outPath = args.includes('--out') ? args[args.indexOf('--out')+1]! : join(dir, `marks-${frame.seq}.png`);
+      writeFileSync(outPath, PNG.sync.write(buffer));
+      const rows = candidates.map((candidate, index) => `  ${index+1},${JSON.stringify(candidate.ref)},${JSON.stringify(candidate.label)},${JSON.stringify(candidate.role)}`).join('\n');
+      return `marks: ${candidates.length} candidates region=${region.join(',')} dimensions=${rw}x${rh} cost: ~${estimateMarksCost(rw!,rh!)} tokens frame=${frame.seq}\nimage: ${outPath}\n${candidates.length ? `marks[${candidates.length}]{mark,ref,label,role}:\n${rows}` : 'marks: 0 actionable candidates in region'}\nhelp[2]:\n  desklink-axi click <ref from marks>\n  desklink-axi marks --region x,y,w,h`;
     }
     if (command === 'screen' || command === 'home') {
       const region = args.includes('--region') ? args[args.indexOf('--region')+1]!.split(',').map(Number) : undefined;
