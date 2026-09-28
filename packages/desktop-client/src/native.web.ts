@@ -1007,6 +1007,13 @@ export const nativeDesklink: NativeDesklinkModule = {
                 emit(id, 'failure', { code: 'transport', message: 'the connection to the desktop was lost' });
             }
         };
+        peer.oniceconnectionstatechange = () => {
+            if (sessions.get(id) !== session) return;
+            // Surfaced as it happens — upstream of any failure timeout — so a
+            // short drop reads as reconnecting within about a second, not as
+            // a frozen picture that still says live.
+            emit(id, 'ice', { state: peer.iceConnectionState.toUpperCase() });
+        };
         return id;
     },
 

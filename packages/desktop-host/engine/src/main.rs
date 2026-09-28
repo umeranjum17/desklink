@@ -595,6 +595,21 @@ async fn dispatch(
                 .map_err(|error| ErrorBody::new("transport", format!("{error:#}")))?;
             Ok(serde_json::json!({ "accepted": true }))
         }
+        "session.restart_ice" => {
+            // The client asks; the engine offers. The fresh offer travels as a
+            // new `session.description` event and the client answers it as
+            // usual, so no new event shape is needed and the session,
+            // generation and control channel survive.
+            let session = require_session(current)?;
+            let params: protocol::SessionRef = serde_json::from_value(request.params.clone())
+                .map_err(|error| ErrorBody::new("malformed", error.to_string()))?;
+            check_session(session, &params.session_id, params.generation)?;
+            session
+                .restart_ice()
+                .await
+                .map_err(|error| ErrorBody::new("transport", format!("{error:#}")))?;
+            Ok(serde_json::json!({ "accepted": true }))
+        }
         "session.clipboard.read" => {
             let session = require_session(current)?;
             let params: protocol::ClipboardParams = serde_json::from_value(request.params.clone())

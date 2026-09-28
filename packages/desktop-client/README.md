@@ -104,6 +104,33 @@ import { desktopAvailable } from '@desklink/react-native/availability';
 - **Readiness is a rendered frame.** Android marks the first draw; iOS uses
   `RTCView`'s native video-dimensions callback, which fires after a decoded
   picture arrives. Neither marks a track or ICE connection as live.
+- **Connection states, as they happen.** The session status is `idle`,
+  `opening`, `connecting`, `live`, `reconnecting`, `ended` or `failed`. The
+  peer's ICE state and the engine's `session.state` both feed it: a
+  `disconnected` path reads as `reconnecting` within about a second of the
+  drop — never a frozen picture that still says live — and a recovered path
+  reads as `live` again once ICE is `connected`. `failed` stays terminal.
+  Every event carries its engine session id where the carrier preserves it,
+  and the session ignores anything naming a session it no longer holds, so a
+  previous generation's queued offer or revocation cannot corrupt or kill a
+  healthy recovery.
+  Detection is two-layered: ICE and engine `session.state` events, plus the
+  engine's twice-a-second control-channel heartbeat (`{"kind":"ping"}`) — a
+  path that stops heartbeating reads as stalled within ~1.5 s even while ICE
+  consent timers are still making up their minds, and resumed heartbeats read
+  as recovered. Clients on engines that predate the heartbeat simply never
+  arm that watchdog.
+- **ICE restarts before reopens.** When the path drops after frames were
+  shown, the session asks the engine (`session.restart_ice`) to re-offer on
+  the same peer connection: the fresh offer arrives as the usual
+  `session.description` event and is answered as usual, all without reopening
+  the session. The first restart waits ~2 s for blips that heal alone;
+  retries back off across ~60 s, so a 30–60 s outage still recovers when the
+  network returns. Only a terminal `failed` reopens the session, and those
+  reopens back off across ~60 s too instead of spending one attempt while the
+  network is still down. Renegotiation transients from a restart the session
+  asked for itself are expected, not a new outage: they neither flip the
+  status nor trigger another restart for a short grace window.
 - **Control starts off.** `setInputEnabled(true)` enables pointer, keyboard and
   clipboard input; `setInputEnabled(false)` blocks new input, releases held keys
   and buttons, and resets pending gestures. The app decides when to enable it
@@ -127,9 +154,9 @@ interface Signaling {
 ```
 
 `method` is one of `session.open`, `session.description`, `session.candidate`,
-`session.close`; `SessionEvent` is the engine's offer, candidates, state and
-revocation. Pixels and input do **not** use this channel — they are the
-desktop's own WebRTC session.
+`session.restart_ice`, `session.close`; `SessionEvent` is the engine's offer,
+candidates, state and revocation. Pixels and input do **not** use this
+channel — they are the desktop's own WebRTC session.
 
 ## Licence
 

@@ -224,21 +224,33 @@ async fn serve_control(
     channel: Arc<dyn DataChannel>,
     events: tokio::sync::mpsc::UnboundedSender<PeerEvent>,
 ) {
-    while let Some(event) = channel.poll().await {
-        match event {
-            DataChannelEvent::OnOpen => {
-                let _ = events.send(PeerEvent::ControlOpen);
-            }
-            DataChannelEvent::OnMessage(message) => {
-                if let Ok(text) = String::from_utf8(message.data.to_vec()) {
-                    let _ = events.send(PeerEvent::ControlMessage(text));
+    // A heartbeat the client watches: ICE consent timers take seconds to call
+    // a dead path disconnected, while a missing heartbeat reads as stalled
+    // within about a second. Cheap on purpose — seventeen bytes twice a second.
+    let mut ping = tokio::time::interval(std::time::Duration::from_millis(500));
+    loop {
+        tokio::select! {
+            event = channel.poll() => {
+                match event {
+                    Some(DataChannelEvent::OnOpen) => {
+                        let _ = events.send(PeerEvent::ControlOpen);
+                    }
+                    Some(DataChannelEvent::OnMessage(message)) => {
+                        if let Ok(text) = String::from_utf8(message.data.to_vec()) {
+                            let _ = events.send(PeerEvent::ControlMessage(text));
+                        }
+                    }
+                    Some(DataChannelEvent::OnClose) => {
+                        let _ = events.send(PeerEvent::ControlClosed);
+                        break;
+                    }
+                    Some(_) => {}
+                    None => break,
                 }
             }
-            DataChannelEvent::OnClose => {
-                let _ = events.send(PeerEvent::ControlClosed);
-                break;
+            _ = ping.tick() => {
+                let _ = channel.send_text(r#"{"kind":"ping"}"#).await;
             }
-            _ => {}
         }
     }
     let _ = events.send(PeerEvent::ControlClosed);
@@ -775,6 +787,26 @@ impl VideoPeer {
         Ok(applied)
     }
 
+    /// Restart ICE on this peer: a fresh offer with a new ICE generation,
+    /// for the client to answer as usual. The engine stays the offerer, so
+    /// this is the same local-offer path as the initial negotiation.
+    pub async fn restart_ice(&self) -> Result<String> {
+        use rtc::peer_connection::configuration::RTCOfferOptions;
+        let offer = self
+            .peer
+            .create_offer(Some(RTCOfferOptions {
+                ice_restart: true,
+                ..Default::default()
+            }))
+            .await
+            .context("the peer would not offer an ICE restart")?;
+        self.peer
+            .set_local_description(offer.clone())
+            .await
+            .context("the peer refused its restart offer")?;
+        Ok(offer.sdp)
+    }
+
     pub async fn add_candidate(
         &self,
         candidate: String,
@@ -1054,6 +1086,58 @@ mod tests {
             .await
             .expect("the answer is accepted");
         assert_eq!(applied, 1, "the held candidate must reach the peer");
+    }
+
+    #[tokio::test]
+    async fn an_ice_restart_offers_fresh_credentials_on_the_same_peer() {
+        let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (peer, offer) = VideoPeer::offer(
+            TransportOptions {
+                ice_servers: Vec::new(),
+                loopback_tcp: false,
+                pace_bps: 20_000_000.0,
+            },
+            events,
+        )
+        .await
+        .expect("a peer connection");
+
+        let other = answerer(&offer).await;
+        let answer = other.create_answer(None).await.expect("an answer");
+        other
+            .set_local_description(answer.clone())
+            .await
+            .expect("a local description");
+        peer.accept_answer(answer.sdp)
+            .await
+            .expect("the answer is accepted");
+
+        let ufrag = |sdp: &str| {
+            sdp.lines()
+                .find_map(|line| line.strip_prefix("a=ice-ufrag:"))
+                .expect("an ICE username fragment")
+                .to_owned()
+        };
+        let restart = peer.restart_ice().await.expect("a restart offer");
+        assert!(
+            !restart.is_empty() && ufrag(&restart) != ufrag(&offer),
+            "the restart must turn over the ICE generation"
+        );
+        // The far end answers the restart as usual, on the same peer.
+        other
+            .set_remote_description(
+                RTCSessionDescription::offer(restart).expect("a valid offer"),
+            )
+            .await
+            .expect("the restart offer applies");
+        let reanswer = other.create_answer(None).await.expect("an answer");
+        other
+            .set_local_description(reanswer.clone())
+            .await
+            .expect("a local description");
+        peer.accept_answer(reanswer.sdp)
+            .await
+            .expect("the restart answer is accepted");
     }
 
     #[tokio::test]

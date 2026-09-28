@@ -27,8 +27,73 @@ import {
 /** How long a clipboard round trip may take before it is reported as lost. */
 const CLIPBOARD_TIMEOUT_MS = 4000;
 
-/** One reconnect attempt per session; beyond that the caller must ask again. */
-const MAX_RECONNECT_ATTEMPTS = 1;
+/**
+ * A drop heals on its own more often than not, so the first ICE restart waits
+ * out brief blips; the retries then back off. The whole schedule spans about a
+ * minute, so a 30–60 s outage still recovers when the network comes back.
+ */
+const RESTART_AFTER_MS = 2000;
+export const RESTART_BACKOFF_MS = [2000, 4000, 8000, 16000, 30000];
+/**
+ * A heartbeat missed this long means the path is stalled, even when ICE has
+ * not said so yet. Twice the engine's ping interval, with room for jitter.
+ */
+const STALL_AFTER_MS = 1200;
+/**
+ * After the session itself asks for a restart, renegotiation transients are
+ * expected: ICE may flap and heartbeats may pause while the new generation
+ * comes up. These are not a new outage, so they neither flip the status nor
+ * trigger another restart while the window lasts.
+ */
+const RESTART_GRACE_MS = 2500;
+/** How long a restart offer may go unanswered before the next attempt. */
+const RESTART_REPLY_MS = 5000;
+/**
+ * Full session reopens back off across about a minute, holding at patient
+ * 8 s retries: a return must never wait out a 32 s gap, and an attempt every
+ * 8 s costs nothing next to a live desktop.
+ */
+export const REOPEN_BACKOFF_MS = [1000, 2000, 4000, 8000, 8000, 8000, 8000, 8000];
+
+/** The delay before attempt `n` (0-based), or null when the schedule is spent. */
+export function backoffDelay(schedule: readonly number[], attempt: number): number | null {
+    return attempt < schedule.length ? schedule[attempt]! : null;
+}
+
+export type ConnectionStateName =
+    | 'new'
+    | 'checking'
+    | 'connected'
+    | 'completed'
+    | 'disconnected'
+    | 'failed'
+    | 'closed';
+
+/**
+ * What one ICE/engine-transport state means for the session status, or null
+ * when it changes nothing. `disconnected` surfaces as `reconnecting` at once —
+ * event-driven, so within about a second of the drop — and `connected` moves a
+ * session that had shown frames back to `live`. `failed` is terminal and is
+ * handled by the failure path, not here.
+ */
+export function connectionStatusFor(
+    state: string,
+    status: SessionSnapshot['status'],
+    presented: boolean,
+): SessionSnapshot['status'] | null {
+    switch (state) {
+        case 'disconnected':
+            return status === 'live' || status === 'connecting' ? 'reconnecting' : null;
+        case 'connected':
+        case 'completed':
+            if (status !== 'reconnecting') return null;
+            // Frames were never shown: this is still the first connection, not
+            // a recovery, so it stays `connecting` until a frame renders.
+            return presented ? 'live' : 'connecting';
+        default:
+            return null;
+    }
+}
 
 /**
  * Without a relay there is no route between two networks: ICE only ever finds
@@ -58,9 +123,14 @@ const OPEN_FAILURE_CODES: Record<string, SessionFailure['code']> = {
     transport: 'transport',
 };
 
-function classifyOpenFailure(error: unknown): SessionFailure['code'] {
+export function classifyOpenFailure(error: unknown): SessionFailure['code'] {
     const code = (error as { code?: unknown } | null)?.code;
-    if (typeof code === 'string') return OPEN_FAILURE_CODES[code] ?? 'platform';
+    if (typeof code === 'string') {
+        // An engine that never answers — stopped, wedged, or unreachable — is
+        // a transport problem a retry may fix, not a platform verdict.
+        if (code === 'engine' || code === 'timeout') return 'transport';
+        return OPEN_FAILURE_CODES[code] ?? 'platform';
+    }
     // No token at all: fall back to the message, treating anything that is not a
     // permission refusal as a transport failure a retry may fix.
     const message = error instanceof Error ? error.message : '';
@@ -165,6 +235,13 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const nativeRef = useRef<string | null>(null);
     const inputEnabled = useRef(false);
     const pendingClipboard = useRef(new Map<string, (reply: { text: string; truncated: boolean; error?: string }) => void>());
+    /**
+     * The engine's offer and candidates can beat the open result back: the
+     * subscription starts before `session.open`, so anything that arrives
+     * before the native session exists waits here and is replayed into it.
+     */
+    const pendingOffer = useRef<{ sdp: string; sessionId?: string } | null>(null);
+    const pendingCandidates = useRef<Array<{ candidate: string; sdpMid: string | null; sdpMLineIndex: number | null; sessionId?: string }>>([]);
     const attempts = useRef(0);
     /**
      * The pending reconnect attempt. It lives here rather than in the effect
@@ -172,6 +249,31 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
      * its dependencies, so React would run its cleanup and cancel the retry.
      */
     const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    /** The pending ICE-restart attempt; cancelled on recovery or failure. */
+    const restartTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    /** The pending stall watchdog, armed by heartbeats. */
+    const stallTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    /** When the last heartbeat arrived, or 0 before the first one. */
+    const lastPingAt = useRef(0);
+    /** Renegotiation transients are not a new outage before this time. */
+    const restartGraceUntil = useRef(0);
+    /** ICE-restart attempts spent on the current drop. */
+    const restartAttempts = useRef(0);
+    /**
+     * Successful restarts since the last heartbeat: when ICE is up but the
+     * path stays quiet, enough of these in a row means the session itself is
+     * wedged and only a reopen heals it.
+     */
+    const restartCycles = useRef(0);
+    /** The last ICE state the peer or the engine reported. */
+    const iceConnected = useRef(false);
+    /** The engine's restore token, for a consent-free reopen. Unset by hand. */
+    const restoreToken = useRef<string | null>(null);
+    /** The latest status and presentation, read by event handlers. */
+    const statusRef = useRef<SessionSnapshot['status']>('idle');
+    const presentedRef = useRef(false);
+    /** The latest snapshot; mirrored eagerly so timers read exact state. */
+    const snapshotRef = useRef<SessionSnapshot>(IDLE);
     const diagnostics = useRef<Record<string, string | number | boolean>>({});
     /** Guards every asynchronous callback against a session that already ended. */
     const generationToken = useRef(0);
@@ -179,11 +281,15 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     optionsRef.current = options;
 
     const update = useCallback((patch: Partial<SessionSnapshot>) => {
-        setSnapshot((current) => {
-            const next = { ...current, ...patch };
-            optionsRef.current.onStateChange?.(next);
-            return next;
-        });
+        // Mirrored eagerly: timers read these between renders, and React may
+        // defer the render itself. (Calling onStateChange here also keeps it
+        // to one call per update, where the updater form could double-fire.)
+        const next = { ...snapshotRef.current, ...patch };
+        snapshotRef.current = next;
+        statusRef.current = next.status;
+        presentedRef.current = next.presented;
+        setSnapshot(next);
+        optionsRef.current.onStateChange?.(next);
     }, []);
 
     const fail = useCallback((failure: SessionFailure) => {
@@ -194,6 +300,177 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const refuse = useCallback((message: string, code: SessionFailure['code'] = 'platform') => {
         fail({ code, message });
     }, [fail]);
+
+    /** A transport loss is one event no matter how many sides report it: the
+     * peer's `failed` state and its `failure` event would otherwise spend the
+     * reopen budget twice for the same outage. */
+    const transportFailed = useCallback((message: string = UNREACHABLE_DESKTOP) => {
+        if (statusRef.current === 'failed') return;
+        refuse(message, 'transport');
+    }, [refuse]);
+
+    const cancelRestart = useCallback(() => {
+        if (restartTimer.current !== null) clearTimeout(restartTimer.current);
+        restartTimer.current = null;
+    }, []);
+
+    const cancelReconnect = useCallback(() => {
+        if (reconnectTimer.current !== null) clearTimeout(reconnectTimer.current);
+        reconnectTimer.current = null;
+    }, []);
+
+    const cancelStall = useCallback(() => {
+        if (stallTimer.current !== null) clearTimeout(stallTimer.current);
+        stallTimer.current = null;
+    }, []);
+
+    const scheduleRestartRef = useRef<(delay: number) => void>(() => undefined);
+
+    /**
+     * Spend one restart from the backoff schedule, or stop asking when the
+     * schedule is spent: ICE's own failure then moves the session to a full
+     * reopen. Only refs and module constants, so stable callbacks may hold it.
+     */
+    const spendRestartAttempt = useCallback((): void => {
+        if (statusRef.current !== 'reconnecting' || nativeRef.current == null) return;
+        const wait = backoffDelay(RESTART_BACKOFF_MS, restartAttempts.current);
+        if (wait === null) return;
+        restartAttempts.current += 1;
+        scheduleRestartRef.current(wait);
+    }, []);
+
+    /**
+     * Queue the next ICE restart after `delay`, or do nothing when an attempt
+     * is already queued or the session is gone. The status is validated when
+     * the timer fires rather than here: the caller just moved the session to
+     * `reconnecting` and that update has not been processed yet.
+     *
+     * A restart asks the engine to re-offer on the same peer connection; the
+     * offer arrives as the usual description event and is answered as usual.
+     * The session never reopens for it.
+     */
+    const scheduleRestart = useCallback((delay: number) => {
+        if (restartTimer.current !== null) return;
+        if (nativeRef.current == null) return;
+        restartTimer.current = setTimeout(() => {
+            restartTimer.current = null;
+            if (statusRef.current !== 'reconnecting') return;
+            const openedRef = opened.current;
+            const channel = signaling.current;
+            if (openedRef == null || channel == null) {
+                spendRestartAttempt();
+                return;
+            }
+            void (async () => {
+                try {
+                    await channel.request('session.restart_ice', {
+                        session_id: openedRef.sessionId,
+                        generation: openedRef.generation,
+                    });
+                } catch {
+                    spendRestartAttempt();
+                    return;
+                }
+                if (statusRef.current !== 'reconnecting') return;
+                restartGraceUntil.current = Date.now() + RESTART_GRACE_MS;
+                restartCycles.current += 1;
+                // Media is up but the path stays quiet after clean restarts:
+                // the session itself is wedged and only a reopen heals it.
+                // (While ICE is down, patience: the network may still come
+                // back, and the backoff schedule owns that case.)
+                if (restartCycles.current >= 2 && iceConnected.current) {
+                    transportFailed('the desktop stopped responding; reopening the session');
+                    return;
+                }
+                // The engine re-offers through the usual description event,
+                // which the session answers as usual; without recovery by the
+                // reply deadline, spend the next attempt. A live transport
+                // answers in milliseconds, so hold it to a short leash.
+                const replyMs = iceConnected.current ? 2000 : RESTART_REPLY_MS;
+                restartTimer.current = setTimeout(() => {
+                    restartTimer.current = null;
+                    spendRestartAttempt();
+                }, replyMs);
+            })();
+        }, delay);
+    }, [spendRestartAttempt, transportFailed]);
+
+    useEffect(() => {
+        scheduleRestartRef.current = scheduleRestart;
+        checkStallRef.current = checkStall;
+    });
+
+    const checkStallRef = useRef(() => {});
+
+    /**
+     * One ICE or engine-transport state, from either reporter. The mapping is
+     * idempotent, so the peer's event and the engine's `session.state` telling
+     * the same story neither double-counts nor fights.
+     */
+    const onTransportState = useCallback((state: string, trackIce = true) => {
+        // Synthetic stall reports say nothing about ICE itself.
+        if (trackIce) iceConnected.current = state === 'connected' || state === 'completed';
+        const next = connectionStatusFor(state, statusRef.current, presentedRef.current);
+        if (next === null) return;
+        // Our own restart's transients are expected, not a new outage.
+        if (next === 'reconnecting' && Date.now() < restartGraceUntil.current) return;
+        update({ status: next });
+        if (next === 'reconnecting') {
+            // Only a path that once carried frames is worth restarting: an
+            // initial connection that never got there has nothing to save.
+            if (presentedRef.current) {
+                restartAttempts.current = 0;
+                scheduleRestart(RESTART_AFTER_MS);
+            }
+        } else {
+            cancelRestart();
+            if (next === 'live') {
+                // The path is back but may be quiet: a missing heartbeat
+                // from here is a stalled session, not a healthy idle one.
+                cancelStall();
+                stallTimer.current = setTimeout(() => checkStallRef.current(), STALL_AFTER_MS);
+            }
+        }
+    }, [cancelRestart, cancelStall, scheduleRestart, update]);
+
+    /**
+     * One stall check: quiet too long while the session should be talking
+     * means the path is stalled, even when ICE has not said so yet. Only
+     * refs and module constants, so stable callbacks may hold it.
+     */
+    const checkStall = useCallback((): void => {
+        stallTimer.current = null;
+        if (lastPingAt.current === 0) return;
+        // A timer that fires a shade early re-arms for the remainder rather
+        // than dying: a one-shot watchdog must not miss by milliseconds.
+        const quietMs = Date.now() - lastPingAt.current;
+        if (quietMs < STALL_AFTER_MS) {
+            stallTimer.current = setTimeout(() => checkStallRef.current(), STALL_AFTER_MS - quietMs);
+            return;
+        }
+        const status = statusRef.current;
+        if (status !== 'live' && status !== 'connecting' && status !== 'reconnecting') return;
+        if (Date.now() < restartGraceUntil.current) {
+            // Our own restart's transients: recheck when the grace ends.
+            stallTimer.current = setTimeout(() => checkStallRef.current(), restartGraceUntil.current - Date.now());
+            return;
+        }
+        onTransportState('disconnected', false);
+    }, [onTransportState]);
+
+    /**
+     * One engine heartbeat: the path works. It clears a stall the watchdog
+     * saw, then rearms the watchdog — which stays disarmed on engines that
+     * predate heartbeats, since `lastPingAt` never leaves 0 for them.
+     */
+    const notePing = useCallback(() => {
+        lastPingAt.current = Date.now();
+        restartCycles.current = 0;
+        cancelStall();
+        // A heartbeat is the engine alive and the path working.
+        if (statusRef.current === 'reconnecting') onTransportState('connected');
+        stallTimer.current = setTimeout(checkStall, STALL_AFTER_MS);
+    }, [cancelStall, checkStall, onTransportState]);
 
     const send = useCallback((message: ControlMessage) => {
         const id = nativeRef.current;
@@ -276,6 +553,10 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         inputEnabled.current = false;
         for (const resolve of pendingClipboard.current.values()) resolve({ text: '', truncated: false, error: 'the session ended' });
         pendingClipboard.current.clear();
+        pendingOffer.current = null;
+        pendingCandidates.current = [];
+        restartGraceUntil.current = 0;
+        restartCycles.current = 0;
         opened.current = null;
         signaling.current = null;
         setNativeId(null);
@@ -302,15 +583,19 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     }, []);
 
     const teardown = useCallback(async (reason: string, closeRemote: boolean) => {
+        cancelReconnect();
+        cancelRestart();
+        cancelStall();
+        restoreToken.current = null;
         const openedRef = opened.current;
         const owner = signaling.current;
         discardSession();
         if (closeRemote) await endRemote(openedRef, owner);
         update({ status: 'ended', presented: false, failure: null });
         void reason;
-    }, [endRemote, discardSession, update]);
+    }, [cancelReconnect, cancelRestart, cancelStall, endRemote, discardSession, update]);
 
-    const connect = useCallback(async () => {
+    const establish = useCallback(async () => {
         if (nativeRef.current != null) return;
         const token = ++generationToken.current;
         if (!(await loadPlatform())) {
@@ -330,6 +615,69 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         if (token !== generationToken.current) return;
         signaling.current = authorization.signaling;
 
+        // Subscribed before the open, because the engine's offer and its first
+        // candidates can beat the open result back. Anything that arrives
+        // before the native session exists is stashed and replayed into it.
+        authorization.signaling.subscribe((event) => {
+            if (token !== generationToken.current) return;
+            const native = nativeRef.current;
+            const held = opened.current;
+            const current = event.sessionId === undefined || held == null || held.sessionId === event.sessionId;
+            switch (event.kind) {
+                case 'description':
+                    if (event.description.type !== 'offer') return;
+                    if (native == null || held == null) {
+                        pendingOffer.current = { sdp: event.description.sdp, sessionId: event.sessionId };
+                        return;
+                    }
+                    if (!current) return;
+                    // A mid-session re-offer is a restart this session asked
+                    // for, through its policy or directly: renegotiation
+                    // transients after it are expected, not a new outage.
+                    if (presentedRef.current) restartGraceUntil.current = Date.now() + RESTART_GRACE_MS;
+                    nativeDesklink?.setRemoteDescription(native, 'offer', event.description.sdp);
+                    return;
+                case 'candidate':
+                    if (native == null || held == null) {
+                        pendingCandidates.current.push({
+                            candidate: event.candidate.candidate,
+                            sdpMid: event.candidate.sdpMid ?? null,
+                            sdpMLineIndex: event.candidate.sdpMLineIndex ?? null,
+                            sessionId: event.sessionId,
+                        });
+                        return;
+                    }
+                    if (!current) return;
+                    nativeDesklink?.addRemoteCandidate(
+                        native,
+                        event.candidate.candidate,
+                        event.candidate.sdpMid ?? null,
+                        event.candidate.sdpMLineIndex ?? null,
+                    );
+                    return;
+                case 'state':
+                    if (!current) return;
+                    diagnostics.current.transport = event.transport;
+                    // Before the session exists there is nothing to map onto.
+                    if (held != null) onTransportState(String(event.transport ?? '').toLowerCase());
+                    update({ diagnostics: { ...diagnostics.current } });
+                    return;
+                case 'restoreToken':
+                    // The live session's grant for a consent-free reopen.
+                    if (current && held != null) restoreToken.current = event.token;
+                    return;
+                case 'revoked':
+                    // Nothing held: the reopen policy owns recovery, and a
+                    // dead session's late revocation must not end it.
+                    if (held == null || !current) return;
+                    void teardown(event.reason, false);
+                    update({ status: 'ended', failure: { code: 'revoked', message: event.reason } });
+                    return;
+                default:
+                    return;
+            }
+        });
+
         let openedResult: SessionOpenResult;
         try {
             openedResult = await authorization.signaling.request<SessionOpenResult>('session.open', {
@@ -339,7 +687,9 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 bitrate_kbps: authorization.session.bitrateKbps,
                 max_fps: authorization.session.maxFps,
                 ice_servers: serializeIceServers(authorization.session.iceServers),
-                restore_token: authorization.session.restoreToken,
+                // A restore token the live session earned buys a consent-free
+                // reopen; the app's own grant wins when it names one.
+                restore_token: authorization.session.restoreToken ?? restoreToken.current ?? undefined,
                 ttl_seconds: authorization.session.ttlSeconds,
             });
         } catch (error) {
@@ -370,35 +720,20 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             platform?.setInputEnabled(id, inputEnabled.current);
             setNativeId(id);
 
-            authorization.signaling.subscribe((event) => {
-                if (token !== generationToken.current) return;
-                const native = nativeRef.current;
-                if (native == null) return;
-                switch (event.kind) {
-                    case 'description':
-                        if (event.description.type !== 'offer') return;
-                        nativeDesklink?.setRemoteDescription(native, 'offer', event.description.sdp);
-                        return;
-                    case 'candidate':
-                        nativeDesklink?.addRemoteCandidate(
-                            native,
-                            event.candidate.candidate,
-                            event.candidate.sdpMid ?? null,
-                            event.candidate.sdpMLineIndex ?? null,
-                        );
-                        return;
-                    case 'state':
-                        diagnostics.current.transport = event.transport;
-                        update({ diagnostics: { ...diagnostics.current } });
-                        return;
-                    case 'revoked':
-                        void teardown(event.reason, false);
-                        update({ status: 'ended', failure: { code: 'revoked', message: event.reason } });
-                        return;
-                    default:
-                        return;
-                }
-            });
+            // Anything the engine sent before the native session existed.
+            // A stashed message naming another session is a previous
+            // generation's leftover and is dropped, not replayed.
+            const stashedOffer = pendingOffer.current;
+            pendingOffer.current = null;
+            if (stashedOffer !== null
+                && (stashedOffer.sessionId === undefined || stashedOffer.sessionId === openedResult.sessionId)) {
+                platform?.setRemoteDescription(id, 'offer', stashedOffer.sdp);
+            }
+            for (const candidate of pendingCandidates.current.splice(0)) {
+                if (candidate.sessionId !== undefined && candidate.sessionId !== openedResult.sessionId) continue;
+                platform?.addRemoteCandidate(id, candidate.candidate, candidate.sdpMid, candidate.sdpMLineIndex);
+            }
+
             if (token === generationToken.current) established = true;
         } catch (error) {
             if (token === generationToken.current) {
@@ -410,7 +745,20 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 await endRemote(openedResult, authorization.signaling);
             }
         }
-    }, [discardSession, endRemote, refuse, teardown, update]);
+    }, [discardSession, endRemote, refuse, teardown, update, onTransportState]);
+
+    /**
+     * Open (or reopen) the session with fresh authority. A deliberate call
+     * starts a fresh reopen budget; the automatic retry calls `establish`
+     * directly so its budget survives.
+     */
+    const connect = useCallback(async () => {
+        attempts.current = 0;
+        restartAttempts.current = 0;
+        restartCycles.current = 0;
+        cancelRestart();
+        await establish();
+    }, [cancelRestart, establish]);
 
     // Native events: answer, candidates, control replies, presentation, failure.
     useEffect(() => {
@@ -455,11 +803,18 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                         return;
                     case 'presented':
                         attempts.current = 0;
+                        restartAttempts.current = 0;
+                        restartCycles.current = 0;
+                        cancelRestart();
                         update({ status: 'live', presented: true, failure: null });
                         return;
                     case 'control': {
                         const reply = parseControlReply(String(event.payload.message ?? ''));
                         if (reply == null) return;
+                        if (reply.kind === 'ping') {
+                            notePing();
+                            return;
+                        }
                         if (reply.kind === 'hello') {
                             diagnostics.current.protocol = reply.protocol;
                             if (reply.protocol !== PROTOCOL_VERSION) {
@@ -496,13 +851,21 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                         }
                         return;
                     }
+                    case 'ice': {
+                        // The peer's connection state, as it happens: Android
+                        // and iOS already emit this, and web matches them.
+                        const state = String(event.payload.state ?? '').toLowerCase();
+                        if (state === 'failed') transportFailed();
+                        else onTransportState(state);
+                        return;
+                    }
                     case 'keyboard':
                         // Typing the platform held back for an armed modifier.
                         if (typeof event.payload.key === 'string') pressKey(event.payload.key)();
                         else if (typeof event.payload.text === 'string') typeText(event.payload.text);
                         return;
                     case 'failure':
-                        refuse(UNREACHABLE_DESKTOP, 'transport');
+                        transportFailed();
                         return;
                     case 'closed':
                         return;
@@ -516,7 +879,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             dropped = true;
             subscription?.remove();
         };
-    }, [refuse, teardown, update, pressKey, typeText]);
+    }, [transportFailed, onTransportState, cancelRestart, spendRestartAttempt, notePing, teardown, update, pressKey, typeText]);
 
     const copyRemoteToLocal = useCallback(async () => {
         if (!inputEnabled.current) throw new Error('Desktop control is off.');
@@ -551,19 +914,18 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         if (reply.error != null) throw new Error(reply.error);
     }, []);
 
-    const cancelReconnect = useCallback(() => {
-        if (reconnectTimer.current !== null) clearTimeout(reconnectTimer.current);
-        reconnectTimer.current = null;
-    }, []);
-
     const close = useCallback(async (reason = 'closed by the user') => {
         cancelReconnect();
         attempts.current = 0;
+        restartAttempts.current = 0;
+        restartCycles.current = 0;
         await teardown(reason, true);
     }, [cancelReconnect, teardown]);
 
-    // Reconnect once after a transport failure, with fresh authority: a session
-    // that was revoked must not be reopened on the strength of the old grant.
+    // Reopen with fresh authority after a transport failure, backing off
+    // across about a minute: a session that was revoked must not be reopened
+    // on the strength of the old grant, and an outage that outlasts one
+    // attempt must not spend the whole budget while the network is still down.
     useEffect(() => {
         if (snapshot.status !== 'failed') return;
         if (snapshot.failure?.code !== 'transport') return;
@@ -575,17 +937,20 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         const openedRef = opened.current;
         discardSession();
         void endRemote(openedRef, owner);
-        if (attempts.current >= MAX_RECONNECT_ATTEMPTS) return;
+        const wait = backoffDelay(REOPEN_BACKOFF_MS, attempts.current);
+        if (wait === null) return;
         attempts.current += 1;
         update({ status: 'reconnecting' });
         reconnectTimer.current = setTimeout(() => {
             reconnectTimer.current = null;
-            void connect();
-        }, 800);
-    }, [connect, discardSession, endRemote, snapshot.status, snapshot.failure, update]);
+            void establish();
+        }, wait);
+    }, [establish, discardSession, endRemote, snapshot.status, snapshot.failure, update]);
 
     useEffect(() => () => {
         cancelReconnect();
+        cancelRestart();
+        cancelStall();
         generationToken.current += 1;
         const id = nativeRef.current;
         nativeRef.current = null;
