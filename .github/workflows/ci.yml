@@ -8,6 +8,22 @@ permissions:
   contents: read
 
 jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Chromium + Xvfb for the browser-lane flow
+        run: |
+          npx -y playwright@1.62.1 install --with-deps chromium
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth
+      - run: node packages/axi/test/browser-flow.mjs
   packages:
     runs-on: ubuntu-24.04
     steps:

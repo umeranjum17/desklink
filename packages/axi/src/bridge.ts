@@ -266,7 +266,6 @@ export async function serve(args: string[]): Promise<void> {
         : typeof step === 'object' && step !== null && verbs.includes(String((step as {verb?:unknown}).verb));
       if (!Array.isArray(raw) || !raw.length || raw.length > 30 || !raw.every(isStep)) {
         throw new Error('batch: expected 1\u201330 steps as [click|type|press|scroll|wait|snapshot|assert|tree|marks, ...args] or {verb, args?, name?, wait?} objects');
->>>>>>> f80fcd3 (Two-lane AXI: browser lane over playwright-core, transactional batch outcomes, build/proof hygiene)
       }
       type Step = { verb: string; args: string[]; name?: string; wait?: string };
       const steps: Step[] = (raw as unknown[]).map(step => Array.isArray(step)

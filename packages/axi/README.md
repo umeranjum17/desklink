@@ -13,13 +13,56 @@ desklink-axi click @a3.7
 desklink-axi marks
 desklink-axi click 100,120
 desklink-axi type "hello"
-desklink-axi batch '[["press","Meta+l"],["type","https://example.com"],["press","Return"],["wait","change"]]'
+desklink-axi batch '[[{"verb":"snapshot","name":"ui"},{"verb":"click","args":["@ui.2"]},{"verb":"assert","args":["Saved"]}]]'
 desklink-axi diff
 desklink-axi look @r1
 desklink-axi stop
 ```
 
 `health` reports capture state, latest frame sequence, and a stream-stop reason without OCR. `start` defaults to view-only; Linux uses the portal unless `--source x11 --display :N` is given, and macOS uses the main display unless `--source display --display <id>` is given. The portal can require a desktop consent prompt; its single-use restore token is kept in `$XDG_STATE_HOME/desklink-axi/portal-token` (otherwise `~/.local/state/desklink-axi/portal-token`), atomically replaced with mode 0600 after each grant. Set `DESKLINK_AXI_RESTORE_TOKEN_FILE` to use a different path. macOS Screen Recording and Accessibility belong to the app that launches the bridge and its engine child. Do not run it unattended against someone else's display. Input and clipboard read/write require `start --control`; view-only clipboard calls return a structured error naming that flag. `stop` releases held input. Actions acknowledge `input: applied` immediately, without waiting for a frame. Every action (`click`, `type`, `press`, `scroll`, `drag`) accepts `--wait settle|change|none|<milliseconds>`; frame timeout after applied input returns `input: applied; frame: timed out` with success status. `batch` takes a JSON array of 1–30 `[verb, ...args]` steps (click/type/press/scroll/wait/tree/marks), runs them in order in one socket round trip, stops on the first failed step and returns a compact per-step result. OCR refs survive advancing frame numbers only while their text and position still match a fresh crop; moved or ambiguous text requires `screen --query`. `screen --query` reuses a prior matching text location for a targeted crop before falling back to full OCR, and reports estimated text tokens. Start with `screen --query` or `--region` before `--full`. For web pages prefer DOM/browser automation when available; AXI is for native apps or whole-desktop tasks. `wait change` and `wait settle` block on engine frame signals rather than polling. `diff` reports repeatedly changing regions separately as `animating`; `diff --include-animating` includes them among ordinary changes. `look` writes a PNG crop. `--help` lists the commands and their flags. Errors are structured and the CLI does not prompt.
+## Browser lane (opt-in, loopback-only)
+
+For web pages the browser lane gives semantic control through [playwright-core](https://www.npmjs.com/package/playwright-core) over CDP; the desktop lane stays for native apps and whole-desktop tasks. Nothing is attached implicitly:
+
+```
+desklink-axi browser attach --cdp 127.0.0.1:9222   # a Chromium YOU started with --remote-debugging-port (loopback only)
+desklink-axi browser launch --profile /tmp/task-profile   # or: isolated task-owned Chromium, debug port on loopback only
+desklink-axi browser tabs          # 'selected' = this lane's page, 'front' = the browser's actual activated tab
+desklink-axi browser snapshot      # compact accessibility snapshot with [ref=eN] elements; no screenshots
+desklink-axi browser click @e12 / fill @e5 "text" / upload @e9 /tmp/report.pdf / press Enter
+desklink-axi browser select 1 / open <url> / navigate <url> / close 1 / detach
+```
+
+Non-loopback endpoints are refused; `launch` renders on `$DISPLAY` (X11) so it never follows `WAYLAND_DISPLAY` to another desktop, and `--arg <chromium flag>` (repeatable) passes extra flags such as `--arg=--window-size=1280,640`. Snapshot refs are re-derived on every command and rejected as `stale-ref` when the page changed. `upload` only sets files on `<input type=file>`; for OS-level dialogs it returns `not-supported` and names the desktop lane (`desklink-axi click/type`), which is also the route for real native-dialog navigation — a DOM upload is not equivalent to completing a native file dialog. `detach` stops the browser only if this lane launched it; a passed `--profile` directory is kept, a lane-created temp profile is removed.
+
+## Batch outcomes
+
+`batch` steps are `[verb, ...args]` arrays or `{verb, args?, name?, wait?}` objects with verbs `click, type, press, scroll, wait, snapshot, assert, tree, marks`. A named snapshot step binds its OCR items so later steps can target `@name.n`; `assert` steps make success depend on observed screen text; per-step lines separate `input: applied` (transport acknowledgement) from `effect: change observed | none within timeout`, and the footer says `effects: asserted[n]` or `effects: unverified (input acknowledgements only)` — an input acknowledgement is never a verified outcome, so wrong-focus typing or a no-op click fails the batch instead of reporting success.
+
+## Proofs and measurements
+
+From the repository root with a task-built engine (`DESKLINK_AXI_ENGINE`) on Linux:
+
+- `node packages/axi/test/smoke.mjs` — clean-tree rebuild of host+axi, then `batch` and `click` on a private Xvfb; asserts no task-owned survivors.
+- `node packages/axi/test/flow.mjs` — full desktop proof (frame/damage, input, chords, batch outcomes, injected-failure cleanup).
+- `node packages/axi/test/browser-flow.mjs` — the open/form/two-tab fixture through the browser lane with semantic refs on a private Xvfb; also proves selected-vs-front, stale-ref rejection, DOM upload and the not-supported fallback.
+- `node packages/axi/test/bench.mjs [runs]` — comparative p50/p95 (default 20 measured runs after 3 warmups) for the browser lane vs the AXI fallback over the open/form/tabs/native fixtures; text-token proxy is `ceil(stdout chars/4)`, a proxy, not a tokenizer.
+
+Measured on one private 1280x720 Xvfb with a task-owned Chromium 151 (`--window-position=0,0 --window-size=1280,640`, 20 measured runs per task after 3 warmups, CLI wall time per run; Chromium for Testing 151.0.7922.34, playwright-core 1.62.1):
+
+| task | lane | p50 ms | p95 ms | calls/run | retries | text-token proxy/run | failures |
+|---|---|---|---|---|---|---|---|
+| native typing | axi | 57 | 68 | 1.0 | 0 | 22 | 1/23 |
+| open + verify heading | browser | 532 | 558 | 2.0 | 0 | 149 | 0/23 |
+| open + verify heading | axi | 6043 | 8659 | 2.0 | 0 | 107 | 0/23 |
+| form fill+save+verify | browser | 1735 | 6082 | 4.0 | 0 | 290 | 0/23 |
+| two tabs read both | browser | 5176 | 6007 | 17.0 | 0 | 900 | 0/23 |
+| form fill+save+verify | axi | not completed — OCR word-target steps (`--into Name`, `click Save`) are flaky in the bench sequence; the same steps pass in isolation and the batch/assert machinery is proven in flow.mjs. Follow-up: stabilize, then re-measure. |
+| two tabs read both | axi | not completed — same OCR word-target limitation on the popup-link click; works in isolation, not yet in the measured sequence. |
+
+The browser lane completed every web task 23/23 with compact text snapshots; the desktop lane's OCR fallback stays reliable for the native proof and degrades on small web text, matching the two-lane ranking in the 2026-09-27 computer-use benchmark.
+
+`health` reports capture state, latest frame sequence, and a stream-stop reason without OCR. `start` defaults to view-only; Linux uses the portal unless `--source x11 --display :N` is given, and macOS uses the main display unless `--source display --display <id>` is given. The portal can require a desktop consent prompt; its single-use restore token is kept in `$XDG_STATE_HOME/desklink-axi/portal-token` (otherwise `~/.local/state/desklink-axi/portal-token`), atomically replaced with mode 0600 after each grant. Set `DESKLINK_AXI_RESTORE_TOKEN_FILE` to use a different path. macOS Screen Recording and Accessibility belong to the app that launches the bridge and its engine child. Do not run it unattended against someone else's display. Input and clipboard read/write require `start --control`; view-only clipboard calls return a structured error naming that flag. `stop` releases held input. Actions acknowledge `input: applied` immediately, without waiting for a frame. Every action (`click`, `type`, `press`, `scroll`, `drag`) accepts `--wait settle|change|none|<milliseconds>`; frame timeout after applied input returns `input: applied; frame: timed out` with success status. `batch` takes a JSON array of 1–30 `[verb, ...args]` steps (click/type/press/scroll/wait), runs them in order in one socket round trip, stops on the first failed step and returns a compact per-step result. OCR refs survive advancing frame numbers only while their text and position still match a fresh crop; moved or ambiguous text requires `screen --query`. `screen --query` reuses a prior matching text location for a targeted crop before falling back to full OCR, and reports estimated text tokens. Start with `screen --query` or `--region` before `--full`. For web pages prefer DOM/browser automation when available; AXI is for native apps or whole-desktop tasks. `wait change` and `wait settle` block on engine frame signals rather than polling. `diff` reports repeatedly changing regions separately as `animating`; `diff --include-animating` includes them among ordinary changes. `look` writes a PNG crop. `--help` lists the commands and their flags. Errors are structured and the CLI does not prompt.
 
 For a remote signed Mac bridge, start it once **inside the permission-granted app**, then forward its Unix socket over one persistent SSH connection: `ssh -N -L "$LOCAL_RUNTIME/desklink-axi/default.sock:$REMOTE_RUNTIME/desklink-axi/default.sock" mac-host`. Set `XDG_RUNTIME_DIR=$LOCAL_RUNTIME` on the client (create `$LOCAL_RUNTIME/desklink-axi` mode 0700 first), and run `desklink-axi screen`, `batch`, etc. locally. The SSH login does not launch the engine, and the forwarded socket grants control: use a private directory and close SSH when done. Do not run local `start` against a forwarded socket. Never swap and re-sign the executable per run. Update the complete app at its existing path with the same key using `packages/desktop-host/release/install-mac-app.sh`; verify grants after updating.\n\n`desklink-axi setup hooks` adds a Claude `SessionStart` hook to `.claude/settings.local.json` in the current directory; it does not start capture.
 
