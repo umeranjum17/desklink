@@ -16,9 +16,10 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "npm run build --workspace=@desklink/host && tsc",
     "pretest": "npm run build",
     "test": "vitest run",
+    "smoke": "node test/smoke.mjs",
     "skill:gen": "node scripts/gen-skill.mjs",
     "skill:check": "node scripts/gen-skill.mjs --check"
   },
@@ -30,6 +31,7 @@
   "dependencies": {
     "@desklink/host": "0.1.1",
     "node-datachannel": "^0.33.4",
+    "playwright-core": "1.62.1",
     "pngjs": "^7.0.0"
   }
 }

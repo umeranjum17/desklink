@@ -251,15 +251,77 @@ export async function serve(args: string[]): Promise<void> {
       return state?.event === 'session.state' ? `capture: ${state.params.capture}; transport: ${state.params.transport}; frame: ${frame?.seq ?? 'unavailable'}` : 'capture: starting';
     }
     if (command === 'batch') {
-      let steps: unknown;
-      try { steps = JSON.parse(args[0] ?? ''); } catch { throw new Error('batch: expected JSON array of [verb, ...args] steps'); }
-      if (!Array.isArray(steps) || !steps.length || steps.length > 30 || steps.some(step => !Array.isArray(step) || !['click','type','press','scroll','wait','tree','marks'].includes(step[0]) || step.slice(1).some((arg:unknown) => typeof arg !== 'string'))) throw new Error('batch: expected 1–30 [click|type|press|scroll|wait|tree|marks, ...args] steps');
-      const results: string[] = [];
-      for (const [index, step] of steps.entries()) {
-        try { results.push(`${index+1}: ${await output(step[0], step.slice(1))}`); }
-        catch (error) { results.push(`${index+1}: error: ${(error as Error).message}`); break; }
+      // Transactional batch with outcome semantics (build-plan item 5). Steps
+      // are ["verb", ...args] arrays or {verb, args?, name?, wait?} objects.
+      // A named snapshot step binds its OCR items so later steps can target
+      // `@name.n` refs; assert steps turn observed text into task success.
+      // Per step, `input: applied` stays a transport acknowledgement; the
+      // effect field reports only what a post-action frame read saw, and the
+      // footer never presents acknowledged input as a verified outcome.
+      let raw: unknown;
+      try { raw = JSON.parse(args[0] ?? ''); } catch { throw new Error('batch: expected a JSON array of steps'); }
+      const verbs = ['click','type','press','scroll','wait','snapshot','assert','tree','marks'];
+      const isStep = (step: unknown): boolean => Array.isArray(step)
+        ? verbs.includes(String(step[0])) && step.slice(1).every(arg => typeof arg === 'string')
+        : typeof step === 'object' && step !== null && verbs.includes(String((step as {verb?:unknown}).verb));
+      if (!Array.isArray(raw) || !raw.length || raw.length > 30 || !raw.every(isStep)) {
+        throw new Error('batch: expected 1\u201330 steps as [click|type|press|scroll|wait|snapshot|assert|tree|marks, ...args] or {verb, args?, name?, wait?} objects');
+>>>>>>> f80fcd3 (Two-lane AXI: browser lane over playwright-core, transactional batch outcomes, build/proof hygiene)
       }
-      return `${results.at(-1)?.includes(': error:') ? 'error: ' : ''}batch: ${results.length}/${steps.length} steps\n${results.join('\n')}`;
+      type Step = { verb: string; args: string[]; name?: string; wait?: string };
+      const steps: Step[] = (raw as unknown[]).map(step => Array.isArray(step)
+        ? { verb: String(step[0]), args: (step as unknown[]).slice(1).map(String) }
+        : { verb: String((step as {verb:string}).verb),
+            args: Array.isArray((step as {args?:unknown}).args) ? (step as {args:unknown[]}).args.map(String) : [],
+            name: typeof (step as {name?:unknown}).name === 'string' ? (step as {name:string}).name : undefined,
+            wait: typeof (step as {wait?:unknown}).wait === 'string' ? (step as {wait:string}).wait : undefined });
+      const bindings = new Map<string, Item[]>();
+      const resolveBound = (arg: string): string => {
+        const bound = /^@([A-Za-z][A-Za-z0-9_-]*)\.(\d+)$/.exec(arg);
+        if (!bound) return arg;
+        const items = bindings.get(bound[1]!);
+        if (!items) throw new Error(`batch: unknown binding @${bound[1]}; run a named snapshot step first`);
+        const item = items[Number(bound[2]) - 1];
+        if (!item) throw new Error(`stale-ref: ${arg}; binding holds ${items.length} items`);
+        const live = text.find(t => t.text === item.text && Math.abs(t.x - item.x) < 12 && Math.abs(t.y - item.y) < 12);
+        if (!live) throw new Error(`stale-ref: ${arg}; run a fresh snapshot step`);
+        return live.ref;
+      };
+      const results: string[] = [];
+      let asserted = 0;
+      const label = (index: number, step: Step) => `${index + 1}${step.name ? ` ${step.name}` : ''}:`;
+      const footer = () => asserted ? `effects: asserted[${asserted}]` : 'effects: unverified (input acknowledgements only)';
+      for (const [index, step] of steps.entries()) {
+        try {
+          if (step.verb === 'snapshot') {
+            const view = await output('screen', step.args[0] ? ['--query', step.args[0]] : []);
+            if (step.name) bindings.set(step.name, [...text]);
+            results.push(`${label(index, step)} ${view.split('\n')[0]}`);
+            continue;
+          }
+          if (step.verb === 'assert') {
+            const absent = step.args[0] === '--absent';
+            const wanted = (absent ? step.args[1] : step.args[0]) ?? '';
+            if (!wanted) throw new Error('assert: expected text (optionally after --absent)');
+            const found = !(await output('screen', ['--query', wanted])).includes('text: 0 items match');
+            if (found === absent) throw new Error(`assert-failed: "${wanted}" ${absent ? 'is present but --absent was set' : 'not on screen; effect not confirmed'}`);
+            asserted++;
+            results.push(`${label(index, step)} assert: "${wanted}" ${absent ? 'absent' : 'found'}`);
+            continue;
+          }
+          const stepArgs = step.args.map(resolveBound);
+          if (step.verb === 'wait') { results.push(`${label(index, step)} ${await output('wait', stepArgs)}`); continue; }
+          if (step.wait !== undefined) stepArgs.push('--wait', step.wait);
+          const out = await output(step.verb, stepArgs);
+          const effect = out.includes('frame: ready') ? 'effect: change observed'
+            : out.includes('frame: timed out') ? 'effect: none within timeout' : 'input: applied';
+          results.push(`${label(index, step)} ${effect}`);
+        } catch (error) {
+          results.push(`${label(index, step)} error: ${(error as Error).message}`);
+          return `error: batch: ${results.length}/${steps.length} steps; ${footer()}\n${results.join('\n')}`;
+        }
+      }
+      return `batch: ${results.length}/${steps.length} steps; ${footer()}\n${results.join('\n')}`;
     }
     if (command === 'stop') {
       try { await engine.closeSession(opened.sessionId); }
@@ -456,6 +518,29 @@ export async function serve(args: string[]): Promise<void> {
         const found = await ocr(frame,[x,y,right-x,bottom-y]);
         text = found.some(t=>t.text.toLowerCase().includes(query!.toLowerCase())) ? found : await ocr(frame,region);
       } else text = await ocr(frame,region);
+      // Small UI text can vanish in a full-frame tesseract pass (page
+      // segmentation drops sparse rows — the benchmark's link-row hazard).
+      // When the full pass under-reads, tile the frame and merge so a query
+      // or snapshot reflects what is actually on screen. Bounded: 4 tiles.
+      const underRead = text.length < 8 && frame.width > 400 && frame.height > 300;
+      const queryMissed = query && !text.some(t => t.text.toLowerCase().includes(query.toLowerCase()));
+      if (!region && (queryMissed || underRead)) {
+        const midX = Math.floor(frame.width / 2), midY = Math.floor(frame.height / 2), pad = 24;
+        const tiles: number[][] = [
+          [0, 0, midX + pad, midY + pad],
+          [Math.max(0, midX - pad), 0, frame.width - Math.max(0, midX - pad), midY + pad],
+          [0, Math.max(0, midY - pad), midX + pad, frame.height - Math.max(0, midY - pad)],
+          [Math.max(0, midX - pad), Math.max(0, midY - pad), frame.width - Math.max(0, midX - pad), frame.height - Math.max(0, midY - pad)],
+        ];
+        const merged = [...text];
+        for (const tile of tiles) {
+          const found = await ocr(frame, tile).catch(() => [] as Item[]);
+          for (const item of found) {
+            if (!merged.some(m => m.text === item.text && Math.abs(m.x - item.x) < 12 && Math.abs(m.y - item.y) < 12)) merged.push(item);
+          }
+        }
+        text = merged.map((t, i) => ({ ...t, ref: `@${frame.seq}.${i + 1}` }));
+      }
     }
     if (command === 'home') return `session: open source=${source} ${display ?? ''} size=${frame.width}x${frame.height} permissions=view${control?',control':''}\nframe: ${frame.seq} settled=${frame.still_ms>=150} unseen=${frame.changed ? frame.damage.length : 0} region\nwindows: unavailable on this compositor\ntext[${Math.min(text.length,12)} of ${text.length}]{ref,text,x,y}:\n${text.slice(0,12).map(t=>`  ${t.ref},${JSON.stringify(t.text)},${t.x},${t.y}`).join('\n')}\nhelp[2]:\n  desklink-axi diff\n  desklink-axi screen --query "<words>"`;
     if (command === 'screen') {

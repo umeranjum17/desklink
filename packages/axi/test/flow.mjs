@@ -54,6 +54,23 @@ function recordProcesses() {
     } catch { /* Child already exited. */ }
   }
 }
+// A stale dist whose bridge predates pid-file support (the benchmark's false
+// failure) writes neither PID file, so recordProcesses() finds nothing. Every
+// process this run started carries this run's unique session marker in its
+// environment; scan /proc for exact marker matches and reap them too.
+const sessionMarker = `DESKLINK_AXI_SESSION=flow-${process.pid}`;
+function sessionStrays() {
+  const strays = [];
+  for (const entry of readdirSync('/proc')) {
+    const pid = Number(entry);
+    if (!Number.isInteger(pid) || pid <= 1 || owned.has(pid) || pid === process.pid) continue;
+    try {
+      if (!readFileSync(`/proc/${pid}/environ`).toString('latin1').split('\0').includes(sessionMarker)) continue;
+      strays.push({ pid, cmdline: readFileSync(`/proc/${pid}/cmdline`,'utf8').replaceAll('\0',' ') });
+    } catch { /* Vanished or not readable. */ }
+  }
+  return strays;
+}
 async function goneOwned(pid) {
   const started = owned.get(pid);
   for (let i=0; i<40 && proc(pid)?.started===started && proc(pid)?.state!=='Z'; i++) await new Promise(r=>setTimeout(r,50));
@@ -67,6 +84,13 @@ async function stopProcess(pid) {
   try { process.kill(pid,'SIGKILL'); } catch (error) { if (alive()) throw error; }
   for (let i=0;i<40 && alive();i++) await new Promise(r=>setTimeout(r,25));
   assert(!alive(), `task-owned process ${pid} survived cleanup`);
+}
+async function stopXvfbGracefully() {
+  const alive = () => { const state = proc(xvfb.pid); return state?.started === owned.get(xvfb.pid) && state.state !== 'Z'; };
+  if (!alive()) return;
+  try { xvfb.kill('SIGTERM'); } catch { /* already gone */ }
+  for (let i = 0; i < 40 && alive(); i++) await new Promise(r => setTimeout(r, 50));
+  if (alive()) await stopProcess(xvfb.pid); // Graceful exit unlinks the X socket; SIGKILL leaves it behind.
 }
 async function verifyXvfb() {
   for (let i=0;i<100 && !existsSync(socket) && xvfb.exitCode===null;i++) await new Promise(r=>setTimeout(r,50));
@@ -97,12 +121,19 @@ function cleanup() {
     if (target) target.kill('SIGTERM');
     const failures = [];
     try { recordProcesses(); } catch (error) { failures.push(error); }
+    for (const stray of sessionStrays()) {
+      try { remember(stray.pid, stray.cmdline.slice(0, 48)); }
+      catch (error) { failures.push(error); }
+    }
     for (const pid of owned.keys()) if (pid !== xvfb.pid) {
       try { await stopProcess(pid); } catch (error) { failures.push(error); }
     }
-    if (failures.length) throw new AggregateError(failures,'could not prove child cleanup; private Xvfb remains up');
-    await stopProcess(xvfb.pid); // Keep the private server up until every input-capable child is gone.
+    // Keep the private server up until every input-capable child is gone —
+    // but stop it even when child reaping failed, so an injected assertion
+    // failure leaves no Xvfb behind either. Failures surface afterwards.
+    try { await stopXvfbGracefully(); } catch (error) { failures.push(error); }
     assert([...owned].every(([pid,started])=>!started || proc(pid)?.started!==started || proc(pid)?.state==='Z'), 'a task-owned child survived');
+    if (failures.length) throw new AggregateError(failures,'could not prove child cleanup');
     rmSync(dir,{recursive:true,force:true});
   })();
 }
@@ -207,6 +238,20 @@ try {
   assert.match(batched,/1: input: applied/);
   assert.match(events, /"kind":"button".*"phase":"up"/);
   assert.match(events, /"kind":"key".*"phase":"down"/);
+  // Outcome semantics: acknowledged input alone must never read as success.
+  await verifyXvfb();
+  const failedBatch = spawn(process.execPath,[cli,'batch',JSON.stringify([['press','a'],['assert','XYZZY_NEVER_ON_SCREEN']])],{env});
+  let failOut=''; for await (const part of failedBatch.stdout) failOut += part;
+  assert.equal(await new Promise(r=>failedBatch.on('exit',r)),1,failOut);
+  assert.match(failOut,/assert-failed: "XYZZY_NEVER_ON_SCREEN" not on screen/);
+  assert.match(failOut,/effects: unverified/, 'a failed assert must not read as task success');
+  assert.doesNotMatch(failOut, /^batch: 2\/2 steps/m, 'a failed assert must not produce a success summary');
+  const absentOk = await run('batch', JSON.stringify([['assert','--absent','XYZZY_NEVER_ON_SCREEN']]));
+  assert.match(absentOk,/assert: "XYZZY_NEVER_ON_SCREEN" absent/);
+  assert.match(absentOk,/effects: asserted\[1\]/);
+  const named = await run('batch', JSON.stringify([{verb:'snapshot',name:'ui'},{verb:'press',args:['a'],name:'key'},{verb:'wait',args:['50']}]));
+  assert.match(named,/batch: 3\/3 steps; effects: unverified/);
+  assert.match(named,/2 key: input: applied/);
   recordProcesses();
   const bridgePid = Number(readFileSync(pidFile,'utf8').trim().split(/\s+/).at(-1));
   const enginePid = Number(readFileSync(enginePidFile,'utf8').trim().split(/\s+/).at(-1));

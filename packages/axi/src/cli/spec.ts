@@ -14,6 +14,8 @@ export interface FlagSpec {
   default?: string | boolean;
   /** When set, string values are validated against this list. */
   values?: string[];
+  /** Repeatable: values accumulate into an array instead of last-wins. */
+  multi?: boolean;
   description: string;
 }
 

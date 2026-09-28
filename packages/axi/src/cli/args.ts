@@ -6,7 +6,7 @@ import { UsageError } from "../output/errors.js";
 
 export interface Parsed {
   positionals: string[];
-  flags: Record<string, string | boolean>;
+  flags: Record<string, string | boolean | string[]>;
   help: boolean;
 }
 
@@ -22,7 +22,7 @@ function forScope(spec: CommandSpec): string {
 }
 
 export function parseArgs(argv: string[], spec: CommandSpec): Parsed {
-  const flags: Record<string, string | boolean> = {};
+  const flags: Record<string, string | boolean | string[]> = {};
   for (const f of spec.flags) {
     if (f.default !== undefined) flags[f.name] = f.default;
   }
@@ -90,7 +90,12 @@ export function parseArgs(argv: string[], spec: CommandSpec): Parsed {
             `valid values: ${flagSpec.values.join(", ")}`,
           );
         }
-        flags[name] = value;
+        if (flagSpec.multi) {
+          const existing = flags[name];
+          flags[name] = Array.isArray(existing) ? [...existing, value] : [value];
+        } else {
+          flags[name] = value;
+        }
       }
     } else if (tok.startsWith("-") && tok.length > 1) {
       if (spec.args?.[positionals.length]?.name === "text") {
