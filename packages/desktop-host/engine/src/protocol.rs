@@ -89,6 +89,26 @@ pub enum SourceRequest {
         #[serde(default)]
         display: Option<String>,
     },
+    /// Video the consumer already encoded, fed access unit by access unit with
+    /// `session.feed`. The engine has no capture backend, no encoder and no
+    /// input backend for this source: it packetizes what it is handed and
+    /// forwards control messages back to the consumer, which owns the device.
+    Encoded {
+        codec: EncodedCodec,
+        /// The stream's own pixel size. The consumer is the only party that
+        /// knows it, and nothing here is scaled: the client aims at these
+        /// pixels and the consumer maps them to its device.
+        width: usize,
+        height: usize,
+    },
+}
+
+/// A codec the consumer may feed. Only H.264 is accepted today, because it is
+/// what the device helpers emit and what the clients can already decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EncodedCodec {
+    H264,
 }
 
 #[derive(Debug, Deserialize)]
@@ -154,6 +174,44 @@ pub struct FrameParams {
     pub region: Option<[usize; 4]>,
 }
 
+/// One access unit of a consumer-encoded stream.
+///
+/// Base64 inside the same JSON line keeps one ordered channel and one fd: one
+/// second of a 2 Mbit/s stream costs about 1 ms to decode here and 0.09 ms to
+/// encode on the consumer's side, against the 5 % of a core that would have
+/// justified a second fd (see `docs/PROTOCOL.md`, "Encoded sources").
+#[derive(Debug, Deserialize)]
+pub struct FeedParams {
+    pub session_id: String,
+    /// True for an IDR access unit. The first one also carries the SPS whose
+    /// profile-level-id the offer negotiates.
+    pub keyframe: bool,
+    pub data_b64: String,
+}
+
+/// The largest access unit this protocol accepts, once decoded. A 4K key frame
+/// at a quality worth sending is a few hundred kilobytes; this refuses a request
+/// that is not a picture rather than acting as a rate limit.
+pub const MAX_ACCESS_UNIT_BYTES: usize = 8 * 1024 * 1024;
+
+impl FeedParams {
+    /// The access unit's own bytes, or why this request is not one.
+    pub fn access_unit(&self) -> std::result::Result<Vec<u8>, String> {
+        let data = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            self.data_b64.as_bytes(),
+        )
+        .map_err(|error| format!("data_b64 is not base64: {error}"))?;
+        if data.len() > MAX_ACCESS_UNIT_BYTES {
+            return Err(format!(
+                "an access unit is {} bytes; the limit is {MAX_ACCESS_UNIT_BYTES}",
+                data.len()
+            ));
+        }
+        Ok(data)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SessionRef {
     pub session_id: String,
@@ -202,7 +260,7 @@ pub struct ClipboardParams {
 /// `seq` is the client's own ordering. The engine refuses a repeat or a lower
 /// value rather than re-applying an action, so a replayed frame cannot move the
 /// pointer twice.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ControlMessage {
     Pointer {
@@ -274,7 +332,7 @@ impl ControlMessage {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PointerPhase {
     Move,
@@ -353,6 +411,84 @@ mod tests {
                 display_id: Some(42)
             }
         ));
+    }
+
+    #[test]
+    fn an_encoded_source_names_its_codec_and_its_own_size() {
+        let request: SourceRequest = serde_json::from_value(serde_json::json!({
+            "kind": "encoded",
+            "codec": "h264",
+            "width": 486,
+            "height": 1080
+        }))
+        .unwrap();
+        assert!(matches!(
+            request,
+            SourceRequest::Encoded {
+                codec: EncodedCodec::H264,
+                width: 486,
+                height: 1080
+            }
+        ));
+    }
+
+    #[test]
+    fn an_unknown_encoded_codec_is_refused_rather_than_guessed() {
+        assert!(serde_json::from_value::<SourceRequest>(serde_json::json!({
+            "kind": "encoded",
+            "codec": "av1",
+            "width": 486,
+            "height": 1080
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn a_feed_request_is_one_access_unit_with_its_own_keyframe_flag() {
+        let params: FeedParams =
+            serde_json::from_str(r#"{"session_id":"s","keyframe":true,"data_b64":"AAAA"}"#)
+                .unwrap();
+        assert_eq!(params.session_id, "s");
+        assert!(params.keyframe, "a feed says whether its unit is an IDR");
+        assert_eq!(params.data_b64, "AAAA");
+        assert_eq!(params.access_unit().unwrap(), vec![0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn a_feed_request_that_is_not_base64_is_refused() {
+        let params = FeedParams {
+            session_id: String::from("s"),
+            keyframe: false,
+            data_b64: String::from("not base64!!"),
+        };
+        assert!(params.access_unit().is_err());
+    }
+
+    /// The reason this protocol carries bytes in base64 rather than adding a
+    /// second inherited fd: at 2 Mbit/s it costs a fraction of a per cent of a
+    /// core, against a whole second channel to keep ordered and bounded. The
+    /// bound below is deliberately loose — it is a sanity check on the order of
+    /// magnitude, not a benchmark, so it does not flake on a loaded machine.
+    #[test]
+    fn decoding_a_two_megabit_stream_is_nowhere_near_a_core() {
+        // One second of a 2 Mbit/s stream, in access units.
+        let unit: Vec<u8> = (0..8_000u32).map(|index| index as u8).collect();
+        let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &unit);
+        let params = FeedParams {
+            session_id: String::from("s"),
+            keyframe: false,
+            data_b64: encoded,
+        };
+        let started = std::time::Instant::now();
+        for _ in 0..(250_000 / unit.len()) {
+            assert_eq!(params.access_unit().unwrap().len(), unit.len());
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "a second of 2 Mbit/s base64 took {elapsed:?}, which is far past 5 % of a core",
+        );
+        println!("a second of 2 Mbit/s stream decoded in {elapsed:?}");
     }
 
     #[test]

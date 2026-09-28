@@ -29,7 +29,7 @@
     "typescript": "^5.6.0"
   },
   "dependencies": {
-    "@desklink/host": "0.1.1",
+    "@desklink/host": "0.2.0",
     "node-datachannel": "^0.33.4",
     "playwright-core": "1.62.1",
     "pngjs": "^7.0.0"

@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>desklink encoded source flow</title>
+<!--
+  The browser half of `encoded-flow.mjs`.
+
+  It is the client package's own web implementation — `native.web.ts` — driven
+  the way an application drives it: open a session over the signalling channel,
+  take the offer the engine sends, answer it, mount the surface, and let the
+  client's own gestures produce the control messages. Nothing here re-implements
+  the media path, so what the test proves is what a browser app gets.
+
+  The driver serves this page, relays the local protocol to the engine, and
+  feeds the Annex-B stream.
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #000; }
+  #surface { position: absolute; inset: 0; overflow: hidden; }
+</style>
+</head>
+<body>
+<div id="surface"></div>
+<script type="module">
+import { attachSurface, nativeDesklink } from '/packages/desktop-client/src/native.web.ts';
+
+const socket = new WebSocket(new URLSearchParams(location.search).get('engine'));
+const pending = new Map();
+const state = {
+    /** The client's own session handle, for the page's module and its events. */
+    localId: null,
+    /** The engine's session id, which every engine request has to name. */
+    sessionId: null,
+    geometry: null,
+    offer: null,
+    answer: null,
+    presented: false,
+    failure: null,
+    frames: 0,
+    control: [],
+    rejection: null,
+};
+let nextId = 0;
+
+/** One request on the engine's local protocol, relayed by the driver. */
+function request(method, params) {
+    const id = ++nextId;
+    return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        socket.send(JSON.stringify({ id, method, params: params ?? {} }));
+        setTimeout(() => {
+            if (pending.delete(id)) reject(new Error(`${method} timed out`));
+        }, 20_000);
+    });
+}
+
+/***
+ * Empty until the control channel opens: nothing is accepted before `hello`,
+ * and the surface size the client maps touches against comes from it.
+ */
+function onControl(reply) {
+    state.control.push(reply.kind);
+    if (reply.kind === 'hello') {
+        state.geometry = reply.geometry;
+        nativeDesklink.setSurfaceSize(state.localId, reply.geometry.encoded.width, reply.geometry.encoded.height);
+    }
+    if (reply.kind === 'rejected') state.rejection = `${reply.code}: ${reply.message}`;
+}
+nativeDesklink.addListener('onSessionEvent', (event) => {
+    void handle(event);
+});
+
+async function handle(event) {
+    if (event.sessionId !== state.localId) return;
+    switch (event.name) {
+        case 'answer':
+            state.answer = String(event.payload.sdp ?? '');
+            await request('session.description', {
+                session_id: state.sessionId,
+                description: { type: 'answer', sdp: state.answer },
+            });
+            return;
+        case 'candidate':
+            await request('session.candidate', {
+                session_id: state.sessionId,
+                candidate: String(event.payload.candidate ?? ''),
+                sdp_mid: event.payload.sdpMid ?? null,
+                sdp_m_line_index: event.payload.sdpMLineIndex ?? null,
+            }).catch(() => undefined);
+            return;
+        case 'presented':
+            state.presented = true;
+            countFrames();
+            return;
+        case 'control':
+            onControl(JSON.parse(String(event.payload.message ?? '{}')));
+            return;
+        case 'failure':
+            state.failure = event.payload;
+            return;
+        default:
+            return;
+    }
+}
+
+/** Count decoded-and-shown frames: the only honest answer to "is it live". */
+function countFrames() {
+    const video = document.querySelector('#surface video');
+    if (video === null || typeof video.requestVideoFrameCallback !== 'function') return;
+    video.requestVideoFrameCallback(() => {
+        state.frames += 1;
+        countFrames();
+    });
+}
+
+socket.addEventListener('message', (message) => {
+    const payload = JSON.parse(message.data);
+    if (payload.id !== undefined) {
+        const waiting = pending.get(payload.id);
+        if (waiting === undefined) return;
+        pending.delete(payload.id);
+        if (payload.error) waiting.reject(new Error(`${payload.error.code}: ${payload.error.message}`));
+        else waiting.resolve(payload.result);
+        return;
+    }
+    if (payload.event === 'session.description') {
+        state.offer = payload.params.description.sdp;
+        nativeDesklink.setRemoteDescription(state.localId, 'offer', state.offer);
+        return;
+    }
+    if (payload.event === 'session.candidate') {
+        nativeDesklink.addRemoteCandidate(
+            state.localId,
+            payload.params.candidate,
+            payload.params.sdpMid ?? null,
+            payload.params.sdpMLineIndex ?? null,
+        );
+    }
+});
+
+/**
+ * Open an encoded session and mount its surface. The offer only exists once the
+ * driver has fed an access unit, so this resolves on the open result, not on a
+ * picture.
+ */
+window.__flow = {
+    state,
+    async open(size) {
+        const id = nativeDesklink.createSession('[]');
+        if (id === null) throw new Error('the web session could not be created');
+        state.localId = id;
+        const opened = await request('session.open', {
+            source: { kind: 'encoded', codec: 'h264', width: size.width, height: size.height },
+            permissions: ['view', 'control'],
+        });
+        state.sessionId = opened.sessionId;
+        state.geometry = opened.geometry;
+        attachSurface(id, document.getElementById('surface'));
+        nativeDesklink.setInputEnabled(id, true);
+        // Autoplay is what the client relies on; a headless renderer sometimes
+        // needs to be told, and a paused element is not a broken stream.
+        const video = document.querySelector('#surface video');
+        video?.play?.().catch(() => undefined);
+        return opened;
+    },
+
+    /** The rendered picture: its size, and how much of it is not black. */
+    sample() {
+        const video = document.querySelector('#surface video');
+        if (video === null) return { error: 'no video element' };
+        const canvas = document.createElement('canvas');
+        canvas.width = 64;
+        canvas.height = 128;
+        const context = canvas.getContext('2d');
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        let luminance = 0;
+        let lit = 0;
+        for (let index = 0; index < pixels.length; index += 4) {
+            const value = 0.299 * pixels[index] + 0.587 * pixels[index + 1] + 0.114 * pixels[index + 2];
+            luminance += value;
+            if (value > 24) lit += 1;
+        }
+        const samples = pixels.length / 4;
+        const quality = typeof video.getVideoPlaybackQuality === 'function' ? video.getVideoPlaybackQuality() : {};
+        return {
+            width: video.videoWidth,
+            height: video.videoHeight,
+            currentTime: video.currentTime,
+            paused: video.paused,
+            readyState: video.readyState,
+            decoded: quality.totalVideoFrames ?? null,
+            droppedDecoded: quality.droppedVideoFrames ?? null,
+            meanLuminance: luminance / samples,
+            litFraction: lit / samples,
+            frames: state.frames,
+        };
+    },
+
+    /** Where the picture is on the page, in CSS pixels, for a real click. */
+    pictureRect() {
+        const video = document.querySelector('#surface video');
+        const rect = video.getBoundingClientRect();
+        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    },
+};
+socket.addEventListener('open', () => {
+    window.__flow.ready = true;
+});
+</script>
+</body>
+</html>

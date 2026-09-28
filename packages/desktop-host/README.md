@@ -27,6 +27,12 @@ a source build with a static VP9 library.
   re-codes a still desktop once at a fine quantizer so it reads sharp.
 - **Transport** with WebRTC — ICE, DTLS, SRTP, RTP — and one data channel for the
   session's pointer/keyboard/clipboard.
+- **Carry** video the consumer encoded itself, on an `encoded` source: Annex-B
+  H.264 access units arrive as they are produced, and the session's pointer,
+  keyboard and wheel messages come back to the consumer as events instead of
+  being applied. This is for a stream whose encoder lives elsewhere — a phone
+  mirror from a device helper — so the helper keeps its own hardware encoder and
+  the engine keeps the WebRTC path. See `docs/PROTOCOL.md`.
 - **Input** through [inputtino](https://github.com/games-on-whales/inputtino)
   (MIT) over `uinput`/`libevdev` for portal capture, XTest for an X display, or
   Quartz events on macOS. Held input is released when the session ends.

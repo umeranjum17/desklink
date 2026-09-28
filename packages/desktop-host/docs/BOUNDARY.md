@@ -18,9 +18,13 @@ mean the phone pins a native host build, or the host pins a mobile runtime.
 apply authenticated input to the same desktop".
 
 - In: `session.open`, SDP/ICE, scoped WebRTC control-channel input, explicit
-  clipboard read/write, close. See `docs/PROTOCOL.md`.
-- Out: one VP9 video track and session notifications. Metrics are a request, not
-  an event; the wire contract is in `docs/PROTOCOL.md`.
+  clipboard read/write, close — and `session.feed`, which supplies the access
+  units of a consumer-encoded `encoded` source. See `docs/PROTOCOL.md`.
+- Out: one video track — VP9 the engine encodes from a captured desktop, or
+  H.264 it only packetizes for a consumer-fed `encoded` source, whose control
+  messages are forwarded to the consumer instead of applied — and session
+  notifications. Metrics are a request, not an event; the wire contract is in
+  `docs/PROTOCOL.md`.
 - Process shape: per-user, on-demand, spawned by a consumer that already owns
   the session, spoken to over an inherited private channel. No listener, no
   daemon, no autostart, no root.
