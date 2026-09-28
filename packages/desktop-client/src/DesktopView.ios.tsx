@@ -37,7 +37,13 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         return () => { show.remove(); hide.remove(); };
     }, []);
     React.useEffect(() => {
-        if (gestures === 'device') setCursor(null);
+        if (gestures !== 'device') return;
+        setCursor(null);
+        const held = gesture.current;
+        if (held && (held.mode === 'pending' || held.mode === 'armed')) {
+            stopTimer();
+            held.mode = 'spent';
+        }
     }, [gestures]);
     React.useEffect(() => {
         if (!sessionId) return;
@@ -139,7 +145,7 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         if (g.mode === 'scroll') {
             // Content follows the finger: moving it up scrolls the page down.
             send({ kind: 'wheel', dx: -(at.x - g.last.x) / scale / 120, dy: -(at.y - g.last.y) / scale / 120 });
-            g.last = at;
+            g.last = at; g.focus = at;
             return;
         }
         if (g.mode === 'pan') {
