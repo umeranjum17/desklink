@@ -94,6 +94,10 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
     if (gesture == Gesture.DRAG) session?.sendCancel()
     cancelGesture()
     gestures = value
+    if (value == "device" && pointerAt != null) {
+      pointerAt = null
+      placePointer()
+    }
   }
 
   // The picture's placement: surface pixels per desktop pixel, and where the

@@ -42,7 +42,7 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
                 platform.attachSurface(sessionId, element, gestures);
             });
         },
-        [sessionId, gestures],
+        [sessionId],
     );
 
     React.useEffect(() => {

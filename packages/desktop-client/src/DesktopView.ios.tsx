@@ -37,6 +37,9 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         return () => { show.remove(); hide.remove(); };
     }, []);
     React.useEffect(() => {
+        if (gestures === 'device') setCursor(null);
+    }, [gestures]);
+    React.useEffect(() => {
         if (!sessionId) return;
         return registerDesktopView(sessionId, {
             show: () => { if (desktopInputEnabled(sessionId)) input.current?.focus(); },
@@ -118,7 +121,7 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
             } else if (g.mode === 'scroll') {
                 send({ kind: 'wheel', dx: -(center.x - g.focus.x) / scale / 120, dy: -(center.y - g.focus.y) / scale / 120 });
             }
-            g.span = distance; g.focus = center;
+            g.span = distance; g.focus = center; g.last = center;
             return;
         }
         if (touches.length !== 1 || g.mode === 'spent' || g.mode === 'two' || g.mode === 'pinch' || (g.mode === 'scroll' && gestures !== 'browser')) return;

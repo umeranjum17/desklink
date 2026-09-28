@@ -1185,7 +1185,7 @@ export function setGestures(id: string, gestures: GestureProfile): void {
     if (session.gestures === gestures) return;
     // A held drag belongs to the old meaning: let go rather than release the
     // button somewhere the finger never meant.
-    if (session.gesture === 'drag') endGestureDrag(session);
+    if (session.gesture === 'drag' || session.gesture === 'mouse') endGestureDrag(session);
     cancelLongPress(session);
     session.gesture = 'none';
     session.touches.clear();
@@ -1198,11 +1198,9 @@ export function setGestures(id: string, gestures: GestureProfile): void {
     }
 }
 
-/** Release a held button at the finger's last point, or let go off the picture. */
+/** Release a held button at the last desktop point it was sent to. */
 function endGestureDrag(session: WebSession): void {
-    const at = desktopPoint(session, session.lastX, session.lastY, true);
-    if (at !== null) pointer(session, 'up', at, 1);
-    else control(session, { kind: 'pointer', phase: 'cancel', x: 0, y: 0, seq: seq(session) });
+    pointer(session, 'up', { x: session.dragX, y: session.dragY }, 1);
 }
 
 export function attachSurface(id: string, container: HTMLElement | null, gestures: GestureProfile = 'desktop'): void {
