@@ -378,14 +378,9 @@ fn untrack(tracked: &mut VecDeque<Window>, window: Window) -> bool {
 /// events an engine session sends go to what the user would be looking at.
 /// Parked helpers are never focused: an off-screen window would swallow keys.
 fn refocus(conn: &RustConnection, tracked: &VecDeque<Window>) -> Result<()> {
-    let newest = tracked
-        .iter()
-        .rev()
-        .copied()
-        .find(|&window| {
-            mapped_size(conn, window)
-                .is_some_and(|(width, height)| is_content(width, height))
-        });
+    let newest = tracked.iter().rev().copied().find(|&window| {
+        mapped_size(conn, window).is_some_and(|(width, height)| is_content(width, height))
+    });
     if let Some(window) = newest {
         conn.set_input_focus(InputFocus::POINTER_ROOT, window, x11rb::CURRENT_TIME)?;
     }
@@ -578,7 +573,9 @@ mod tests {
         assert!(keep(Some("not a display"), &mut out).is_err());
         let line: serde_json::Value =
             serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
-        assert!(line["error"].as_str().is_some_and(|error| !error.is_empty()));
+        assert!(line["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()));
     }
 
     #[test]
