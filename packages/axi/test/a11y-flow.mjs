@@ -223,10 +223,11 @@ for (const [signal, code] of [['SIGTERM', 143], ['SIGINT', 130]]) process.once(s
 try {
   remember(xvfb.pid, 'Xvfb');
   await verifyXvfb();
-  const session = await spawnDaemon(['--session', '--fork', '--print-address', '--print-pid'], 'dbus-daemon');
+  // Explicit fd 1: Debian's dbus-daemon rejects the bare flag forms.
+  const session = await spawnDaemon(['--session', '--fork', '--print-address=1', '--print-pid=1'], 'dbus-daemon');
   remember(session.pid, 'dbus-daemon');
   cageEnv.DBUS_SESSION_BUS_ADDRESS = session.address;
-  const a11y = await spawnDaemon(['--config-file', a11yConf, '--fork', '--print-address', '--print-pid'], 'dbus-daemon');
+  const a11y = await spawnDaemon(['--config-file', a11yConf, '--fork', '--print-address=1', '--print-pid=1'], 'dbus-daemon');
   remember(a11y.pid, 'dbus-daemon');
   a11yBusAddress = a11y.address;
   cageEnv.AT_SPI_BUS_ADDRESS = a11yBusAddress;
