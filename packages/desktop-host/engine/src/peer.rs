@@ -16,7 +16,9 @@ use rtc::interceptor::{
 };
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_H264, MIME_TYPE_VP9};
+use rtc::peer_connection::configuration::media_engine::{
+    MediaEngine, MIME_TYPE_H264, MIME_TYPE_VP9,
+};
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::event::RTCPeerConnectionIceEvent;
 use rtc::peer_connection::sdp::RTCSessionDescription;
@@ -25,8 +27,8 @@ use rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtc::rtcp::receiver_report::ReceiverReport;
 use rtc::rtp_transceiver::rtp_sender::{
-    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters, RTCPFeedback,
-    RtpCodecKind,
+    RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters,
+    RTCRtpEncodingParameters, RtpCodecKind,
 };
 use rtc::rtp_transceiver::PayloadType;
 use rtc::sansio::Protocol;
@@ -402,9 +404,7 @@ impl Packetizer {
             Self::Vp9(packetizer) => {
                 Ok(packetizer.packetize(frame, keyframe, captured, ssrc, payload_type))
             }
-            Self::H264(packetizer) => {
-                packetizer.packetize(frame, captured, ssrc, payload_type)
-            }
+            Self::H264(packetizer) => packetizer.packetize(frame, captured, ssrc, payload_type),
         }
     }
 }
@@ -441,8 +441,13 @@ impl H264Packetizer {
     ) -> Result<Vec<rtc::rtp::Packet>> {
         let payloads = self
             .payloader
-            .payload(RTP_MTU - RTP_HEADER, &bytes::Bytes::copy_from_slice(access_unit))
-            .map_err(|error| anyhow::anyhow!("the H.264 payloader refused an access unit: {error}"))?;
+            .payload(
+                RTP_MTU - RTP_HEADER,
+                &bytes::Bytes::copy_from_slice(access_unit),
+            )
+            .map_err(|error| {
+                anyhow::anyhow!("the H.264 payloader refused an access unit: {error}")
+            })?;
         let ticks = (arrived
             .saturating_duration_since(self.started)
             .as_secs_f64()
@@ -965,14 +970,13 @@ mod tests {
             .expect("the media engine has an H.264 payloader");
         let mut packetizer = H264Packetizer::new(payloader);
         let packets = packetizer
-            .packetize(
-                &stream,
-                Instant::now(),
-                7,
-                H264_PAYLOAD_TYPE,
-            )
+            .packetize(&stream, Instant::now(), 7, H264_PAYLOAD_TYPE)
             .expect("a keyframe packetizes");
-        assert_eq!(packets.len(), 2, "one STAP-A for the parameter sets, one slice");
+        assert_eq!(
+            packets.len(),
+            2,
+            "one STAP-A for the parameter sets, one slice"
+        );
         assert_eq!(
             packets[0].payload[0], 0x78,
             "the parameter sets travel as a STAP-A",

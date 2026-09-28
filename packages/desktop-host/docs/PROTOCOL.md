@@ -294,7 +294,8 @@ Metrics are a request, not a notification:
 ```jsonc
 {"id":7,"result":{"captured_frames":812,"dropped_frames":3,"encoded_frames":809,
   "encoded_bytes":12345678,"key_frames":1,"refined_frames":37,
-  "encode_micros":7390000,"target_kbps":16430,"input_applied":44,"input_rejected":0}}
+  "encode_micros":7390000,"target_kbps":16430,"input_applied":44,"input_rejected":0,
+  "fed_frames":0,"input_forwarded":0}}
 ```
 
 `dropped_frames` counts frames superseded by a newer one before they were coded;
@@ -462,9 +463,9 @@ is the consumer's to carry.
 
 `session.frame` and `session.wait_frame` are refused with `error.code =
 "operation"` — there is no lossless frame to read — and `captured_frames`,
-`refined_frames` and `target_kbps` stay at zero while `encoded_frames`,
-`encoded_bytes`, `key_frames` and `encode_micros` describe what was packetized
-and sent.
+`refined_frames` and `target_kbps` stay at zero while `fed_frames` counts what
+the consumer handed over and `encoded_frames`, `encoded_bytes`, `key_frames`
+and `encode_micros` describe what was packetized and sent.
 
 ## Latest frame over the local protocol
 

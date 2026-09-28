@@ -11,9 +11,7 @@ use crate::convert::{fit, I420};
 use crate::encoder::Encoder;
 use crate::input::{Button, HeldState, InputDevices};
 use crate::keymap::{self, Layout};
-use crate::peer::{
-    h264_profile_level_id, PeerEvent, TransportOptions, VideoCodec, VideoPeer,
-};
+use crate::peer::{h264_profile_level_id, PeerEvent, TransportOptions, VideoCodec, VideoPeer};
 use crate::portal::{self, SelectedSource};
 use crate::protocol::{
     ControlMessage, ControlReply, EncodedCodec, Permission, PointerPhase, SourceRequest,
@@ -1106,7 +1104,9 @@ impl Session {
         if width == 0 || height == 0 || width > 7680 || height > 4320 {
             return Err(SessionError::new(
                 "source",
-                format!("an encoded surface must be 1..7680 by 1..4320 pixels, not {width}x{height}"),
+                format!(
+                    "an encoded surface must be 1..7680 by 1..4320 pixels, not {width}x{height}"
+                ),
             ));
         }
         let id = opaque_id();
@@ -1182,11 +1182,7 @@ impl Session {
     /// The reply acknowledges the hand-off, not the picture: the unit is
     /// packetized behind this request, and `session.metrics` reports what was
     /// sent and what was dropped.
-    pub fn feed(
-        &self,
-        keyframe: bool,
-        data: Vec<u8>,
-    ) -> std::result::Result<(), SessionError> {
+    pub fn feed(&self, keyframe: bool, data: Vec<u8>) -> std::result::Result<(), SessionError> {
         if self.inner.closed.load(Ordering::Relaxed) {
             return Err(SessionError::new("session", "the session has ended"));
         }
@@ -1355,7 +1351,10 @@ impl Session {
     }
 
     pub async fn accept_answer(&self, sdp: String) -> Result<()> {
-        self.current_peer()?.accept_answer(sdp).await.map(|_applied| ())
+        self.current_peer()?
+            .accept_answer(sdp)
+            .await
+            .map(|_applied| ())
     }
 
     /// The peer for this session, which an encoded source does not have until
@@ -1451,8 +1450,9 @@ impl Inner {
         if let Some(peer) = self.peer.lock().ok().and_then(|peer| peer.clone()) {
             let _ = peer
                 .send_control(
-                    &serde_json::to_string(&ControlReply::Revoked { reason })
-                        .unwrap_or_else(|_| String::from(r#"{"kind":"revoked","reason":"closed"}"#)),
+                    &serde_json::to_string(&ControlReply::Revoked { reason }).unwrap_or_else(
+                        |_| String::from(r#"{"kind":"revoked","reason":"closed"}"#),
+                    ),
                 )
                 .await;
             peer.close().await;
@@ -2271,7 +2271,11 @@ fn spawn_encoded(inner: &Arc<Inner>, mut feed: tokio_mpsc::Receiver<FedAccessUni
                             profile_level_id: profile,
                         },
                     };
-                    (encoded.transport.clone(), encoded.peer_events.clone(), codec)
+                    (
+                        encoded.transport.clone(),
+                        encoded.peer_events.clone(),
+                        codec,
+                    )
                 };
                 let offered = VideoPeer::offer(transport, peer_events, codec).await;
                 match offered {
@@ -2296,8 +2300,11 @@ fn spawn_encoded(inner: &Arc<Inner>, mut feed: tokio_mpsc::Receiver<FedAccessUni
                         });
                     }
                     Err(error) => {
-                        revoke(&inner, format!("the transport refused the encoded stream: {error:#}"))
-                            .await;
+                        revoke(
+                            &inner,
+                            format!("the transport refused the encoded stream: {error:#}"),
+                        )
+                        .await;
                         return;
                     }
                 }
@@ -2957,7 +2964,14 @@ mod tests {
         let (events, mut received) = tokio_mpsc::unbounded_channel();
         let (inner, _recorded) = test_inner(events).await;
         let (frame_tx, frame_rx) = latest_frame();
-        spawn_pipeline(&inner, current_peer(&inner).expect("the test's peer"), frame_rx, Arc::new(AtomicBool::new(true)), 30, 1000);
+        spawn_pipeline(
+            &inner,
+            current_peer(&inner).expect("the test's peer"),
+            frame_rx,
+            Arc::new(AtomicBool::new(true)),
+            30,
+            1000,
+        );
 
         // The encoder is 64x64; a 32x32 frame is the dimension mismatch that
         // used to be counted and dropped behind a permanently black picture.
@@ -3072,7 +3086,9 @@ mod tests {
             first.event,
         );
 
-        session.feed(true, fed_keyframe()).expect("a keyframe is taken");
+        session
+            .feed(true, fed_keyframe())
+            .expect("a keyframe is taken");
         let offered = loop {
             let notice = next_notice(&mut received).await;
             if let SessionEvent::Description { sdp, .. } = notice.event {
@@ -3153,10 +3169,7 @@ mod tests {
         let session = Session::open(encoded_open(), events)
             .await
             .expect("an encoded session");
-        assert_eq!(
-            session.frame(None, "", None).unwrap_err().code,
-            "operation"
-        );
+        assert_eq!(session.frame(None, "", None).unwrap_err().code, "operation");
         assert_eq!(
             session.wait_frame(None, None, 10).await.unwrap_err().code,
             "operation"
@@ -3250,7 +3263,14 @@ mod tests {
         let (events, _events_rx) = tokio_mpsc::unbounded_channel();
         let (inner, _recorded) = test_inner(events).await;
         let (frame_tx, frame_rx) = latest_frame();
-        spawn_pipeline(&inner, current_peer(&inner).expect("the test's peer"), frame_rx, Arc::new(AtomicBool::new(true)), 20, 1000);
+        spawn_pipeline(
+            &inner,
+            current_peer(&inner).expect("the test's peer"),
+            frame_rx,
+            Arc::new(AtomicBool::new(true)),
+            20,
+            1000,
+        );
 
         // 40 frames over 200 ms is 200 fps; the requested 20 fps caps what leaves.
         for _ in 0..40 {

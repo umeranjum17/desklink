@@ -445,10 +445,9 @@ mod tests {
 
     #[test]
     fn a_feed_request_is_one_access_unit_with_its_own_keyframe_flag() {
-        let params: FeedParams = serde_json::from_str(
-            r#"{"session_id":"s","keyframe":true,"data_b64":"AAAA"}"#,
-        )
-        .unwrap();
+        let params: FeedParams =
+            serde_json::from_str(r#"{"session_id":"s","keyframe":true,"data_b64":"AAAA"}"#)
+                .unwrap();
         assert_eq!(params.session_id, "s");
         assert!(params.keyframe, "a feed says whether its unit is an IDR");
         assert_eq!(params.data_b64, "AAAA");
@@ -474,10 +473,7 @@ mod tests {
     fn decoding_a_two_megabit_stream_is_nowhere_near_a_core() {
         // One second of a 2 Mbit/s stream, in access units.
         let unit: Vec<u8> = (0..8_000u32).map(|index| index as u8).collect();
-        let encoded = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &unit,
-        );
+        let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &unit);
         let params = FeedParams {
             session_id: String::from("s"),
             keyframe: false,
