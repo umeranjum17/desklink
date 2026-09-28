@@ -114,6 +114,18 @@ fn window_line(windows: &[KeeperWindow]) -> String {
     .expect("a window report always serialises")
 }
 
+/// The display a `keep` invocation names: the value after `--display`, and
+/// nothing else. One spelling, per the documented contract.
+fn display_argument(args: &[String]) -> Option<String> {
+    let mut remaining = args.iter();
+    while let Some(arg) = remaining.next() {
+        if arg == "--display" {
+            return remaining.next().cloned();
+        }
+    }
+    None
+}
+
 /// `desklink-host keep --display :N`: keep one display until it goes away. The
 /// display is required on purpose: a bare `keep` must never go hunting for a
 /// screen to manage.
@@ -122,15 +134,7 @@ pub fn command(args: &[String]) -> i32 {
         println!("usage: desklink-host keep --display :N");
         return 0;
     }
-    let mut display: Option<String> = None;
-    let mut remaining = args.iter();
-    while let Some(arg) = remaining.next() {
-        if let Some(value) = arg.strip_prefix("--display=") {
-            display = Some(value.to_owned());
-        } else if arg == "--display" {
-            display = Some(remaining.next().cloned().unwrap_or_default());
-        }
-    }
+    let display = display_argument(args);
     let mut out = BufWriter::new(std::io::stdout().lock());
     match keep(display.as_deref(), &mut out) {
         Ok(()) => 0,
@@ -587,5 +591,27 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "{\"error\":\"another window manager\"}\n"
         );
+    }
+
+    #[test]
+    fn the_display_flag_has_one_spelling() {
+        let flag = |args: &[&str]| {
+            display_argument(
+                &args
+                    .iter()
+                    .map(|arg| String::from(*arg))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(flag(&["--display", ":42"]), Some(String::from(":42")));
+        assert_eq!(
+            flag(&["--display", ":42", "--x"]),
+            Some(String::from(":42"))
+        );
+        assert_eq!(flag(&[]), None);
+        assert_eq!(flag(&["--display"]), None);
+        // The undocumented `--display=:42` spelling is not a display: `keep`
+        // refuses it rather than guessing what was meant.
+        assert_eq!(flag(&["--display=:42"]), None);
     }
 }
