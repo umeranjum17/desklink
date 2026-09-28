@@ -9,9 +9,10 @@ See and drive a live Linux or macOS desktop through desklink; text and changes b
 
 ```
 desklink-axi: desklink-axi — See and drive a live Linux or macOS desktop through desklink; text and changes by default, pixels on request
-help[3]:
+help[4]:
   desklink-axi start --control --source x11 --display :97
   desklink-axi screen --query "<words>"
+  desklink-axi tree --query "<words>"
   desklink-axi look @r1
 ```
 

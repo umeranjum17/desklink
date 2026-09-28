@@ -3,6 +3,7 @@
 This file is the project's committed home for project-intrinsic agent knowledge: build, test, release, architecture, and sharp-edge notes that should travel with the code.
 
 - Desktop engine wire contract: `packages/desktop-host/docs/PROTOCOL.md`. AXI integration proof: `packages/axi/test/flow.mjs` on its own Xvfb; set `DESKLINK_AXI_ENGINE` and a task-owned `CARGO_TARGET_DIR`.
+- Accessibility/marks proof: `packages/axi/test/a11y-flow.mjs` (same env as flow.mjs). It builds a fully private D-Bus + AT-SPI cage — the a11y bus is per-user, so without a task-owned `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS`/`AT_SPI_BUS_ADDRESS`, fixture apps register on the user's live accessibility bus.
 - Never test capture/input on a person's actual display. `Xvfb -displayfd` can choose the live Xwayland `:0`; use only the verified high-display, task-owned Xvfb in `packages/axi/test/flow.mjs`, and reap its bridge/engine PIDs.
 - macOS TCC identity: sign DesklinkHost.app with the one stable rcodesign PEM identity per `packages/desktop-host/README.md` (§macOS). Grants key on the cert-root designated requirement, so swapping the certificate (not the rebuild) is what re-triggers privacy prompts; never swap-and-re-sign per run.
 

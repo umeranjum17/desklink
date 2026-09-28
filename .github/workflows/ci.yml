@@ -32,7 +32,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config libclang-dev \
-            libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libevdev-dev libxcb1-dev libxcursor-dev xvfb x11-utils xauth tesseract-ocr
+            libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libevdev-dev libxcb1-dev libxcursor-dev xvfb x11-utils xauth tesseract-ocr \
+            dbus at-spi2-core python3-gi gir1.2-gtk-3.0
       - name: Rust (the version the release build pins)
         run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
       - uses: actions/cache@v4
@@ -45,5 +46,8 @@ jobs:
       - run: cargo build --manifest-path packages/desktop-host/engine/Cargo.toml
       - run: npm ci && npm run build
       - run: node packages/axi/test/flow.mjs
+        env:
+          DESKLINK_AXI_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/desklink-host
+      - run: node packages/axi/test/a11y-flow.mjs
         env:
           DESKLINK_AXI_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/desklink-host
