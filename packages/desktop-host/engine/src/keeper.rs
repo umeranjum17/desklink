@@ -165,15 +165,19 @@ pub fn keep(display: Option<&str>, out: &mut impl Write) -> Result<()> {
         &ChangeWindowAttributesAux::new()
             .event_mask(EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY),
     );
+    // The display was opened, so a connection that dies during the election
+    // is the display going away — the normal end. Only the server's own error
+    // replies refuse the keeper.
     let claim = match claim {
         Ok(cookie) => cookie,
-        Err(error) => return fatal(out, &format!("cannot keep {display:?}: {error}")),
+        Err(_) => return Ok(()),
     };
     match claim.check() {
         Ok(()) => {}
         Err(ReplyError::X11Error(error)) if error.error_code == ACCESS_ERROR => {
             return fatal(out, "another window manager");
         }
+        Err(ReplyError::ConnectionError(_)) => return Ok(()),
         Err(error) => return fatal(out, &format!("cannot keep {display:?}: {error}")),
     }
 
