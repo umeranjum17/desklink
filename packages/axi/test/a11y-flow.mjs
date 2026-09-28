@@ -67,6 +67,11 @@ function remember(pid, command) {
   assert(readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ').includes(command), `unexpected child ${pid}`);
   owned.set(pid, state.started);
 }
+// Cleanup-time variant: a recorded PID whose cmdline no longer matches was
+// reused by an unrelated process — it is not ours and must not be signalled.
+function rememberIfOurs(pid, command) {
+  try { remember(pid, command); } catch { owned.set(pid, undefined); }
+}
 function childrenOf(pid) {
   try { return readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number); }
   catch { return []; }
@@ -194,10 +199,10 @@ async function cleanup() {
   await run('stop').catch(() => {});
   const failures = [];
   if (existsSync(join(dir, 'bridges.pid'))) for (const pid of readFileSync(join(dir, 'bridges.pid'), 'utf8').trim().split(/\s+/).filter(Boolean).map(Number)) {
-    try { remember(pid, '--bridge'); } catch (error) { failures.push(error); }
+    try { rememberIfOurs(pid, '--bridge'); } catch (error) { failures.push(error); }
   }
   if (existsSync(join(dir, 'engines.pid'))) for (const pid of readFileSync(join(dir, 'engines.pid'), 'utf8').trim().split(/\s+/).filter(Boolean).map(Number)) {
-    try { remember(pid, enginePath); } catch (error) { failures.push(error); }
+    try { rememberIfOurs(pid, enginePath); } catch (error) { failures.push(error); }
   }
   for (const pid of [process.pid]) for (const child of childrenOf(pid)) {
     try {
@@ -205,7 +210,7 @@ async function cleanup() {
       if (cmd.includes(enginePath) && (cmd.includes('serve') || cmd.includes('agent-overlay'))) remember(child, enginePath);
     } catch { /* exited */ }
   }
-  if (registryd) try { remember(registryd.pid, 'at-spi2-registryd'); } catch (error) { failures.push(error); }
+  if (registryd) try { rememberIfOurs(registryd.pid, 'at-spi2-registryd'); } catch (error) { failures.push(error); }
   for (const pid of owned.keys()) if (pid !== xvfb.pid) {
     try { await stopProcess(pid); } catch (error) { failures.push(error); }
   }
