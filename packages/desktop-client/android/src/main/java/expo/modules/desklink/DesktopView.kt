@@ -727,7 +727,7 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
 
   private fun rightClick(active: DesktopSession, at: Pair<Int, Int>) {
     active.sendRightClick(at.first, at.second)
-    if (!mouseInput) showPointer(at)
+    if (!mouseInput && gestures != "device") showPointer(at)
   }
 
   private fun twoFingers(active: DesktopSession, event: MotionEvent) {
