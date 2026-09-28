@@ -479,9 +479,10 @@ const upload: CommandModule = {
   async run(parsed) {
     const ref = parsed.positionals[0]!;
     const path = resolve(parsed.positionals[1]!);
-    if (!existsSync(path)) throw new AxiError(`upload: no such file ${path}`);
+    // Consent gate before filesystem access: no-browser fires first.
     await withPage(async page => {
       const locator = await resolveRef(page, ref);
+      if (!existsSync(path)) throw new AxiError(`upload: no such file ${path}`);
       const isFileInput = await locator.evaluate(el => el instanceof HTMLInputElement && el.type === 'file').catch(() => false);
       if (!isFileInput) {
         throw new AxiError(`not-supported: ${ref} does not accept files (needs <input type=file>)`,

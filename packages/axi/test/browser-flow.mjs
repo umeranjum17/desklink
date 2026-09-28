@@ -115,7 +115,8 @@ const indexOfUrl = async (urlPart) => {
   return position;
 };
   // Launch through the adapter itself: loopback-only port, task-owned profile.
-  const launched = await ok('browser', 'launch', '--profile', profile);
+  // CI runners disable chromium's sandbox namespaces, so drop the sandbox there.
+  const launched = await ok('browser', 'launch', '--profile', profile, ...(process.env.CI ? ['--arg=--no-sandbox'] : []));
   const launchInfo = /browser: launched (127\.0\.0\.1:\d+) pid=(\d+) profile=(\S+)/.exec(launched);
   assert(launchInfo, `unexpected launch output: ${launched}`);
   const browserPid = Number(launchInfo[2]);
@@ -204,7 +205,7 @@ const indexOfUrl = async (urlPart) => {
   assert.match(after.out, /no-browser:/);
 
   // A lane-created default profile is removed on detach (unlike a passed one).
-  const launched2 = await ok('browser', 'launch');
+  const launched2 = await ok('browser', 'launch', ...(process.env.CI ? ['--arg=--no-sandbox'] : []));
   const info2 = /browser: launched \S+ pid=(\d+) profile=(\S+)/.exec(launched2);
   assert(info2, launched2);
   owned.set(Number(info2[1]), proc(Number(info2[1]))?.started);
