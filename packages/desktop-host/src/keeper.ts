@@ -101,7 +101,16 @@ export function startDisplayKeeper(options: DisplayKeeperOptions): DisplayKeeper
         // A process that never spawned emits no 'exit'; this is its only death.
         if (child.pid === undefined) options.onExit?.({ code: null, signal: null, error: error.message });
     });
-    child.on('exit', (code, signal) => options.onExit?.({ code, signal, ...(refusal === undefined ? {} : { error: refusal }) }));
+    // 'close', not 'exit': the death detail may carry a refusal parsed from
+    // stdout, which has fully drained by the time 'close' fires.
+    child.on('close', () => {
+        if (child.pid !== undefined)
+            options.onExit?.({
+                code: child.exitCode,
+                signal: child.signalCode,
+                ...(refusal === undefined ? {} : { error: refusal }),
+            });
+    });
     return {
         stop: () =>
             new Promise<void>((resolve) => {
