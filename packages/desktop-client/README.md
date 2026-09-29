@@ -104,10 +104,10 @@ larger one is scaled to fit. Above that box the encoder cannot sustain 50+ fps
 under full-screen motion.
 
 On iOS, keep the box at or below the device's own pixels and `maxFps` at 30:
-the engine encodes captured desktops as VP9, which iOS decodes in software
-(VideoToolbox accelerates H.264 only), so a 1440p or 4K picture costs CPU,
-heat and battery. This cap stands until the engine offers an H.264 captured
-source with hardware decode.
+the iOS receiver asks the engine for H.264, which iOS decodes in hardware
+(VideoToolbox), but a host without an H.264 encoder still sends VP9, which
+iOS decodes in software — so a 1440p or 4K picture on such a host costs CPU,
+heat and battery.
 
 ### What the package guarantees
 

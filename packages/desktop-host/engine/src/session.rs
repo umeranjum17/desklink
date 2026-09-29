@@ -2526,10 +2526,11 @@ fn spawn_pipeline(
                             let reason = String::from("no H.264 encoder could start");
                             inner.notify(SessionEvent::Revoked {
                                 reason: reason.clone(),
+                                code: "error",
                             });
                             let target = inner.clone();
                             handle.spawn(async move {
-                                target.close(&reason).await;
+                                target.close(&reason, "error").await;
                             });
                             break;
                         }
@@ -4053,7 +4054,7 @@ mod tests {
             "H.264 is always coded at full size"
         );
         pin.abort();
-        inner.close("done").await;
+        inner.close("done", "closed").await;
         assert!(
             lock(&inner.encoder).is_none(),
             "closing releases the encoder"

@@ -100,7 +100,8 @@ can [build it from source](#building-from-source). Windows remains unsupported.
 ### macOS
 
 The macOS engine shares protocol v3's WebRTC session path: selected-display
-ScreenCaptureKit capture, VP9 encoding, Quartz pointer/keyboard events, and
+ScreenCaptureKit capture, VP9 encoding (H.264 through VideoToolbox for a receiver
+that asks), Quartz pointer/keyboard events, and
 plain-text NSPasteboard operations. `capabilities` is non-prompting; `session.open`
 requests Screen Recording and, for control, Accessibility consent when needed.
 For persistent grants, install the signed `DesklinkHost.app` at one fixed path.
