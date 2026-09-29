@@ -365,10 +365,11 @@ are JSON, one per message:
 | `release_all` | — | explicit safety net; the engine also does this on close and on channel loss |
 | `clipboard_read` / `clipboard_write` | `request` (echoed back), `text` | explicit, on user action; never polled |
 
-The engine answers on the same channel:
+The engine answers on the same channel, and sends two things unprompted:
 
 ```jsonc
 {"kind":"hello","protocol":3,"geometry":{…}}     // once, when the channel opens
+{"kind":"ping"}                                  // heartbeat, twice a second; see "State" above
 {"kind":"ack","seq":44}
 {"kind":"rejected","seq":44,"code":"coordinates","message":"(9000,4) is outside the 1280x720 surface"}
 {"kind":"clipboard","request":"…","text":"…","truncated":false}   // an empty "text" with "error" when the read failed
