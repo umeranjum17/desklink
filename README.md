@@ -35,7 +35,7 @@ npx expo install @desklink/react-native  # the view and session
 | Package | Latest | Unpacked size | Release tag |
 | --- | --- | --- | --- |
 | `@desklink/host` (plus the `@desklink/host-linux-x64-gnu` platform package) | 0.2.0 | ~1.1 MB (platform package ~17 MB) | [`desklink-host-v0.2.0`](https://github.com/umeranjum17/desklink/releases/tag/desklink-host-v0.2.0) |
-| `@desklink/react-native` | 0.2.0 | ~236 KB | [`desklink-react-native-v0.2.0`](https://github.com/umeranjum17/desklink/releases/tag/desklink-react-native-v0.2.0) |
+| `@desklink/react-native` | 0.2.0 | ~266 KB | [`desklink-react-native-v0.2.0`](https://github.com/umeranjum17/desklink/releases/tag/desklink-react-native-v0.2.0) |
 
 The npm version badges at the top of this page track the registry, so they never go stale. npm verifies each package's integrity on install, so there is no separate checksum to copy. The GitHub releases carry no attached assets — npm is the distribution channel: [latest release](https://github.com/umeranjum17/desklink/releases/latest).
 
