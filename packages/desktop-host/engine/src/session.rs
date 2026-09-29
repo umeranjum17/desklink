@@ -272,6 +272,12 @@ fn select_x11(
                                 on_stop(format!("X11 capture stopped: {error}"));
                                 break;
                             }
+                            if !hashed {
+                                let elapsed = started.elapsed();
+                                if elapsed < interval {
+                                    std::thread::sleep(interval - elapsed);
+                                }
+                            }
                         }
                     }
                     // With Damage the fps cap paced the grab above; without
