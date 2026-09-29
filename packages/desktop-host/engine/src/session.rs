@@ -207,6 +207,7 @@ fn select_x11(
     let desktop = Arc::new(Mutex::new(X11Desktop::connect(display)?));
     let (width, height) = {
         let desktop = lock(&desktop);
+        eprintln!("x11 capture path: {}", desktop.capture_path());
         desktop.screen_size()
     };
     let source = SelectedSource {
@@ -229,11 +230,29 @@ fn select_x11(
             .spawn(move || {
                 let interval = frame_interval(max_fps);
                 let mut sequence = 0u64;
-                // An X server has no damage signal here, so an unchanged screen
-                // is recognised by its pixels: handing it on would keep the
-                // encoder busy and a still desktop would never be refined.
+                let mut last_sent: Option<Instant> = None;
+                // Without XDamage there is no change signal, so an unchanged
+                // screen is recognised by its pixels exactly as before.
+                let hashed = !lock(&desktop).damage_armed();
                 let mut last_hash = None;
+                // The first frame is always grabbed; afterwards Damage wakes
+                // the loop, so a still screen costs no grab, no conversion
+                // and no hash. The fps cap stays a minimum spacing.
+                let mut first = true;
                 while !stop.load(Ordering::SeqCst) {
+                    if !first {
+                        let changed = lock(&desktop).take_damage();
+                        if !changed {
+                            std::thread::sleep(interval);
+                            continue;
+                        }
+                        if let Some(sent) = last_sent {
+                            let elapsed = sent.elapsed();
+                            if elapsed < interval {
+                                std::thread::sleep(interval - elapsed);
+                            }
+                        }
+                    }
                     let started = Instant::now();
                     let grabbed = Instant::now();
                     let frame = {
@@ -243,12 +262,24 @@ fn select_x11(
                     let grab_micros = grabbed.elapsed().as_micros() as u64;
                     match frame {
                         Ok((frame, raw)) => {
-                            use std::hash::{Hash, Hasher};
-                            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                            raw.hash(&mut hasher);
-                            let hash = hasher.finish();
-                            if last_hash != Some(hash) {
-                                last_hash = Some(hash);
+                            let changed = if hashed {
+                                use std::hash::{Hash, Hasher};
+                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                raw.hash(&mut hasher);
+                                let hash = hasher.finish();
+                                if last_hash == Some(hash) {
+                                    false
+                                } else {
+                                    last_hash = Some(hash);
+                                    true
+                                }
+                            } else {
+                                true
+                            };
+                            if changed {
+                                // Handing an unchanged frame on would keep the
+                                // encoder busy and a still desktop would never
+                                // be refined.
                                 if let Ok(mut m) = captured.lock() {
                                     m.capture_micros += grab_micros;
                                 }
@@ -266,6 +297,8 @@ fn select_x11(
                                     )
                                 });
                                 sequence += 1;
+                                last_sent = Some(started);
+                                first = false;
                             }
                         }
                         Err(error) => {
@@ -278,11 +311,21 @@ fn select_x11(
                                 on_stop(format!("X11 capture stopped: {error}"));
                                 break;
                             }
+                            if !hashed {
+                                let elapsed = started.elapsed();
+                                if elapsed < interval {
+                                    std::thread::sleep(interval - elapsed);
+                                }
+                            }
                         }
                     }
-                    let elapsed = started.elapsed();
-                    if elapsed < interval {
-                        std::thread::sleep(interval - elapsed);
+                    // With Damage the fps cap paced the grab above; without
+                    // it the loop keeps its old trailing sleep.
+                    if hashed {
+                        let elapsed = started.elapsed();
+                        if elapsed < interval {
+                            std::thread::sleep(interval - elapsed);
+                        }
                     }
                 }
             })

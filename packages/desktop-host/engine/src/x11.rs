@@ -13,9 +13,13 @@
 
 use crate::convert::{fit, to_i420, I420};
 use anyhow::{Context, Result};
-use x11rb::connection::Connection;
+use std::os::unix::io::{AsFd, AsRawFd};
+use x11rb::connection::{Connection, RequestConnection};
+use x11rb::protocol::damage::ConnectionExt as _;
+use x11rb::protocol::shm::ConnectionExt as _;
 use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, Screen};
 use x11rb::protocol::xtest::ConnectionExt as _;
+use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
 /// X key codes are evdev codes offset by 8 on every evdev-backed server,
@@ -41,6 +45,35 @@ pub struct X11Desktop {
     /// Bytes per pixel the server reports; 4 for the 24/32-bit TrueColor that
     /// every normal server uses, and the only depth this backend reads.
     depth: u8,
+    /// A reused server-allocated MIT-SHM segment. Absent on a server without
+    /// MIT-SHM (remote X), where grabs fall back to socket GetImage.
+    shm: Option<ShmSegment>,
+    /// An XDamage object watching the root. Absent where the server lacks the
+    /// extension, where the capture loop falls back to pixel hashing.
+    damage: Option<u32>,
+}
+
+/// A server-allocated MIT-SHM segment, mmapped into this process and reused
+/// for every grab. The server frees its side when this connection closes, so
+/// dropping the mapping and the fd here is the whole cleanup.
+struct ShmSegment {
+    seg: u32,
+    // Held open for the mapping's lifetime and closed on drop; never read.
+    #[allow(dead_code)]
+    fd: std::os::unix::io::OwnedFd,
+    ptr: *mut u8,
+    len: usize,
+}
+
+// Only touched through `&mut X11Desktop`, itself always behind a Mutex.
+unsafe impl Send for ShmSegment {}
+
+impl Drop for ShmSegment {
+    fn drop(&mut self) {
+        unsafe {
+            libc::munmap(self.ptr as *mut libc::c_void, self.len);
+        }
+    }
 }
 
 impl X11Desktop {
@@ -69,8 +102,115 @@ impl X11Desktop {
             width: screen.width_in_pixels as usize,
             height: screen.height_in_pixels as usize,
             depth: screen.root_depth,
+            shm: Self::setup_shm(
+                &connection,
+                screen.width_in_pixels as usize,
+                screen.height_in_pixels as usize,
+            ),
+            damage: Self::setup_damage(&connection, screen.root),
             connection,
         })
+    }
+
+    /// Allocate one MIT-SHM segment for the full root and map it here. Any
+    /// failure means "no SHM on this server", never an error: the caller
+    /// falls back to socket GetImage and reports it via [`Self::capture_path`].
+    fn setup_shm(connection: &RustConnection, width: usize, height: usize) -> Option<ShmSegment> {
+        let len = width.checked_mul(height)?.checked_mul(4)?;
+        let size: u32 = len.try_into().ok()?;
+        if size == 0 {
+            return None;
+        }
+        connection
+            .extension_information(x11rb::protocol::shm::X11_EXTENSION_NAME)
+            .ok()??;
+        let reply = connection.shm_query_version().ok()?.reply().ok()?;
+        let _ = (reply.major_version, reply.minor_version);
+        let seg = connection.generate_id().ok()?;
+        let reply = connection
+            .shm_create_segment(seg, size, false)
+            .ok()?
+            .reply()
+            .ok()?;
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                reply.shm_fd.as_fd().as_raw_fd(),
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            return None;
+        }
+        Some(ShmSegment {
+            seg,
+            fd: reply.shm_fd,
+            ptr: ptr as *mut u8,
+            len,
+        })
+    }
+
+    /// Watch the root for changes at NON_EMPTY level: one event per change
+    /// batch, re-armed by [`Self::take_damage`]. Absent where unsupported.
+    fn setup_damage(connection: &RustConnection, root: u32) -> Option<u32> {
+        use x11rb::protocol::damage::ReportLevel;
+        let ext = connection
+            .extension_information(x11rb::protocol::damage::X11_EXTENSION_NAME)
+            .ok()?;
+        ext?;
+        connection.damage_query_version(1, 1).ok()?.reply().ok()?;
+        let damage = connection.generate_id().ok()?;
+        connection
+            .damage_create(damage, root, ReportLevel::NON_EMPTY)
+            .ok()?
+            .check()
+            .ok()?;
+        connection.flush().ok()?;
+        Some(damage)
+    }
+
+    /// Which grab path is in use: `"shm"`, or `"get_image"` on a server
+    /// without MIT-SHM. Labs cite this so a number is never ambiguous.
+    pub fn capture_path(&self) -> &'static str {
+        if self.shm.is_some() {
+            "shm"
+        } else {
+            "get_image"
+        }
+    }
+
+    /// Whether XDamage watches the root. When false the capture loop keeps
+    /// the old pixel-hash change detection.
+    pub fn damage_armed(&self) -> bool {
+        self.damage.is_some()
+    }
+
+    /// Drain queued events and report whether the root changed since the last
+    /// call. Without Damage this always returns true and the caller hashes.
+    pub fn take_damage(&self) -> bool {
+        let damage = match self.damage {
+            Some(damage) => damage,
+            None => return true,
+        };
+        let mut changed = false;
+        loop {
+            match self.connection.poll_for_event() {
+                Ok(Some(Event::DamageNotify(_))) => changed = true,
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                // Let the next grab surface connection trouble as an error.
+                Err(_) => return true,
+            }
+        }
+        if changed {
+            // Clear the pending region so the next change notifies again.
+            let _ = self.connection.damage_subtract(damage, 0u32, 0u32);
+            let _ = self.connection.flush();
+        }
+        changed
     }
 
     pub fn screen_size(&self) -> (i32, i32) {
@@ -95,6 +235,17 @@ impl X11Desktop {
         max_width: usize,
         max_height: usize,
     ) -> Result<(I420, Vec<u8>)> {
+        // The server's depth is the only field that can tell us how the pixel is
+        // packed; the engine assumes the byte order every TrueColor server uses.
+        let _ = self.depth;
+        let stride = self.width * 4;
+        // Prefer MIT-SHM. A segment that worked at connect can still break
+        // later (revoked by the server); that degrades to the socket path,
+        // which keeps capturing, instead of stalling on failing grabs.
+        if let Ok(output) = self.capture_shm(stride, max_width, max_height) {
+            return Ok(output);
+        }
+        self.shm = None;
         let image = self
             .connection
             .get_image(
@@ -109,7 +260,6 @@ impl X11Desktop {
             .context("X11 GetImage failed")?
             .reply()
             .context("X11 GetImage returned no reply")?;
-        let stride = self.width * 4;
         if image.data.len() < stride * self.height {
             anyhow::bail!(
                 "X11 returned {} bytes for a {}x{} screen",
@@ -119,9 +269,6 @@ impl X11Desktop {
             );
         }
         let (width, height) = fit(self.width, self.height, max_width, max_height);
-        // The server's depth is the only field that can tell us how the pixel is
-        // packed; the engine assumes the byte order every TrueColor server uses.
-        let _ = self.depth;
         let frame = to_i420(
             &image.data,
             self.width,
@@ -133,6 +280,67 @@ impl X11Desktop {
         )
         .context("the captured X11 pixels are not a format this engine can read")?;
         Ok((frame, image.data))
+    }
+
+    /// One MIT-SHM grab into the reused segment. The caller tears the
+    /// segment down on any error and falls back to the socket path.
+    fn capture_shm(
+        &self,
+        stride: usize,
+        max_width: usize,
+        max_height: usize,
+    ) -> Result<(I420, Vec<u8>)> {
+        let (seg, ptr, len) = match &self.shm {
+            Some(shm) => (shm.seg, shm.ptr, shm.len),
+            None => anyhow::bail!("no MIT-SHM segment"),
+        };
+        // MIT-SHM: the server writes the root straight into our mapping;
+        // the reply only signals completion. The segment is reused, so
+        // copy out through the conversion below before the next grab.
+        self.connection
+            .shm_get_image(
+                self.root,
+                0,
+                0,
+                self.width as u16,
+                self.height as u16,
+                u32::MAX,
+                u8::from(ImageFormat::Z_PIXMAP),
+                seg,
+                0,
+            )
+            .context("X11 ShmGetImage failed")?
+            .reply()
+            .context("X11 ShmGetImage returned no reply")?;
+        let pixels = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
+        // Snapshot the length: the caller drops the mapping on error, so no
+        // slice may be alive past this return.
+        let byte_len = pixels.len();
+        if byte_len < stride * self.height {
+            anyhow::bail!(
+                "X11 shared memory holds {} bytes for a {}x{} screen",
+                byte_len,
+                self.width,
+                self.height
+            );
+        }
+        // Copy out of the reused segment before the next grab overwrites
+        // it; the caller samples these full-screen rows into the frame's
+        // geometry. This copy is inherent to SHM; the socket arm below
+        // moves its reply instead.
+        let owned = pixels.to_vec();
+        let (width, height) = fit(self.width, self.height, max_width, max_height);
+        let frame = to_i420(
+            &owned,
+            self.width,
+            self.height,
+            stride,
+            crate::convert::PixelFormat::Bgrx,
+            width,
+            height,
+        )
+        .context("the captured X11 pixels are not a format this engine can read")?;
+        Ok((frame, owned))
     }
 
     fn flush(&self) -> Result<()> {
