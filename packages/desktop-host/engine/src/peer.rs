@@ -1098,6 +1098,7 @@ mod tests {
                 pace_bps: 20_000_000.0,
             },
             events,
+            VideoCodec::Vp9,
         )
         .await
         .expect("a peer connection");
@@ -1125,9 +1126,7 @@ mod tests {
         );
         // The far end answers the restart as usual, on the same peer.
         other
-            .set_remote_description(
-                RTCSessionDescription::offer(restart).expect("a valid offer"),
-            )
+            .set_remote_description(RTCSessionDescription::offer(restart).expect("a valid offer"))
             .await
             .expect("the restart offer applies");
         let reanswer = other.create_answer(None).await.expect("an answer");
