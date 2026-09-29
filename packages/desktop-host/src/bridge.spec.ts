@@ -209,7 +209,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
         const script = join(directory, 'engine.cjs');
         writeFileSync(
             script,
-            STUB.replace("if (request.method === 'session.open') {", "if (request.method === 'session.open') {\n    out({ event: 'seen', params: { source: request.params.source ?? null } });"),
+            STUB.replace("if (request.method === 'session.open') {", "if (request.method === 'session.open') {\n    out({ event: 'seen', params: { source: request.params.source ?? null, localFrames: request.params.local_frames } });"),
         );
         const bridge = await Bridge.start({
             listen: '127.0.0.1:0',
@@ -223,14 +223,16 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
         const socket = await connect(bridge.port, 'token=t');
         const seen: unknown[] = [];
         socket.on('message', (raw) => {
-            const message = JSON.parse(String(raw)) as { event?: string; params?: { source?: unknown } };
-            if (message.event === 'seen') seen.push(message.params?.source);
+            const message = JSON.parse(String(raw)) as { event?: string; params?: { source?: unknown; localFrames?: unknown } };
+            if (message.event === 'seen') seen.push(message.params);
         });
         await expect(requestOn(socket, 1, 'session.open', { source: { kind: 'x11', display: ':0' } }))
             .rejects.toMatchObject({ code: 'source' });
         expect(seen).toEqual([]);
         await requestOn(socket, 2, 'session.open');
-        expect(seen).toEqual([{ kind: 'x11', display: ':99' }]);
+        // Nothing past the socket reads local frames, and this host listens to
+        // no engine events, so the engine is told not to keep them.
+        expect(seen).toEqual([{ source: { kind: 'x11', display: ':99' }, localFrames: false }]);
     }, 20_000);
 
     it('closes a late open when its requesting socket disconnects', async () => {
@@ -328,7 +330,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
         // still attached: the bridge closes it only when nobody is left.
         first.close();
         await requestOn(second, 2, 'session.metrics');
-        expect(sent()).toContain('session.open {}');
+        expect(sent()).toContain('session.open {"local_frames":false}');
         expect(sent().filter((line) => line.startsWith('session.close'))).toEqual([]);
 
         second.close();

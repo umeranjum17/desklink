@@ -188,6 +188,8 @@ pub fn to_i420(
         stride: src_stride,
         bytes_per_pixel,
         order,
+        columns: spans(src_w, dst_w),
+        rows: spans(src_h, dst_h),
     };
     std::thread::scope(|scope| {
         let y_bands = y_plane.chunks_mut(per_band * 2 * dst_w);
@@ -197,18 +199,39 @@ pub fn to_i420(
             let source = &source;
             scope.spawn(move || {
                 let first_pair = band * per_band;
+                // One destination row of box sums, reused for every row.
+                let mut rgb = vec![[0i32; 3]; dst_w * 2];
                 for pair in 0..u.len() / cw {
                     let dy = (first_pair + pair) * 2;
                     let (top, bottom) =
                         y[pair * 2 * dst_w..(pair + 1) * 2 * dst_w].split_at_mut(dst_w);
                     let u_row = &mut u[pair * cw..(pair + 1) * cw];
                     let v_row = &mut v[pair * cw..(pair + 1) * cw];
-                    source.row_pair(dy, dst_w, dst_h, top, bottom, u_row, v_row);
+                    if source.native(dst_w, dst_h) && bytes_per_pixel == 4 {
+                        source.native_pair(dy, top, bottom, u_row, v_row);
+                    } else {
+                        let (a, b) = rgb.split_at_mut(dst_w);
+                        source.box_row(dy, a);
+                        source.box_row(dy + 1, b);
+                        pack(a, b, top, bottom, u_row, v_row);
+                    }
                 }
             });
         }
     });
     Some(out)
+}
+
+/// The source span `[start, end)` each of `dst` destination pixels covers: the
+/// box a downscale averages, or at least the one nearest pixel when the
+/// destination is a little larger than the source.
+fn spans(src: usize, dst: usize) -> Vec<(usize, usize)> {
+    (0..dst)
+        .map(|d| {
+            let start = d * src / dst;
+            (start, ((d + 1) * src).div_ceil(dst).clamp(start + 1, src))
+        })
+        .collect()
 }
 
 struct Source<'a> {
@@ -218,77 +241,134 @@ struct Source<'a> {
     stride: usize,
     bytes_per_pixel: usize,
     order: [usize; 3],
+    columns: Vec<(usize, usize)>,
+    rows: Vec<(usize, usize)>,
 }
 
 impl Source<'_> {
-    #[inline]
-    fn rgb(&self, x: usize, y: usize) -> (i32, i32, i32) {
-        let i = y * self.stride + x * self.bytes_per_pixel;
-        let p = &self.data[i..i + 3];
-        (
-            p[self.order[0]] as i32,
-            p[self.order[1]] as i32,
-            p[self.order[2]] as i32,
-        )
+    fn native(&self, dst_w: usize, dst_h: usize) -> bool {
+        dst_w == self.width && dst_h == self.height
     }
 
-    /// The average colour of the source pixels destination pixel (dx, dy) covers.
-    #[inline]
-    fn sample(&self, dx: usize, dy: usize, dst_w: usize, dst_h: usize) -> (i32, i32, i32) {
-        if dst_w == self.width && dst_h == self.height {
-            return self.rgb(dx, dy);
-        }
-        let x0 = dx * self.width / dst_w;
-        let x1 = ((dx + 1) * self.width)
-            .div_ceil(dst_w)
-            .clamp(x0 + 1, self.width);
-        let y0 = dy * self.height / dst_h;
-        let y1 = ((dy + 1) * self.height)
-            .div_ceil(dst_h)
-            .clamp(y0 + 1, self.height);
-        let (mut r, mut g, mut b) = (0i32, 0i32, 0i32);
+    /// Destination row `dy` as the average colour of the source box each pixel
+    /// covers (at the source's own size, a box of one pixel: its exact colour).
+    fn box_row(&self, dy: usize, out: &mut [[i32; 3]]) {
+        let (y0, y1) = self.rows[dy];
+        out.fill([0; 3]);
         for y in y0..y1 {
-            for x in x0..x1 {
-                let (pr, pg, pb) = self.rgb(x, y);
-                r += pr;
-                g += pg;
-                b += pb;
+            let line = &self.data[y * self.stride..];
+            for (sum, &(x0, x1)) in out.iter_mut().zip(&self.columns) {
+                for pixel in line[x0 * self.bytes_per_pixel..x1 * self.bytes_per_pixel]
+                    .chunks_exact(self.bytes_per_pixel)
+                {
+                    sum[0] += pixel[self.order[0]] as i32;
+                    sum[1] += pixel[self.order[1]] as i32;
+                    sum[2] += pixel[self.order[2]] as i32;
+                }
             }
         }
-        let n = ((x1 - x0) * (y1 - y0)) as i32;
-        (r / n, g / n, b / n)
+        let height = (y1 - y0) as i32;
+        for (sum, &(x0, x1)) in out.iter_mut().zip(&self.columns) {
+            let n = (x1 - x0) as i32 * height;
+            *sum = [sum[0] / n, sum[1] / n, sum[2] / n];
+        }
     }
 
-    /// Two destination rows and the chroma row they share.
-    #[allow(clippy::too_many_arguments)]
-    fn row_pair(
+    /// A 4-byte source at its own size: the path every full-size desktop takes,
+    /// so it reads the two rows directly and in a shape the compiler vectorises.
+    fn native_pair(
         &self,
         dy: usize,
-        dst_w: usize,
-        dst_h: usize,
         top: &mut [u8],
         bottom: &mut [u8],
         u: &mut [u8],
         v: &mut [u8],
     ) {
-        for cx in 0..dst_w / 2 {
-            let dx = cx * 2;
-            let a = self.sample(dx, dy, dst_w, dst_h);
-            let b = self.sample(dx + 1, dy, dst_w, dst_h);
-            let c = self.sample(dx, dy + 1, dst_w, dst_h);
-            let d = self.sample(dx + 1, dy + 1, dst_w, dst_h);
-            top[dx] = luma(a.0, a.1, a.2);
-            top[dx + 1] = luma(b.0, b.1, b.2);
-            bottom[dx] = luma(c.0, c.1, c.2);
-            bottom[dx + 1] = luma(d.0, d.1, d.2);
-            let (cu, cv) = chroma(
-                (a.0 + b.0 + c.0 + d.0 + 2) >> 2,
-                (a.1 + b.1 + c.1 + d.1 + 2) >> 2,
-                (a.2 + b.2 + c.2 + d.2 + 2) >> 2,
-            );
-            u[cx] = cu;
-            v[cx] = cv;
+        let width = top.len();
+        let row = |y: usize| &self.data[y * self.stride..y * self.stride + width * 4];
+        let (upper, lower) = (row(dy), row(dy + 1));
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU was just checked for AVX2.
+            unsafe {
+                return match self.order {
+                    [2, 1, 0] => pair4_avx2::<2, 1, 0>(upper, lower, top, bottom, u, v),
+                    _ => pair4_avx2::<0, 1, 2>(upper, lower, top, bottom, u, v),
+                };
+            }
         }
+        match self.order {
+            [2, 1, 0] => pair4::<2, 1, 0>(upper, lower, top, bottom, u, v),
+            _ => pair4::<0, 1, 2>(upper, lower, top, bottom, u, v),
+        }
+    }
+}
+
+/// `pair4` compiled for AVX2, for the x86-64 machines that have it; the build
+/// itself targets the x86-64 baseline.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn pair4_avx2<const R: usize, const G: usize, const B: usize>(
+    upper: &[u8],
+    lower: &[u8],
+    top: &mut [u8],
+    bottom: &mut [u8],
+    u: &mut [u8],
+    v: &mut [u8],
+) {
+    pair4::<R, G, B>(upper, lower, top, bottom, u, v)
+}
+
+#[inline(always)]
+fn pair4<const R: usize, const G: usize, const B: usize>(
+    upper: &[u8],
+    lower: &[u8],
+    top: &mut [u8],
+    bottom: &mut [u8],
+    u: &mut [u8],
+    v: &mut [u8],
+) {
+    // The same integer formulas as `luma` and `chroma`, in 16 bits: every
+    // intermediate fits (luma below 2^16 unsigned, chroma within ±2^15) and the
+    // results need no clamp, which lets the compiler use 16-bit vector lanes.
+    for (src, dst) in [(upper, &mut *top), (lower, &mut *bottom)] {
+        for (pixel, y) in src.chunks_exact(4).zip(dst.iter_mut()) {
+            let (r, g, b) = (pixel[R] as u16, pixel[G] as u16, pixel[B] as u16);
+            *y = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8;
+        }
+    }
+    let blocks = upper.chunks_exact(8).zip(lower.chunks_exact(8));
+    for ((a, b), (u, v)) in blocks.zip(u.iter_mut().zip(v.iter_mut())) {
+        let sum = |c: usize| {
+            ((a[c] as u16 + a[c + 4] as u16 + b[c] as u16 + b[c + 4] as u16 + 2) >> 2) as i16
+        };
+        let (r, g, b) = (sum(R), sum(G), sum(B));
+        *u = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128) as u8;
+        *v = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128) as u8;
+    }
+}
+
+/// Two rows of RGB into two luma rows and the chroma row they share, chroma
+/// being the average of each 2x2 block.
+fn pack(
+    a: &[[i32; 3]],
+    b: &[[i32; 3]],
+    top: &mut [u8],
+    bottom: &mut [u8],
+    u: &mut [u8],
+    v: &mut [u8],
+) {
+    for (p, y) in a
+        .iter()
+        .zip(top.iter_mut())
+        .chain(b.iter().zip(bottom.iter_mut()))
+    {
+        *y = luma(p[0], p[1], p[2]);
+    }
+    for (cx, (u, v)) in u.iter_mut().zip(v.iter_mut()).enumerate() {
+        let sum =
+            |c: usize| (a[cx * 2][c] + a[cx * 2 + 1][c] + b[cx * 2][c] + b[cx * 2 + 1][c] + 2) >> 2;
+        (*u, *v) = chroma(sum(0), sum(1), sum(2));
     }
 }
 
@@ -346,6 +426,95 @@ mod tests {
             to_bgrx(&src, 2, 1, 8, PixelFormat::Rgbx, 2, 1).unwrap(),
             [3, 2, 1, 255, 6, 5, 4, 255]
         );
+    }
+
+    /// The per-pixel conversion this module used to run, kept as the definition
+    /// the fast paths must reproduce bit for bit.
+    fn reference(
+        src: &[u8],
+        sw: usize,
+        sh: usize,
+        stride: usize,
+        format: PixelFormat,
+        dw: usize,
+        dh: usize,
+    ) -> Vec<u8> {
+        let (bpp, o) = layout(format).unwrap();
+        let rgb = |x: usize, y: usize| {
+            let p = &src[y * stride + x * bpp..];
+            (p[o[0]] as i32, p[o[1]] as i32, p[o[2]] as i32)
+        };
+        let sample = |dx: usize, dy: usize| {
+            let x0 = dx * sw / dw;
+            let x1 = ((dx + 1) * sw).div_ceil(dw).clamp(x0 + 1, sw);
+            let y0 = dy * sh / dh;
+            let y1 = ((dy + 1) * sh).div_ceil(dh).clamp(y0 + 1, sh);
+            let (mut r, mut g, mut b) = (0, 0, 0);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let p = rgb(x, y);
+                    (r, g, b) = (r + p.0, g + p.1, b + p.2);
+                }
+            }
+            let n = ((x1 - x0) * (y1 - y0)) as i32;
+            (r / n, g / n, b / n)
+        };
+        let (mut y, mut u, mut v) = (vec![0; dw * dh], vec![], vec![]);
+        for cy in 0..dh / 2 {
+            for cx in 0..dw / 2 {
+                let px = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                    .map(|(i, j)| (cx * 2 + i, cy * 2 + j, sample(cx * 2 + i, cy * 2 + j)));
+                for (x, yy, p) in px {
+                    y[yy * dw + x] = luma(p.0, p.1, p.2);
+                }
+                let s = |f: fn(&(i32, i32, i32)) -> i32| {
+                    (px.iter().map(|p| f(&p.2)).sum::<i32>() + 2) >> 2
+                };
+                let (cu, cv) = chroma(s(|p| p.0), s(|p| p.1), s(|p| p.2));
+                u.push(cu);
+                v.push(cv);
+            }
+        }
+        [y, u, v].concat()
+    }
+
+    #[test]
+    fn every_path_matches_the_per_pixel_definition_exactly() {
+        let mut seed = 0x9e3779b9u32;
+        let mut noise = |n: usize| {
+            (0..n)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    seed as u8
+                })
+                .collect::<Vec<u8>>()
+        };
+        let formats = [
+            PixelFormat::Bgrx,
+            PixelFormat::Rgba,
+            PixelFormat::Bgr,
+            PixelFormat::Rgb,
+        ];
+        for (sw, sh, dw, dh) in [
+            (64, 36, 64, 36),
+            (67, 41, 66, 40),
+            (100, 60, 38, 22),
+            (90, 50, 92, 50),
+            (33, 17, 8, 6),
+        ] {
+            for format in formats {
+                let bpp = layout(format).unwrap().0;
+                let stride = sw * bpp + 12;
+                let src = noise(stride * sh);
+                let fast = to_i420(&src, sw, sh, stride, format, dw, dh).unwrap();
+                assert!(
+                    fast.data == reference(&src, sw, sh, stride, format, dw & !1, dh & !1),
+                    "{format:?} {sw}x{sh} -> {dw}x{dh}"
+                );
+            }
+        }
     }
 
     #[test]

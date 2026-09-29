@@ -4,7 +4,10 @@ use anyhow::{bail, Result};
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::Mutex;
 
-pub type FrameSink = Box<dyn Fn(I420, u64, Vec<u8>) + Send + 'static>;
+/// See the Linux `capture::FrameSink`: the closure makes the BGRX copy, only
+/// when the sink asks for it.
+pub type FrameSink = Box<dyn Fn(I420, u64, Pixels) + Send + 'static>;
+pub type Pixels<'a> = &'a mut dyn FnMut() -> Option<Vec<u8>>;
 
 struct State {
     sink: FrameSink,
@@ -67,15 +70,6 @@ extern "C" fn receive_frame(
     let state = unsafe { &*(context as *const Mutex<State>) };
     let Ok(mut state) = state.lock() else { return };
     let source = unsafe { std::slice::from_raw_parts(pixels, length) };
-    let raw = to_bgrx(
-        source,
-        source_width,
-        source_height,
-        stride,
-        PixelFormat::Bgra,
-        state.width,
-        state.height,
-    );
     let frame = to_i420(
         source,
         source_width,
@@ -85,8 +79,11 @@ extern "C" fn receive_frame(
         state.width,
         state.height,
     );
-    if let (Some(frame), Some(raw)) = (frame, raw) {
-        (state.sink)(frame, state.sequence, raw);
+    if let Some(frame) = frame {
+        let (width, height) = (state.width, state.height);
+        (state.sink)(frame, state.sequence, &mut || {
+            to_bgrx(source, source_width, source_height, stride, PixelFormat::Bgra, width, height)
+        });
         state.sequence += 1;
     }
 }

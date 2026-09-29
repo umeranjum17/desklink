@@ -83,6 +83,12 @@ export interface OpenSessionRequest {
     loopbackTcp?: boolean;
     /** Local cursor feedback for an agent session; off for human phone control. */
     agentIndicator?: boolean;
+    /**
+     * Keep the latest pre-encode frame for `session.frame` and emit
+     * `session.frame.changed` (default true). `false` for a consumer that only
+     * streams, so the engine converts each frame once, for the encoder.
+     */
+    localFrames?: boolean;
 }
 
 export interface OpenedSession {

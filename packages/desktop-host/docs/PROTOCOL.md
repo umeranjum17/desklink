@@ -173,7 +173,8 @@ trigger a capture request.
   "restore_token": null,                // from a previous session.restoreToken
   "ttl_seconds": 3600,                 // session lease; default 3600
   "loopback_tcp": false,               // also offer ICE over TCP on 127.0.0.1; default false
-  "agent_indicator": false             // local input feedback; default false (phone control)
+  "agent_indicator": false,            // local input feedback; default false (phone control)
+  "local_frames": true                 // keep frames for session.frame; default true
 }}
 ```
 
@@ -215,6 +216,14 @@ On bare X11 it replaces the pointer sprite instead, which XGetImage excludes:
 there is no edge glow on that path. macOS uses a nonactivating, click-through
 window excluded by the ScreenCaptureKit content filter. Closing the session
 fades and removes the indicator.
+
+`local_frames` keeps the latest pre-encode frame and its tile hashes for
+`session.frame` and `session.frame.changed` (see "Latest frame over the local
+protocol"). A consumer that only streams sets it to `false`: each captured
+frame is then converted once, for the encoder, no frame is kept, no
+`session.frame.changed` is emitted, and `session.frame` is refused with
+`error.code = "operation"`. The WebSocket bridge sets it to `false` unless its
+host listens to engine events, because neither travels past the socket.
 
 `session.open` is where the capture request happens, which is where the user's
 consent appears. It is not implicit and it is not retried silently.

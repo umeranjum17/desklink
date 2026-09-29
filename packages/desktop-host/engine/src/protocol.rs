@@ -139,6 +139,15 @@ pub struct OpenParams {
     /// Show local, capture-excluded feedback for an agent controlling this session.
     #[serde(default)]
     pub agent_indicator: bool,
+    /// Keep the latest pre-encode frame for `session.frame` and emit
+    /// `session.frame.changed`. A consumer that only streams turns it off, and
+    /// the engine then spends nothing per frame on either.
+    #[serde(default = "default_local_frames")]
+    pub local_frames: bool,
+}
+
+fn default_local_frames() -> bool {
+    true
 }
 
 /// The encode box when the consumer names none: a desktop's own pixels up to
@@ -502,6 +511,7 @@ mod tests {
             "the engine sizes the rate to the surface"
         );
         assert_eq!(params.max_fps, 30);
+        assert!(params.local_frames, "session.frame works unless turned off");
         assert!(
             !params.agent_indicator,
             "human control has no overlay by default"
