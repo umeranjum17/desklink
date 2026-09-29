@@ -124,7 +124,10 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
-    let (width, height) = (screen.width_in_pixels as i16, screen.height_in_pixels as i16);
+    let (width, height) = (
+        screen.width_in_pixels as i16,
+        screen.height_in_pixels as i16,
+    );
     let rate: u64 = std::env::var("RATE")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -162,9 +165,8 @@ fn main() -> Result<()> {
     connection
         .configure_window(
             window,
-            &x11rb::protocol::xproto::ConfigureWindowAux::new().stack_mode(
-                x11rb::protocol::xproto::StackMode::ABOVE,
-            ),
+            &x11rb::protocol::xproto::ConfigureWindowAux::new()
+                .stack_mode(x11rb::protocol::xproto::StackMode::ABOVE),
         )
         .ok();
     let graphics = connection.generate_id()?;
@@ -212,7 +214,16 @@ fn main() -> Result<()> {
             continue;
         }
         let stamp = now_ms() & 0xFF_FFFF;
-        paint(&connection, window, graphics, width, height, frame, stamp, motion)?;
+        paint(
+            &connection,
+            window,
+            graphics,
+            width,
+            height,
+            frame,
+            stamp,
+            motion,
+        )?;
         frame += 1;
         std::thread::sleep(std::time::Duration::from_millis(1000 / rate));
     }

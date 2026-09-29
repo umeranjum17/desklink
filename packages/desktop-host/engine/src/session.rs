@@ -3159,11 +3159,14 @@ mod tests {
 
         // The encoder is 64x64; a 32x32 frame is the dimension mismatch that
         // used to be counted and dropped behind a permanently black picture.
-        frame_tx.put(I420 {
-            width: 32,
-            height: 32,
-            data: vec![128u8; 32 * 32 + 2 * 16 * 16],
-        }, Instant::now());
+        frame_tx.put(
+            I420 {
+                width: 32,
+                height: 32,
+                data: vec![128u8; 32 * 32 + 2 * 16 * 16],
+            },
+            Instant::now(),
+        );
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         let mut reason = None;
@@ -3507,11 +3510,14 @@ mod tests {
 
         // 40 frames over 200 ms is 200 fps; the requested 20 fps caps what leaves.
         for _ in 0..40 {
-            frame_tx.put(I420 {
-                width: 64,
-                height: 64,
-                data: vec![128u8; 64 * 64 + 2 * 32 * 32],
-            }, Instant::now());
+            frame_tx.put(
+                I420 {
+                    width: 64,
+                    height: 64,
+                    data: vec![128u8; 64 * 64 + 2 * 32 * 32],
+                },
+                Instant::now(),
+            );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let motion = inner.metrics.lock().unwrap().encoded_frames;
