@@ -130,6 +130,8 @@ export interface SessionMetrics {
     encoded_bytes: number;
     key_frames: number;
     refined_frames: number;
+    /** Motion frames coded at half size because full size could not keep up. */
+    halved_frames: number;
     /** Fresh captures coded at the pace of change; the queue_micros population (L0 lab). */
     motion_frames: number;
     encode_micros: number;
