@@ -211,7 +211,7 @@ sets it for control sessions, never for view-only or human phone control. It
 adds an eased pointer halo, click ripple, and typing pulse. On Wayland it uses
 a click-through layer-shell surface with an edge glow; its bounded area is
 masked before capture/diff (pixels behind the effect can remain briefly stale).
-On bare X11 it replaces the pointer sprite instead, which XGetImage excludes:
+On bare X11 it replaces the pointer sprite instead, which the X11 grab excludes:
 there is no edge glow on that path. macOS uses a nonactivating, click-through
 window excluded by the ScreenCaptureKit content filter. Closing the session
 fades and removes the indicator.

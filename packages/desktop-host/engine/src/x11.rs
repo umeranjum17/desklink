@@ -115,11 +115,7 @@ impl X11Desktop {
     /// Allocate one MIT-SHM segment for the full root and map it here. Any
     /// failure means "no SHM on this server", never an error: the caller
     /// falls back to socket GetImage and reports it via [`Self::capture_path`].
-    fn setup_shm(
-        connection: &RustConnection,
-        width: usize,
-        height: usize,
-    ) -> Option<ShmSegment> {
+    fn setup_shm(connection: &RustConnection, width: usize, height: usize) -> Option<ShmSegment> {
         let len = width.checked_mul(height)?.checked_mul(4)?;
         let size: u32 = len.try_into().ok()?;
         if size == 0 {
@@ -259,8 +255,7 @@ impl X11Desktop {
                 .context("X11 ShmGetImage failed")?
                 .reply()
                 .context("X11 ShmGetImage returned no reply")?;
-            let pixels =
-                unsafe { std::slice::from_raw_parts(shm.ptr as *const u8, shm.len) };
+            let pixels = unsafe { std::slice::from_raw_parts(shm.ptr as *const u8, shm.len) };
             if pixels.len() < stride * self.height {
                 anyhow::bail!(
                     "X11 shared memory holds {} bytes for a {}x{} screen",

@@ -239,8 +239,7 @@ fn select_x11(
                         Ok((frame, raw)) => {
                             let changed = if hashed {
                                 use std::hash::{Hash, Hasher};
-                                let mut hasher =
-                                    std::collections::hash_map::DefaultHasher::new();
+                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
                                 raw.hash(&mut hasher);
                                 let hash = hasher.finish();
                                 if last_hash == Some(hash) {
