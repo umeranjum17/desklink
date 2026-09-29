@@ -24,11 +24,17 @@
 /* The quantizer ceiling while the desktop moves. Refinement frames lower it. */
 #define DL_VPX_MOTION_MAX_Q 52
 
+/* Below this width a half-size frame is too small to be worth a key frame. */
+#define DL_VPX_HALF_MIN_WIDTH 640
+
 typedef struct {
     vpx_codec_ctx_t ctx;
     vpx_codec_enc_cfg_t cfg;
     int width;
     int height;
+    /* The half-size copy of a frame coded while the desktop moves faster than
+     * the encoder keeps up; NULL until the first such frame. */
+    uint8_t *half;
     int frame_index;
     /* The packet libvpx last produced; valid until the next encode call. */
     const void *packet;
@@ -105,18 +111,61 @@ dl_vpx_encoder *dl_vpx_create(int width, int height, int bitrate_kbps, int fps,
     return self;
 }
 
-/* Encode one tightly packed I420 frame. Returns:
+/* One plane at half size, each output pixel the mean of a 2x2 block. */
+static void halve_plane(const uint8_t *src, int src_w, uint8_t *dst, int dst_w, int dst_h) {
+    for (int y = 0; y < dst_h; y++) {
+        const uint8_t *a = src + (size_t)2 * y * src_w;
+        const uint8_t *b = a + src_w;
+        uint8_t *out = dst + (size_t)y * dst_w;
+        for (int x = 0; x < dst_w; x++) {
+            out[x] = (uint8_t)((a[2 * x] + a[2 * x + 1] + b[2 * x] + b[2 * x + 1] + 2) >> 2);
+        }
+    }
+}
+
+/* Encode one tightly packed I420 frame, at its own size or, with `half`, at
+ * half its size. The coded size changes only on a key frame: a decoder that
+ * scales references across a size change is a feature many hardware decoders
+ * get wrong, and the frame that changes size costs a key frame's bits anyway.
+ * Returns:
  *   1  a packet is available through dl_vpx_packet_*
  *   0  libvpx held the frame (should not happen with zero lookahead)
  *  -1  libvpx rejected the frame
  */
-int dl_vpx_encode(dl_vpx_encoder *self, const uint8_t *i420, int force_keyframe) {
+int dl_vpx_encode(dl_vpx_encoder *self, const uint8_t *i420, int force_keyframe, int half) {
     if (self == NULL || i420 == NULL) {
         return -1;
     }
+    int w = self->width;
+    int h = self->height;
+    if (half && w >= DL_VPX_HALF_MIN_WIDTH) {
+        w = (w / 2) & ~1;
+        h = (h / 2) & ~1;
+        if (self->half == NULL) {
+            self->half = malloc((size_t)w * h * 3 / 2);
+            if (self->half == NULL) {
+                return -1;
+            }
+        }
+        const uint8_t *u = i420 + (size_t)self->width * self->height;
+        const uint8_t *v = u + (size_t)(self->width / 2) * (self->height / 2);
+        uint8_t *hu = self->half + (size_t)w * h;
+        halve_plane(i420, self->width, self->half, w, h);
+        halve_plane(u, self->width / 2, hu, w / 2, h / 2);
+        halve_plane(v, self->width / 2, hu + (size_t)(w / 2) * (h / 2), w / 2, h / 2);
+        i420 = self->half;
+    }
+    if (self->cfg.g_w != (unsigned int)w || self->cfg.g_h != (unsigned int)h) {
+        self->cfg.g_w = (unsigned int)w;
+        self->cfg.g_h = (unsigned int)h;
+        if (vpx_codec_enc_config_set(&self->ctx, &self->cfg) != VPX_CODEC_OK) {
+            return -1;
+        }
+        force_keyframe = 1;
+    }
     vpx_image_t image;
-    if (vpx_img_wrap(&image, VPX_IMG_FMT_I420, (unsigned int)self->width,
-                     (unsigned int)self->height, 1, (unsigned char *)i420) == NULL) {
+    if (vpx_img_wrap(&image, VPX_IMG_FMT_I420, (unsigned int)w, (unsigned int)h, 1,
+                     (unsigned char *)i420) == NULL) {
         return -1;
     }
     if (vpx_codec_encode(&self->ctx, &image, self->frame_index, 1,
@@ -180,5 +229,6 @@ void dl_vpx_destroy(dl_vpx_encoder *self) {
         return;
     }
     vpx_codec_destroy(&self->ctx);
+    free(self->half);
     free(self);
 }

@@ -51,10 +51,13 @@ pub struct Metrics {
     pub dropped_frames: u64,
     pub encoded_frames: u64,
     pub encoded_bytes: u64,
-    /// Key frames sent: the first, and one per receiver request.
+    /// Key frames sent: the first, one per receiver request, and one each time
+    /// motion starts or stops being coded at half size.
     pub key_frames: u64,
     /// Refinement passes: a still desktop re-coded once, sharp.
     pub refined_frames: u64,
+    /// Motion frames coded at half size because full size could not keep up.
+    pub halved_frames: u64,
     /// Time spent in the encoder, in microseconds, over every encoded frame.
     pub encode_micros: u64,
     /// The current rate target, after any loss back-off.
@@ -2072,9 +2075,46 @@ impl RateControl {
     }
 }
 
+/// Whether motion is coded at half size. Full-size frames that change much of
+/// the picture (a packet over a quarter of the per-frame rate budget) and take
+/// longer to code than a frame interval, several in a row, cannot reach the
+/// frame rate, so the rest of the motion is coded at half size. Half-size frames
+/// that are small or code in under a quarter of an interval, for long enough,
+/// mean full size would keep up again. Each change of size costs a key frame,
+/// so both need a run of frames rather than one: a slow key frame or a busy
+/// moment on the host must not flip it, typing must never halve, and it must
+/// not flap. The refinement pass is always full size and starts the next
+/// motion at full size.
+#[derive(Default)]
+struct MotionSize {
+    half: bool,
+    run: u32,
+}
+
+impl MotionSize {
+    const SLOW_RUN: u32 = 5;
+    const FAST_RUN: u32 = 30;
+
+    /// Account for a motion frame coded at the current size in `took`; `large`
+    /// when its packet was over a quarter of the per-frame rate budget.
+    fn coded(&mut self, took: Duration, large: bool, interval: Duration) {
+        let (counts, needed) = if self.half {
+            (!large || took * 4 < interval, Self::FAST_RUN)
+        } else {
+            (large && took > interval, Self::SLOW_RUN)
+        };
+        self.run = if counts { self.run + 1 } else { 0 };
+        if self.run >= needed {
+            self.half = !self.half;
+            self.run = 0;
+        }
+    }
+}
+
 enum Pass {
     Motion {
         keyframe: bool,
+        half: bool,
     },
     Refine,
     /// The same picture again, so a still stream never looks stalled.
@@ -2116,6 +2156,7 @@ fn spawn_pipeline(
             let mut keyframe = true;
             let mut still_since = Instant::now();
             let mut last_sent: Option<Instant> = None;
+            let mut size = MotionSize::default();
             loop {
                 let now = Instant::now();
                 let slot = last_sent.map_or(Duration::ZERO, |at| {
@@ -2185,7 +2226,10 @@ fn spawn_pipeline(
                     continue;
                 }
                 let pass = if pending || keyframe {
-                    Pass::Motion { keyframe }
+                    Pass::Motion {
+                        keyframe,
+                        half: size.half,
+                    }
                 } else if !refined && now.duration_since(still_since) >= REFINE_AFTER {
                     Pass::Refine
                 } else if refined
@@ -2206,9 +2250,9 @@ fn spawn_pipeline(
                         break;
                     };
                     match pass {
-                        Pass::Motion { keyframe } => encoder.encode(frame, keyframe),
+                        Pass::Motion { keyframe, half } => encoder.encode(frame, keyframe, half),
                         Pass::Refine => encoder.refine(frame),
-                        Pass::Keepalive => encoder.encode(frame, false),
+                        Pass::Keepalive => encoder.encode(frame, false, false),
                     }
                 };
                 let packet = match packet {
@@ -2234,14 +2278,16 @@ fn spawn_pipeline(
                         break;
                     }
                 };
+                let took = started.elapsed();
                 if let Ok(mut m) = inner.metrics.lock() {
                     m.encoded_frames += 1;
                     m.encoded_bytes += packet.data.len() as u64;
-                    m.encode_micros += started.elapsed().as_micros() as u64;
+                    m.encode_micros += took.as_micros() as u64;
+                    m.key_frames += packet.keyframe as u64;
                     match pass {
-                        Pass::Motion { keyframe: true } => m.key_frames += 1,
+                        Pass::Motion { half: true, .. } => m.halved_frames += 1,
                         Pass::Refine => m.refined_frames += 1,
-                        Pass::Motion { keyframe: false } | Pass::Keepalive => {}
+                        Pass::Motion { half: false, .. } | Pass::Keepalive => {}
                     }
                 }
                 match pass {
@@ -2250,8 +2296,13 @@ fn spawn_pipeline(
                         keyframe = false;
                         refined = false;
                         still_since = now;
+                        let budget = rate.target as u64 * 1000 / 8 / max_fps.max(1) as u64;
+                        size.coded(took, packet.data.len() as u64 * 4 > budget, interval);
                     }
-                    Pass::Refine => refined = true,
+                    Pass::Refine => {
+                        refined = true;
+                        size = MotionSize::default();
+                    }
                     Pass::Keepalive => {}
                 }
                 last_sent = Some(now);
@@ -3301,6 +3352,47 @@ mod tests {
         assert!(inner.revoked_reason().is_some());
         assert!(!inner.pipeline.load(Ordering::SeqCst));
         assert!(inner.input.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn motion_halves_only_after_a_slow_large_run_and_returns_after_a_light_one() {
+        let interval = Duration::from_millis(16);
+        let (slow, busy, fast) = (
+            Duration::from_millis(30),
+            Duration::from_millis(8),
+            Duration::from_millis(2),
+        );
+        let mut size = MotionSize::default();
+        for _ in 0..MotionSize::SLOW_RUN * 4 {
+            size.coded(slow, false, interval);
+        }
+        assert!(
+            !size.half,
+            "slow small frames (typing on a busy host) keep full size"
+        );
+        for _ in 0..MotionSize::SLOW_RUN - 1 {
+            size.coded(slow, true, interval);
+        }
+        size.coded(fast, true, interval);
+        assert!(!size.half, "a broken run of slow frames keeps full size");
+        for _ in 0..MotionSize::SLOW_RUN {
+            size.coded(slow, true, interval);
+        }
+        assert!(size.half, "a run of slow large frames halves");
+        for _ in 0..MotionSize::FAST_RUN * 2 {
+            size.coded(busy, true, interval);
+        }
+        assert!(
+            size.half,
+            "large half-size frames that are not fast stay half"
+        );
+        for _ in 0..MotionSize::FAST_RUN {
+            size.coded(busy, false, interval);
+        }
+        assert!(
+            !size.half,
+            "a run of small half-size frames returns to full size"
+        );
     }
 
     #[tokio::test]

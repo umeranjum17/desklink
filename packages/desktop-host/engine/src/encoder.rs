@@ -10,7 +10,9 @@
 //! only on request, and a refinement pass. While the desktop moves, frames are
 //! coded against the rate target; once it stops, the last frame is coded once
 //! more under a low quantizer ceiling, so what the user reads is sharp without
-//! paying for sharpness on every frame of a scroll.
+//! paying for sharpness on every frame of a scroll. Motion the encoder cannot
+//! code within a frame interval may be coded at half size; the refinement pass
+//! is always full size.
 
 use crate::convert::I420;
 use anyhow::Result;
@@ -30,7 +32,12 @@ extern "C" {
         threads: c_int,
         cpu_used: c_int,
     ) -> *mut NativeEncoder;
-    fn dl_vpx_encode(encoder: *mut NativeEncoder, i420: *const u8, force_keyframe: c_int) -> c_int;
+    fn dl_vpx_encode(
+        encoder: *mut NativeEncoder,
+        i420: *const u8,
+        force_keyframe: c_int,
+        half: c_int,
+    ) -> c_int;
     fn dl_vpx_reconfigure(
         encoder: *mut NativeEncoder,
         bitrate_kbps: c_int,
@@ -47,9 +54,9 @@ extern "C" {
 /// that small text is crisp; the pass happens once per still, not per frame.
 const REFINE_MAX_Q: c_int = 10;
 
-/// libvpx's speed/quality trade for real time. 8 codes a 4K desktop frame well
-/// inside a 30 fps budget on a desktop CPU.
-const CPU_USED: c_int = 8;
+/// libvpx's speed/quality trade for real time. 9 codes full-screen motion at
+/// 1080p in about half the CPU time of 8, and a refined still reads the same.
+const CPU_USED: c_int = 9;
 
 /// One encoded VP9 frame as libvpx produced it.
 pub struct EncodedFrame {
@@ -122,7 +129,7 @@ impl Encoder {
         if unsafe { dl_vpx_reconfigure(self.native, bitrate, REFINE_MAX_Q) } != 0 {
             anyhow::bail!("libvpx refused the refinement ceiling");
         }
-        let packet = self.encode(frame, false);
+        let packet = self.encode(frame, false, false);
         let restored = unsafe { dl_vpx_reconfigure(self.native, bitrate, dl_vpx_motion_max_q()) };
         if restored != 0 {
             anyhow::bail!("libvpx refused to restore the motion ceiling");
@@ -130,7 +137,14 @@ impl Encoder {
         packet
     }
 
-    pub fn encode(&mut self, frame: &I420, force_keyframe: bool) -> Result<EncodedFrame> {
+    /// Code `frame`; with `half`, at half its width and height. Changing the
+    /// coded size makes this frame a key frame.
+    pub fn encode(
+        &mut self,
+        frame: &I420,
+        force_keyframe: bool,
+        half: bool,
+    ) -> Result<EncodedFrame> {
         if frame.width != self.width || frame.height != self.height {
             anyhow::bail!(
                 "encoder is {}x{} but was given {}x{}",
@@ -140,8 +154,14 @@ impl Encoder {
                 frame.height
             );
         }
-        let status =
-            unsafe { dl_vpx_encode(self.native, frame.data.as_ptr(), force_keyframe as c_int) };
+        let status = unsafe {
+            dl_vpx_encode(
+                self.native,
+                frame.data.as_ptr(),
+                force_keyframe as c_int,
+                half as c_int,
+            )
+        };
         if status < 0 {
             anyhow::bail!("libvpx rejected a {}x{} frame", self.width, self.height);
         }
@@ -197,8 +217,34 @@ mod tests {
     fn encodes_successive_frames_and_refuses_a_mismatched_geometry() {
         let (w, h) = (64usize, 64usize);
         let mut encoder = Encoder::new(w, h, 500, 30, 2).expect("encoder should start");
-        assert!(!encoder.encode(&blank(w, h), true).unwrap().data.is_empty());
-        assert!(!encoder.encode(&blank(w, h), false).unwrap().data.is_empty());
-        assert!(encoder.encode(&blank(32, 32), false).is_err());
+        assert!(!encoder
+            .encode(&blank(w, h), true, false)
+            .unwrap()
+            .data
+            .is_empty());
+        assert!(!encoder
+            .encode(&blank(w, h), false, false)
+            .unwrap()
+            .data
+            .is_empty());
+        assert!(encoder.encode(&blank(32, 32), false, false).is_err());
+    }
+
+    #[test]
+    fn a_half_size_run_starts_and_ends_on_a_key_frame() {
+        let (w, h) = (1280usize, 720usize);
+        let mut encoder = Encoder::new(w, h, 2000, 60, 2).expect("encoder should start");
+        assert!(encoder.encode(&blank(w, h), true, false).unwrap().keyframe);
+        assert!(!encoder.encode(&blank(w, h), false, false).unwrap().keyframe);
+        assert!(
+            encoder.encode(&blank(w, h), false, true).unwrap().keyframe,
+            "size down"
+        );
+        assert!(!encoder.encode(&blank(w, h), false, true).unwrap().keyframe);
+        assert!(
+            encoder.refine(&blank(w, h)).unwrap().keyframe,
+            "size back up"
+        );
+        assert!(!encoder.encode(&blank(w, h), false, false).unwrap().keyframe);
     }
 }
