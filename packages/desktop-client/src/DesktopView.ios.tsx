@@ -1,12 +1,38 @@
 import * as React from 'react';
 import { Keyboard, StyleSheet, TextInput, View, type GestureResponderEvent, type LayoutChangeEvent } from 'react-native';
-import { RTCView } from 'react-native-webrtc';
 import type { DesktopViewProps } from './DesktopView';
 import { keyboardDelta } from './keyboardDelta';
 import { desktopInputEnabled, emitDesktopKeyboard, getDesktopSize, getDesktopStream, markDesktopPresented, nativeDesklink, observeDesktopSurface, registerDesktopView } from './native.ios';
 
 type Point = { x: number; y: number };
-type Gesture = { start: Point; last: Point; time: number; mode: 'pending' | 'hover' | 'pan' | 'armed' | 'drag' | 'two' | 'scroll' | 'pinch' | 'spent'; span: number; focus: Point };
+type Gesture = { start: Point; last: Point; time: number; mode: 'pending' | 'letterbox' | 'hover' | 'pan' | 'armed' | 'drag' | 'two' | 'scroll' | 'pinch' | 'spent'; span: number; focus: Point };
+
+/** Wheel detents accumulate in these steps and never send more than this at once. */
+const MIN_WHEEL_STEP = 0.05;
+const MAX_WHEEL_STEP = 10;
+/** Desktop pixels one wheel detent stands for. */
+const PIXELS_PER_DETENT = 120;
+/** Where the cursor mark's tip sits inside the mark, in points. */
+const CURSOR_HOTSPOT = 3;
+
+/**
+ * The native video view, loaded on first render rather than with this module:
+ * importing the package must not pull the native WebRTC libraries into the
+ * application's first paint. `globalThis.require` is the bundler's lazy
+ * require on device; under test the spec stubs it.
+ */
+function loadRTCView(): React.ComponentType<Record<string, unknown>> | null {
+    try {
+        const lazyRequire = (globalThis as { require?: (id: string) => unknown }).require;
+        if (typeof lazyRequire !== 'function') return null;
+        const webrtc = lazyRequire('react-native-webrtc') as {
+            RTCView?: React.ComponentType<Record<string, unknown>>;
+        };
+        return webrtc.RTCView ?? null;
+    } catch {
+        return null;
+    }
+}
 
 export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0, gestures = 'desktop' }: DesktopViewProps) {
     const [revision, refresh] = React.useReducer((n: number) => n + 1, 0);
@@ -21,10 +47,12 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
     const input = React.useRef<TextInput>(null);
     const captured = React.useRef(false);
     const gesture = React.useRef<Gesture | null>(null);
+    const wheel = React.useRef({ x: 0, y: 0 });
     const longPress = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     const lastTap = React.useRef<{ time: number; at: Point; point: Point } | null>(null);
     const [enabled, setEnabled] = React.useState(() => desktopInputEnabled(sessionId));
     const stream = getDesktopStream(sessionId);
+    const RTCView = React.useMemo(loadRTCView, []);
     void revision;
 
     React.useEffect(() => {
@@ -37,13 +65,18 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         return () => { show.remove(); hide.remove(); };
     }, []);
     React.useEffect(() => {
-        if (gestures !== 'device') return;
-        setCursor(null);
+        // A held drag belongs to the old meaning: let go of the button rather
+        // than release it somewhere the finger never meant.
         const held = gesture.current;
-        if (held && (held.mode === 'pending' || held.mode === 'armed')) {
+        if (held) {
             stopTimer();
+            if (held.mode === 'drag') send({ kind: 'release_all' });
             held.mode = 'spent';
         }
+        flushWheel(true);
+        if (gestures === 'device') setCursor(null);
+        // `send` and `flushWheel` are stable per render; this runs on profile change.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [gestures]);
     React.useEffect(() => {
         if (!sessionId) return;
@@ -71,7 +104,20 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         if (!clamp && (px < 0 || py < 0 || px >= size.width || py >= size.height)) return null;
         return { x: Math.max(0, Math.min(size.width - 1, px)), y: Math.max(0, Math.min(size.height - 1, py)) };
     };
+    /** Hold the offset to the picture's edges at a zoom level. */
+    const clampOffset = (x: number, y: number, atScale: number = scale): Point => {
+        const maxX = Math.max(0, (size.width * atScale - bounds.width) / 2);
+        const maxY = Math.max(0, (size.height * atScale - visibleHeight) / 2);
+        return { x: Math.max(-maxX, Math.min(maxX, x)), y: Math.max(-maxY, Math.min(maxY, y)) };
+    };
     const send = (control: Record<string, unknown>) => { if (sessionId) nativeDesklink.sendControl(sessionId, JSON.stringify(control)); };
+    const flushWheel = (force: boolean) => {
+        const { x, y } = wheel.current;
+        if (!force && Math.abs(x) < MIN_WHEEL_STEP && Math.abs(y) < MIN_WHEEL_STEP) return;
+        if (!x && !y) return;
+        send({ kind: 'wheel', dx: Math.max(-MAX_WHEEL_STEP, Math.min(MAX_WHEEL_STEP, x)), dy: Math.max(-MAX_WHEEL_STEP, Math.min(MAX_WHEEL_STEP, y)) });
+        wheel.current = { x: 0, y: 0 };
+    };
     const pointer = (phase: string, at: Point, button?: number) => {
         send({ kind: 'pointer', phase, x: at.x, y: at.y, ...(button ? { button } : {}) });
         // A device screen shows the touch itself; a cursor would be a second finger that lies.
@@ -98,7 +144,11 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
             if (from) pointer('down', from, 1);
             return;
         }
-        gesture.current = { start: at, last: at, time: Date.now(), mode: 'pending', span: 0, focus: at };
+        // Off the picture there is no pointer to carry: the finger waits for a
+        // second one, and one finger alone is ignored. A zoomed picture pans
+        // from anywhere, clamped to its edges.
+        const onPicture = point(at.x, at.y) !== null;
+        gesture.current = { start: at, last: at, time: Date.now(), mode: onPicture || zoom > 1 ? 'pending' : 'letterbox', span: 0, focus: at };
         stopTimer();
         longPress.current = setTimeout(() => {
             if (gesture.current?.mode === 'pending' && point(at.x, at.y)) gesture.current.mode = 'armed';
@@ -107,7 +157,7 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
     const move = (event: GestureResponderEvent) => {
         if (!enabled) return;
         const g = gesture.current;
-        if (!g) return;
+        if (!g || !scale) return;
         const touches = event.nativeEvent.touches;
         if (touches.length === 2) {
             stopTimer();
@@ -115,22 +165,52 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
             const distance = span(touches);
             if (g.mode !== 'two' && g.mode !== 'pinch' && g.mode !== 'scroll') {
                 if (g.mode === 'drag') send({ kind: 'release_all' });
+                if (g.mode === 'letterbox' && !touches.some((touch) => point(touch.locationX, touch.locationY))) {
+                    // The letterbox is not the desktop: only a second finger
+                    // on the picture starts a gesture.
+                    g.mode = 'spent';
+                    return;
+                }
                 g.mode = 'two'; g.span = distance; g.focus = center; g.start = center;
+                wheel.current = { x: 0, y: 0 };
                 return;
             }
             if (g.mode === 'two') {
                 if (Math.abs(distance - g.span) > 12) g.mode = 'pinch';
-                else if (Math.hypot(center.x - g.start.x, center.y - g.start.y) > 8) g.mode = 'scroll';
+                else if (Math.hypot(center.x - g.start.x, center.y - g.start.y) > 8) {
+                    g.mode = 'scroll';
+                    // The desktop scrolls whatever is under its pointer.
+                    const under = point(center.x, center.y);
+                    if (under) pointer('move', under);
+                }
             }
             if (g.mode === 'pinch' && g.span) {
-                setZoom((value) => Math.max(1, Math.min(2.5 / fit, value * distance / g.span)));
+                const maxZoom = fit > 0 ? 2.5 / fit : 2.5;
+                const next = Math.max(1, Math.min(maxZoom, zoom * distance / g.span));
+                const applied = zoom > 0 ? next / zoom : 1;
+                // The desktop point under the focus stays under it while the
+                // offset follows the fingers, then everything clamps back.
+                const nextScale = fit * next;
+                const ox = (bounds.width - size.width * scale) / 2 + offset.x;
+                const oy = (visibleHeight - size.height * scale) / 2 + offset.y;
+                const baseX = (bounds.width - size.width * nextScale) / 2;
+                const baseY = (visibleHeight - size.height * nextScale) / 2;
+                setZoom(next);
+                setOffset(clampOffset(
+                    center.x - (center.x - ox) * applied - baseX + (center.x - g.focus.x),
+                    center.y - (center.y - oy) * applied - baseY + (center.y - g.focus.y),
+                    nextScale,
+                ));
             } else if (g.mode === 'scroll') {
-                send({ kind: 'wheel', dx: -(center.x - g.focus.x) / scale / 120, dy: -(center.y - g.focus.y) / scale / 120 });
+                // Content follows the fingers: moving them up scrolls the page down.
+                wheel.current.x += -(center.x - g.focus.x) / scale / PIXELS_PER_DETENT;
+                wheel.current.y += -(center.y - g.focus.y) / scale / PIXELS_PER_DETENT;
+                flushWheel(false);
             }
             g.span = distance; g.focus = center; g.last = center;
             return;
         }
-        if (touches.length !== 1 || g.mode === 'spent' || g.mode === 'two' || g.mode === 'pinch' || (g.mode === 'scroll' && gestures !== 'browser')) return;
+        if (touches.length !== 1 || g.mode === 'spent' || g.mode === 'letterbox' || g.mode === 'two' || g.mode === 'pinch' || (g.mode === 'scroll' && gestures !== 'browser')) return;
         const at = { x: touches[0].locationX, y: touches[0].locationY };
         if (g.mode === 'pending' && Math.hypot(at.x - g.start.x, at.y - g.start.y) > 8) {
             stopTimer();
@@ -144,17 +224,16 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         }
         if (g.mode === 'scroll') {
             // Content follows the finger: moving it up scrolls the page down.
-            send({ kind: 'wheel', dx: -(at.x - g.last.x) / scale / 120, dy: -(at.y - g.last.y) / scale / 120 });
+            wheel.current.x += -(at.x - g.last.x) / scale / PIXELS_PER_DETENT;
+            wheel.current.y += -(at.y - g.last.y) / scale / PIXELS_PER_DETENT;
+            flushWheel(false);
             g.last = at; g.focus = at;
             return;
         }
         if (g.mode === 'pan') {
             const dx = at.x - g.last.x;
             const dy = at.y - g.last.y;
-            setOffset((current) => ({
-                x: Math.max(-Math.max(0, (pictureWidth - bounds.width) / 2), Math.min(Math.max(0, (pictureWidth - bounds.width) / 2), current.x + dx)),
-                y: Math.max(-Math.max(0, (pictureHeight - visibleHeight) / 2), Math.min(Math.max(0, (pictureHeight - visibleHeight) / 2), current.y + dy)),
-            }));
+            setOffset((current) => clampOffset(current.x + dx, current.y + dy));
         }
         if (g.mode === 'armed' && Math.hypot(at.x - g.start.x, at.y - g.start.y) > 8) {
             const from = point(g.start.x, g.start.y, true);
@@ -171,6 +250,8 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         stopTimer();
         const g = gesture.current;
         if (!g) return;
+        // Leftover wheel below the send threshold still belongs to this scroll.
+        if (g.mode === 'scroll') flushWheel(true);
         if (g.mode === 'two' && Date.now() - g.time < 350) {
             const at = point(g.focus.x, g.focus.y);
             if (at) click(at, 3);
@@ -207,16 +288,22 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         setKeyboardText(keyboardTextRef.current);
     };
     const onLayout = (event: LayoutChangeEvent) => setBounds(event.nativeEvent.layout);
-    return <View style={[styles.surface, style]} onLayout={onLayout} accessibilityLabel={accessibilityLabel}
+    return <View style={[styles.surface, style]} onLayout={onLayout} accessible={accessibilityLabel !== undefined} accessibilityLabel={accessibilityLabel}
         onStartShouldSetResponder={() => enabled} onMoveShouldSetResponder={() => enabled}
         onResponderGrant={start} onResponderMove={move} onResponderRelease={end}
         onResponderTerminate={() => { stopTimer(); if (gesture.current?.mode === 'drag') send({ kind: 'release_all' }); gesture.current = null; }}>
-        {sessionId && stream && size.width > 0 && size.height > 0 ?
+        {sessionId && stream && RTCView && size.width > 0 && size.height > 0 ?
             <RTCView pointerEvents="none" streamURL={stream.toURL()} objectFit="contain" style={{ position: 'absolute', left: originX, top: originY, width: pictureWidth, height: pictureHeight }}
                 onDimensionsChange={(event) => { if (event.nativeEvent.width > 0 && event.nativeEvent.height > 0) markDesktopPresented(sessionId); }} /> : placeholder}
-        {cursor && <View pointerEvents="none" style={[styles.cursor, { left: originX + (cursor.x + 0.5) * scale, top: originY + (cursor.y + 0.5) * scale }]} />}
-        <TextInput ref={input} style={styles.input} value={keyboardText} onChangeText={changeText} autoCorrect={false} autoCapitalize="none" submitBehavior="submit"
-            onSubmitEditing={() => { send({ kind: 'key', name: 'Enter', modifiers: [], down: true }); send({ kind: 'key', name: 'Enter', modifiers: [], down: false }); }} />
+        {cursor && <View pointerEvents="none" accessible={false} style={[styles.cursor, { left: originX + (cursor.x + 0.5) * scale - CURSOR_HOTSPOT, top: originY + (cursor.y + 0.5) * scale - CURSOR_HOTSPOT }]} />}
+        <TextInput ref={input} style={styles.input} value={keyboardText} onChangeText={changeText} autoCorrect={false} autoCapitalize="none" submitBehavior="submit" accessible={false}
+            onSubmitEditing={() => {
+                // While the app holds a sticky modifier, Enter is the app's to
+                // chord: it goes through capture like every other key, so
+                // Ctrl+Enter reaches the desktop instead of typing a newline.
+                if (captured.current && sessionId) emitDesktopKeyboard(sessionId, { key: 'Enter' });
+                else { send({ kind: 'key', name: 'Enter', modifiers: [], down: true }); send({ kind: 'key', name: 'Enter', modifiers: [], down: false }); }
+            }} />
     </View>;
 }
 

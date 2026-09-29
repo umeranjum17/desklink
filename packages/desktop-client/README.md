@@ -111,9 +111,10 @@ import { desktopAvailable } from '@desklink/react-native/availability';
   sticky Ctrl and Shift: tap arms one for the next key, tap again locks it.
   While one is armed, the next key or character the phone's keyboard types is
   sent as that key's chord, so Ctrl then v is Ctrl+V. The app draws the keys.
-- **Readiness is a rendered frame.** Android marks the first draw; iOS uses
-  `RTCView`'s native video-dimensions callback, which fires after a decoded
-  picture arrives. Neither marks a track or ICE connection as live.
+- **Readiness is a rendered frame.** Android marks the first draw; iOS marks
+  the first `RTCView` video-dimensions callback and ignores later ones, so a
+  resize or remount during a reconnect does not read as live. Neither marks
+  a track or ICE connection as live.
 - **Connection states, as they happen.** The session status is `idle`,
   `opening`, `connecting`, `live`, `reconnecting`, `ended` or `failed`. The
   peer's ICE state and the engine's `session.state` both feed it: a

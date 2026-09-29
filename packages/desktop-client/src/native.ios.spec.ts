@@ -1,4 +1,4 @@
-import { beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 const peers: MockPeer[] = [];
 class MockStream {
@@ -19,9 +19,29 @@ class MockPeer {
     close = vi.fn();
     constructor() { peers.push(this); }
 }
-vi.mock('react-native-webrtc', () => ({ MediaStream: MockStream, RTCPeerConnection: MockPeer }));
 
-beforeEach(() => { peers.length = 0; });
+/** What the bundler's lazy require handed out, in order. */
+const required: string[] = [];
+beforeEach(() => {
+    peers.length = 0;
+    required.length = 0;
+    // The device bundler evaluates `react-native-webrtc` on first require;
+    // nothing in this package may require it at import time.
+    vi.stubGlobal('require', (id: string) => {
+        required.push(id);
+        if (id === 'react-native-webrtc') return { MediaStream: MockStream, RTCPeerConnection: MockPeer };
+        throw new Error(`unexpected require: ${id}`);
+    });
+});
+afterEach(() => { vi.unstubAllGlobals(); });
+
+it('keeps WebRTC out of the import and loads it on the first session', async () => {
+    vi.resetModules();
+    const fresh = await import('./native.ios');
+    expect(required).not.toContain('react-native-webrtc');
+    expect(fresh.nativeDesklink.createSession('[]')).not.toBeNull();
+    expect(required).toContain('react-native-webrtc');
+});
 
 it('buffers ICE until offer, emits answer and gates/stamps control input per session', async () => {
     const { nativeDesklink } = await import('./native.ios');
@@ -73,6 +93,20 @@ it('emits ICE connection states as they happen', async () => {
     (peer.oniceconnectionstatechange as (() => void) | undefined)?.();
     expect(events).toContainEqual({ name: 'ice', payload: { state: 'DISCONNECTED' } });
     expect(id).not.toBeNull();
+    listener.remove();
+    nativeDesklink.closeSession(id);
+});
+
+it('marks presented once: a resize or remount must not re-mark', async () => {
+    const { markDesktopPresented, nativeDesklink } = await import('./native.ios');
+    const events: string[] = [];
+    const id = nativeDesklink.createSession('[]')!;
+    const listener = nativeDesklink.addListener!('onSessionEvent', (event) => {
+        if (event.sessionId === id) events.push(event.name);
+    });
+    markDesktopPresented(id);
+    markDesktopPresented(id);
+    expect(events).toEqual(['presented']);
     listener.remove();
     nativeDesklink.closeSession(id);
 });
