@@ -878,7 +878,11 @@ impl Session {
         let frame_session_id = id.clone();
         let local_frames = request.local_frames;
         let sink = Box::new(move |frame: I420, _seq: u64, pixels: capture::Pixels| {
-            let converted = Instant::now();
+            // The frame's RTP time: when capture handed it over, not when it
+            // was coded, so the receiver never sees encode jitter as cadence.
+            // ponytail: stamped after the backend's grab and conversion; a
+            // grab-start instant from each backend needs a FrameSink change.
+            let captured_at = Instant::now();
             let raw = if local_frames { pixels() } else { None };
             let hashes = raw
                 .as_ref()
@@ -914,11 +918,11 @@ impl Session {
             }
             if let Ok(mut m) = captured.lock() {
                 m.captured_frames += 1;
-                m.convert_micros += converted.elapsed().as_micros() as u64;
+                m.convert_micros += captured_at.elapsed().as_micros() as u64;
             }
             // An encoder that is behind gets the newest frame, not a queue: a
             // desktop stream is live, and the last state is the one that counts.
-            if frame_tx.put(frame, Instant::now()) {
+            if frame_tx.put(frame, captured_at) {
                 if let Ok(mut m) = captured.lock() {
                     m.dropped_frames += 1;
                 }
@@ -2001,11 +2005,11 @@ fn frame_interval(max_fps: u32) -> Duration {
     Duration::from_secs_f64(1.0 / max_fps.max(1) as f64)
 }
 
-/// The newest captured frame, handed from the capture thread to the encoder. A
-/// newer frame replaces one the encoder has not taken, so however far behind
-/// it falls, what it codes next is the desktop as it is now. The instant
-/// travels with the picture so the pipeline can report how long a coded frame
-/// waited for its encode.
+/// The newest captured frame and when it was captured, handed from the capture
+/// thread to the encoder. A newer frame replaces one the encoder has not taken,
+/// so however far behind it falls, what it codes next is the desktop as it is
+/// now. The instant travels with the picture so the pipeline can report how
+/// long a coded frame waited for its encode.
 struct FrameSlot {
     frame: Mutex<(Option<(I420, Instant)>, bool)>,
     ready: Condvar,
@@ -2190,6 +2194,34 @@ impl MotionSize {
     }
 }
 
+/// The rate cap as a deadline rather than a minimum gap. `due` is where the
+/// next frame falls on the `max_fps` cadence the stream has kept so far, and a
+/// frame may go up to one interval before it, so a late frame's lost time is
+/// made up by the next. A capture clock that jitters around the cap is then
+/// coded the moment each frame arrives, instead of beating against a second
+/// clock that delays a frame or lets the next one supersede it; the sustained
+/// rate still never exceeds the cap, and no window holds more than one frame
+/// over it.
+struct Cadence {
+    interval: Duration,
+    due: Instant,
+}
+
+impl Cadence {
+    fn new(interval: Duration, now: Instant) -> Self {
+        Self { interval, due: now }
+    }
+
+    /// How long until a frame may go; zero when it may go now.
+    fn wait(&self, now: Instant) -> Duration {
+        self.due.saturating_duration_since(now + self.interval)
+    }
+
+    fn sent(&mut self, now: Instant) {
+        self.due = self.due.max(now) + self.interval;
+    }
+}
+
 enum Pass {
     Motion {
         keyframe: bool,
@@ -2236,11 +2268,13 @@ fn spawn_pipeline(
             let mut still_since = Instant::now();
             let mut last_sent: Option<Instant> = None;
             let mut size = MotionSize::default();
+            let mut cadence = Cadence::new(interval, Instant::now());
+            // What the last frame was stamped with: the RTP clock never runs
+            // backwards, even for a re-coded picture.
+            let mut last_stamp: Option<Instant> = None;
             loop {
                 let now = Instant::now();
-                let slot = last_sent.map_or(Duration::ZERO, |at| {
-                    interval.saturating_sub(now.duration_since(at))
-                });
+                let slot = cadence.wait(now);
                 let connected = peer.is_connected();
                 let wait = if !connected {
                     // Nothing sent before the transport connects arrives; the
@@ -2301,7 +2335,7 @@ fn spawn_pipeline(
                     continue;
                 }
                 let now = Instant::now();
-                if last_sent.is_some_and(|at| now.duration_since(at) < interval) {
+                if !cadence.wait(now).is_zero() {
                     continue;
                 }
                 let pass = if pending || keyframe {
@@ -2390,9 +2424,20 @@ fn spawn_pipeline(
                     Pass::Keepalive => {}
                 }
                 last_sent = Some(now);
+                cadence.sent(now);
+                // A new picture carries the moment it was captured, so the
+                // receiver paces playout by the desktop's clock rather than by
+                // encode time; a re-coded one (refinement, keepalive) is new
+                // content now.
+                let stamp = match pass {
+                    Pass::Motion { .. } => *captured,
+                    Pass::Refine | Pass::Keepalive => now,
+                };
+                let stamp = last_stamp.map_or(stamp, |at| stamp.max(at + Duration::from_millis(1)));
+                last_stamp = Some(stamp);
                 let sending = Instant::now();
                 if let Err(error) =
-                    handle.block_on(peer.send_frame(&packet.data, packet.keyframe, now))
+                    handle.block_on(peer.send_frame(&packet.data, packet.keyframe, stamp))
                 {
                     // The transport is gone. End the session rather than leave
                     // the desktop captured behind a picture that stopped.
@@ -2738,6 +2783,41 @@ mod tests {
             dirty_regions(&[1, 0, 0, 1], &[0; 4], 64, 64),
             vec![[0, 0, 32, 32], [32, 32, 32, 32]]
         );
+    }
+
+    #[test]
+    fn frames_that_jitter_around_the_cap_go_at_once_and_a_flood_stays_capped() {
+        let interval = Duration::from_millis(20);
+        let start = Instant::now();
+        let mut cadence = Cadence::new(interval, start);
+        // Captured at the cap, each a few ms early or late: none waits, so
+        // none is delayed or superseded by the next.
+        for (n, jitter) in [0i64, -6, 5, -8, 7, -3, 0, -9, 9, -5].iter().enumerate() {
+            let at = start + interval * n as u32 + Duration::from_millis(9);
+            let at = if *jitter < 0 {
+                at - Duration::from_millis(jitter.unsigned_abs())
+            } else {
+                at + Duration::from_millis(*jitter as u64)
+            };
+            assert_eq!(cadence.wait(at), Duration::ZERO, "frame {n} waited");
+            cadence.sent(at);
+        }
+
+        // A source far above the cap: one second of 1 ms frames sends at most
+        // one frame over the cap.
+        let start = start + Duration::from_secs(10);
+        let mut cadence = Cadence::new(interval, start);
+        let sent = (0..1000)
+            .map(|ms| start + Duration::from_millis(ms))
+            .filter(|&at| {
+                let go = cadence.wait(at).is_zero();
+                if go {
+                    cadence.sent(at);
+                }
+                go
+            })
+            .count();
+        assert!((50..=51).contains(&sent), "sent {sent} at a 50 fps cap");
     }
 
     #[test]

@@ -11,7 +11,8 @@
 // loopback only. Non-loopback endpoints are refused.
 
 import { spawn } from 'node:child_process';
-import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { socketPath } from './bridge.js';
@@ -28,6 +29,7 @@ interface BrowserState {
   profile?: string;
   profileCreated?: boolean;
   selectedTargetId?: string;
+  browserSession?: string;
 }
 
 /** Parse `host:port` or `http://host:port` and refuse non-loopback hosts. */
@@ -179,11 +181,28 @@ function childrenOf(pid: number): number[] {
   catch { return []; }
 }
 
+// Chromium helpers (crashpad handlers double-fork, xdg-settings spawns during
+// shutdown) can reparent out of the recorded child tree, so every launch
+// carries a unique marker in the spawned environment and the sweep below
+// reaps any same-uid process still carrying it.
+function markerStrays(marker: string): number[] {
+  const needle = `DESKLINK_AXI_BROWSER_SESSION=${marker}`;
+  let entries: string[];
+  try { entries = readdirSync('/proc'); } catch { return []; }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+  const found: number[] = [];
+  for (const entry of entries) {
+    const pid = Number(entry);
+    if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) continue;
+    try {
+      if (uid !== undefined && statSync(`/proc/${pid}`).uid !== uid) continue;
+      if (readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').includes(needle)) found.push(pid);
+    } catch { /* vanished or unreadable */ }
+  }
+  return found;
+}
+
 async function stopLaunched(state: BrowserState): Promise<void> {
-  if (!state.pid) return;
-  // Record the child tree before any signal; kill only these exact PIDs.
-  // A SIGTERM'd Chromium otherwise leaves crashpad handlers behind.
-  const kids = [...new Set([...childrenOf(state.pid), ...childrenOf(state.pid).flatMap(childrenOf)])];
   const stop = async (pid: number) => {
     try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
     for (let i = 0; i < 20; i++) {
@@ -192,8 +211,30 @@ async function stopLaunched(state: BrowserState): Promise<void> {
     }
     try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
   };
-  await stop(state.pid);
-  for (const kid of kids) await stop(kid);
+  if (state.pid) {
+    // Record the child tree before any signal; kill only these exact PIDs.
+    const kids = [...new Set([...childrenOf(state.pid), ...childrenOf(state.pid).flatMap(childrenOf)])];
+    await stop(state.pid);
+    for (const kid of kids) await stop(kid);
+  }
+  // Helpers that reparented out of the recorded tree (crashpad handlers,
+  // xdg-settings spawned during shutdown) still carry the launch marker:
+  // SIGTERM them, then SIGKILL survivors, until none remain (~3 s bound).
+  if (state.browserSession) {
+    const deadline = Date.now() + 3000;
+    let termed = false;
+    for (;;) {
+      const strays = markerStrays(state.browserSession);
+      if (!strays.length) break;
+      if (Date.now() >= deadline) {
+        for (const pid of strays) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+        break;
+      }
+      for (const pid of strays) { try { process.kill(pid, termed ? 'SIGKILL' : 'SIGTERM'); } catch { /* gone */ } }
+      termed = true;
+      await new Promise(r => setTimeout(r, 100));
+    }
+  }
   // Remove the profile only once the browser is truly dead; a dying Chromium
   // still writes into it.
   if (state.profileCreated && state.profile) {
@@ -241,18 +282,20 @@ const launch: CommandModule = {
       ...(parsed.flags.headless ? ['--headless=new'] : []),
       ...(Array.isArray(parsed.flags.arg) ? parsed.flags.arg.map(String) : typeof parsed.flags.arg === 'string' ? [parsed.flags.arg] : []),
     ];
+    const browserSession = randomBytes(8).toString('hex');
     const log = openSync(join(profile, 'chromium.log'), 'a');
-    const child = spawn(executable, args, { detached: true, stdio: ['ignore', 'ignore', log] });
+    const child = spawn(executable, args, { detached: true, stdio: ['ignore', 'ignore', log], env: { ...process.env, DESKLINK_AXI_BROWSER_SESSION: browserSession } });
     closeSync(log);
     const portFile = join(profile, 'DevToolsActivePort');
     for (let i = 0; i < 300 && (!existsSync(portFile) || !readFileSync(portFile, 'utf8').trim()) && child.pid; i++) await new Promise(r => setTimeout(r, 100));
     if (!existsSync(portFile) || !readFileSync(portFile, 'utf8').trim()) {
       try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      for (const pid of markerStrays(browserSession)) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
       const tail = existsSync(join(profile, 'chromium.log')) ? readFileSync(join(profile, 'chromium.log'), 'utf8').split('\n').filter(Boolean).at(-1) ?? '' : '';
       throw new AxiError(`browser: Chromium did not open its debugging port${tail ? `: ${tail.slice(0, 200)}` : ''}`, 'check the executable; see chromium.log in the profile; try --headless on displays without a compositor');
     }
     const port = readFileSync(portFile, 'utf8').split('\n')[0]!.trim();
-    writeState({ endpoint: `127.0.0.1:${port}`, launched: true, pid: child.pid, profile, profileCreated: typeof parsed.flags.profile !== 'string' });
+    writeState({ endpoint: `127.0.0.1:${port}`, launched: true, pid: child.pid, profile, profileCreated: typeof parsed.flags.profile !== 'string', browserSession });
     child.unref();
     print(`browser: launched 127.0.0.1:${port} pid=${child.pid} profile=${profile}`);
     return 0;
