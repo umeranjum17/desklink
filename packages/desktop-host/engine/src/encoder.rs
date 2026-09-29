@@ -7,7 +7,7 @@
 //! and would put a driver dependency on the machine class.
 //!
 //! Tuned for a desktop rather than a camera: screen-content mode, key frames
-//! only on request, and a refinement pass. While the desktop moves, frames are
+//! on request and when the coded size changes, and a refinement pass. While the desktop moves, frames are
 //! coded against the rate target; once it stops, the last frame is coded once
 //! more under a low quantizer ceiling, so what the user reads is sharp without
 //! paying for sharpness on every frame of a scroll. Motion the encoder cannot

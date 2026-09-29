@@ -23,10 +23,11 @@ a source build with a static VP9 library.
   in, one packet out. Software by default, because a hardware encoder would put a
   vendor driver dependency on every machine class. Tuned for a desktop: the
   desktop's own pixels up to 4K (a phone zooms in, and text has to survive it),
-  screen-content mode, key frames only on request, and a refinement pass that
+  screen-content mode, key frames on request and when the coded size changes,
+  and a refinement pass that
   re-codes a still desktop once at a fine quantizer so it reads sharp. Motion
-  the CPU cannot code at the frame rate is coded at half size until it stops;
-  the refinement pass is always full size.
+  the CPU cannot code at the frame rate is coded at half size until it stops
+  or shrinks enough to keep up; the refinement pass is always full size.
 - **Transport** with WebRTC — ICE, DTLS, SRTP, RTP — and one data channel for the
   session's pointer/keyboard/clipboard.
 - **Carry** video the consumer encoded itself, on an `encoded` source: Annex-B
