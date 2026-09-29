@@ -74,6 +74,26 @@ export function desktopInputEnabled(id: string | null): boolean {
     return id != null && sessions.get(id)?.input === true;
 }
 
+/**
+ * The offer with H.264 moved ahead of the other video codecs. For a captured
+ * desktop the engine offers VP9 first and H.264 beside it, and codes whichever
+ * the answer lists first; an answer keeps the offer's order. iOS's WebRTC
+ * decodes H.264 in hardware and VP9 in software, so this receiver asks for
+ * H.264 by reordering the offer it applies. An offer without H.264 is unchanged.
+ */
+export function preferH264(sdp: string): string {
+    const lines = sdp.split('\r\n');
+    const start = lines.findIndex((line) => line.startsWith('m=video '));
+    if (start === -1) return sdp;
+    const next = lines.findIndex((line, index) => index > start && line.startsWith('m='));
+    const section = lines.slice(start + 1, next === -1 ? undefined : next);
+    const h264 = new Set(section.flatMap((line) => /^a=rtpmap:(\d+) H264\//i.exec(line)?.[1] ?? []));
+    const [media, port, proto, ...formats] = lines[start].split(' ');
+    const ordered = [...formats.filter((format) => h264.has(format)), ...formats.filter((format) => !h264.has(format))];
+    lines[start] = [media, port, proto, ...ordered].join(' ');
+    return lines.join('\r\n');
+}
+
 function failure(id: string, error: unknown) {
     emit(id, 'failure', { code: 'transport', message: error instanceof Error ? error.message : String(error) });
 }
@@ -126,7 +146,7 @@ export const nativeDesklink: NativeDesklinkModule = {
         if (type !== 'offer') { failure(id, 'the engine must send an offer'); return false; }
         void (async () => {
             try {
-                await session.peer.setRemoteDescription({ type: 'offer', sdp: sdp.replace(PLAYOUT_DELAY, '') });
+                await session.peer.setRemoteDescription({ type: 'offer', sdp: preferH264(sdp.replace(PLAYOUT_DELAY, '')) });
                 if (session.closed) return;
                 session.remoteSet = true;
                 for (const candidate of session.candidates.splice(0)) await session.peer.addIceCandidate(candidate);

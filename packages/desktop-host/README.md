@@ -36,6 +36,16 @@ a source build with a static VP9 library.
   re-codes a still desktop once at a fine quantizer so it reads sharp. Motion
   the CPU cannot code at the frame rate is coded at half size until it stops
   or shrinks enough to keep up; the refinement pass is always full size.
+- **Encode H.264 as well**, for a receiver that asks for it. The engine offers
+  VP9 first and H.264 beside it, and codes whichever the receiver's answer puts
+  first, so VP9 stays the default; the iOS receiver asks for H.264 because iOS
+  decodes it in hardware and VP9 in software. H.264 comes from the platform's
+  encoder, loaded at runtime — VideoToolbox on macOS, NVENC or VA-API on Linux —
+  and otherwise from Cisco's prebuilt openh264, which the engine downloads from
+  Cisco on first need and checks against Cisco's published hash. openh264 is
+  never built from source or shipped in this package (OpenH264 Video Codec
+  provided by Cisco Systems, Inc.). See `docs/PROTOCOL.md` (*Capabilities*,
+  *Codecs*).
 - **Transport** with WebRTC — ICE, DTLS, SRTP, RTP — and one data channel for the
   session's pointer/keyboard/clipboard.
 - **Carry** video the consumer encoded itself, on an `encoded` source: Annex-B

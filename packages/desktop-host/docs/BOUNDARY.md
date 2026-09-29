@@ -20,8 +20,9 @@ apply authenticated input to the same desktop".
 - In: `session.open`, SDP/ICE, scoped WebRTC control-channel input, explicit
   clipboard read/write, close — and `session.feed`, which supplies the access
   units of a consumer-encoded `encoded` source. See `docs/PROTOCOL.md`.
-- Out: one video track — VP9 the engine encodes from a captured desktop, or
-  H.264 it only packetizes for a consumer-fed `encoded` source, whose control
+- Out: one video track — VP9 or H.264 (the receiver's answer picks) the engine
+  encodes from a captured desktop, or H.264 it only packetizes for a
+  consumer-fed `encoded` source, whose control
   messages are forwarded to the consumer instead of applied — and session
   notifications. Metrics are a request, not an event; the wire contract is in
   `docs/PROTOCOL.md`.
@@ -47,8 +48,10 @@ local gestures into that session's input".
 - `session.showKeyboard()/hideKeyboard()`,
   `session.copyRemoteToLocal()/pasteLocalToRemote()` are the control primitives
   the app mounts wherever it wants.
-- Native side owns the video decoder factory selection (hardware VP9 rather
-  than the underlying wrapper's software default), the renderer and the IME/text
+- Native side owns the video decoder factory selection (on Android, hardware
+  VP9 rather than the underlying wrapper's software default; on iOS, whose
+  WebRTC decodes VP9 only in software, the receiver asks for H.264, which it
+  decodes in hardware), the renderer and the IME/text
   connection. For input enablement and release on background/unmount, see the
   [client contract](../../desktop-client/README.md#what-the-package-guarantees).
 - The app supplies `authorize()` (a short-lived, engine-scoped capability plus
@@ -88,6 +91,9 @@ local gestures into that session's input".
 | Portal ScreenCast + PipeWire fd | `ashpd` (zbus) | MIT |
 | PipeWire stream client | `pipewire` | MIT |
 | VP9 encode | libvpx | BSD-3-Clause |
+| H.264 encode (macOS) | VideoToolbox (system framework) | Apple SDK |
+| H.264 encode (Linux GPU) | NVENC, VA-API — loaded at runtime from the driver | NVIDIA driver / libva MIT |
+| H.264 encode (Linux, no GPU encoder) | Cisco's prebuilt openh264, downloaded at runtime, never built or shipped | BSD-2-Clause (Cisco's binary licence) |
 | Virtual mouse/keyboard | inputtino (uinput/libevdev) | MIT |
 | Clipboard read/write | `wl-clipboard-rs` | MIT |
 | Keyboard layout mapping | `xkbcommon` | MIT |

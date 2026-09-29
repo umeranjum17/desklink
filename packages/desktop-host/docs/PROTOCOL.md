@@ -77,7 +77,8 @@ arrives, every other request is refused the same way; `capabilities` and
 ## macOS
 
 macOS speaks protocol 3 and shares the session lifecycle below. It captures the
-selected display with ScreenCaptureKit, encodes VP9, and uses the same WebRTC
+selected display with ScreenCaptureKit, encodes VP9 (and H.264 through
+VideoToolbox, for a receiver that asks for it), and uses the same WebRTC
 offer, ICE, control-channel, lease, and metrics flow as Linux. Capture currently
 uses one bounded ScreenCaptureKit stream (three-frame queue); the backend may
 supply fewer frames. Audio is not captured.
@@ -119,7 +120,8 @@ session may require fresh consent. The macOS engine requires a VP9-enabled build
     "cursor": "embedded",
     "audio": false
   },
-  "encode": {"codecs": ["vp9"], "hardware": false},
+  "encode": {"codecs": ["vp9", "h264"], "hardware": false,
+             "h264": {"encoder": "vaapi", "hardware": true}},
   "input": {
     "mechanism": "inputtino/uinput",
     "pointer": true, "wheel": true, "keyboard": true,
@@ -132,6 +134,28 @@ session may require fresh consent. The macOS engine requires a VP9-enabled build
   "encoded": {"codecs": ["h264"]}
 }
 ```
+
+`encode` describes what the engine codes from a captured desktop. VP9 (libvpx,
+software; `hardware` describes it) is always there and is the default. `h264`
+appears in `codecs` when an H.264 encoder starts on this machine right now, and
+`encode.h264.encoder` names it: `videotoolbox` on macOS; on Linux `nvenc` or
+`vaapi` when the GPU has an H.264 encoder, else `openh264`, Cisco's prebuilt
+library. `encoder` is `null` when there is none. The answer to the offer picks
+between them (see *Codecs* below).
+
+openh264 is never part of this package: the engine loads only Cisco's own
+binary, checked against its published SHA-256, from
+`$XDG_CACHE_HOME/desklink/openh264/` (else `~/.cache/desklink/openh264/`). When a
+Linux machine has no hardware H.264 encoder and the library is not there yet,
+the first captured `session.open` downloads it from Cisco
+(`ciscobinary.openh264.org`) before making its offer; that session is offered
+VP9 alone if the download fails. `capabilities` itself never downloads.
+`DESKLINK_OPENH264=off` in the engine's environment disables openh264 (no
+download, no load); `DESKLINK_OPENH264=<path>` loads that file instead, still
+only if its hash is Cisco's. `DESKLINK_H264_ENCODER=<name>` restricts the engine
+to one H.264 encoder (`off` for none), for measuring one backend. Cisco's
+licence asks that this be stated: OpenH264 Video Codec provided by Cisco
+Systems, Inc.
 
 `encoded` lists the codecs this build will carry when the consumer supplies the
 video itself (see *Encoded sources*): a consumer reads it rather than inferring
@@ -252,6 +276,27 @@ the SDP and candidates to the client and brings back the answer.
 
 A candidate that arrives before the remote description is buffered, not dropped.
 
+#### Codecs
+
+For a captured desktop the offer's video section lists VP9 (payload type 98)
+and, when `capabilities.encode.codecs` has `h264` and the encoded surface is
+within H.264 level 5.2 (at most 36864 16x16 macroblocks, e.g. 4096x2304 — a
+5K surface is offered VP9 alone), H.264 after it (payload type
+102, `packetization-mode=1`, Constrained Baseline, `profile-level-id=42e034`
+with `level-asymmetry-allowed=1`). The engine codes whichever of the two the
+answer lists first. A receiver that applies the offer as it comes answers in
+the offer's order and gets VP9, as before; a receiver that wants H.264 puts it
+first — with `setCodecPreferences` before `createAnswer`, or by moving its
+payload type to the front of the offer's `m=video` line before applying it.
+The iOS receiver in `@desklink/client` does the latter, because iOS decodes
+H.264 in hardware and VP9 in software; the web and Android receivers keep VP9.
+The choice is made by the first answer and kept for the session, ICE restarts
+included; the encoder starts after that answer, so the first frame sent is
+already in the chosen codec. H.264 is coded at the full encoded size throughout
+(no half-size motion), with an IDR carrying its SPS and PPS only for the first
+frame and on a receiver's request. An `encoded` source offers H.264 alone, as
+described under *Encoded sources*.
+
 The offer negotiates the `playout-delay` RTP header extension
 (`http://www.webrtc.org/experiments/rtp-hdrext/playout-delay`), and every video
 packet asks for a playout delay of 0: a receiver that honours it shows each
@@ -360,7 +405,7 @@ Metrics are a request, not a notification:
 {"id":7,"result":{"captured_frames":812,"dropped_frames":3,"encoded_frames":809,
   "encoded_bytes":12345678,"key_frames":1,"refined_frames":37,"halved_frames":0,"motion_frames":770,
   "encode_micros":7390000,"target_kbps":16430,"input_applied":44,"input_rejected":0,
-  "fed_frames":0,"input_forwarded":0,
+  "fed_frames":0,"input_forwarded":0,"codec":"vp9","encoder":"libvpx",
   "capture_micros":14100000,"convert_micros":3200000,
   "queue_micros":410000,"send_micros":180000}}
 ```
@@ -381,7 +426,9 @@ FIR), and when the coded size changes that way, so a receiver never has to scale
 references across a size change. `target_kbps` is the current rate target after
 any back-off: for a standing queue on the path, measured from the receiver's
 transport-wide congestion feedback (RTP `transport-cc`), and for the loss
-its receiver reports carry.
+its receiver reports carry. `codec` is what frames go out in
+(`vp9` or `h264`) and `encoder` what codes them (`libvpx`, `videotoolbox`,
+`nvenc`, `vaapi` or `openh264`); both are empty for an encoded source.
 
 Per-stage timings (the L0 lab harness reads these, and every later lane cites
 them). Each is a cumulative microsecond counter; divide by the frame count

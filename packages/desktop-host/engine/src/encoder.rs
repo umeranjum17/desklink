@@ -182,6 +182,69 @@ impl Encoder {
     }
 }
 
+/// Whichever encoder a session's answer chose: VP9, which every session
+/// starts with, or H.264 once a receiver prefers it (see `crate::h264`).
+pub enum VideoEncoder {
+    Vp9(Encoder),
+    H264 {
+        backend: Box<dyn crate::h264::Backend>,
+        size: (usize, usize),
+    },
+}
+
+impl VideoEncoder {
+    /// `half` is VP9's: H.264 codes every frame at full size.
+    pub fn encode(&mut self, frame: &I420, keyframe: bool, half: bool) -> Result<EncodedFrame> {
+        match self {
+            Self::Vp9(encoder) => encoder.encode(frame, keyframe, half),
+            Self::H264 { backend, size } => {
+                fits(frame, *size)?;
+                backend.encode(frame, keyframe)
+            }
+        }
+    }
+
+    pub fn refine(&mut self, frame: &I420) -> Result<EncodedFrame> {
+        match self {
+            Self::Vp9(encoder) => encoder.refine(frame),
+            Self::H264 { backend, size } => {
+                fits(frame, *size)?;
+                backend.refine(frame)
+            }
+        }
+    }
+
+    pub fn set_bitrate(&mut self, bitrate_kbps: u32) -> Result<()> {
+        match self {
+            Self::Vp9(encoder) => encoder.set_bitrate(bitrate_kbps),
+            Self::H264 { backend, .. } => backend.set_bitrate(bitrate_kbps.max(1)),
+        }
+    }
+
+    pub fn size(&self) -> (usize, usize) {
+        match self {
+            Self::Vp9(encoder) => (encoder.width, encoder.height),
+            Self::H264 { size, .. } => *size,
+        }
+    }
+}
+
+/// The H.264 backends hand `frame.data` to C, which reads a whole I420 frame
+/// of the size they were opened at: refuse anything else here, once.
+fn fits(frame: &I420, (width, height): (usize, usize)) -> Result<()> {
+    if (frame.width, frame.height) != (width, height) {
+        anyhow::bail!(
+            "encoder is {width}x{height} but was given {}x{}",
+            frame.width,
+            frame.height
+        );
+    }
+    if frame.data.len() < width * height + 2 * (width / 2) * (height / 2) {
+        anyhow::bail!("a {width}x{height} frame is short of its planes");
+    }
+    Ok(())
+}
+
 impl Drop for Encoder {
     fn drop(&mut self) {
         if !self.native.is_null() {

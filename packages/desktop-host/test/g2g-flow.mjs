@@ -12,7 +12,13 @@
  *
  *   node packages/desktop-host/test/g2g-flow.mjs [--size 1920x1080] [--max-fps 60]
  *     [--seconds 15] [--scenarios typing,scroll,still] [--gate]
- *     [--baseline <file>] [--require-load-gate] [--netem '<netem args>']
+ *     [--baseline <file>] [--require-load-gate] [--netem '<netem args>'] [--codec vp9|h264]
+ *
+ * `--codec h264` has the page ask for H.264 the way the iOS receiver does (H.264
+ * first in the offer it applies); the default applies the offer as it comes,
+ * as the web and Android receivers do, and gets VP9. Either way the run fails
+ * unless the browser decodes that codec and the engine's metrics say it coded
+ * it (`DESKLINK_H264_ENCODER` picks the engine's H.264 backend).
  *
  * Scenarios: `typing` (stamp only), `scroll` (full-screen motion) and `still`
  * (the stamp freezes 2 s after mapping, to check the refine pass still runs).
@@ -70,6 +76,8 @@ const seconds = Number(flag('seconds', '15'));
 assert(Number.isInteger(seconds) && seconds >= 5, '--seconds must be at least 5');
 const scenarios = (flag('scenarios', 'typing,scroll,still') ?? '').split(',').filter(Boolean);
 assert(scenarios.length > 0 && scenarios.every((s) => ['typing', 'scroll', 'still'].includes(s)), '--scenarios must be typing,scroll,still');
+const codec = flag('codec', 'vp9');
+assert(['vp9', 'h264'].includes(codec), '--codec must be vp9 or h264');
 const gate = args.includes('--gate');
 const baselinePath = flag('baseline', null);
 const requireLoadGate = args.includes('--require-load-gate');
@@ -474,7 +482,7 @@ async function runScenario(scenario, vite) {
     }
     assert(bridgeUp, `bridge never listened: ${bridgeOut.slice(-500)}`);
 
-    const pageUrl = `${vite.url}packages/desktop-host/test/g2g-flow.html?engine=${encodeURIComponent(bridgeUrl)}&width=${sizeW}&height=${sizeH}`;
+    const pageUrl = `${vite.url}packages/desktop-host/test/g2g-flow.html?engine=${encodeURIComponent(bridgeUrl)}&width=${sizeW}&height=${sizeH}&codec=${codec}`;
     const chrome = await startChrome(chromeBinary, pageUrl);
     let stamp = null;
     try {
@@ -534,6 +542,8 @@ async function runScenario(scenario, vite) {
                 send_ms_mean: m.encoded_frames > 0 ? Math.round((m.send_micros / m.encoded_frames / 1000) * 100) / 100 : null,
             },
             receiver: {
+                codec: inbound.codec ?? null,
+                decoder: inbound.decoder ?? null,
                 decoded: inbound.framesDecoded ?? result.stats.decoded,
                 dropped: inbound.framesDropped ?? result.stats.droppedDecoded,
                 decode_ms_mean: decodeMean !== null ? Math.round(decodeMean * 100) / 100 : null,
@@ -542,6 +552,10 @@ async function runScenario(scenario, vite) {
             load: { before: loadBefore.one, after: loadAfter.one, nproc: loadAfter.nproc, gate_ok: loadBefore.gate_ok && loadAfter.gate_ok },
         };
         console.log(JSON.stringify(line));
+        // The receiver decodes the codec it asked for, and the engine codes it.
+        const wanted = codec === 'h264' ? 'video/H264' : 'video/VP9';
+        assert.equal(line.receiver.codec, wanted, `the receiver decodes ${wanted}`);
+        assert.equal(m.codec, codec, `the engine codes ${codec}`);
         return line;
     } finally {
         await chrome.close().catch(() => undefined);

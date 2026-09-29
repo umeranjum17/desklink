@@ -11,6 +11,7 @@
  *   node notices.mjs <inputs> > THIRD_PARTY_LICENSES.txt
  *
  * `<inputs>` is laid out by `linux-x64-gnu.Dockerfile`: cargo-metadata.json,
+ * nv-codec-headers/, libva/,
  * libvpx/, inputtino/ and Apache-2.0.txt.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -109,6 +110,7 @@ for (const pkg of linked) {
         const options = pkg.license.replaceAll('/', ' OR ').split(/[\s()]+/);
         if (options.includes('Apache-2.0')) texts = [apache];
         else if (options.includes('MIT')) texts = [mitText(pkg.authors)];
+        else if (options.includes('BSD-2-Clause')) texts = [bsd2Text(pkg.authors)];
         else throw new Error(`no licence text for ${pkg.name}@${pkg.version} (${pkg.license})`);
     }
     for (const text of texts) {
@@ -123,15 +125,26 @@ function mitText(authors) {
     return `Copyright (c) ${holders}\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.`;
 }
 
+function bsd2Text(authors) {
+    const holders = authors.length > 0 ? authors.join(', ') : 'the authors';
+    return `Copyright (c) ${holders}\nAll rights reserved.\n\nRedistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:\n\n1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.\n\n2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.\n\nTHIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.`;
+}
+
 const rule = (title) => `\n\n${title}\n${'='.repeat(title.length)}\n\n`;
 let out = `Third-party notices for the desklink-host executable
 
 The executable is licensed Apache-2.0. It links the components below into
 itself; each keeps its own licence, reproduced here as that licence requires.
 Libraries it loads from the system at run time (glibc, libstdc++, libpipewire,
-libxkbcommon, libevdev, libXcursor, libX11, libwayland-client) are not part of it and are not reproduced.`;
+libxkbcommon, libevdev, libXcursor, libX11, libwayland-client) are not part of it and are not reproduced.
+Neither are the H.264 encoders it loads at run time only when present: the
+NVIDIA driver's NVENC and CUDA libraries, libva with its driver, and Cisco's
+prebuilt openh264 library, which the engine downloads from Cisco and never
+ships (OpenH264 Video Codec provided by Cisco Systems, Inc.).`;
 out += rule('libvpx (BSD-3-Clause), linked statically') + licenceTexts(join(inputs, 'libvpx')).join('\n\n');
 out += rule('inputtino (MIT), vendored and linked statically') + licenceTexts(join(inputs, 'inputtino')).join('\n\n');
+out += rule('NVENC API header from nv-codec-headers (MIT), vendored and compiled in') + licenceTexts(join(inputs, 'nv-codec-headers')).join('\n\n');
+out += rule('libva public headers (MIT), vendored and compiled in') + licenceTexts(join(inputs, 'libva')).join('\n\n');
 out += rule('The Rust standard library (MIT OR Apache-2.0), linked statically')
     + 'Its copyright and licence notices, and those of its own dependencies, are in\nCOPYRIGHT-rust-library.html beside this file, as the Rust project ships them.';
 out += rule(`Rust crates (${linked.length})`) + linked.map((pkg) => `${pkg.name} ${pkg.version}  ${pkg.license}`).join('\n');

@@ -23,6 +23,16 @@ mod encoder;
 #[cfg(all(target_os = "macos", desklink_vpx))]
 mod encoder;
 #[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
+mod h264;
+#[cfg(target_os = "linux")]
+mod h264_nvenc;
+#[cfg(target_os = "linux")]
+mod h264_openh264;
+#[cfg(target_os = "linux")]
+mod h264_vaapi;
+#[cfg(all(target_os = "macos", desklink_vpx))]
+mod h264_vt;
+#[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
 mod indicator;
 #[cfg(target_os = "linux")]
 mod input;

@@ -1,4 +1,4 @@
-//! The WebRTC handoff: one VP9 video track out, one control data channel in.
+//! The WebRTC handoff: one video track out, one control data channel in.
 //!
 //! The engine is the offerer. The consumer's own authenticated channel carries
 //! the SDP and ICE candidates to the client and brings the answer back; this
@@ -65,6 +65,10 @@ pub const H264_PAYLOAD_TYPE: PayloadType = 102;
 pub enum VideoCodec {
     /// VP9 in flexible mode, encoded by this engine from captured frames.
     Vp9,
+    /// Captured frames again, offered as VP9 first and H.264 second: the
+    /// receiver's answer picks, so one that states no preference keeps VP9,
+    /// and one whose platform decodes only H.264 in hardware can ask for it.
+    Vp9OrH264,
     /// H.264 the consumer encoded and feeds. The profile-level-id is read from
     /// the fed stream's own SPS, so a receiver's decoder is configured for the
     /// profile actually arriving rather than for one the engine guessed.
@@ -87,8 +91,8 @@ fn vp9_codec() -> RTCRtpCodecParameters {
 
 /// H.264 with `packetization-mode=1`, which is what the device helpers emit and
 /// what every WebRTC receiver implements. Key frame requests are negotiated so
-/// the receiver has a defined way to ask; the engine turns one into a
-/// `session.keyframeRequest` for the consumer that owns the encoder.
+/// the receiver has a defined way to ask; for a fed stream the engine turns one
+/// into a `session.keyframeRequest` for the consumer that owns the encoder.
 fn h264_codec(profile_level_id: &str) -> RTCRtpCodecParameters {
     RTCRtpCodecParameters {
         rtp_codec: RTCRtpCodec {
@@ -127,6 +131,38 @@ pub fn h264_profile_level_id(annex_b: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+/// Whether an answer puts H.264 ahead of VP9 on its video section: the
+/// receiver's preference, which the codec it is sent follows.
+fn answer_prefers_h264(sdp: &str) -> bool {
+    let Some(video) = sdp
+        .split("\nm=")
+        .find(|section| section.trim_start_matches("m=").starts_with("video "))
+    else {
+        return false;
+    };
+    let mut lines = video.lines();
+    let formats: Vec<&str> = lines
+        .next()
+        .map(|line| line.split_whitespace().skip(3).collect())
+        .unwrap_or_default();
+    let names: Vec<(&str, &str)> = lines
+        .filter_map(|line| line.trim_end().strip_prefix("a=rtpmap:"))
+        .filter_map(|map| map.split_once(' '))
+        .collect();
+    formats
+        .iter()
+        .find_map(|format| {
+            let (_, name) = names.iter().find(|(pt, _)| pt == format)?;
+            let name = name.split('/').next()?.to_ascii_uppercase();
+            match name.as_str() {
+                "H264" => Some(true),
+                "VP9" => Some(false),
+                _ => None,
+            }
+        })
+        .unwrap_or(false)
 }
 
 /// NAL type 7: sequence parameter set.
@@ -720,7 +756,13 @@ pub struct VideoPeer {
     packetizer: Mutex<Packetizer>,
     ssrc: u32,
     control: Arc<dyn DataChannel>,
-    payload_type: PayloadType,
+    /// The payload type frames go out on; H.264's once an answer to a
+    /// `Vp9OrH264` offer prefers it.
+    payload_type: std::sync::atomic::AtomicU8,
+    /// Offered H.264 beside VP9, for the answer to pick.
+    offers_h264: bool,
+    /// The answer picked H.264: the encoder has to follow.
+    sends_h264: AtomicBool,
     /// Loss fractions (RFC 3550, /256) the far end reported, oldest first.
     loss: Arc<Mutex<Vec<u8>>>,
     /// The latest queueing delay transport-wide feedback showed, if any.
@@ -748,13 +790,22 @@ impl VideoPeer {
         let runtime = default_runtime().context("no WebRTC runtime is enabled")?;
 
         let mut media_engine = MediaEngine::default();
-        let video_codec = match &codec {
-            VideoCodec::Vp9 => vp9_codec(),
-            VideoCodec::H264 { profile_level_id } => h264_codec(profile_level_id),
+        // In preference order: the offer lists them so, and a receiver that
+        // states no preference of its own answers with the first.
+        let video_codecs = match &codec {
+            VideoCodec::Vp9 => vec![vp9_codec()],
+            VideoCodec::Vp9OrH264 => vec![
+                vp9_codec(),
+                h264_codec(crate::h264::PROFILE_LEVEL_ID),
+            ],
+            VideoCodec::H264 { profile_level_id } => vec![h264_codec(profile_level_id)],
         };
-        media_engine
-            .register_codec(video_codec.clone(), RtpCodecKind::Video)
-            .with_context(|| format!("failed to offer {codec:?}"))?;
+        let video_codec = video_codecs[0].clone();
+        for offered in &video_codecs {
+            media_engine
+                .register_codec(offered.clone(), RtpCodecKind::Video)
+                .with_context(|| format!("failed to offer {codec:?}"))?;
+        }
         media_engine
             .register_header_extension(
                 RTCRtpHeaderExtensionCapability {
@@ -836,14 +887,19 @@ impl VideoPeer {
                 String::from("desktop"),
                 String::from("desktop"),
                 RtpCodecKind::Video,
-                vec![RTCRtpEncodingParameters {
-                    rtp_coding_parameters: RTCRtpCodingParameters {
-                        ssrc: Some(ssrc),
+                // One encoding per offered codec is how a track states its
+                // codec preferences; one stream is sent, on the first.
+                video_codecs
+                    .iter()
+                    .map(|offered| RTCRtpEncodingParameters {
+                        rtp_coding_parameters: RTCRtpCodingParameters {
+                            ssrc: Some(ssrc),
+                            ..Default::default()
+                        },
+                        codec: offered.rtp_codec.clone(),
                         ..Default::default()
-                    },
-                    codec: video_codec.rtp_codec.clone(),
-                    ..Default::default()
-                }],
+                    })
+                    .collect(),
             )));
         let sender = peer
             .add_track(Arc::clone(&track) as Arc<dyn TrackLocal>)
@@ -874,7 +930,7 @@ impl VideoPeer {
         ));
 
         let packetizer = match &codec {
-            VideoCodec::Vp9 => Packetizer::Vp9(Vp9Packetizer::new()),
+            VideoCodec::Vp9 | VideoCodec::Vp9OrH264 => Packetizer::Vp9(Vp9Packetizer::new()),
             VideoCodec::H264 { .. } => Packetizer::H264(H264Packetizer::new(
                 video_codec
                     .rtp_codec
@@ -896,7 +952,9 @@ impl VideoPeer {
                 packetizer: Mutex::new(packetizer),
                 ssrc,
                 control,
-                payload_type,
+                payload_type: std::sync::atomic::AtomicU8::new(payload_type),
+                offers_h264: codec == VideoCodec::Vp9OrH264,
+                sends_h264: AtomicBool::new(false),
                 loss,
                 path,
                 feedback,
@@ -908,6 +966,7 @@ impl VideoPeer {
 
     pub async fn accept_answer(&self, sdp: String) -> Result<usize> {
         let answer = RTCSessionDescription::answer(sdp).context("the answer is not valid SDP")?;
+        let prefers_h264 = self.offers_h264 && answer_prefers_h264(&answer.sdp);
         self.peer
             .set_remote_description(answer)
             .await
@@ -924,11 +983,24 @@ impl VideoPeer {
             }
         }
         self.playout_delay.store(playout_delay, Ordering::SeqCst);
-        let held = {
+        let (first, held) = {
             let mut state = lock(&self.candidates);
+            let first = !state.ready;
             state.ready = true;
-            std::mem::take(&mut state.held)
+            (first, std::mem::take(&mut state.held))
         };
+        // The first answer picks the codec, before any frame has gone out; an
+        // ICE restart's answer comes from the same receiver and keeps it.
+        if first && prefers_h264 {
+            let payloader = h264_codec(crate::h264::PROFILE_LEVEL_ID)
+                .rtp_codec
+                .payloader()
+                .context("the media engine has no H.264 payloader")?;
+            *lock(&self.packetizer) = Packetizer::H264(H264Packetizer::new(payloader));
+            self.payload_type
+                .store(H264_PAYLOAD_TYPE, Ordering::SeqCst);
+            self.sends_h264.store(true, Ordering::SeqCst);
+        }
         let mut applied = 0;
         for candidate in held {
             // Each was acknowledged when it arrived; a bad one must not turn the
@@ -986,6 +1058,11 @@ impl VideoPeer {
             .context("the peer refused an ICE candidate")
     }
 
+    /// Whether the answer asked for H.264 rather than VP9.
+    pub fn sends_h264(&self) -> bool {
+        self.sends_h264.load(Ordering::SeqCst)
+    }
+
     /// Whether the transport is connected; a frame sent before it is lost.
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::SeqCst)
@@ -1006,7 +1083,7 @@ impl VideoPeer {
             keyframe,
             captured,
             self.ssrc,
-            self.payload_type,
+            self.payload_type.load(Ordering::SeqCst),
         )?;
         let extensions: &[HeaderExtension] = if self.playout_delay.load(Ordering::SeqCst) {
             &[NO_PLAYOUT_DELAY]
@@ -1066,7 +1143,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1118,10 +1195,20 @@ mod tests {
     impl PeerConnectionEventHandler for NoopHandler {}
 
     async fn answerer(offer: &str) -> Arc<dyn PeerConnection> {
+        answerer_with(offer, vec![vp9_codec()]).await
+    }
+
+    /// A receiver that decodes `codecs`, in its order of preference.
+    pub(crate) async fn answerer_with(
+        offer: &str,
+        codecs: Vec<RTCRtpCodecParameters>,
+    ) -> Arc<dyn PeerConnection> {
         let mut media_engine = MediaEngine::default();
-        media_engine
-            .register_codec(vp9_codec(), RtpCodecKind::Video)
-            .expect("VP9 registers");
+        for codec in codecs {
+            media_engine
+                .register_codec(codec, RtpCodecKind::Video)
+                .expect("the codec registers");
+        }
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)
             .expect("interceptors register");
         let peer = PeerConnectionBuilder::<std::net::SocketAddr>::new()
@@ -1169,6 +1256,92 @@ mod tests {
             !offer.contains("VP9"),
             "an encoded source must not also offer the codec it cannot encode: {offer}",
         );
+    }
+
+    fn transport() -> TransportOptions {
+        TransportOptions {
+            ice_servers: Vec::new(),
+            loopback_tcp: false,
+            pace_bps: 20_000_000.0,
+        }
+    }
+
+    /// The answer `codecs` make to a `Vp9OrH264` offer, applied to its peer.
+    pub(crate) async fn answered(codecs: Vec<RTCRtpCodecParameters>) -> (VideoPeer, String) {
+        let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (peer, offer) = VideoPeer::offer(transport(), events, VideoCodec::Vp9OrH264)
+            .await
+            .expect("a peer connection");
+        let other = answerer_with(&offer, codecs).await;
+        let answer = other.create_answer(None).await.expect("an answer");
+        other
+            .set_local_description(answer.clone())
+            .await
+            .expect("a local description");
+        peer.accept_answer(answer.sdp.clone())
+            .await
+            .expect("the answer is accepted");
+        (peer, answer.sdp)
+    }
+
+    pub(crate) fn h264_receiver_codec() -> RTCRtpCodecParameters {
+        h264_codec(crate::h264::PROFILE_LEVEL_ID)
+    }
+
+    #[tokio::test]
+    async fn a_captured_offer_puts_vp9_first_and_h264_second() {
+        let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_peer, offer) = VideoPeer::offer(transport(), events, VideoCodec::Vp9OrH264)
+            .await
+            .expect("a peer connection");
+        let video = offer
+            .lines()
+            .find(|line| line.starts_with("m=video "))
+            .expect("a video section");
+        assert!(
+            video.ends_with(&format!(" {VP9_PAYLOAD_TYPE} {H264_PAYLOAD_TYPE}")),
+            "VP9 is the default a receiver with no preference answers with: {video}",
+        );
+        assert!(
+            offer.contains(&format!(
+                "a=fmtp:{H264_PAYLOAD_TYPE} level-asymmetry-allowed=1;packetization-mode=1;profile-level-id={}",
+                crate::h264::PROFILE_LEVEL_ID
+            )),
+            "H.264 is offered as the Constrained Baseline every backend emits: {offer}",
+        );
+    }
+
+    #[tokio::test]
+    async fn the_receivers_first_codec_is_the_one_sent() {
+        let (peer, answer) = answered(vec![vp9_codec(), h264_receiver_codec()]).await;
+        assert!(
+            !peer.sends_h264(),
+            "a receiver that keeps the offer's order gets VP9: {answer}"
+        );
+        let (peer, answer) = answered(vec![h264_receiver_codec()]).await;
+        assert!(peer.sends_h264(), "an H.264 receiver gets H.264: {answer}");
+        assert_eq!(
+            peer.payload_type.load(Ordering::SeqCst),
+            H264_PAYLOAD_TYPE,
+            "frames go out on the payload type the answer kept",
+        );
+    }
+
+    #[test]
+    fn an_answer_is_read_for_its_video_sections_first_known_codec() {
+        let answer = |formats: &str| {
+            format!(
+                "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n\
+                 m=video 9 UDP/TLS/RTP/SAVPF {formats}\r\nc=IN IP4 0.0.0.0\r\n\
+                 a=rtpmap:96 rtx/90000\r\na=rtpmap:98 VP9/90000\r\na=rtpmap:102 H264/90000\r\n\
+                 m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=rtpmap:5 H264/90000\r\n"
+            )
+        };
+        assert!(answer_prefers_h264(&answer("102 98")));
+        assert!(answer_prefers_h264(&answer("96 102 98")), "rtx is skipped");
+        assert!(!answer_prefers_h264(&answer("98 102")));
+        assert!(!answer_prefers_h264(&answer("98")));
+        assert!(!answer_prefers_h264("v=0\r\n"), "no video, no H.264");
     }
 
     #[tokio::test]

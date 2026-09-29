@@ -17,6 +17,29 @@ licences.
     f4ce2b0df536ef309e9ff318f75b460f7097d7c1; its LICENSE file is retained
     alongside its source.
 
+  NVENC API header             MIT (Copyright NVIDIA Corporation)
+    nvEncodeAPI.h from nv-codec-headers n10.0.26.2 (commit
+    43adb856807855d7742da53181b181e4ef25344a), vendored unmodified under
+    engine/vendor/nv-codec-headers with its licence. Declarations only; the
+    NVIDIA driver's NVENC and CUDA libraries are loaded at run time when
+    present and are neither linked nor shipped.
+
+  libva public headers          MIT (Copyright Intel Corporation)
+    From libva 2.24.0, vendored under engine/vendor/libva with its COPYING.
+    Declarations only; the system libva and its driver are loaded at run time
+    when present and are neither linked nor shipped.
+
+  VideoToolbox                  Apple system framework (macOS)
+    H.264 encoding on macOS, linked as an operating-system framework.
+
+  openh264                      BSD-2-Clause (NOT built, NOT shipped)
+    OpenH264 Video Codec provided by Cisco Systems, Inc. On a Linux machine
+    without a hardware H.264 encoder the engine downloads Cisco's own prebuilt
+    library from Cisco at run time, checks it against Cisco's published
+    SHA-256, and loads it; Cisco's patent licence covers only that binary.
+    No openh264 source is built or distributed by this package. The
+    openh264-sys2 crate (BSD-2-Clause) supplies the loader.
+
   libevdev                      MIT (with a Linux-header GPL notice retained
                                 upstream; no GPL code is linked from it)
     Used by inputtino to open and manage uinput devices.

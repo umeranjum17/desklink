@@ -1,14 +1,20 @@
 //! Native dependencies of the engine.
 //!
 //! The Linux build uses two permissive C libraries, both built or linked from
-//! this machine's own sources — no prebuilt binary is fetched, and nothing is
-//! installed:
+//! this machine's own sources — no prebuilt binary is fetched at build time, and
+//! nothing is installed:
 //!
 //! * libvpx (BSD-3-Clause) — VP9 encode, through `native/vpx_shim.c` so the
 //!   versioned encoder config struct is laid out by a C compiler.
 //! * inputtino (MIT, vendored under `vendor/`) — virtual mouse and keyboard
 //!   over `uinput`/`libevdev`, built by its own CMake project into a static
 //!   library and called through its documented C API.
+//!
+//! H.264 encoding adds no link-time dependency: NVENC and VA-API are loaded with
+//! `dlopen` from the machine's driver at run time, compiled against vendored
+//! MIT headers (`vendor/nv-codec-headers`, `vendor/libva`); openh264 is Cisco's
+//! prebuilt library, fetched by the engine at run time (see `src/h264.rs`). The
+//! macOS build links the VideoToolbox system framework.
 //!
 //! macOS builds only the libvpx shim; ScreenCaptureKit, Quartz input and
 //! AppKit clipboard use native frameworks. Linux runtime input access is still
@@ -25,6 +31,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-check-cfg=cfg(desklink_vpx)");
     println!("cargo:rustc-check-cfg=cfg(desklink_macos_cli)");
     println!("cargo:rerun-if-changed=native/vpx_shim.c");
+    println!("cargo:rerun-if-changed=native/nvenc_shim.c");
+    println!("cargo:rerun-if-changed=native/vaapi_shim.c");
+    println!("cargo:rerun-if-changed=native/vt_shim.c");
     println!("cargo:rerun-if-changed=native/inputtino_shim.cpp");
     println!("cargo:rerun-if-changed=native/mac_stream.mm");
     println!("cargo:rerun-if-changed=native/agent_overlay_mac.m");
@@ -69,6 +78,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if target_os == "linux" {
+        // H.264 through NVENC and VA-API: the driver libraries are dlopen'd at
+        // run time, so building needs only their vendored MIT headers, and a
+        // machine without them still runs the engine.
+        cc::Build::new()
+            .file("native/nvenc_shim.c")
+            .include("vendor/nv-codec-headers/include")
+            .compile("dlnvenc");
+        cc::Build::new()
+            .file("native/vaapi_shim.c")
+            .include("vendor/libva")
+            .compile("dlvaapi");
+        println!("cargo:rustc-link-lib=dl");
         cc::Build::new()
             .file("native/agent_overlay_x11.c")
             .file("native/agent_overlay_wayland.c")
@@ -114,6 +135,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             println!("cargo:rustc-link-lib=static=vpx");
             println!("cargo:rustc-cfg=desklink_vpx");
+            // H.264 for receivers that decode it in hardware; VideoToolbox is a
+            // system framework, so linking it adds no dependency.
+            cc::Build::new().file("native/vt_shim.c").compile("dlvt");
+            println!("cargo:rustc-link-lib=framework=VideoToolbox");
+            println!("cargo:rustc-link-lib=framework=CoreFoundation");
         }
         println!("cargo:rustc-link-lib=framework=CoreGraphics");
         println!("cargo:rustc-link-lib=framework=ApplicationServices");

@@ -5,8 +5,10 @@
  *
  * What it proves:
  *
- *  - the app's `react-native-webrtc` peer answers the engine's real VP9 offer
- *    with VP9 and NACK — both descriptions are written out as they crossed the
+ *  - the app's `react-native-webrtc` peer answers the engine's real offer with
+ *    H.264 and NACK when the host offers H.264 beside VP9 (the host has an
+ *    H.264 encoder), and with VP9 and NACK otherwise — both descriptions are
+ *    written out as they crossed the
  *    bridge, not reconstructed;
  *  - the first frame reaches `presented` (the session goes `live`) and the
  *    simulator shows the desktop, which a screenshot records;
@@ -300,7 +302,7 @@ const out = process.env.DESKLINK_IOS_OUT ?? mkdtempSync(join(tmpdir(), 'desklink
 mkdirSync(out, { recursive: true });
 const work = mkdtempSync(join(tmpdir(), 'desklink-ios-host-'));
 let xvfbPid = 0; let pagePid = 0; let bridgePid = 0; let enginePid = 0;
-let relay = null; let page = null; let udid = null;
+let relay = null; let page = null; let udid = null; let codec = null;
 
 async function cleanup() {
     if (udid !== null) {
@@ -456,11 +458,17 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // ---- descriptions ---------------------------------------------------------------
     assert(crossed.offer !== null && crossed.answer !== null, 'both descriptions crossed the bridge');
     console.log(`---- iOS answer SDP ----\n${crossed.answer.trim()}\n------------------------`);
+    const offered = videoCodecs(crossed.offer);
     const answered = videoCodecs(crossed.answer);
+    log(`offer video codecs: ${offered.map((c) => `${c.codec}/${c.type}`).join('; ')}`);
     log(`answer video codecs: ${answered.map((c) => `${c.codec}/${c.type} [${c.feedback.join(', ')}]`).join('; ')}`);
-    assert.equal(answered[0].codec, 'VP9', 'the receiver answers with VP9, the codec the engine encodes');
-    assert(answered[0].feedback.includes('nack'), 'NACK is negotiated for VP9');
-    assert(answered[0].feedback.includes('nack pli'), 'PLI is negotiated for VP9');
+    // The engine codes the answer's first codec; the receiver puts H.264 first
+    // whenever the host offers it, because iOS decodes it in hardware.
+    const expected = offered.some((c) => c.codec === 'H264') ? 'H264' : 'VP9';
+    assert.equal(answered[0].codec, expected, `the receiver answers with ${expected} first`);
+    assert(answered[0].feedback.includes('nack'), `NACK is negotiated for ${expected}`);
+    assert(answered[0].feedback.includes('nack pli'), `PLI is negotiated for ${expected}`);
+    codec = expected;
 
     // ---- taps -------------------------------------------------------------------------
     const geometry = crossed.opened?.geometry?.encoded;
@@ -605,7 +613,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         assert(hovers > 1, `the pointer's hover moves the desktop's pointer with no button held: ${hovers} buttonless moves at the scroll`);
         log(`hover: ${hovers - 1} buttonless moves from the pointer's hover reports`);
     }
-    console.log(`ok: the iOS receiver shows the live desktop, answers VP9 with NACK, its taps click the host and its hardware input drives it${IPAD ? ', trackpad included' : ''} (${out})`);
+    console.log(`ok: the iOS receiver shows the live desktop, answers ${codec} with NACK, its taps click the host and its hardware input drives it${IPAD ? ', trackpad included' : ''} (${out})`);
 }
 
 let failed = false;

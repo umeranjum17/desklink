@@ -8,7 +8,7 @@
 use crate::capture::{self, Capture};
 use crate::clipboard;
 use crate::convert::{fit, I420};
-use crate::encoder::Encoder;
+use crate::encoder::{Encoder, VideoEncoder};
 use crate::input::{Button, HeldState, InputDevices};
 use crate::keymap::{self, Layout};
 use crate::peer::{
@@ -19,7 +19,7 @@ use crate::protocol::{
     ControlMessage, ControlReply, EncodedCodec, Permission, PointerPhase, SourceRequest,
 };
 use crate::x11::X11Desktop;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -83,6 +83,11 @@ pub struct Metrics {
     pub send_micros: u64,
     /// The current rate target, after any loss back-off.
     pub target_kbps: u32,
+    /// The codec frames go out in, `vp9` or `h264`, and what codes them
+    /// (`libvpx`, `nvenc`, `vaapi`, `openh264`, `videotoolbox`); empty for an
+    /// encoded source, whose consumer is the encoder.
+    pub codec: &'static str,
+    pub encoder: &'static str,
     pub input_applied: u64,
     pub input_rejected: u64,
     /// Access units the consumer fed to an encoded source.
@@ -671,7 +676,7 @@ struct Inner {
     /// offer has to name the profile the stream's own SPS declares.
     peer: Mutex<Option<Arc<VideoPeer>>>,
     /// Absent for an encoded source: the consumer is the encoder.
-    encoder: Mutex<Option<Encoder>>,
+    encoder: Mutex<Option<VideoEncoder>>,
     input: Mutex<Option<InputTarget>>,
     indicator: Mutex<Option<crate::indicator::Indicator>>,
     capture: Mutex<Option<FrameSource>>,
@@ -769,7 +774,7 @@ pub fn capabilities() -> serde_json::Value {
             "cursor": "embedded",
             "audio": false,
         },
-        "encode": { "codecs": ["vp9"], "hardware": false },
+        "encode": encode_capabilities(),
         "input": {
             "mechanism": "inputtino/uinput",
             "pointer": input,
@@ -827,7 +832,7 @@ pub fn capabilities() -> serde_json::Value {
                 "remedy": format!("Allow {} in System Settings › Privacy & Security › Screen & System Audio Recording, then reconnect.", crate::mac::tcc_responsible_app_name())
             }) }
         },
-        "encode": { "codecs": ["vp9"], "hardware": false },
+        "encode": encode_capabilities(),
         "input": {
             "mechanism": "quartz-cgevent",
             "pointer": input,
@@ -841,6 +846,24 @@ pub fn capabilities() -> serde_json::Value {
         "clipboard": { "read": true, "write": true, "mime": ["text/plain;charset=utf-8"],
             "maxBytes": clipboard::MAX_CLIPBOARD_BYTES },
         "encoded": { "codecs": ["h264"] },
+    })
+}
+
+/// `capabilities.encode`: VP9 always, H.264 when an encoder for it starts
+/// here now. `hardware` describes VP9, the default.
+fn encode_capabilities() -> serde_json::Value {
+    let h264 = crate::h264::probe();
+    let mut codecs = vec!["vp9"];
+    if h264.is_some() {
+        codecs.push("h264");
+    }
+    serde_json::json!({
+        "codecs": codecs,
+        "hardware": false,
+        "h264": {
+            "encoder": h264.map(|info| info.encoder),
+            "hardware": h264.is_some_and(|info| info.hardware),
+        },
     })
 }
 
@@ -1150,6 +1173,16 @@ impl Session {
             SessionError::new("input", format!("no keyboard layout: {error:#}"))
         })?;
 
+        // H.264 is offered beside VP9 only when an encoder for it starts on
+        // this machine; the answer then decides which one is coded.
+        let codec = if !crate::h264::fits(width, height) {
+            VideoCodec::Vp9
+        } else {
+            match tokio::task::spawn_blocking(crate::h264::prepare).await {
+                Ok(Some(_)) => VideoCodec::Vp9OrH264,
+                _ => VideoCodec::Vp9,
+            }
+        };
         let (peer_events_tx, peer_events_rx) = tokio_mpsc::unbounded_channel::<PeerEvent>();
         let (peer, offer) = VideoPeer::offer(
             TransportOptions {
@@ -1160,7 +1193,7 @@ impl Session {
                 pace_bps: (bitrate_kbps as f64 * 3_000.0).max(20_000_000.0),
             },
             peer_events_tx,
-            VideoCodec::Vp9,
+            codec,
         )
         .await
         .map_err(|error| SessionError::new("transport", format!("{error:#}")))?;
@@ -1185,7 +1218,7 @@ impl Session {
             capture_error,
             frame_changes,
             peer: Mutex::new(Some(peer.clone())),
-            encoder: Mutex::new(Some(encoder)),
+            encoder: Mutex::new(Some(VideoEncoder::Vp9(encoder))),
             input: Mutex::new(input),
             indicator: Mutex::new(indicator),
             capture: Mutex::new(Some(capture)),
@@ -1589,6 +1622,11 @@ impl Inner {
         self.control_open.store(false, Ordering::SeqCst);
         self.pipeline.store(false, Ordering::SeqCst);
         drop(lock(&self.encoded).take());
+        // The encoder goes now, not with the last handle: a hardware session
+        // still open when the process exits can hang the driver's exit
+        // handlers, and `shutdown` exits right after this. The encode thread
+        // finds it gone and stops.
+        drop(lock(&self.encoder).take());
         if let Ok(mut indicator) = self.indicator.lock() {
             indicator.take();
         }
@@ -2389,7 +2427,10 @@ fn spawn_pipeline(
             let mut rate = RateControl::new(bitrate_kbps);
             if let Ok(mut m) = inner.metrics.lock() {
                 m.target_kbps = bitrate_kbps;
+                (m.codec, m.encoder) = ("vp9", "libvpx");
             }
+            // Whether motion may be coded at half size: VP9's alone.
+            let mut halves = true;
             let mut latest: Option<(I420, Instant)> = None;
             // `pending`: the latest frame has not been coded. `refined`: it has
             // had its refinement pass, or there is nothing to refine.
@@ -2471,10 +2512,33 @@ fn spawn_pipeline(
                 if !cadence.wait(now).is_zero() || !budget.wait(now, rate.target).is_zero() {
                     continue;
                 }
+                if halves && peer.sends_h264() {
+                    // The answer asked for H.264: nothing has been sent yet,
+                    // since frames wait for the transport, which waits for it.
+                    match start_h264(&inner, rate.target, max_fps) {
+                        Ok(()) => {
+                            halves = false;
+                            size = MotionSize::default();
+                            keyframe = true;
+                        }
+                        Err(error) => {
+                            eprintln!("{error:#}");
+                            let reason = String::from("no H.264 encoder could start");
+                            inner.notify(SessionEvent::Revoked {
+                                reason: reason.clone(),
+                            });
+                            let target = inner.clone();
+                            handle.spawn(async move {
+                                target.close(&reason).await;
+                            });
+                            break;
+                        }
+                    }
+                }
                 let pass = if pending || keyframe {
                     Pass::Motion {
                         keyframe,
-                        half: size.half,
+                        half: size.half && halves,
                     }
                 } else if !refined && now.duration_since(still_since) >= REFINE_AFTER {
                     Pass::Refine
@@ -2549,7 +2613,9 @@ fn spawn_pipeline(
                         still_since = now;
                         let budget = rate.target as u64 * 1000 / 8 / max_fps.max(1) as u64;
                         let large = packet.data.len() as u64 * 4 > budget;
-                        size.coded(took, large, frame_rx.waiting(), interval);
+                        if halves {
+                            size.coded(took, large, frame_rx.waiting(), interval);
+                        }
                     }
                     Pass::Refine => {
                         refined = true;
@@ -2594,6 +2660,25 @@ fn spawn_pipeline(
             }
         })
         .ok();
+}
+
+/// Replace the session's VP9 encoder with an H.264 one of the same size and
+/// rate target, on the encode thread that will drive it.
+fn start_h264(inner: &Arc<Inner>, bitrate_kbps: u32, fps: u32) -> Result<()> {
+    let mut held = lock(&inner.encoder);
+    let (width, height) = held
+        .as_ref()
+        .map(VideoEncoder::size)
+        .context("the session has no encoder")?;
+    let (backend, info) = crate::h264::open(width, height, bitrate_kbps, fps)?;
+    *held = Some(VideoEncoder::H264 {
+        backend,
+        size: (width, height),
+    });
+    if let Ok(mut m) = inner.metrics.lock() {
+        (m.codec, m.encoder) = ("h264", info.encoder);
+    }
+    Ok(())
 }
 
 /// Packetize what a consumer feeds an encoded source, building the peer on the
@@ -3023,6 +3108,15 @@ mod tests {
         )
         .await
         .expect("a peer connection builds without a network");
+        test_inner_with(events, peer, 64, 64)
+    }
+
+    fn test_inner_with(
+        events: tokio_mpsc::UnboundedSender<Notice>,
+        peer: VideoPeer,
+        width: usize,
+        height: usize,
+    ) -> (Arc<Inner>, Arc<Mutex<Vec<(i16, bool)>>>) {
         // The pipeline codes nothing before the transport connects.
         peer.assume_connected();
         let recorded = Arc::new(Mutex::new(Vec::new()));
@@ -3049,7 +3143,9 @@ mod tests {
             capture_error: Arc::new(Mutex::new(None)),
             frame_changes: tokio::sync::watch::channel(0).1,
             peer: Mutex::new(Some(Arc::new(peer))),
-            encoder: Mutex::new(Some(Encoder::new(64, 64, 1000, 30, 1).expect("an encoder"))),
+            encoder: Mutex::new(Some(VideoEncoder::Vp9(
+                Encoder::new(width, height, 1000, 30, 1).expect("an encoder"),
+            ))),
             input: Mutex::new(Some(InputTarget {
                 applier: Applier::Recording(recorded.clone()),
                 held: HeldState::default(),
@@ -3893,5 +3989,65 @@ mod tests {
             "a still stream still sends"
         );
         assert_eq!((later.key_frames, later.refined_frames), (1, 1));
+        assert_eq!((later.codec, later.encoder), ("vp9", "libvpx"));
+    }
+
+    #[tokio::test]
+    async fn a_receiver_that_asks_for_h264_is_sent_h264_from_the_first_frame() {
+        let Some(info) = tokio::task::spawn_blocking(crate::h264::probe)
+            .await
+            .unwrap()
+        else {
+            eprintln!("skipped: no H.264 encoder starts on this machine");
+            return;
+        };
+        let (peer, _answer) =
+            crate::peer::tests::answered(vec![crate::peer::tests::h264_receiver_codec()]).await;
+        let (events, _events_rx) = tokio_mpsc::unbounded_channel();
+        let (inner, _recorded) = test_inner_with(events, peer, 320, 240);
+        // The answer is real, so ICE runs and, with no candidates, never
+        // connects; each state it reports would take back `assume_connected`.
+        let pinned = current_peer(&inner).expect("the test's peer");
+        let pin = tokio::spawn(async move {
+            loop {
+                pinned.assume_connected();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let (frame_tx, frame_rx) = latest_frame();
+        spawn_pipeline(
+            &inner,
+            current_peer(&inner).expect("the test's peer"),
+            frame_rx,
+            Arc::new(AtomicBool::new(true)),
+            20,
+            1000,
+        );
+        for shade in 0..10u8 {
+            frame_tx.put(
+                I420 {
+                    width: 320,
+                    height: 240,
+                    data: vec![shade * 20; 320 * 240 * 3 / 2],
+                },
+                Instant::now(),
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // Opening a hardware session can take a good part of a second, more
+        // with other tests holding the GPU: wait for the still to be refined.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while inner.metrics.lock().unwrap().refined_frames == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let metrics = inner.metrics.lock().unwrap().clone();
+        assert_eq!((metrics.codec, metrics.encoder), ("h264", info.encoder));
+        assert!(metrics.encoded_frames >= 2, "{metrics:?}");
+        assert_eq!(metrics.key_frames, 1, "one IDR, then inter frames: {metrics:?}");
+        assert_eq!(metrics.refined_frames, 1, "a still desktop is refined once");
+        assert_eq!(metrics.halved_frames, 0, "H.264 is always coded at full size");
+        pin.abort();
+        inner.close("done").await;
+        assert!(lock(&inner.encoder).is_none(), "closing releases the encoder");
     }
 }

@@ -79,6 +79,8 @@ COPY --from=build /opt/rustup/toolchains/${RUST_VERSION}-x86_64-unknown-linux-gn
 COPY --from=build /opt/libvpx-src/LICENSE /opt/libvpx-src/PATENTS /inputs/libvpx/
 COPY --from=build /tmp/cargo-metadata.json /inputs/
 COPY engine/vendor/inputtino/LICENSE /inputs/inputtino/
+COPY engine/vendor/nv-codec-headers/LICENSE /inputs/nv-codec-headers/
+COPY engine/vendor/libva/COPYING /inputs/libva/
 COPY LICENSE /inputs/Apache-2.0.txt
 COPY release/notices.mjs /notices.mjs
 RUN node /notices.mjs /inputs > /out/THIRD_PARTY_LICENSES.txt
