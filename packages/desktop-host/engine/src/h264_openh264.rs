@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::os::raw::{c_int, c_void};
 use std::path::PathBuf;
+use std::ptr::NonNull;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -49,7 +50,10 @@ const BLOB: Option<(&str, &str)> = None;
 const HOST: &str = "ciscobinary.openh264.org";
 
 pub struct Encoder {
-    native: *mut ISVCEncoder,
+    native: NonNull<ISVCEncoder>,
+    /// Copy of the encoder's vtable, validated at open. Every call goes
+    /// through this, so no path dereferences the library's pointers unchecked.
+    vtable: ISVCEncoderVtbl,
     width: usize,
     height: usize,
     fps: u32,
@@ -79,12 +83,19 @@ impl Encoder {
         let api = DynamicAPI::from_blob_path(&path)
             .map_err(|e| anyhow::anyhow!("cannot load {}: {e}", path.display()))?;
 
-        let mut native: *mut ISVCEncoder = std::ptr::null_mut();
-        if unsafe { api.WelsCreateSVCEncoder(&mut native) } != 0 || native.is_null() {
+        let mut raw: *mut ISVCEncoder = std::ptr::null_mut();
+        if unsafe { api.WelsCreateSVCEncoder(&mut raw) } != 0 {
             anyhow::bail!("openh264 could not create an encoder");
         }
+        let native = NonNull::new(raw).context("openh264 returned a null encoder")?;
+        // The handle's first word is its vtable pointer; reject a null one
+        // here so no later call dereferences an unchecked pointer.
+        let vtable = NonNull::new(unsafe { *native.as_ptr() } as *mut ISVCEncoderVtbl)
+            .context("openh264 returned an encoder with no vtable")?;
+        let vtable = unsafe { *vtable.as_ptr() };
         let mut encoder = Self {
             native,
+            vtable,
             width,
             height,
             fps: fps.max(1),
@@ -104,7 +115,7 @@ impl Encoder {
             .GetDefaultParams
             .context("openh264 lacks GetDefaultParams")?;
         let initialize = vt.InitializeExt.context("openh264 lacks InitializeExt")?;
-        unsafe { get_defaults(encoder.native, &mut params) };
+        unsafe { get_defaults(encoder.native.as_ptr(), &mut params) };
         let bps = (bitrate_kbps.max(1) as c_int).saturating_mul(1000);
         // Camera mode, not screen content: the screen mode switches scene
         // change detection back on whatever it is told, and codes an unasked
@@ -146,15 +157,14 @@ impl Encoder {
             SM_SINGLE_SLICE
         };
         layer.sSliceArgument.uiSliceNum = threads as u32;
-        if unsafe { initialize(encoder.native, &params) } != 0 {
+        if unsafe { initialize(encoder.native.as_ptr(), &params) } != 0 {
             anyhow::bail!("openh264 refused a {width}x{height} encoder at {bitrate_kbps} kbps");
         }
         Ok(encoder)
     }
 
     fn vtable(&self) -> &ISVCEncoderVtbl {
-        // Non-null since WelsCreateSVCEncoder succeeded; lives as long as it.
-        unsafe { &**self.native }
+        &self.vtable
     }
 
     fn option<T>(&mut self, id: openh264_sys2::ENCODER_OPTION, value: &mut T) -> Result<()> {
@@ -162,7 +172,7 @@ impl Encoder {
             .vtable()
             .SetOption
             .context("openh264 lacks SetOption")?;
-        if unsafe { set(self.native, id, value as *mut T as *mut c_void) } != 0 {
+        if unsafe { set(self.native.as_ptr(), id, value as *mut T as *mut c_void) } != 0 {
             anyhow::bail!("openh264 refused option {id}");
         }
         Ok(())
@@ -181,7 +191,7 @@ impl Encoder {
         let mut stats = SEncoderStatistics::default();
         let status = unsafe {
             get(
-                self.native,
+                self.native.as_ptr(),
                 ENCODER_OPTION_GET_STATISTICS,
                 &mut stats as *mut SEncoderStatistics as *mut c_void,
             )
@@ -216,7 +226,7 @@ impl crate::h264::Backend for Encoder {
         let force = vt
             .ForceIntraFrame
             .context("openh264 lacks ForceIntraFrame")?;
-        if keyframe && unsafe { force(self.native, true) } != 0 {
+        if keyframe && unsafe { force(self.native.as_ptr(), true) } != 0 {
             anyhow::bail!("openh264 refused to force an IDR");
         }
         // The encoder only reads the planes; the API is not const-correct.
@@ -240,16 +250,18 @@ impl crate::h264::Backend for Encoder {
             bPsnrV: false,
         };
         self.frames += 1;
-        if unsafe { encode(self.native, &source, &mut *self.bitstream) } != 0 {
+        if unsafe { encode(self.native.as_ptr(), &source, &mut *self.bitstream) } != 0 {
             anyhow::bail!("openh264 rejected a {w}x{h} frame");
         }
         let info = &*self.bitstream;
+        let sizes = validated_layer_sizes(info)?;
         let mut data = Vec::with_capacity(info.iFrameSizeInBytes.max(0) as usize);
-        for layer in &info.sLayerInfo[..info.iLayerNum.clamp(0, 128) as usize] {
-            let lengths = unsafe {
-                std::slice::from_raw_parts(layer.pNalLengthInByte, layer.iNalCount as usize)
-            };
-            let size: usize = lengths.iter().map(|&n| n as usize).sum();
+        for (layer, &size) in info.sLayerInfo[..sizes.len()].iter().zip(&sizes) {
+            if size == 0 {
+                continue;
+            }
+            // Non-null with this length by validated_layer_sizes; copied into
+            // the owned Vec so no borrow of the library's buffers escapes.
             data.extend_from_slice(unsafe { std::slice::from_raw_parts(layer.pBsBuf, size) });
         }
         if data.is_empty() {
@@ -291,12 +303,58 @@ impl crate::h264::Backend for Encoder {
     }
 }
 
+/// Each layer's bitstream size, validated before any slice is built from
+/// what the library handed back: the layer count is clamped to the array,
+/// NAL counts and lengths must be non-negative with their length pointers
+/// present, sums use checked arithmetic, a non-empty layer needs its buffer,
+/// and the running total stays within the reported frame size. Pure over the
+/// header, so tests cover it without the library.
+fn validated_layer_sizes(info: &SFrameBSInfo) -> Result<Vec<usize>> {
+    let layers = info.iLayerNum.clamp(0, info.sLayerInfo.len() as c_int) as usize;
+    let mut sizes = Vec::with_capacity(layers);
+    let mut total = 0usize;
+    for layer in &info.sLayerInfo[..layers] {
+        if layer.iNalCount < 0 {
+            anyhow::bail!("openh264 reported a negative NAL count");
+        }
+        let count = layer.iNalCount as usize;
+        if count > 0 && layer.pNalLengthInByte.is_null() {
+            anyhow::bail!("openh264 reported NALs with no lengths");
+        }
+        let lengths = if count == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(layer.pNalLengthInByte, count) }
+        };
+        let mut size = 0usize;
+        for &len in lengths {
+            if len < 0 {
+                anyhow::bail!("openh264 reported a negative NAL length");
+            }
+            size = size
+                .checked_add(len as usize)
+                .context("openh264 NAL lengths overflow")?;
+        }
+        if size > 0 && layer.pBsBuf.is_null() {
+            anyhow::bail!("openh264 reported bytes with no buffer");
+        }
+        total = total
+            .checked_add(size)
+            .context("openh264 layer sizes overflow")?;
+        if info.iFrameSizeInBytes > 0 && total > info.iFrameSizeInBytes as usize {
+            anyhow::bail!("openh264 reported more bytes than the frame holds");
+        }
+        sizes.push(size);
+    }
+    Ok(sizes)
+}
+
 impl Drop for Encoder {
     fn drop(&mut self) {
         if let Some(uninitialize) = self.vtable().Uninitialize {
-            unsafe { uninitialize(self.native) };
+            unsafe { uninitialize(self.native.as_ptr()) };
         }
-        unsafe { self._api.WelsDestroySVCEncoder(self.native) };
+        unsafe { self._api.WelsDestroySVCEncoder(self.native.as_ptr()) };
     }
 }
 
@@ -435,6 +493,56 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::h264::Backend;
+    use openh264_sys2::SLayerBSInfo;
+
+    #[test]
+    fn malformed_bitstream_headers_are_rejected_before_any_slice() {
+        fn info(layer_count: c_int, layers: &[SLayerBSInfo], frame_size: c_int) -> SFrameBSInfo {
+            let mut info = SFrameBSInfo::default();
+            info.iLayerNum = layer_count;
+            info.sLayerInfo[..layers.len()].copy_from_slice(layers);
+            info.iFrameSizeInBytes = frame_size;
+            info
+        }
+        fn layer(nals: &mut [c_int], buf: *mut u8) -> SLayerBSInfo {
+            SLayerBSInfo {
+                iNalCount: nals.len() as c_int,
+                pNalLengthInByte: nals.as_mut_ptr(),
+                pBsBuf: buf,
+                ..Default::default()
+            }
+        }
+        let some_buf = NonNull::<u8>::dangling().as_ptr();
+        // Well-formed headers pass through with their sizes.
+        let (mut a, mut b) = ([10, 20], [5]);
+        let ok = info(
+            2,
+            &[layer(&mut a, some_buf), layer(&mut b, some_buf)],
+            36,
+        );
+        assert_eq!(validated_layer_sizes(&ok).unwrap(), [30, 5]);
+        // A count past the array is clamped, not read past.
+        assert_eq!(validated_layer_sizes(&info(500, &[], 0)).unwrap().len(), 128);
+        assert!(validated_layer_sizes(&info(-1, &[], 0)).unwrap().is_empty());
+        // Every malformation fails instead of building a slice.
+        let mut bad = [-1];
+        assert!(validated_layer_sizes(&info(1, &[layer(&mut bad, some_buf)], 100)).is_err());
+        let null_lengths = SLayerBSInfo {
+            iNalCount: 2,
+            pNalLengthInByte: std::ptr::null_mut(),
+            pBsBuf: some_buf,
+            ..Default::default()
+        };
+        assert!(validated_layer_sizes(&info(1, &[null_lengths], 100)).is_err());
+        let mut negative = [10, -3];
+        assert!(validated_layer_sizes(&info(1, &[layer(&mut negative, some_buf)], 100)).is_err());
+        let mut no_buf = [10];
+        assert!(
+            validated_layer_sizes(&info(1, &[layer(&mut no_buf, std::ptr::null_mut())], 100)).is_err()
+        );
+        let mut over = [60, 50];
+        assert!(validated_layer_sizes(&info(1, &[layer(&mut over, some_buf)], 100)).is_err());
+    }
 
     /// A diagonal gradient that moves with `t`, so inter frames carry motion.
     fn pattern(width: usize, height: usize, t: usize) -> I420 {

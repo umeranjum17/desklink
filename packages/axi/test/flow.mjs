@@ -96,11 +96,19 @@ async function verifyXvfb() {
   for (let i=0;i<100 && !existsSync(socket) && xvfb.exitCode===null;i++) await new Promise(r=>setTimeout(r,50));
   assert(xvfb.pid && xvfb.exitCode===null && existsSync(socket), 'private Xvfb did not start');
   assert.equal(Number(readFileSync(`/tmp/.X${number}-lock`,'utf8').trim()),xvfb.pid,'X lock belongs to another server');
-  const line = readFileSync('/proc/net/unix','utf8').split('\n').find(line=>line.endsWith(` ${socket}`));
-  assert(line,'X socket missing from proc socket table');
-  const inode = line.trim().split(/\s+/)[6];
-  assert(readdirSync(`/proc/${xvfb.pid}/fd`).some(fd=> {
-    try { return readlinkSync(`/proc/${xvfb.pid}/fd/${fd}`)===`socket:[${inode}]`; } catch { return false; }
+  // Every accepted client connection also carries the socket path and sorts
+  // before the listener, so the first table row is the wrong inode whenever
+  // a client is connected or its just-closed row still lingers: select the
+  // listening socket (Flags carries __SO_ACCEPTCON 0x00010000) instead.
+  const rows = readFileSync('/proc/net/unix','utf8').split('\n').filter(line=>line.endsWith(` ${socket}`));
+  assert(rows.length > 0,'X socket missing from proc socket table');
+  const listening = rows.filter(line=>(parseInt(line.trim().split(/\s+/)[3],16) & 0x10000) !== 0);
+  assert(listening.length > 0,'X listening socket missing from proc socket table');
+  assert(listening.some(line=> {
+    const inode = line.trim().split(/\s+/)[6];
+    return readdirSync(`/proc/${xvfb.pid}/fd`).some(fd=> {
+      try { return readlinkSync(`/proc/${xvfb.pid}/fd/${fd}`)===`socket:[${inode}]`; } catch { return false; }
+    });
   }), 'X server socket is not held by the spawned Xvfb PID');
   const info = spawnSync(example,['--probe'],{env,encoding:'utf8',timeout:3000});
   assert.equal(info.status,0,`X client could not verify ${display}: ${info.stderr}`);
