@@ -32,15 +32,16 @@
  *   meson setup build -Dwlroots:backends= -Dwlroots:session=disabled \
  *     -Dwlroots:renderers=gles2 -Dwlroots:allocators=gbm -Dwlroots:xwayland=disabled
  *
- * The `still` scenario checks refinement: its stamp stops `--freeze-after`
- * seconds after it starts (20 by default), so read `engine.refined` — the
- * in-window refinements — there, not the latency.
+ * The `still` scenario checks refinement: the flow freezes its stamp
+ * `--freeze-after` seconds after the measurement window opens (2 by default),
+ * so read `engine.refined` — the in-window refinements — there, not the
+ * latency.
  *
  * Usage:
  *
  *   node packages/desktop-host/test/portal-g2g-flow.mjs [--size 1920x1080]
  *     [--fps 60] [--scenario typing,scroll,still] [--seconds 15] [--gate]
- *     [--freeze-after 20]
+ *     [--freeze-after 2]
  *
  * One JSON line per scenario, in the X11 lab's shape plus `source`, `load` and
  * `isolation`. A run counts only when the 1-minute load average is at most
@@ -150,7 +151,7 @@ async function cage(dir) {
         return wayland !== null;
     });
     const client = { ...env, WAYLAND_DISPLAY: wayland };
-    const stamp = spawn(config.stamp, ['--mode', config.scenario, '--freeze-after', String(config.freezeAfter)], {
+    const stamp = spawn(config.stamp, ['--mode', config.scenario, '--freeze-file', join(dir, 'freeze')], {
         stdio: ['ignore', 'pipe', 'ignore'], env: client,
     });
     children.push(stamp);
@@ -215,11 +216,12 @@ async function main() {
     const [width, height] = option('size', '1920x1080').split('x').map(Number);
     const maxFps = Number(option('fps', '60'));
     const seconds = Number(option('seconds', '15'));
-    const freezeAfter = Number(option('freeze-after', '20'));
+    const freezeAfter = Number(option('freeze-after', '2'));
     const scenarios = option('scenario', 'typing,scroll').split(',');
     const gate = process.argv.includes('--gate');
     assert(width > 0 && height > 0 && maxFps > 0 && seconds > 0, 'bad --size, --fps or --seconds');
     assert(Number.isInteger(freezeAfter) && freezeAfter > 0, 'bad --freeze-after');
+    assert(!scenarios.includes('still') || freezeAfter < seconds, 'bad --freeze-after (must fall inside --seconds for still)');
     assert(scenarios.every((s) => ['typing', 'scroll', 'still'].includes(s)), '--scenario is typing, scroll or still');
 
     const skip = (reason) => {
@@ -238,6 +240,8 @@ async function main() {
     const sway = process.env.DESKLINK_PORTAL_SWAY || which('sway');
     const portal = firstFile(PORTAL_DIRS.map((d) => `${d}/xdg-desktop-portal`));
     const xdph = firstFile(PORTAL_DIRS.map((d) => `${d}/xdg-desktop-portal-hyprland`));
+    const portalFile = firstFile(['/usr/share/xdg-desktop-portal/portals/hyprland.portal']);
+    if (portalFile === null) skip('hyprland.portal is not installed');
     const chrome = firstFile([process.env.DESKLINK_CHROME]) ?? ['google-chrome-stable', 'google-chrome', 'chromium'].map(which).find(Boolean) ?? null;
     const missing = [
         ['unshare', which('unshare')], ['dbus-daemon', which('dbus-daemon')], ['busctl', which('busctl')],
@@ -269,7 +273,7 @@ async function main() {
     for (const scenario of scenarios) {
         const before = loadavg()[0];
         const result = await measure({
-            engine, stamp, sway, portal, xdph, chrome, renderNode, width, height, maxFps, seconds, scenario, freezeAfter,
+            engine, stamp, sway, portal, xdph, portalFile, chrome, renderNode, width, height, maxFps, seconds, scenario, freezeAfter,
         });
         const after = loadavg()[0];
         result.load = {
@@ -384,7 +388,11 @@ async function measure(run) {
         await browser.evaluate(`window.__g2g.begin(${opened.geometry.source.width})`);
         const metricsStart = await engine.request('session.metrics', { session_id: sessionId });
         const windowAt = Date.now();
-        await sleep(run.seconds * 1000);
+        if (run.scenario === 'still') {
+            await sleep(run.freezeAfter * 1000);
+            writeFileSync(join(dir, 'freeze'), '');
+        }
+        await sleep(run.seconds * 1000 - (Date.now() - windowAt));
         const page = await browser.evaluate('window.__g2g.report()');
         const metrics = await engine.request('session.metrics', { session_id: sessionId });
         const elapsed = (Date.now() - windowAt) / 1000;
@@ -428,7 +436,7 @@ function writeCage(dir, run) {
         if (name) ambient.push(name.startsWith('/') ? name : `/run/user/${process.getuid()}/${name}`);
     }
     writeFileSync(join(dir, 'cage.json'), JSON.stringify({
-        scenario: run.scenario, freezeAfter: run.freezeAfter, engine: realpathSync(run.engine), stamp: realpathSync(run.stamp), sway: run.sway,
+        scenario: run.scenario, engine: realpathSync(run.engine), stamp: realpathSync(run.stamp), sway: run.sway,
         portal: run.portal, xdph: run.xdph,
         ambient: ambient.filter((path) => path && existsSync(path)).map((path) => {
             const { dev, ino } = statSync(path);
@@ -457,9 +465,7 @@ function writeCage(dir, run) {
     chmodSync(picker, 0o755);
     writeFileSync(join(dir, 'home/.config/hypr/xdph.conf'), `screencopy {\n  custom_picker_binary = ${picker}\n  max_fps = 60\n}\n`);
     writeFileSync(join(dir, 'home/.config/xdg-desktop-portal/portals.conf'), '[preferred]\ndefault=hyprland\n');
-    const portalFile = firstFile(['/usr/share/xdg-desktop-portal/portals/hyprland.portal']);
-    assert(portalFile, 'hyprland.portal is not installed');
-    copyFileSync(portalFile, join(dir, 'portals/hyprland.portal'));
+    copyFileSync(run.portalFile, join(dir, 'portals/hyprland.portal'));
 }
 
 function tailLogs(dir) {

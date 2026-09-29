@@ -8,9 +8,9 @@
 //!
 //! `--mode typing` changes only the stamp strip; `--mode scroll` also redraws a
 //! full-screen field of shifted stripes on every repaint, a worst case like
-//! dense scrolling text; `--mode still` freezes the stamp `--freeze-after`
-//! seconds after it starts (two by default), so a receiver can check that a
-//! still screen gets its sharp refine pass.
+//! dense scrolling text; `--mode still` freezes the stamp when `--freeze-file`
+//! appears, else `--freeze-after` seconds after it starts (two by default), so
+//! a receiver can check that a still screen gets its sharp refine pass.
 //!
 //! ```sh
 //! WAYLAND_DISPLAY=wayland-1 cargo run --example wl_stamp_target -- --mode scroll
@@ -69,6 +69,7 @@ fn main() -> Result<()> {
     let mut mode = Mode::Typing;
     let mut rate = 120u64;
     let mut freeze_after = Duration::from_secs(2);
+    let mut freeze_file: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -81,6 +82,9 @@ fn main() -> Result<()> {
                 }
             }
             "--rate" => rate = args.next().context("--rate needs a value")?.parse()?,
+            "--freeze-file" => {
+                freeze_file = Some(args.next().context("--freeze-file needs a value")?)
+            }
             "--freeze-after" => {
                 freeze_after = Duration::from_secs(
                     args.next()
@@ -203,7 +207,12 @@ fn main() -> Result<()> {
             }
         }
         let now = now_ms();
-        let ms = if mode == Mode::Still && started.elapsed() > freeze_after {
+        let told = freeze_file
+            .as_deref()
+            .is_some_and(|path| std::path::Path::new(path).exists());
+        let ms = if mode == Mode::Still
+            && (told || (freeze_file.is_none() && started.elapsed() > freeze_after))
+        {
             *frozen_ms.get_or_insert_with(|| {
                 frozen_at = frame;
                 now
