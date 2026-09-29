@@ -33,7 +33,8 @@ Android uses an Expo native module; iOS uses the app's existing
 Expo module of its own for the hardware keyboard and an iPad pointer. Both need a
 dev client or native build containing that binding ([development builds](https://docs.expo.dev/develop/development-builds/introduction/); [Expo Go](https://docs.expo.dev/workflow/expo-go/) cannot load them). Web uses the browser's WebRTC.
 No second WebRTC binary is linked. The Android module has its own hardware-first
-decoder factory; iOS uses the decoder shipped by `react-native-webrtc`.
+decoder factory; iOS uses the decoder shipped by `react-native-webrtc` and asks
+the host for H.264, which that decoder runs in hardware.
 
 On iOS the WebRTC binding also needs its config plugin
 (`@config-plugins/react-native-webrtc` — 14.x for Expo SDK 55, 15.x for
@@ -103,16 +104,20 @@ larger one is scaled to fit. Above that box the encoder cannot sustain 50+ fps
 under full-screen motion.
 
 On iOS, keep the box at or below the device's own pixels and `maxFps` at 30:
-the engine encodes captured desktops as VP9, which iOS decodes in software
-(VideoToolbox accelerates H.264 only), so a 1440p or 4K picture costs CPU,
-heat and battery. This cap stands until the engine offers an H.264 captured
-source with hardware decode.
+the iOS receiver asks the engine for H.264, which iOS decodes in hardware
+(VideoToolbox), but a host without an H.264 encoder still sends VP9, which
+iOS decodes in software — so a 1440p or 4K picture on such a host costs CPU,
+heat and battery.
 
 ### What the package guarantees
 
-- **VP9 decoding.** Android builds a session-scoped hardware-first decoder
+- **Hardware decoding where the platform has it.** Android and web decode the
+  host's default VP9; Android builds a session-scoped hardware-first decoder
   factory with software fallback. iOS uses the app's `react-native-webrtc`
-  decoder; neither platform links a second WebRTC stack.
+  decoder, which decodes H.264 through VideoToolbox but VP9 only in software,
+  so the iOS receiver asks for H.264 by putting it first in the offer it
+  applies; a host with an H.264 encoder then sends H.264, and one without sends
+  VP9. Neither platform links a second WebRTC stack.
 - **A sharp, zoomable picture.** The desktop fits the view by default; a pinch
   zooms up to 2.5 view pixels per desktop pixel and one finger moves around the
   zoomed desktop. On Android the decoded frame is copied once into the view's
@@ -267,8 +272,9 @@ What the consuming app — not this package — must get right before review.
 build with `react-native-webrtc`, connecting to `desklink-host bridge` with the
 URL it is launched with. `test/ios-flow.mjs` builds it for the iOS simulator on
 a Mac over ssh, serves a private Xvfb desktop from this machine through the
-bridge, and checks that the first frame is presented, that the answer is VP9
-with NACK (both descriptions are written out), that a tap clicks the host, that
+bridge, and checks that the first frame is presented, that the answer puts
+H.264 first with NACK when the host offers it (VP9 otherwise; both descriptions
+are written out), that a tap clicks the host, that
 the picture keeps following the desktop afterwards, and that hardware keys
 pressed on the simulator reach the desktop. With `DESKLINK_IOS_IPAD=1` it runs on
 an iPad simulator and also drives a trackpad through XCUITest

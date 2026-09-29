@@ -32,6 +32,11 @@ pipewire = { version = "0.10", features = ["v0_3_44"] }
 xkbcommon = "0.8"
 x11rb = { version = "0.14", default-features = false, features = ["allow-unsafe-code", "xtest", "shm", "damage"] }
 wl-clipboard-rs = "0.9"
+# H.264 fallback: Cisco's prebuilt openh264, loaded at runtime (never built
+# from source), fetched once as bzip2 and checked against a pinned sha256.
+openh264-sys2 = { version = "0.9.8", default-features = false, features = ["libloading"] }
+sha2 = "0.10"
+bzip2-rs = "0.1.2"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # The Wayland stamp example only; already in the tree through wl-clipboard-rs.

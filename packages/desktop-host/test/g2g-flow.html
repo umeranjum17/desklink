@@ -170,7 +170,11 @@ socket.addEventListener('message', (message) => {
     }
     if (payload.event === 'session.description') {
         state.offer = payload.params.description.sdp;
-        nativeDesklink.setRemoteDescription(state.localId, 'offer', state.offer);
+        nativeDesklink.setRemoteDescription(
+            state.localId,
+            'offer',
+            query.get('codec') === 'h264' ? preferH264(state.offer) : state.offer,
+        );
         return;
     }
     if (payload.event === 'session.candidate') {
@@ -182,6 +186,20 @@ socket.addEventListener('message', (message) => {
         );
     }
 });
+
+/**
+ * `--codec h264`: the offer with H.264 ahead of VP9, as the iOS receiver
+ * applies it (`preferH264` in native.ios.ts), so the answer asks for H.264.
+ */
+function preferH264(sdp) {
+    const lines = sdp.split('\r\n');
+    const start = lines.findIndex((line) => line.startsWith('m=video '));
+    if (start === -1) return sdp;
+    const h264 = new Set(lines.flatMap((line) => /^a=rtpmap:(\d+) H264\//i.exec(line)?.[1] ?? []));
+    const [media, port, proto, ...formats] = lines[start].split(' ');
+    lines[start] = [media, port, proto, ...formats.filter((f) => h264.has(f)), ...formats.filter((f) => !h264.has(f))].join(' ');
+    return lines.join('\r\n');
+}
 
 /**
  * Open a view session on the bridge's own source (the bridge refuses a
@@ -231,6 +249,8 @@ window.__flow = {
             report?.forEach((s) => {
                 if (s.type === 'inbound-rtp' && (s.kind === 'video' || s.mediaType === 'video')) {
                     out.inbound.push({
+                        codec: report.get(s.codecId)?.mimeType ?? null,
+                        decoder: s.decoderImplementation ?? null,
                         framesDecoded: s.framesDecoded ?? null,
                         framesDropped: s.framesDropped ?? null,
                         totalDecodeTime: s.totalDecodeTime ?? null,

@@ -125,3 +125,26 @@ it('marks presented once: a resize or remount must not re-mark', async () => {
     listener.remove();
     nativeDesklink.closeSession(id);
 });
+
+it('asks for H.264 by applying the offer with H.264 first, and leaves other offers alone', async () => {
+    const { nativeDesklink, preferH264 } = await import('./native.ios');
+    const offer = [
+        'v=0', 'o=- 1 1 IN IP4 0.0.0.0', 's=-', 't=0 0',
+        'm=video 9 UDP/TLS/RTP/SAVPF 98 102',
+        'a=rtpmap:98 VP9/90000', 'a=rtpmap:102 H264/90000',
+        'a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e034',
+        'm=application 9 UDP/DTLS/SCTP webrtc-datachannel', '',
+    ].join('\r\n');
+    const preferred = preferH264(offer);
+    expect(preferred).toContain('\r\nm=video 9 UDP/TLS/RTP/SAVPF 102 98\r\n');
+    expect(preferred.replace(' 102 98', ' 98 102')).toBe(offer);
+    const vp9Only = offer.replace(' 98 102', ' 98').replace(/a=rtpmap:102.*\r\na=fmtp:102.*\r\n/, '');
+    expect(preferH264(vp9Only)).toBe(vp9Only);
+    expect(preferH264('v=0\r\n')).toBe('v=0\r\n');
+
+    const id = nativeDesklink.createSession('[]')!;
+    const peer = peers.at(-1)!;
+    nativeDesklink.setRemoteDescription(id, 'offer', offer);
+    await vi.waitFor(() => expect(peer.setRemoteDescription).toHaveBeenCalledWith({ type: 'offer', sdp: preferred }));
+    nativeDesklink.closeSession(id);
+});
