@@ -27,7 +27,7 @@ USAGE:
                                       print the URL to open; no signaling of your own needed
   desklink-host <engine command> ...  run the engine directly (serve, keep, capture-probe, setup-input, version)
 
-Set MUXR_DESKLINK_ENGINE to use an engine built somewhere else.`);
+Set DESKLINK_ENGINE to use an engine built somewhere else (MUXR_DESKLINK_ENGINE still works as a deprecated fallback).`);
         return 0;
     }
     if (command === 'path') {
