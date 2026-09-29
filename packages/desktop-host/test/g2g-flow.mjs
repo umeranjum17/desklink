@@ -42,7 +42,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:net';
@@ -111,7 +111,16 @@ function remember(pid, command) {
     if (owned.has(pid)) return;
     const state = proc(pid);
     if (!state || state.state === 'Z') { owned.set(pid, undefined); return; }
-    assert(readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ').includes(command), `unexpected child ${pid}`);
+    let cmdline = '';
+    try { cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' '); } catch { owned.set(pid, undefined); return; }
+    // Launcher shims (e.g. distro chromium wrappers) exit and zombify between
+    // the stat and cmdline reads, leaving an empty cmdline: already gone.
+    if (cmdline === '') { owned.set(pid, undefined); return; }
+    // Distro launchers may re-exec under a different path (e.g. /usr/bin/chromium
+    // re-execs /usr/lib/chromium/chromium); accept the basename so the harness
+    // runs against those shims. PID-reuse safety still rests on the start-time
+    // check in alive().
+    assert(cmdline.includes(command) || cmdline.includes(basename(command)), `unexpected child ${pid}`);
     owned.set(pid, state.started);
 }
 function alive(pid) {
