@@ -185,6 +185,7 @@ fn select_x11(
     let desktop = Arc::new(Mutex::new(X11Desktop::connect(display)?));
     let (width, height) = {
         let desktop = lock(&desktop);
+        eprintln!("x11 capture path: {}", desktop.capture_path());
         desktop.screen_size()
     };
     let source = SelectedSource {
