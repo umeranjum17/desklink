@@ -269,8 +269,9 @@ async function main() {
             console.error(`FAIL ${scenario}: load ${result.load.before}/${result.load.after} is over ${limit}`);
             failed = true;
         }
-        if (gate && scenario === 'typing' && !(result.presented_fps >= 50 && result.g2g_ms.p50 <= 50)) {
-            console.error(`FAIL typing: ${result.presented_fps} fps presented, p50 ${result.g2g_ms.p50} ms`);
+        const measured = result.g2g_ms.n > 0 && Number.isFinite(result.g2g_ms.p50);
+        if (gate && scenario === 'typing' && !(measured && result.presented_fps >= 50 && result.g2g_ms.p50 <= 50)) {
+            console.error(`FAIL typing: ${result.presented_fps} fps presented, p50 ${result.g2g_ms.p50} ms over ${result.g2g_ms.n} decoded stamps`);
             failed = true;
         }
     }
@@ -365,16 +366,17 @@ async function measure(run) {
             max_height: run.height,
             max_fps: run.maxFps,
         }, 60_000);
-        const openedAt = Date.now();
         sessionId = opened.sessionId;
         generation = opened.generation;
         const encoded = opened.geometry.encoded;
         await browser.until('window.__g2g.frames > 0', 30_000, 'a first presented frame');
-        await browser.evaluate(`window.__g2g.begin(${run.width})`);
+        await browser.evaluate(`window.__g2g.begin(${opened.geometry.source.width})`);
+        const metricsStart = await engine.request('session.metrics', { session_id: sessionId });
+        const windowAt = Date.now();
         await sleep(run.seconds * 1000);
         const page = await browser.evaluate('window.__g2g.report()');
         const metrics = await engine.request('session.metrics', { session_id: sessionId });
-        const elapsed = (Date.now() - openedAt) / 1000;
+        const elapsed = (Date.now() - windowAt) / 1000;
         await engine.request('session.close', { session_id: sessionId }).catch(() => {});
 
         return {
@@ -387,15 +389,16 @@ async function measure(run) {
             frame_interval_p95_ms: page.frame_interval_p95_ms,
             g2g_ms: page.g2g_ms,
             engine: {
-                encoded_frames: metrics.encoded_frames,
-                captured_frames: metrics.captured_frames,
-                dropped_frames: metrics.dropped_frames,
+                encoded_frames: metrics.encoded_frames - metricsStart.encoded_frames,
+                captured_frames: metrics.captured_frames - metricsStart.captured_frames,
+                dropped_frames: metrics.dropped_frames - metricsStart.dropped_frames,
                 refined: metrics.refined_frames,
-                encode_ms_mean: round(metrics.encode_micros / Math.max(1, metrics.encoded_frames) / 1000, 2),
+                encode_ms_mean: round((metrics.encode_micros - metricsStart.encode_micros)
+                    / Math.max(1, metrics.encoded_frames - metricsStart.encoded_frames) / 1000, 2),
                 kbps_target: metrics.target_kbps,
-                mbps_actual: round(metrics.encoded_bytes * 8 / elapsed / 1e6, 2),
-                captured_fps: round(metrics.captured_frames / elapsed),
-                encoded_fps: round(metrics.encoded_frames / elapsed),
+                mbps_actual: round((metrics.encoded_bytes - metricsStart.encoded_bytes) * 8 / elapsed / 1e6, 2),
+                captured_fps: round((metrics.captured_frames - metricsStart.captured_frames) / elapsed),
+                encoded_fps: round((metrics.encoded_frames - metricsStart.encoded_frames) / elapsed),
             },
             receiver: page.receiver,
             isolation: first.isolation,
