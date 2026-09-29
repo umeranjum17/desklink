@@ -121,7 +121,12 @@ if (netem !== null) {
         'ip link set g2g0 up',
         // The engine's mDNS socket joins a multicast group, which needs a route.
         'ip route add default dev g2g0',
-        `tc qdisc add dev lo root netem ${netem}`,
+        // Only UDP (the media path, both ways) crosses the emulated link, so
+        // the harness's own page, bridge and DevTools traffic never queues
+        // behind the stream it is measuring.
+        'tc qdisc add dev lo root handle 1: prio',
+        `tc qdisc add dev lo parent 1:3 handle 30: netem ${netem}`,
+        'tc filter add dev lo parent 1: protocol ip u32 match ip protocol 17 0xff flowid 1:3',
     ]) {
         const [bin, ...rest] = command.split(/\s+/);
         const done = spawnSync(bin, rest, { encoding: 'utf8' });
@@ -147,7 +152,13 @@ function remember(pid, command) {
     const state = proc(pid);
     if (!state || state.state === 'Z') { owned.set(pid, undefined); return; }
     let cmdline = '';
-    try { cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' '); } catch { owned.set(pid, undefined); return; }
+    // A child caught mid-exec (a `taskset` launch on a loaded host) briefly
+    // shows an empty cmdline while it is very much alive; recording it as gone
+    // would leave it unreaped and holding this process open.
+    for (let i = 0; i < 100 && cmdline === '' && proc(pid)?.state !== 'Z'; i++) {
+        try { cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' '); } catch { owned.set(pid, undefined); return; }
+        if (cmdline === '') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
     // Launcher shims (e.g. distro chromium wrappers) exit and zombify between
     // the stat and cmdline reads, leaving an empty cmdline: already gone.
     if (cmdline === '') { owned.set(pid, undefined); return; }
@@ -504,6 +515,7 @@ async function runScenario(scenario, vite) {
             seconds: Math.round(elapsed * 10) / 10,
             presented_fps: Math.round((result.frames / elapsed) * 10) / 10,
             frame_interval_p95_ms: percentile(intervals, 95),
+            frame_interval_max_ms: intervals.length > 0 ? intervals[intervals.length - 1] : null,
             g2g_ms: {
                 p50: percentile(g2g, 50),
                 p95: percentile(g2g, 95),
@@ -620,3 +632,6 @@ try {
     await vite?.close().catch(() => undefined);
     rmSync(dir, { recursive: true, force: true });
 }
+// Every task-owned process is reaped above; a handle left open (a CDP socket,
+// a child's pipe) must not keep the run from reporting done.
+process.exit(process.exitCode ?? 0);
