@@ -81,7 +81,20 @@ function buildCandidates(root: string): string[] {
     ];
 }
 
-export function resolveEngine(configured = process.env.MUXR_DESKLINK_ENGINE, root = enginePackageRoot()): ResolvedEngine | null {
+/**
+ * Engine-binary override, read from the environment.
+ *
+ * `DESKLINK_ENGINE` is the documented override. `MUXR_DESKLINK_ENGINE` still
+ * works as a deprecated fallback, read only when `DESKLINK_ENGINE` is unset
+ * or blank, and will be removed in a later release.
+ */
+function configuredEnginePath(): string | undefined {
+    const configured = process.env.DESKLINK_ENGINE;
+    if (configured !== undefined && configured.trim() !== '') return configured;
+    return process.env.MUXR_DESKLINK_ENGINE;
+}
+
+export function resolveEngine(configured = configuredEnginePath(), root = enginePackageRoot()): ResolvedEngine | null {
     if (!macosEngineEnabled()) return null;
     if (configured !== undefined && configured.trim() !== '') {
         if (!isExecutable(configured)) return null;
@@ -113,7 +126,7 @@ function isExecutable(path: string): boolean {
  * there.
  */
 export function explainMissingEngine(
-    configured = process.env.MUXR_DESKLINK_ENGINE,
+    configured = configuredEnginePath(),
     root = enginePackageRoot(),
 ): string | null {
     if (!macosEngineEnabled()) {
@@ -130,16 +143,16 @@ export function explainMissingEngine(
     if (process.platform === 'darwin') {
         const tag = platformTag();
         if (PREBUILT_PLATFORMS.includes(tag)) {
-            return `The prebuilt desktop engine for ${tag} is missing. It arrives as the optional dependency @desklink/host-${tag}: reinstall without omitting optional dependencies, or point MUXR_DESKLINK_ENGINE at an engine built from source.`;
+            return `The prebuilt desktop engine for ${tag} is missing. It arrives as the optional dependency @desklink/host-${tag}: reinstall without omitting optional dependencies, or point DESKLINK_ENGINE at an engine built from source.`;
         }
-        return `There is no prebuilt desktop engine for ${tag}. Build it from source (see the @desklink/host README) and point MUXR_DESKLINK_ENGINE at the binary.`;
+        return `There is no prebuilt desktop engine for ${tag}. Build it from source (see the @desklink/host README) and point DESKLINK_ENGINE at the binary.`;
     }
     if (process.platform !== 'linux') {
         return `The desktop engine runs on Linux only; ${process.platform} is not supported yet.`;
     }
     const tag = platformTag();
     if (PREBUILT_PLATFORMS.includes(tag)) {
-        return `The prebuilt desktop engine for ${tag} is missing. It arrives as the optional dependency @desklink/host-${tag}: reinstall without omitting optional dependencies, or point MUXR_DESKLINK_ENGINE at an engine built from source.`;
+        return `The prebuilt desktop engine for ${tag} is missing. It arrives as the optional dependency @desklink/host-${tag}: reinstall without omitting optional dependencies, or point DESKLINK_ENGINE at an engine built from source.`;
     }
-    return `There is no prebuilt desktop engine for ${tag}. Build it from source (see the @desklink/host README) and point MUXR_DESKLINK_ENGINE at the binary.`;
+    return `There is no prebuilt desktop engine for ${tag}. Build it from source (see the @desklink/host README) and point DESKLINK_ENGINE at the binary.`;
 }
