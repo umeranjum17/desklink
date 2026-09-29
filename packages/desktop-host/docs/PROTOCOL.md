@@ -212,7 +212,7 @@ sets it for control sessions, never for view-only or human phone control. It
 adds an eased pointer halo, click ripple, and typing pulse. On Wayland it uses
 a click-through layer-shell surface with an edge glow; its bounded area is
 masked before capture/diff (pixels behind the effect can remain briefly stale).
-On bare X11 it replaces the pointer sprite instead, which XGetImage excludes:
+On bare X11 it replaces the pointer sprite instead, which the X11 grab excludes:
 there is no edge glow on that path. macOS uses a nonactivating, click-through
 window excluded by the ScreenCaptureKit content filter. Closing the session
 fades and removes the indicator.
@@ -388,7 +388,8 @@ them). Each is a cumulative microsecond counter; divide by the frame count
 named beside it for the per-frame mean:
 
 - `capture_micros` / `captured_frames`: grabbing a frame and converting it on
-  the capture thread (on X11: `GetImage` plus the downscale to I420), over
+  the capture thread (on X11: an MIT-SHM grab, falling back to socket
+  `GetImage` where the server lacks MIT-SHM, plus the downscale to I420), over
   forwarded (changed) frames only — unchanged polls are excluded.
 - `convert_micros` / `captured_frames`: tile hashing and damage computation on
   the capture thread, after the grab; the hash branch runs only with
