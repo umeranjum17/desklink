@@ -134,9 +134,9 @@ export interface SessionMetrics {
     motion_frames: number;
     encode_micros: number;
     target_kbps: number;
-    /** Grab plus colour-conversion time on the capture thread (L0 lab). */
+    /** GetImage plus downscale-to-I420 time, over forwarded frames (L0 lab). */
     capture_micros: number;
-    /** Tile-hash and damage time on the capture thread (L0 lab). */
+    /** Tile-hash and damage time, only with local_frames on (L0 lab). */
     convert_micros: number;
     /** Capture-handoff to encode-start wait per motion-coded frame (L0 lab). */
     queue_micros: number;

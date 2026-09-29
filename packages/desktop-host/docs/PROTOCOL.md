@@ -357,9 +357,11 @@ them). Each is a cumulative microsecond counter; divide by the frame count
 named beside it for the per-frame mean:
 
 - `capture_micros` / `captured_frames`: grabbing a frame and converting it on
-  the capture thread (on X11: `GetImage` plus the downscale to I420).
+  the capture thread (on X11: `GetImage` plus the downscale to I420), over
+  forwarded (changed) frames only — unchanged polls are excluded.
 - `convert_micros` / `captured_frames`: tile hashing and damage computation on
-  the capture thread, after the grab.
+  the capture thread, after the grab; the hash branch runs only with
+  `local_frames` on.
 - `queue_micros` / `motion_frames`: how long a freshly captured frame waited
   between the capture handoff and the start of its encode. Refinement,
   keepalive and receiver-requested re-encodes re-code a picture that was

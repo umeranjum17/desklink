@@ -68,16 +68,31 @@ assert(scenarios.length > 0 && scenarios.every((s) => ['typing', 'scroll', 'stil
 const gate = args.includes('--gate');
 const baselinePath = flag('baseline', null);
 const requireLoadGate = args.includes('--require-load-gate');
-const baselineRaw = baselinePath === null ? null : JSON.parse(readFileSync(baselinePath, 'utf8'));
+const baselineText = baselinePath === null ? null : readFileSync(baselinePath, 'utf8');
+const baselineEntries = (() => {
+    if (baselineText === null) return null;
+    try {
+        const parsed = JSON.parse(baselineText);
+        return Array.isArray(parsed) ? parsed : [parsed];
+    } catch {
+        const entries = [];
+        for (const ln of baselineText.split('\n')) {
+            const t = ln.trim();
+            if (t === '') continue;
+            try { entries.push(JSON.parse(t)); } catch { }
+        }
+        return entries;
+    }
+})();
 const baselineByScenario = (() => {
-    if (baselineRaw === null) return null;
-    const lines = Array.isArray(baselineRaw) ? baselineRaw : [baselineRaw];
+    if (baselineEntries === null) return null;
     const map = {};
-    for (const entry of lines) {
+    for (const entry of baselineEntries) {
         if (entry !== null && typeof entry === 'object' && typeof entry.scenario === 'string') map[entry.scenario] = entry;
     }
     return map;
 })();
+assert(baselineByScenario === null || Object.keys(baselineByScenario).length > 0, `--baseline ${baselinePath} holds no scenario lines`);
 
 const dir = mkdtempSync(join(tmpdir(), 'desklink-g2g-flow-'));
 const enginePidFile = join(dir, 'engines.pid');
@@ -507,7 +522,7 @@ function checkGate(lines) {
         }
         const expected = baselineByScenario?.[line.scenario];
         if (expected !== undefined && expected !== null) {
-            if (line.presented_fps < expected.presented_fps * 0.8) {
+            if (expected.presented_fps != null && line.presented_fps < expected.presented_fps * 0.8) {
                 failures.push(`${line.scenario}: presented ${line.presented_fps} fps, baseline ${expected.presented_fps} (-20% gate)`);
             }
             if (line.g2g_ms.p50 !== null && expected.g2g_ms?.p50 != null && line.g2g_ms.p50 > expected.g2g_ms.p50 * 1.2) {

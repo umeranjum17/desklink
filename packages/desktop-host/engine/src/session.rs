@@ -64,12 +64,14 @@ pub struct Metrics {
     /// Time spent in the encoder, in microseconds, over every encoded frame.
     pub encode_micros: u64,
     /// Time spent grabbing and converting a frame on the capture thread, in
-    /// microseconds, over every captured frame. On X11 this is `GetImage`
-    /// plus the downscale to I420; the lab harness reads it as the grab
-    /// cost L1 owns.
+    /// microseconds, over every frame forwarded to the encoder. On X11 this
+    /// is `GetImage` plus the downscale to I420; unchanged polls are hashed,
+    /// recognised, and never forwarded, so their grab cost stays out; the lab
+    /// harness reads it as the grab cost L1 owns.
     pub capture_micros: u64,
     /// Time spent hashing a captured frame and working out its damage on the
-    /// capture thread, in microseconds, over every captured frame.
+    /// capture thread, in microseconds, over every forwarded frame; the hash
+    /// branch runs only when `local_frames` is on.
     pub convert_micros: u64,
     /// Time a freshly captured frame waited between the capture handoff and
     /// the start of its encode, in microseconds, over motion frames.
