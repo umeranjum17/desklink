@@ -32,18 +32,21 @@
  *   meson setup build -Dwlroots:backends= -Dwlroots:session=disabled \
  *     -Dwlroots:renderers=gles2 -Dwlroots:allocators=gbm -Dwlroots:xwayland=disabled
  *
- * The `still` scenario checks refinement: its stamp stops after two seconds,
- * so read `engine.refined` there, not the latency.
+ * The `still` scenario checks refinement: its stamp stops `--freeze-after`
+ * seconds after it starts (20 by default), so read `engine.refined` — the
+ * in-window refinements — there, not the latency.
  *
  * Usage:
  *
  *   node packages/desktop-host/test/portal-g2g-flow.mjs [--size 1920x1080]
  *     [--fps 60] [--scenario typing,scroll,still] [--seconds 15] [--gate]
+ *     [--freeze-after 20]
  *
  * One JSON line per scenario, in the X11 lab's shape plus `source`, `load` and
  * `isolation`. A run counts only when the 1-minute load average is at most
  * nproc/4 before and after it (`load.counts`); `--gate` turns an uncounted run,
- * or a typing run under 50 presented fps or over 50 ms p50, into a failure.
+ * or a typing run under 50 presented fps, over 50 ms p50, or with no decoded
+ * stamps, into a failure.
  *
  * Environment:
  *
@@ -147,7 +150,7 @@ async function cage(dir) {
         return wayland !== null;
     });
     const client = { ...env, WAYLAND_DISPLAY: wayland };
-    const stamp = spawn(config.stamp, ['--mode', config.scenario], {
+    const stamp = spawn(config.stamp, ['--mode', config.scenario, '--freeze-after', String(config.freezeAfter)], {
         stdio: ['ignore', 'pipe', 'ignore'], env: client,
     });
     children.push(stamp);
@@ -212,9 +215,11 @@ async function main() {
     const [width, height] = option('size', '1920x1080').split('x').map(Number);
     const maxFps = Number(option('fps', '60'));
     const seconds = Number(option('seconds', '15'));
+    const freezeAfter = Number(option('freeze-after', '20'));
     const scenarios = option('scenario', 'typing,scroll').split(',');
     const gate = process.argv.includes('--gate');
     assert(width > 0 && height > 0 && maxFps > 0 && seconds > 0, 'bad --size, --fps or --seconds');
+    assert(Number.isInteger(freezeAfter) && freezeAfter > 0, 'bad --freeze-after');
     assert(scenarios.every((s) => ['typing', 'scroll', 'still'].includes(s)), '--scenario is typing, scroll or still');
 
     const skip = (reason) => {
@@ -243,7 +248,13 @@ async function main() {
     if (spawnSync('unshare', ['--user', '--map-root-user', '--mount', '--pid', '--fork', 'true']).status !== 0) {
         skip('unprivileged user namespaces are not available');
     }
-    const renderNode = process.env.DESKLINK_PORTAL_RENDER_NODE || readdirSync('/dev/dri').filter((n) => n.startsWith('renderD')).sort()
+    let driEntries = [];
+    try {
+        driEntries = readdirSync('/dev/dri');
+    } catch {
+        driEntries = [];
+    }
+    const renderNode = process.env.DESKLINK_PORTAL_RENDER_NODE || driEntries.filter((n) => n.startsWith('renderD')).sort()
         .find((n) => {
             try {
                 return basename(readlinkSync(`/sys/class/drm/${n}/device/driver`)) !== 'nvidia';
@@ -258,7 +269,7 @@ async function main() {
     for (const scenario of scenarios) {
         const before = loadavg()[0];
         const result = await measure({
-            engine, stamp, sway, portal, xdph, chrome, renderNode, width, height, maxFps, seconds, scenario,
+            engine, stamp, sway, portal, xdph, chrome, renderNode, width, height, maxFps, seconds, scenario, freezeAfter,
         });
         const after = loadavg()[0];
         result.load = {
@@ -392,7 +403,7 @@ async function measure(run) {
                 encoded_frames: metrics.encoded_frames - metricsStart.encoded_frames,
                 captured_frames: metrics.captured_frames - metricsStart.captured_frames,
                 dropped_frames: metrics.dropped_frames - metricsStart.dropped_frames,
-                refined: metrics.refined_frames,
+                refined: metrics.refined_frames - metricsStart.refined_frames,
                 encode_ms_mean: round((metrics.encode_micros - metricsStart.encode_micros)
                     / Math.max(1, metrics.encoded_frames - metricsStart.encoded_frames) / 1000, 2),
                 kbps_target: metrics.target_kbps,
@@ -417,7 +428,7 @@ function writeCage(dir, run) {
         if (name) ambient.push(name.startsWith('/') ? name : `/run/user/${process.getuid()}/${name}`);
     }
     writeFileSync(join(dir, 'cage.json'), JSON.stringify({
-        scenario: run.scenario, engine: realpathSync(run.engine), stamp: realpathSync(run.stamp), sway: run.sway,
+        scenario: run.scenario, freezeAfter: run.freezeAfter, engine: realpathSync(run.engine), stamp: realpathSync(run.stamp), sway: run.sway,
         portal: run.portal, xdph: run.xdph,
         ambient: ambient.filter((path) => path && existsSync(path)).map((path) => {
             const { dev, ino } = statSync(path);

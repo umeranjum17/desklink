@@ -8,8 +8,9 @@
 //!
 //! `--mode typing` changes only the stamp strip; `--mode scroll` also redraws a
 //! full-screen field of shifted stripes on every repaint, a worst case like
-//! dense scrolling text; `--mode still` freezes the stamp after two seconds, so
-//! a receiver can check that a still screen gets its sharp refine pass.
+//! dense scrolling text; `--mode still` freezes the stamp `--freeze-after`
+//! seconds after it starts (two by default), so a receiver can check that a
+//! still screen gets its sharp refine pass.
 //!
 //! ```sh
 //! WAYLAND_DISPLAY=wayland-1 cargo run --example wl_stamp_target -- --mode scroll
@@ -19,10 +20,13 @@ use anyhow::{bail, Context, Result};
 use std::fs::File;
 use std::os::fd::AsFd;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(target_os = "linux")]
 use wayland_client::protocol::{
     wl_buffer, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface,
 };
+#[cfg(target_os = "linux")]
 use wayland_client::{Connection, Dispatch, QueueHandle};
+#[cfg(target_os = "linux")]
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
 const BLOCK: usize = 48;
@@ -39,6 +43,7 @@ enum Mode {
     Still,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Default)]
 struct State {
     compositor: Option<wl_compositor::WlCompositor>,
@@ -54,9 +59,16 @@ struct State {
     closed: bool,
 }
 
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("wl_stamp_target is Linux-only");
+}
+
+#[cfg(target_os = "linux")]
 fn main() -> Result<()> {
     let mut mode = Mode::Typing;
     let mut rate = 120u64;
+    let mut freeze_after = Duration::from_secs(2);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -69,6 +81,13 @@ fn main() -> Result<()> {
                 }
             }
             "--rate" => rate = args.next().context("--rate needs a value")?.parse()?,
+            "--freeze-after" => {
+                freeze_after = Duration::from_secs(
+                    args.next()
+                        .context("--freeze-after needs a value")?
+                        .parse()?,
+                )
+            }
             other => bail!("unknown argument {other}"),
         }
     }
@@ -184,7 +203,7 @@ fn main() -> Result<()> {
             }
         }
         let now = now_ms();
-        let ms = if mode == Mode::Still && started.elapsed() > Duration::from_secs(2) {
+        let ms = if mode == Mode::Still && started.elapsed() > freeze_after {
             *frozen_ms.get_or_insert_with(|| {
                 frozen_at = frame;
                 now
@@ -240,6 +259,7 @@ fn bytemuck(bytes: &mut [u8]) -> &mut [u32] {
     unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr().cast(), bytes.len() / 4) }
 }
 
+#[cfg(target_os = "linux")]
 fn memfd(len: usize) -> Result<File> {
     // SAFETY: a static C string name; the fd is owned by the returned File.
     let fd = unsafe { libc::memfd_create(c"desklink-stamp".as_ptr(), libc::MFD_CLOEXEC) };
@@ -254,6 +274,7 @@ fn memfd(len: usize) -> Result<File> {
 
 /// # Safety
 /// `file` must be at least `len` bytes and must outlive the mapping.
+#[cfg(target_os = "linux")]
 unsafe fn memmap(file: &File, len: usize) -> Result<&'static mut [u8]> {
     let ptr = libc::mmap(
         std::ptr::null_mut(),
@@ -269,6 +290,7 @@ unsafe fn memmap(file: &File, len: usize) -> Result<&'static mut [u8]> {
     Ok(std::slice::from_raw_parts_mut(ptr.cast(), len))
 }
 
+#[cfg(target_os = "linux")]
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
     fn event(
         state: &mut Self,
@@ -299,6 +321,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Dispatch<xdg_wm_base::XdgWmBase, ()> for State {
     fn event(
         _: &mut Self,
@@ -314,6 +337,7 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for State {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Dispatch<xdg_surface::XdgSurface, ()> for State {
     fn event(
         state: &mut Self,
@@ -339,6 +363,7 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for State {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
     fn event(
         state: &mut Self,
@@ -358,6 +383,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Dispatch<wl_output::WlOutput, ()> for State {
     fn event(
         state: &mut Self,
@@ -384,6 +410,7 @@ impl Dispatch<wl_output::WlOutput, ()> for State {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Dispatch<wl_buffer::WlBuffer, usize> for State {
     fn event(
         state: &mut Self,
@@ -399,7 +426,11 @@ impl Dispatch<wl_buffer::WlBuffer, usize> for State {
     }
 }
 
+#[cfg(target_os = "linux")]
 wayland_client::delegate_noop!(State: ignore wl_compositor::WlCompositor);
+#[cfg(target_os = "linux")]
 wayland_client::delegate_noop!(State: ignore wl_surface::WlSurface);
+#[cfg(target_os = "linux")]
 wayland_client::delegate_noop!(State: ignore wl_shm::WlShm);
+#[cfg(target_os = "linux")]
 wayland_client::delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
