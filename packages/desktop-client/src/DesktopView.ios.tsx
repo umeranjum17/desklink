@@ -1,11 +1,14 @@
 import * as React from 'react';
-import { Keyboard, StyleSheet, TextInput, View, type GestureResponderEvent, type LayoutChangeEvent } from 'react-native';
+import { Keyboard, StyleSheet, TextInput, View, type GestureResponderEvent, type LayoutChangeEvent, type ViewProps } from 'react-native';
+import { requireNativeViewManager, requireOptionalNativeModule } from 'expo-modules-core';
 import type { DesktopViewProps } from './DesktopView';
+import { hardwareKey, type HardwareKey } from './hardwareKeys';
 import { keyboardDelta } from './keyboardDelta';
+import { requireWebRTC } from './webrtc.ios';
 import { desktopInputEnabled, emitDesktopKeyboard, getDesktopSize, getDesktopStream, markDesktopPresented, nativeDesklink, observeDesktopSurface, registerDesktopView } from './native.ios';
 
 type Point = { x: number; y: number };
-type Gesture = { start: Point; last: Point; time: number; mode: 'pending' | 'letterbox' | 'hover' | 'pan' | 'armed' | 'drag' | 'two' | 'scroll' | 'pinch' | 'spent'; span: number; focus: Point };
+type Gesture = { stamp: number; start: Point; last: Point; time: number; mode: 'pending' | 'letterbox' | 'hover' | 'pan' | 'armed' | 'drag' | 'two' | 'scroll' | 'pinch' | 'spent'; span: number; focus: Point };
 
 /** Wheel detents accumulate in these steps and never send more than this at once. */
 const MIN_WHEEL_STEP = 0.05;
@@ -15,17 +18,41 @@ const PIXELS_PER_DETENT = 120;
 /** Where the cursor mark's tip sits inside the mark, in points. */
 const CURSOR_HOTSPOT = 3;
 
+type NativeEvent<T> = { nativeEvent: T };
+type PointerEvent = { phase: 'hover' | 'down' | 'move' | 'up' | 'cancel'; x: number; y: number; buttons?: number; timestamp?: number };
+type WheelEvent = { phase: 'begin' | 'move' | 'end'; dx: number; dy: number; x: number; y: number };
+type InputViewProps = ViewProps & {
+    enabled: boolean;
+    onKey: (event: NativeEvent<HardwareKey>) => void;
+    onPointer: (event: NativeEvent<PointerEvent>) => void;
+    onWheel: (event: NativeEvent<WheelEvent>) => void;
+};
+
 /**
- * The native video view, loaded on first render rather than with this module:
- * importing the package must not pull the native WebRTC libraries into the
- * application's first paint. `globalThis.require` is the bundler's lazy
- * require on device; under test the spec stubs it.
+ * The package's native surface (`ios/DesklinkInputView.swift`): it reports the
+ * hardware keyboard and an iPad pointer. A build without it — an app that has
+ * not rebuilt its native project since updating — keeps a plain view, with
+ * touch and the on-screen keyboard only.
  */
+function loadInputView(): React.ComponentType<InputViewProps> | null {
+    try {
+        return requireOptionalNativeModule('DesklinkInput') ? requireNativeViewManager<InputViewProps>('DesklinkInput') : null;
+    } catch {
+        return null;
+    }
+}
+
+/** A press's desktop button from UIKit's button mask: primary, secondary, then the middle. */
+function pressedButton(mask: number): number {
+    if (mask & 2) return 3;
+    if (mask & 4) return 2;
+    return 1;
+}
+
+/** The native video view, loaded on first render rather than with this module. */
 function loadRTCView(): React.ComponentType<Record<string, unknown>> | null {
     try {
-        const lazyRequire = (globalThis as { require?: (id: string) => unknown }).require;
-        if (typeof lazyRequire !== 'function') return null;
-        const webrtc = lazyRequire('react-native-webrtc') as {
+        const webrtc = requireWebRTC() as {
             RTCView?: React.ComponentType<Record<string, unknown>>;
         };
         return webrtc.RTCView ?? null;
@@ -50,9 +77,14 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
     const wheel = React.useRef({ x: 0, y: 0 });
     const longPress = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     const lastTap = React.useRef<{ time: number; at: Point; point: Point } | null>(null);
+    const chordsDown = React.useRef(new Set<number>());
+    /** Touch timestamps of recent trackpad or mouse presses, which the native view reports and touch leaves alone. */
+    const pressStamps = React.useRef<number[]>([]);
+    const pressed = React.useRef<number | null>(null);
     const [enabled, setEnabled] = React.useState(() => desktopInputEnabled(sessionId));
     const stream = getDesktopStream(sessionId);
     const RTCView = React.useMemo(loadRTCView, []);
+    const InputView = React.useMemo(loadInputView, []);
     void revision;
 
     React.useEffect(() => {
@@ -118,10 +150,12 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         send({ kind: 'wheel', dx: Math.max(-MAX_WHEEL_STEP, Math.min(MAX_WHEEL_STEP, x)), dy: Math.max(-MAX_WHEEL_STEP, Math.min(MAX_WHEEL_STEP, y)) });
         wheel.current = { x: 0, y: 0 };
     };
-    const pointer = (phase: string, at: Point, button?: number) => {
+    const pointer = (phase: string, at: Point, button?: number, mark = true) => {
         send({ kind: 'pointer', phase, x: at.x, y: at.y, ...(button ? { button } : {}) });
         // A device screen shows the touch itself; a cursor would be a second finger that lies.
-        if (gestures !== 'device') setCursor(at);
+        // A trackpad or mouse has the system's own pointer on screen.
+        if (!mark) setCursor(null);
+        else if (gestures !== 'device') setCursor(at);
     };
     const click = (at: Point, button = 1) => { pointer('down', at, button); pointer('up', at, button); };
     const stopTimer = () => { if (longPress.current) clearTimeout(longPress.current); longPress.current = null; };
@@ -134,13 +168,16 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         if (!enabled) return;
         const touches = event.nativeEvent.touches;
         if (touches.length !== 1) return;
+        // A trackpad or mouse press the native view already reported is its own.
+        const stamp = touches[0].timestamp;
+        if (pressStamps.current.some((pressStamp) => Math.abs(pressStamp - stamp) < 1)) { gesture.current = null; return; }
         const at = { x: touches[0].locationX, y: touches[0].locationY };
         // A device screen is pressed, not pointed at: the finger lands with the
         // button down. A tap is the same press lifted without moving, and a
         // hold holds — there is no long press to arm.
         if (gestures === 'device') {
             const from = point(at.x, at.y);
-            gesture.current = { start: at, last: at, time: Date.now(), mode: from ? 'drag' : 'spent', span: 0, focus: at };
+            gesture.current = { stamp, start: at, last: at, time: Date.now(), mode: from ? 'drag' : 'spent', span: 0, focus: at };
             if (from) pointer('down', from, 1);
             return;
         }
@@ -148,7 +185,7 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         // second one, and one finger alone is ignored. A zoomed picture pans
         // from anywhere, clamped to its edges.
         const onPicture = point(at.x, at.y) !== null;
-        gesture.current = { start: at, last: at, time: Date.now(), mode: onPicture || zoom > 1 ? 'pending' : 'letterbox', span: 0, focus: at };
+        gesture.current = { stamp, start: at, last: at, time: Date.now(), mode: onPicture || zoom > 1 ? 'pending' : 'letterbox', span: 0, focus: at };
         stopTimer();
         longPress.current = setTimeout(() => {
             if (gesture.current?.mode === 'pending' && point(at.x, at.y)) gesture.current.mode = 'armed';
@@ -287,11 +324,70 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         }
         setKeyboardText(keyboardTextRef.current);
     };
+    const onKey = ({ nativeEvent }: NativeEvent<HardwareKey>) => {
+        if (!enabled || !sessionId) return;
+        const action = hardwareKey(nativeEvent, chordsDown.current, captured.current);
+        if (action === null) return;
+        if ('send' in action) send(action.send);
+        else emitDesktopKeyboard(sessionId, action.capture);
+    };
+    const onPointer = ({ nativeEvent: { phase, x, y, buttons = 0, timestamp = NaN } }: NativeEvent<PointerEvent>) => {
+        if (!enabled) return;
+        if (phase === 'hover') {
+            const at = point(x, y);
+            if (at) pointer('move', at, undefined, false);
+            return;
+        }
+        if (phase === 'down') {
+            pressStamps.current = [...pressStamps.current.slice(-7), timestamp];
+            const button = pressedButton(buttons);
+            // Touch may have seen this press first: it is the pointer's, not a finger's.
+            const g = gesture.current;
+            let held = false;
+            if (g && Math.abs(g.stamp - timestamp) < 1) {
+                stopTimer();
+                gesture.current = null;
+                if (g.mode === 'drag') {
+                    const from = point(g.start.x, g.start.y, true);
+                    held = button === 1;
+                    if (!held && from) pointer('up', from, 1, false);
+                }
+            }
+            // The letterbox is not the desktop: a press there does nothing.
+            const at = point(x, y);
+            if (!at) return;
+            pressed.current = button;
+            if (!held) pointer('down', at, button, false);
+            return;
+        }
+        const button = pressed.current;
+        if (button === null) return;
+        const at = point(x, y, true);
+        if (phase === 'move') { if (at) pointer('move', at, button, false); return; }
+        pressed.current = null;
+        if (at) pointer('up', at, button, false); else send({ kind: 'release_all' });
+    };
+    const onWheel = ({ nativeEvent: { phase, dx, dy, x, y } }: NativeEvent<WheelEvent>) => {
+        if (!enabled || !scale) return;
+        if (phase === 'end') { flushWheel(true); return; }
+        if (phase === 'begin') {
+            // The desktop scrolls whatever is under its pointer.
+            const under = point(x, y);
+            if (under) pointer('move', under, undefined, false);
+        }
+        // Content follows the fingers, as with two fingers on the screen.
+        wheel.current.x += -dx / scale / PIXELS_PER_DETENT;
+        wheel.current.y += -dy / scale / PIXELS_PER_DETENT;
+        flushWheel(false);
+    };
     const onLayout = (event: LayoutChangeEvent) => setBounds(event.nativeEvent.layout);
-    return <View style={[styles.surface, style]} onLayout={onLayout} accessible={accessibilityLabel !== undefined} accessibilityLabel={accessibilityLabel}
-        onStartShouldSetResponder={() => enabled} onMoveShouldSetResponder={() => enabled}
-        onResponderGrant={start} onResponderMove={move} onResponderRelease={end}
-        onResponderTerminate={() => { stopTimer(); if (gesture.current?.mode === 'drag') send({ kind: 'release_all' }); gesture.current = null; }}>
+    const surface: ViewProps = {
+        style: [styles.surface, style], onLayout, accessible: accessibilityLabel !== undefined, accessibilityLabel,
+        onStartShouldSetResponder: () => enabled, onMoveShouldSetResponder: () => enabled,
+        onResponderGrant: start, onResponderMove: move, onResponderRelease: end,
+        onResponderTerminate: () => { stopTimer(); if (gesture.current?.mode === 'drag') send({ kind: 'release_all' }); gesture.current = null; },
+    };
+    const children = <>
         {sessionId && stream && RTCView && size.width > 0 && size.height > 0 ?
             <RTCView pointerEvents="none" streamURL={stream.toURL()} objectFit="contain" style={{ position: 'absolute', left: originX, top: originY, width: pictureWidth, height: pictureHeight }}
                 onDimensionsChange={(event) => { if (event.nativeEvent.width > 0 && event.nativeEvent.height > 0) markDesktopPresented(sessionId); }} /> : placeholder}
@@ -304,7 +400,10 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
                 if (captured.current && sessionId) emitDesktopKeyboard(sessionId, { key: 'Enter' });
                 else { send({ kind: 'key', name: 'Enter', modifiers: [], down: true }); send({ kind: 'key', name: 'Enter', modifiers: [], down: false }); }
             }} />
-    </View>;
+    </>;
+    return InputView
+        ? <InputView {...surface} enabled={enabled} onKey={onKey} onPointer={onPointer} onWheel={onWheel}>{children}</InputView>
+        : <View {...surface}>{children}</View>;
 }
 
 const styles = StyleSheet.create({

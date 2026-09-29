@@ -13,7 +13,14 @@
  *  - a tap on the simulator's screen arrives at the host as a click at the
  *    desktop pixel under the finger: the page on the desktop records it;
  *  - the picture keeps following the desktop: it shows the dots the page drew
- *    under those clicks, and it changes as the page repaints every frame.
+ *    under those clicks, and it changes as the page repaints every frame;
+ *  - a hardware keyboard reaches the desktop through the package's native input
+ *    view: arrows, Esc, Tab, a Command chord (the desktop's Meta) and typed text
+ *    arrive at the page as the keys they are;
+ *  - on an iPad simulator (DESKLINK_IOS_IPAD=1), a trackpad pointer does too: a
+ *    hover moves the desktop's pointer without a button, a click-drag selects
+ *    text, a secondary click is a right click and a scroll turns the wheel. The
+ *    pointer is driven by XCUITest (test/ios-pointer/), which `axe` cannot do.
  *
  * The host side runs here, on a private Xvfb (display >= 170, its own cookie):
  * a page on that display, the bridge with an `x11` source, and a relay in
@@ -38,6 +45,7 @@
  *                           no iOS simulator platform installed
  *   DESKLINK_IOS_RUNTIME    iOS runtime version to run on, e.g. 18.6 (default: the
  *                           newest the Mac has)
+ *   DESKLINK_IOS_IPAD       1 runs on an iPad simulator and adds the trackpad checks
  *   DESKLINK_IOS_HOST_ADDR  address the simulator reaches this machine on
  *                           (default: this machine's address as the Mac's ssh
  *                           session sees it)
@@ -65,7 +73,9 @@ const DIR = process.env.DESKLINK_IOS_DIR ?? 'desklink-ios';
 const BUILD = process.env.DESKLINK_IOS_SKIP_BUILD !== '1';
 const BUNDLE = 'dev.desklink.example';
 const RUNTIME = process.env.DESKLINK_IOS_RUNTIME ?? '';
-const DEVICE = RUNTIME ? `desklink-ios-flow-${RUNTIME}` : 'desklink-ios-flow';
+const IPAD = process.env.DESKLINK_IOS_IPAD === '1';
+const DEVICE = ['desklink-ios-flow', IPAD ? 'ipad' : '', RUNTIME].filter(Boolean).join('-');
+const DEVICE_TYPE = IPAD ? 'iPad-Pro-11-inch-M4-8GB' : 'iPhone-16';
 const DESKTOP = { width: 1280, height: 800 };
 const MARK = `DESKLINK_IOS_FLOW=${process.pid}`;
 
@@ -112,8 +122,9 @@ function buildApp(udid) {
     log('building the example app on the Mac (the first build takes a while)');
     mac(`cd "$D/desktop-client/example"
 [ node_modules/.package-lock.json -nt package.json ] || npm install --no-audit --no-fund
-# The native project is generated: regenerate it when what it is generated from changes.
-if [ ! -f ios/Podfile.lock ] || [ package.json -nt ios/Podfile.lock ] || [ app.json -nt ios/Podfile.lock ]; then
+# The native project is generated: regenerate it when what it is generated from changes,
+# the package's own native module and config plugin included.
+if [ ! -f ios/Podfile.lock ] || [ -n "$(find package.json app.json ../expo-module.config.json ../app.plugin.js ../ios -newer ios/Podfile.lock)" ]; then
     rm -rf ios
     npx expo prebuild --platform ios --no-install
     (cd ios && pod install)
@@ -122,6 +133,20 @@ cd ios
 xcodebuild -workspace desklinkexample.xcworkspace -scheme desklinkexample -configuration Release \\
     -destination "platform=iOS Simulator,id=${udid}" -derivedDataPath "$D/DerivedData" \\
     CODE_SIGNING_ALLOWED=NO build > "$D/build.log" 2>&1 || { tail -60 "$D/build.log"; exit 1; }`, 40 * 60_000);
+}
+
+/** Run the XCUITest pointer steps (test/ios-pointer/) against the running app. */
+function pointerSteps(udid, steps) {
+    const copy = spawnSync('rsync', ['-a', '--delete', `${join(here, 'ios-pointer')}/`, `${MAC}:${DIR}/ios-pointer/`], { encoding: 'utf8', timeout: 60_000 });
+    assert.equal(copy.status, 0, `rsync to the Mac failed: ${copy.stderr}`);
+    mac(`cd "$D/ios-pointer"
+# The project is generated with the xcodeproj gem CocoaPods carries, run on CocoaPods' own Ruby.
+POD="$(command -v pod)"
+if head -1 "$POD" | grep -q ruby; then RUBY="$(head -1 "$POD" | sed 's/^#! *//')"
+else eval "$(grep -o '^GEM_HOME="[^"]*"' "$POD")"; export GEM_HOME; RUBY="$(head -1 "$GEM_HOME/bin/pod" | sed 's/^#! *//')"; fi
+$RUBY project.rb
+TEST_RUNNER_DESKLINK_POINTER='${JSON.stringify(steps)}' xcodebuild test -project DesklinkPointer.xcodeproj -scheme PointerTests \
+    -destination "platform=iOS Simulator,id=${udid}" -derivedDataPath "$D/PointerData" > "$D/pointer.log" 2>&1 || { tail -60 "$D/pointer.log"; exit 1; }`, 10 * 60_000);
 }
 
 function simulator() {
@@ -135,7 +160,7 @@ function simulator() {
     assert(runtimes.length > 0, `the Mac has no iOS simulator runtime ${RUNTIME}`);
     const runtime = runtimes.at(-1).identifier;
     log(`creating simulator ${DEVICE} on ${runtime}`);
-    return mac(`xcrun simctl create ${DEVICE} com.apple.CoreSimulator.SimDeviceType.iPhone-16 ${runtime}`).trim();
+    return mac(`xcrun simctl create ${DEVICE} com.apple.CoreSimulator.SimDeviceType.${DEVICE_TYPE} ${runtime}`).trim();
 }
 
 /** The status line the app exposes as `testID="desklink-status"`, and the screen's size in points. */
@@ -198,9 +223,12 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>desklink</title>
 <body style="margin:0;overflow:hidden;font:bold 120px/1.1 system-ui,sans-serif;color:#0b1020">
 <div id="box" style="position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">
 <div>desklink</div><div id="n" style="font-size:56px"></div></div>
+<div id="line" style="position:fixed;left:100px;top:40px;font:40px/48px monospace">select this line of desktop text</div>
 <script>
 let n = 0;
 window.clicks = [];
+window.keys = [];
+window.pointer = [];
 const box = document.getElementById('box');
 function frame() {
     n += 1;
@@ -213,9 +241,19 @@ for (const type of ['mousedown', 'mouseup']) addEventListener(type, (event) => {
     clicks.push({ type, x: event.clientX, y: event.clientY, button: event.button });
     if (type !== 'mousedown') return;
     const dot = document.createElement('div');
-    dot.style.cssText = 'position:fixed;width:36px;height:36px;margin:-18px;border-radius:50%;background:#0b1020;left:' + event.clientX + 'px;top:' + event.clientY + 'px';
+    dot.style.cssText = 'pointer-events:none;position:fixed;width:36px;height:36px;margin:-18px;border-radius:50%;background:#0b1020;left:' + event.clientX + 'px;top:' + event.clientY + 'px';
     document.body.append(dot);
 });
+for (const type of ['keydown', 'keyup']) addEventListener(type, (event) => {
+    keys.push({ type, key: event.key, meta: event.metaKey, ctrl: event.ctrlKey, alt: event.altKey, shift: event.shiftKey });
+    // Tab would move the page's focus; the flow only needs to see it arrive.
+    if (event.key === 'Tab') event.preventDefault();
+});
+for (const type of ['mousemove', 'mousedown', 'mouseup', 'contextmenu', 'wheel']) addEventListener(type, (event) => {
+    pointer.push({ type, x: event.clientX, y: event.clientY, button: event.button, buttons: event.buttons,
+        dy: event.deltaY ?? 0, selection: getSelection().toString() });
+    if (type === 'contextmenu') event.preventDefault();
+}, { passive: false });
 </script>`;
 
 /** Evaluate in the page over the browser's debugging port. */
@@ -298,6 +336,9 @@ async function main() {
     if (BUILD) buildApp(udid);
     const app = mac(`echo "$D/DerivedData/Build/Products/Release-iphonesimulator/desklinkexample.app"`).trim();
     mac(`test -d "${app}"`);
+    // The example opts in to the package's config plugin, so the trackpad's presses carry their buttons.
+    assert.equal(mac(`plutil -extract UIApplicationSupportsIndirectInputEvents raw "${app}/Info.plist"`).trim(), 'true',
+        'the config plugin set UIApplicationSupportsIndirectInputEvents');
 
     // ---- private Xvfb -------------------------------------------------------------
     const number = Array.from({ length: 60 }, (_, i) => 170 + i)
@@ -498,7 +539,73 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     assert(before.some((value, i) => Math.abs(value - after[i]) > 8),
         `the picture keeps changing with the desktop: background rgb(${before}), then rgb(${after})`);
     log(`the picture follows the desktop: both clicks shown, background rgb(${before}) → rgb(${after})`);
-    console.log(`ok: the iOS receiver shows the live desktop, answers VP9 with NACK, and its taps click the host (${out})`);
+
+    // ---- the hardware keyboard ------------------------------------------------------------
+    // HID usages pressed on the simulator's keyboard reach the app as a hardware
+    // keyboard's would: Up, Esc, Tab, Command+C, then typed text.
+    const keysBefore = await page.evaluate('keys.length');
+    for (const press of ['key 82', 'key 41', 'key 43', 'key-combo --modifiers 227 --key 6', 'type desk']) mac(`axe ${press} --udid ${udid}`);
+    let keys = [];
+    for (let i = 0; i < 50 && !keys.some((key) => key.type === 'keyup' && key.key === 'k'); i++) {
+        await sleep(100);
+        keys = (await page.evaluate('keys')).slice(keysBefore);
+    }
+    const downs = keys.filter((key) => key.type === 'keydown');
+    log(`host keys: ${downs.map((key) => `${key.meta ? 'Meta+' : ''}${key.key}`).join(' ')}`);
+    // The desktop reports Command's Meta as its own key too; the chord is what matters.
+    assert.deepEqual(downs.map((key) => key.key).filter((key) => key !== 'Meta' && key !== 'OS'),
+        ['ArrowUp', 'Escape', 'Tab', 'c', 'd', 'e', 's', 'k'], 'the hardware keys arrive as themselves, in order');
+    assert(downs.find((key) => key.key === 'c').meta, 'Command+C arrives as Meta+C');
+    for (const down of downs) {
+        assert(keys.some((key) => key.type === 'keyup' && key.key === down.key), `${down.key} is released, not left held`);
+    }
+
+    // ---- the trackpad (iPad) ----------------------------------------------------------------
+    if (!IPAD) {
+        log('trackpad checks skipped: set DESKLINK_IOS_IPAD=1 to run on an iPad simulator');
+    } else {
+        const screenAt = (desktop) => ({ x: origin.x + (desktop.x + 0.5) * scale, y: origin.y + (desktop.y + 0.5) * scale });
+        const [left, top, right, bottom] = await page.evaluate(
+            '(() => { const box = document.getElementById("line").getBoundingClientRect(); return [box.left, box.top, box.right, box.bottom]; })()');
+        const line = Math.round((top + bottom) / 2);
+        const spots = {
+            from: { x: Math.round(left) + 8, y: line }, to: { x: Math.round(right) - 8, y: line },
+            menu: { x: 640, y: 560 }, wheel: { x: 640, y: 400 },
+        };
+        const steps = [
+            { action: 'drag', ...screenAt(spots.from), toX: screenAt(spots.to).x, toY: screenAt(spots.to).y },
+            { action: 'rightClick', ...screenAt(spots.menu) },
+            { action: 'scroll', ...screenAt(spots.wheel), dy: -200 },
+        ];
+        const pointerBefore = await page.evaluate('pointer.length');
+        log('driving the trackpad with XCUITest');
+        pointerSteps(udid, steps);
+        await sleep(500);
+        const seen = (await page.evaluate('pointer')).slice(pointerBefore);
+        writeFileSync(join(out, 'pointer-events.json'), JSON.stringify(seen, null, 1));
+        log(`page pointer events: ${seen.filter((event) => event.type !== 'mousemove').map((event) => `${event.type}/${event.button}@${event.x},${event.y}`).join(' ')}; ${seen.filter((event) => event.type === 'mousemove' && event.buttons === 0).length} buttonless moves`);
+        const near = (event, spot) => Math.abs(event.x - spot.x) <= slack && Math.abs(event.y - spot.y) <= slack;
+        const down = seen.findIndex((event) => event.type === 'mousedown' && event.button === 0 && near(event, spots.from));
+        assert(down >= 0, `a trackpad press is a left button down where it pressed: ${JSON.stringify(seen.filter((event) => event.type !== 'mousemove'))}`);
+        const up = seen.findIndex((event, i) => i > down && event.type === 'mouseup' && event.button === 0);
+        assert(up > down && near(seen[up], spots.to), `the drag lets go where it ended: ${JSON.stringify(seen[up])}`);
+        assert(seen.slice(down, up).some((event) => event.type === 'mousemove' && (event.buttons & 1) === 1), 'the button stays held through the drag');
+        assert.match(seen[up].selection, /line of desktop/, 'the click-drag selected the page\'s text');
+        log(`drag-select: pressed at (${seen[down].x}, ${seen[down].y}), released at (${seen[up].x}, ${seen[up].y}), selected "${seen[up].selection}"`);
+        const menu = seen.find((event) => event.type === 'mousedown' && event.button === 2);
+        assert(menu !== undefined && near(menu, spots.menu), `a secondary click is a right click where it clicked: ${JSON.stringify(menu)}`);
+        assert(seen.some((event) => event.type === 'contextmenu'), 'the page got its context menu event');
+        const wheels = seen.filter((event) => event.type === 'wheel');
+        assert(wheels.length > 0, 'a trackpad scroll turns the desktop wheel');
+        log(`right click at (${menu.x}, ${menu.y}); scroll: ${wheels.length} wheel events, deltaY total ${wheels.reduce((sum, event) => sum + event.dy, 0)}`);
+        // XCUITest's own hover() reaches no app on the simulator, but the pointer's
+        // hover reports go on while it rests over the scroll: each is a buttonless
+        // move, besides the one move the scroll makes to put the pointer under it.
+        const hovers = seen.filter((event) => event.type === 'mousemove' && event.buttons === 0 && near(event, spots.wheel)).length;
+        assert(hovers > 1, `the pointer's hover moves the desktop's pointer with no button held: ${hovers} buttonless moves at the scroll`);
+        log(`hover: ${hovers - 1} buttonless moves from the pointer's hover reports`);
+    }
+    console.log(`ok: the iOS receiver shows the live desktop, answers VP9 with NACK, its taps click the host and its hardware input drives it${IPAD ? ', trackpad included' : ''} (${out})`);
 }
 
 let failed = false;

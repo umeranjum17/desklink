@@ -1,17 +1,11 @@
 import type { MediaStream, RTCPeerConnection } from 'react-native-webrtc';
 import type { NativeDesklinkModule, NativeSessionEvent } from './native';
+import { requireWebRTC } from './webrtc.ios';
 
-/**
- * The WebRTC stack, loaded the first time a session opens rather than with
- * this module: importing the package must not pull the native WebRTC
- * libraries into the application's first paint. `globalThis.require` is the
- * bundler's lazy require on device; under test the spec stubs it.
- */
+/** The WebRTC stack, loaded the first time a session opens rather than with this module. */
 function loadWebRTC(): { RTCPeerConnection: new (config: unknown) => RTCPeerConnection; MediaStream: new () => MediaStream } | null {
     try {
-        const lazyRequire = (globalThis as { require?: (id: string) => unknown }).require;
-        if (typeof lazyRequire !== 'function') return null;
-        return lazyRequire('react-native-webrtc') as {
+        return requireWebRTC() as {
             RTCPeerConnection: new (config: unknown) => RTCPeerConnection;
             MediaStream: new () => MediaStream;
         };

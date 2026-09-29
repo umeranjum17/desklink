@@ -8,6 +8,6 @@
             "bundleIdentifier": "dev.desklink.example",
             "supportsTablet": true
         },
-        "plugins": ["@config-plugins/react-native-webrtc"]
+        "plugins": ["@config-plugins/react-native-webrtc", "@desklink/react-native"]
     }
 }

@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+// The bundler's inline require, standing in: it goes through the stubbed global so the spec sees when it runs.
+vi.mock('./webrtc.ios', () => ({ requireWebRTC: () => (globalThis as unknown as { require: (id: string) => unknown }).require('react-native-webrtc') }));
 
 const peers: MockPeer[] = [];
 class MockStream {
