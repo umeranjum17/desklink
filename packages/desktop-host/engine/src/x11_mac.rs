@@ -22,6 +22,18 @@ impl X11Desktop {
         bail!("the X11 backend is only available on Linux")
     }
 
+    pub fn capture_path(&self) -> &'static str {
+        "get_image"
+    }
+
+    pub fn damage_armed(&self) -> bool {
+        false
+    }
+
+    pub fn take_damage(&self) -> bool {
+        true
+    }
+
     pub fn move_pointer(&mut self, _: i64, _: i64) -> Result<()> {
         bail!("the X11 backend is only available on Linux")
     }

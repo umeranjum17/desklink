@@ -30,7 +30,7 @@ rand = "0.8"
 ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
 pipewire = { version = "0.10", features = ["v0_3_44"] }
 xkbcommon = "0.8"
-x11rb = { version = "0.14", default-features = false, features = ["allow-unsafe-code", "xtest"] }
+x11rb = { version = "0.14", default-features = false, features = ["allow-unsafe-code", "xtest", "shm", "damage", "xfixes"] }
 wl-clipboard-rs = "0.9"
 
 [target.'cfg(target_os = "macos")'.dependencies]

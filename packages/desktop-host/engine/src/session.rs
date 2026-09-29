@@ -207,11 +207,29 @@ fn select_x11(
             .spawn(move || {
                 let interval = frame_interval(max_fps);
                 let mut sequence = 0u64;
-                // An X server has no damage signal here, so an unchanged screen
-                // is recognised by its pixels: handing it on would keep the
-                // encoder busy and a still desktop would never be refined.
+                let mut last_sent: Option<Instant> = None;
+                // Without XDamage there is no change signal, so an unchanged
+                // screen is recognised by its pixels exactly as before.
+                let hashed = !lock(&desktop).damage_armed();
                 let mut last_hash = None;
+                // The first frame is always grabbed; afterwards Damage wakes
+                // the loop, so a still screen costs no grab, no conversion
+                // and no hash. The fps cap stays a minimum spacing.
+                let mut first = true;
                 while !stop.load(Ordering::SeqCst) {
+                    if !first {
+                        let changed = lock(&desktop).take_damage();
+                        if !changed {
+                            std::thread::sleep(interval);
+                            continue;
+                        }
+                        if let Some(sent) = last_sent {
+                            let elapsed = sent.elapsed();
+                            if elapsed < interval {
+                                std::thread::sleep(interval - elapsed);
+                            }
+                        }
+                    }
                     let started = Instant::now();
                     let frame = {
                         let mut desktop = lock(&desktop);
@@ -219,14 +237,29 @@ fn select_x11(
                     };
                     match frame {
                         Ok((frame, raw)) => {
-                            use std::hash::{Hash, Hasher};
-                            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                            raw.hash(&mut hasher);
-                            let hash = hasher.finish();
-                            if last_hash != Some(hash) {
-                                last_hash = Some(hash);
+                            let changed = if hashed {
+                                use std::hash::{Hash, Hasher};
+                                let mut hasher =
+                                    std::collections::hash_map::DefaultHasher::new();
+                                raw.hash(&mut hasher);
+                                let hash = hasher.finish();
+                                if last_hash == Some(hash) {
+                                    false
+                                } else {
+                                    last_hash = Some(hash);
+                                    true
+                                }
+                            } else {
+                                true
+                            };
+                            if changed {
+                                // Handing an unchanged frame on would keep the
+                                // encoder busy and a still desktop would never
+                                // be refined.
                                 sink(frame, sequence, raw);
                                 sequence += 1;
+                                last_sent = Some(started);
+                                first = false;
                             }
                         }
                         Err(error) => {
@@ -241,9 +274,13 @@ fn select_x11(
                             }
                         }
                     }
-                    let elapsed = started.elapsed();
-                    if elapsed < interval {
-                        std::thread::sleep(interval - elapsed);
+                    // With Damage the fps cap paced the grab above; without
+                    // it the loop keeps its old trailing sleep.
+                    if hashed {
+                        let elapsed = started.elapsed();
+                        if elapsed < interval {
+                            std::thread::sleep(interval - elapsed);
+                        }
                     }
                 }
             })
