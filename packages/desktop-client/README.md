@@ -119,7 +119,8 @@ import { desktopAvailable } from '@desklink/react-native/availability';
   peer's ICE state and the engine's `session.state` both feed it: a
   `disconnected` path reads as `reconnecting` within about a second of the
   drop — never a frozen picture that still says live — and a recovered path
-  reads as `live` again once ICE is `connected`. `failed` stays terminal.
+  reads as `live` again once ICE is `connected`. A path that reports
+  `failed` reopens the session with fresh authority instead of staying stuck.
   Every event carries its engine session id where the carrier preserves it,
   and the session ignores anything naming a session it no longer holds, so a
   previous generation's queued offer or revocation cannot corrupt or kill a
@@ -136,7 +137,12 @@ import { desktopAvailable } from '@desklink/react-native/availability';
   `session.description` event and is answered as usual, all without reopening
   the session. The first restart waits ~2 s for blips that heal alone;
   retries back off across ~60 s, so a 30–60 s outage still recovers when the
-  network returns. Only a terminal `failed` reopens the session, and those
+  network returns. When the restart schedule is spent without the peer
+  reporting `failed`, the session reopens instead of sitting in
+  `reconnecting`. An engine revocation with code `transport` (the path was
+  lost) also reopens the session; any other revocation code, or none, ends
+  it, as does a deliberate close. A return to the foreground after ~30 s away
+  reopens at once rather than spending restarts on a lapsed path. Those
   reopens back off across ~60 s too instead of spending one attempt while the
   network is still down. Renegotiation transients from a restart the session
   asked for itself are expected, not a new outage: they neither flip the
