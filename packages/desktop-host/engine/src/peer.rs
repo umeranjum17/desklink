@@ -12,7 +12,8 @@
 
 use anyhow::{Context, Result};
 use rtc::interceptor::{
-    Attribute, Interceptor, PacerBuilder, Packet, Registry, Slot, StreamInfo, TaggedPacket,
+    Attribute, BandwidthEstimator, CongestionControlBuilder, Interceptor, PacerBuilder, Packet,
+    PacketReport, Registry, Slot, StreamInfo, TaggedPacket, TwccSenderBuilder,
 };
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
@@ -219,6 +220,107 @@ const NO_PLAYOUT_DELAY: HeaderExtension = HeaderExtension::PlayoutDelay(PlayoutD
     min_delay: 0,
     max_delay: 0,
 });
+/// What the far end's transport-wide feedback says about the path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathReport {
+    /// The queueing delay no packet escaped over the last `STANDING_WINDOW`:
+    /// the lowest one-way delay in it above the lowest the path has shown. A
+    /// burst that one frame queues up lifts some packets, not all of them; a
+    /// link carrying more than it can drain lifts every one.
+    pub queue_delay: Duration,
+    /// What arrived over the last `DELIVERED_WINDOW`, in kbps.
+    pub delivered_kbps: u32,
+}
+
+/// How long the lowest one-way delay is remembered: a path's base delay is the
+/// lowest of the last one to two of these, so a queue that stands for a while
+/// is still measured against the empty path, and a route change is learnt.
+const FLOOR_WINDOW: Duration = Duration::from_secs(15);
+const STANDING_WINDOW: Duration = Duration::from_millis(200);
+const DELIVERED_WINDOW: Duration = Duration::from_millis(500);
+
+/// Reads the queueing delay out of transport-wide congestion feedback (every
+/// packet's departure here against its arrival there) for the session's rate
+/// control to act on. The rate decision stays in the session, beside the
+/// encoder it drives; this only measures. Its own "target" is the constant
+/// pacing rate, so the pacer is never retargeted from here.
+struct QueueDelay {
+    report: Arc<Mutex<Option<PathReport>>>,
+    pace_bps: f64,
+    epoch: Option<Instant>,
+    /// The lowest one-way delay in the previous and the current window, in µs
+    /// on an arbitrary offset (the two clocks are not synchronized).
+    floor: [i64; 2],
+    floor_since: Option<Instant>,
+    /// Recent arrivals: arrival and one-way delay in µs, size in bytes.
+    recent: VecDeque<(i64, i64, usize)>,
+}
+
+impl QueueDelay {
+    fn new(report: Arc<Mutex<Option<PathReport>>>, pace_bps: f64) -> Self {
+        Self {
+            report,
+            pace_bps,
+            epoch: None,
+            floor: [i64::MAX; 2],
+            floor_since: None,
+            recent: VecDeque::new(),
+        }
+    }
+}
+
+impl BandwidthEstimator for QueueDelay {
+    fn on_reports(&mut self, now: Instant, reports: &[PacketReport]) {
+        let Some(first) = reports.first() else {
+            return;
+        };
+        let epoch = *self.epoch.get_or_insert(first.departure);
+        let before = self.recent.len();
+        for report in reports {
+            let Some(arrival) = report.arrival.filter(|_| report.arrived) else {
+                continue;
+            };
+            let arrival = arrival.as_micros() as i64;
+            let delay = arrival
+                - report
+                    .departure
+                    .saturating_duration_since(epoch)
+                    .as_micros() as i64;
+            self.floor[1] = self.floor[1].min(delay);
+            self.recent.push_back((arrival, delay, report.size));
+        }
+        let since = *self.floor_since.get_or_insert(now);
+        if now.saturating_duration_since(since) >= FLOOR_WINDOW {
+            self.floor = [self.floor[1], i64::MAX];
+            self.floor_since = Some(now);
+        }
+        if self.recent.len() == before {
+            return;
+        }
+        let latest = self.recent.iter().map(|(at, _, _)| *at).max().unwrap_or(0);
+        let delivered_since = latest - DELIVERED_WINDOW.as_micros() as i64;
+        self.recent.retain(|(at, _, _)| *at >= delivered_since);
+        let standing_since = latest - STANDING_WINDOW.as_micros() as i64;
+        let standing = self
+            .recent
+            .iter()
+            .filter(|(at, _, _)| *at >= standing_since)
+            .map(|(_, delay, _)| *delay)
+            .min()
+            .unwrap_or(0);
+        let base = self.floor[0].min(self.floor[1]);
+        let bytes: usize = self.recent.iter().map(|(_, _, size)| size).sum();
+        *lock(&self.report) = Some(PathReport {
+            queue_delay: Duration::from_micros(standing.saturating_sub(base).max(0) as u64),
+            delivered_kbps: (bytes as u64 * 8 * 1000 / DELIVERED_WINDOW.as_micros() as u64)
+                .min(u32::MAX as u64) as u32,
+        });
+    }
+
+    fn target_bitrate(&self) -> f64 {
+        self.pace_bps
+    }
+}
 
 struct Handler {
     events: tokio::sync::mpsc::UnboundedSender<PeerEvent>,
@@ -617,6 +719,8 @@ pub struct VideoPeer {
     payload_type: PayloadType,
     /// Loss fractions (RFC 3550, /256) the far end reported, oldest first.
     loss: Arc<Mutex<Vec<u8>>>,
+    /// The latest queueing delay transport-wide feedback showed, if any.
+    path: Arc<Mutex<Option<PathReport>>>,
     feedback: tokio::task::JoinHandle<()>,
     /// The engine is the offerer, so a candidate can arrive before the answer
     /// that supplies its remote description; those are held here until it does.
@@ -656,12 +760,21 @@ impl VideoPeer {
                 None,
             )
             .context("failed to offer the playout-delay extension")?;
+        let path = Arc::new(Mutex::new(None));
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)?
             .with(
                 Slot::Pacer,
                 PacerBuilder::new()
                     .with_target_bitrate(options.pace_bps)
                     .with_burst_bits(PACE_BURST_BITS)
+                    .build(),
+            )
+            // Number every packet transport-wide, so the receiver reports when
+            // each one arrived, and read those reports for the queueing delay.
+            .with(Slot::TwccSender, TwccSenderBuilder::new().build())
+            .with(
+                Slot::CongestionControl,
+                CongestionControlBuilder::new(QueueDelay::new(path.clone(), options.pace_bps))
                     .build(),
             )
             // Last, so every interceptor has seen the whole of the inbound RTCP.
@@ -780,6 +893,7 @@ impl VideoPeer {
                 control,
                 payload_type,
                 loss,
+                path,
                 feedback,
                 candidates: Mutex::new(PendingCandidates::default()),
             },
@@ -891,6 +1005,12 @@ impl VideoPeer {
         std::mem::take(&mut *lock(&self.loss))
     }
 
+    /// Take the path report that arrived since the last call, if any; `None`
+    /// also when the receiver sends no transport-wide feedback.
+    pub fn take_path_report(&self) -> Option<PathReport> {
+        lock(&self.path).take()
+    }
+
     /// Take the pending "the far end needs a reference frame" request, if any.
     pub fn take_keyframe_request(&self) -> bool {
         self.wants_keyframe.swap(false, Ordering::SeqCst)
@@ -926,6 +1046,50 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_standing_queue_is_measured_and_one_frames_burst_is_not() {
+        let epoch = Instant::now();
+        let report = Arc::new(Mutex::new(None));
+        let mut estimator = QueueDelay::new(report.clone(), 20_000_000.0);
+        let mut id = 0u64;
+        // One 1200-byte packet every 10 ms, sent at `ms` and `extra` ms late
+        // over a path with 20 ms of base delay.
+        let mut feed = |from: u64, to: u64, extra: &dyn Fn(u64) -> u64| {
+            let reports: Vec<PacketReport> = (from..to)
+                .step_by(10)
+                .map(|ms| {
+                    id += 1;
+                    PacketReport {
+                        ssrc: 1,
+                        id,
+                        rtp_sequence_number: id as u16,
+                        is_twcc: true,
+                        twcc_sequence_number: id as u16,
+                        size: 1200,
+                        arrived: true,
+                        departure: epoch + Duration::from_millis(ms),
+                        arrival: Some(Duration::from_millis(1_000 + ms + 20 + extra(ms))),
+                        ecn: Default::default(),
+                    }
+                })
+                .collect();
+            estimator.on_reports(epoch + Duration::from_millis(to + 20), &reports);
+            lock(&report).take().expect("a report")
+        };
+
+        let quiet = feed(0, 1000, &|_| 0);
+        assert_eq!(quiet.queue_delay, Duration::ZERO);
+        // 51 packets of 1200 bytes arrived in the last 500 ms, both ends in.
+        assert_eq!(quiet.delivered_kbps, 979);
+        // A frame's burst lifts the packets at its tail, not the ones before.
+        let burst = feed(1000, 1100, &|ms| if ms >= 1070 { 40 } else { 0 });
+        assert_eq!(burst.queue_delay, Duration::ZERO);
+        // A link that drains slower than it is fed lifts every packet: the
+        // queue is the least any packet of the last 200 ms waited.
+        let standing = feed(1100, 1400, &|ms| 30 + (ms - 1100) / 10);
+        assert_eq!(standing.queue_delay, Duration::from_millis(41));
+    }
 
     struct NoopHandler;
 
