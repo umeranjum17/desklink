@@ -18,6 +18,13 @@ const surfaces = new Set<() => void>();
 const sizes = new Map<string, { width: number; height: number }>();
 let nextId = 0;
 
+// RTCView's Metal renderer draws a frame only when its timestamp differs from
+// the last one drawn, and a receiver honouring the engine's zero playout delay
+// stamps every decoded frame with a render time of 0: the view would keep its
+// first frame, or none, while frames go on decoding. Declining the extension
+// keeps real timestamps, at the cost of the receiver's usual jitter buffer.
+const PLAYOUT_DELAY = /^a=extmap:\d+(?:\/\w+)? http:\/\/www\.webrtc\.org\/experiments\/rtp-hdrext\/playout-delay\r?\n/gm;
+
 function emit(sessionId: string, name: NativeSessionEvent['name'], payload: Record<string, unknown> = {}) {
     if (!sessions.has(sessionId) && name !== 'closed') return;
     for (const listener of listeners) listener({ sessionId, name, payload });
@@ -98,7 +105,7 @@ export const nativeDesklink: NativeDesklinkModule = {
         if (type !== 'offer') { failure(id, 'the engine must send an offer'); return false; }
         void (async () => {
             try {
-                await session.peer.setRemoteDescription({ type: 'offer', sdp });
+                await session.peer.setRemoteDescription({ type: 'offer', sdp: sdp.replace(PLAYOUT_DELAY, '') });
                 if (session.closed) return;
                 session.remoteSet = true;
                 for (const candidate of session.candidates.splice(0)) await session.peer.addIceCandidate(candidate);

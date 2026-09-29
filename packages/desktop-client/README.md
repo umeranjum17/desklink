@@ -76,7 +76,10 @@ import { desktopAvailable } from '@desklink/react-native/availability';
   zoomed desktop. On Android the decoded frame is copied once into the view's
   own texture and drawn with a multi-tap filter when it is shown smaller than
   its size, so a fitted 4K desktop does not alias and a pinch redraws at once.
-  iOS uses `RTCView`'s native renderer. `fitToView()` shows the whole desktop again.
+  iOS uses `RTCView`'s native renderer. That renderer draws a frame only when
+  its timestamp is new, and a receiver honouring the engine's zero playout delay
+  stamps every frame alike, so the iOS peer declines that hint and keeps the
+  receiver's usual jitter buffer. `fitToView()` shows the whole desktop again.
 - **A pointer a phone can see.** Once a touch has sent the desktop's pointer
   somewhere, the view draws it there at a readable size, over a picture whose
   own cursor is a few pixels tall or not captured at all. Android hides the
@@ -181,7 +184,8 @@ build with `react-native-webrtc`, connecting to `desklink-host bridge` with the
 URL it is launched with. `test/ios-flow.mjs` builds it for the iOS simulator on
 a Mac over ssh, serves a private Xvfb desktop from this machine through the
 bridge, and checks that the first frame is presented, that the answer is VP9
-with NACK (both descriptions are written out) and that a tap clicks the host:
+with NACK (both descriptions are written out), that a tap clicks the host and
+that the picture keeps following the desktop afterwards:
 
 ```sh
 npm run build && cargo build --manifest-path packages/desktop-host/engine/Cargo.toml
@@ -192,10 +196,8 @@ The Mac needs Xcode with an iOS simulator runtime, CocoaPods, node and
 [`axe`](https://github.com/cameroncooke/AXe) on its login `PATH`; everything
 the run builds or caches stays in `~/desklink-ios` there. When the selected
 Xcode has no simulator platform, point `DESKLINK_IOS_XCODE` at one that does;
-the script's header lists the other settings. The simulator has been seen to
-keep showing its first frame while later frames still decode, so the run
-reports whether the picture followed the taps rather than failing on it; a
-device run settles whether a phone does the same. To try the example by hand against any bridge:
+`DESKLINK_IOS_RUNTIME` picks the iOS version (for example `18.6`); the
+script's header lists the other settings. To try the example by hand against any bridge:
 
 ```sh
 xcrun simctl launch <device> dev.desklink.example -desklinkUrl 'ws://HOST:PORT/desktop?token=TOKEN'

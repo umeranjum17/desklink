@@ -712,6 +712,10 @@ pub struct VideoPeer {
     wants_keyframe: Arc<AtomicBool>,
     /// True while the transport is connected: frames sent before it are lost.
     connected: Arc<AtomicBool>,
+    /// True when the answer accepted the playout-delay extension. A packet
+    /// carrying an extension the answer declined is dropped whole by the
+    /// sender, so a receiver that declines it would get no picture at all.
+    playout_delay: AtomicBool,
     track: Arc<TrackLocalStaticRTP>,
     packetizer: Mutex<Packetizer>,
     ssrc: u32,
@@ -887,6 +891,7 @@ impl VideoPeer {
                 peer,
                 wants_keyframe,
                 connected,
+                playout_delay: AtomicBool::new(false),
                 track,
                 packetizer: Mutex::new(packetizer),
                 ssrc,
@@ -907,6 +912,18 @@ impl VideoPeer {
             .set_remote_description(answer)
             .await
             .context("the peer refused the answer")?;
+        // What the sender negotiated is what it checks each packet against.
+        let mut playout_delay = false;
+        for sender in self.peer.get_senders().await {
+            if let Ok(parameters) = sender.get_parameters().await {
+                playout_delay |= parameters
+                    .rtp_parameters
+                    .header_extensions
+                    .iter()
+                    .any(|extension| extension.uri == PLAYOUT_DELAY_URI);
+            }
+        }
+        self.playout_delay.store(playout_delay, Ordering::SeqCst);
         let held = {
             let mut state = lock(&self.candidates);
             state.ready = true;
@@ -991,9 +1008,14 @@ impl VideoPeer {
             self.ssrc,
             self.payload_type,
         )?;
+        let extensions: &[HeaderExtension] = if self.playout_delay.load(Ordering::SeqCst) {
+            &[NO_PLAYOUT_DELAY]
+        } else {
+            &[]
+        };
         for packet in packets {
             self.track
-                .write_rtp_with_extensions(packet, &[NO_PLAYOUT_DELAY])
+                .write_rtp_with_extensions(packet, extensions)
                 .await
                 .context("failed to hand a packet to the track")?;
         }
@@ -1257,6 +1279,45 @@ mod tests {
         )
         .await
         .expect("a candidate that arrives before the answer is buffered");
+    }
+
+    #[tokio::test]
+    async fn packets_ask_for_no_playout_delay_only_when_the_answer_accepts_it() {
+        for accepts in [false, true] {
+            let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (peer, offer) = VideoPeer::offer(
+                TransportOptions {
+                    ice_servers: Vec::new(),
+                    loopback_tcp: false,
+                    pace_bps: 20_000_000.0,
+                },
+                events,
+                VideoCodec::Vp9,
+            )
+            .await
+            .expect("a peer connection");
+            // This answerer knows no playout-delay extension, so it declines it.
+            let other = answerer(&offer).await;
+            let answer = other.create_answer(None).await.expect("an answer");
+            let sdp = if accepts {
+                answer.sdp.replacen(
+                    "a=mid:0\r\n",
+                    &format!("a=mid:0\r\na=extmap:1 {PLAYOUT_DELAY_URI}\r\n"),
+                    1,
+                )
+            } else {
+                answer.sdp
+            };
+            assert_eq!(sdp.contains(PLAYOUT_DELAY_URI), accepts);
+            peer.accept_answer(sdp)
+                .await
+                .expect("the answer is accepted");
+            assert_eq!(
+                peer.playout_delay.load(Ordering::SeqCst),
+                accepts,
+                "a packet may carry the extension only when the answer accepted it",
+            );
+        }
     }
 
     #[tokio::test]

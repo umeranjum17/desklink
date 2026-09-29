@@ -61,6 +61,19 @@ it('buffers ICE until offer, emits answer and gates/stamps control input per ses
     listener.remove();
 });
 
+it('declines the playout-delay extension so RTCView draws every frame', async () => {
+    const { nativeDesklink } = await import('./native.ios');
+    const id = nativeDesklink.createSession('[]')!;
+    const peer = peers.at(-1)!;
+    const offer = ['v=0', 'm=video 9 UDP/TLS/RTP/SAVPF 96', 'a=extmap:1 http://www.webrtc.org/experiments/rtp-hdrext/playout-delay',
+        'a=extmap:2/sendonly urn:ietf:params:rtp-hdrext:sdes:mid', 'a=extmap:3/sendonly http://www.webrtc.org/experiments/rtp-hdrext/playout-delay', 'a=rtpmap:96 VP9/90000', ''].join('\r\n');
+    nativeDesklink.setRemoteDescription(id, 'offer', offer);
+    await vi.waitFor(() => expect(peer.setRemoteDescription).toHaveBeenCalled());
+    expect(peer.setRemoteDescription).toHaveBeenCalledWith({ type: 'offer', sdp: ['v=0', 'm=video 9 UDP/TLS/RTP/SAVPF 96',
+        'a=extmap:2/sendonly urn:ietf:params:rtp-hdrext:sdes:mid', 'a=rtpmap:96 VP9/90000', ''].join('\r\n') });
+    nativeDesklink.closeSession(id);
+});
+
 it('emits ICE connection states as they happen', async () => {
     const { nativeDesklink } = await import('./native.ios');
     const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
