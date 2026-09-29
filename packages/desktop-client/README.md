@@ -31,18 +31,22 @@ npx expo install @desklink/react-native      # or yarn add, then prebuild/rebuil
 Android uses an Expo native module; iOS uses the app's existing
 `react-native-webrtc` peer connection and `RTCView` from JavaScript, plus a small
 Expo module of its own for the hardware keyboard and an iPad pointer. Both need a
-dev client or native build containing that binding. Web uses the browser's WebRTC.
+dev client or native build containing that binding ([development builds](https://docs.expo.dev/develop/development-builds/introduction/); [Expo Go](https://docs.expo.dev/workflow/expo-go/) cannot load them). Web uses the browser's WebRTC.
 No second WebRTC binary is linked. The Android module has its own hardware-first
 decoder factory; iOS uses the decoder shipped by `react-native-webrtc`.
 
-On iPad, a trackpad or mouse hovers and scrolls the desktop as it is. For its
-presses to carry their buttons — a click-drag that selects, a secondary click
-that is a right click — add the package's config plugin, which sets
-`UIApplicationSupportsIndirectInputEvents`:
+On iOS the WebRTC binding also needs its config plugin
+(`@config-plugins/react-native-webrtc` — 14.x for Expo SDK 55, 15.x for
+Expo SDK 56 and later):
 
 ```json
-{ "expo": { "plugins": ["@desklink/react-native"] } }
+{ "expo": { "plugins": ["@config-plugins/react-native-webrtc", "@desklink/react-native"] } }
 ```
+
+On iPad, a trackpad or mouse hovers and scrolls the desktop as it is. For its
+presses to carry their buttons — a click-drag that selects, a secondary click
+that is a right click — the package's entry in the plugins list above sets
+[`UIApplicationSupportsIndirectInputEvents`](https://developer.apple.com/documentation/bundleresources/information-property-list/uiapplicationsupportsindirectinputevents).
 
 That key changes how every screen of the app receives trackpad input, so the
 package never sets it on its own; without the plugin nothing about the app
@@ -97,6 +101,12 @@ session: { permissions: CONTROL_PERMISSIONS, maxWidth: 1920, maxHeight: 1080 },
 The engine never upscales, so a smaller desktop is sent at its own size and a
 larger one is scaled to fit. Above that box the encoder cannot sustain 50+ fps
 under full-screen motion.
+
+On iOS, keep the box at or below the device's own pixels and `maxFps` at 30:
+the engine encodes captured desktops as VP9, which iOS decodes in software
+(VideoToolbox accelerates H.264 only), so a 1440p or 4K picture costs CPU,
+heat and battery. This cap stands until the engine offers an H.264 captured
+source with hardware decode.
 
 ### What the package guarantees
 
@@ -220,6 +230,36 @@ interface Signaling {
 `session.restart_ice`, `session.close`; `SessionEvent` is the engine's offer,
 candidates, state and revocation. Pixels and input do **not** use this
 channel — they are the desktop's own WebRTC session.
+
+## Shipping on iOS
+
+What the consuming app — not this package — must get right before review.
+
+- **Local network.** A direct LAN session connects to host ICE candidates,
+  which prompts for local-network access, so the app needs
+  `NSLocalNetworkUsageDescription`. The first connection can be denied before
+  the user answers; the session's restart/reopen path recovers from that.
+  `NSBonjourServices` is only needed if the app adds its own Bonjour
+  discovery — desklink discovers no hosts. Relay-only sessions never prompt.
+  See [TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy).
+- **Export compliance.** The viewer's DTLS-SRTP comes from libwebrtc bundled
+  with `react-native-webrtc`, not from the OS, so the app must check the
+  exemption criteria itself rather than assume
+  `ITSAppUsesNonExemptEncryption` is `NO` — standard-protocol encryption is
+  commonly exempt but can still need a yearly self-classification report.
+  See [complying with encryption export regulations](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations).
+- **Review.** A viewer that mirrors the whole host device generically falls
+  outside the remote-desktop conditions; one that mirrors only specific
+  software must connect LAN-only to a user-owned host. Which case applies is
+  the app's product shape to decide. Declare no `audio` or `voip` background
+  mode to keep the stream alive — review rejects that. See the
+  [App Store review guidelines](https://developer.apple.com/app-store/review/guidelines/)
+  (§4.2.7, §2.5.4).
+- **Backgrounding.** There is no compliant background mode for a desktop
+  stream: an app away longer than ~30 s comes back to a closed session, and
+  the session reopens on return to the foreground rather than resuming. Keep
+  disabling input on background; the engine releases held keys within
+  seconds of the path dying, so nothing stays stuck.
 
 ## iOS simulator proof
 
