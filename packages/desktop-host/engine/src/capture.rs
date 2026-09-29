@@ -320,14 +320,26 @@ fn run_loop(
     let mut ready = Some(ready);
     let _listener = stream
         .add_local_listener_with_user_data(&mut state)
-        .state_changed({ let main_loop = main_loop.clone(); move |_, state, old, new| {
-            let reason = match new {
-                pw::stream::StreamState::Error(message) => Some(format!("PipeWire stream stopped: {message}")),
-                pw::stream::StreamState::Unconnected if old == pw::stream::StreamState::Streaming => Some(String::from("PipeWire stream disconnected")),
-                _ => None,
-            };
-            if let Some(reason) = reason { (state.on_stop)(reason); main_loop.quit(); }
-        } })
+        .state_changed({
+            let main_loop = main_loop.clone();
+            move |_, state, old, new| {
+                let reason = match new {
+                    pw::stream::StreamState::Error(message) => {
+                        Some(format!("PipeWire stream stopped: {message}"))
+                    }
+                    pw::stream::StreamState::Unconnected
+                        if old == pw::stream::StreamState::Streaming =>
+                    {
+                        Some(String::from("PipeWire stream disconnected"))
+                    }
+                    _ => None,
+                };
+                if let Some(reason) = reason {
+                    (state.on_stop)(reason);
+                    main_loop.quit();
+                }
+            }
+        })
         .param_changed(|_, state, id, param| {
             if id != pw::spa::param::ParamType::Format.as_raw() {
                 return;
@@ -400,7 +412,15 @@ fn run_loop(
                     return;
                 };
                 mask.apply(&mut raw, box_w, box_h, w, h);
-                let frame = to_i420(&raw, box_w, box_h, box_w * 4, PixelFormat::Bgrx, box_w, box_h);
+                let frame = to_i420(
+                    &raw,
+                    box_w,
+                    box_h,
+                    box_w * 4,
+                    PixelFormat::Bgrx,
+                    box_w,
+                    box_h,
+                );
                 masked = Some(raw);
                 frame
             } else {

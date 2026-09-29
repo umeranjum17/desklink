@@ -44,8 +44,13 @@ unsafe extern "C" {
 extern "C" fn stream_status(context: *mut c_void, reason: *const c_char, running: bool) {
     let state = unsafe { &*(context as *const Mutex<State>) };
     if let Ok(state) = state.lock() {
-        let reason = if reason.is_null() { String::from("stream stopped") }
-            else { unsafe { CStr::from_ptr(reason) }.to_string_lossy().into_owned() };
+        let reason = if reason.is_null() {
+            String::from("stream stopped")
+        } else {
+            unsafe { CStr::from_ptr(reason) }
+                .to_string_lossy()
+                .into_owned()
+        };
         (state.status)(running, reason);
     }
 }
@@ -82,7 +87,15 @@ extern "C" fn receive_frame(
     if let Some(frame) = frame {
         let (width, height) = (state.width, state.height);
         (state.sink)(frame, state.sequence, &mut || {
-            to_bgrx(source, source_width, source_height, stride, PixelFormat::Bgra, width, height)
+            to_bgrx(
+                source,
+                source_width,
+                source_height,
+                stride,
+                PixelFormat::Bgra,
+                width,
+                height,
+            )
         });
         state.sequence += 1;
     }

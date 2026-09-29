@@ -525,7 +525,8 @@ of stillness. When both are supplied, both conditions must hold.
 Each changed capture emits a local `session.frame.changed` event with `sessionId`,
 `seq` and `damage`, allowing a co-located consumer to track animation across
 observations. Neither the event nor this file-writing method is forwarded by
-the remote WebSocket bridge.
+the remote WebSocket bridge. A session opened with `local_frames: false` keeps
+no frame: both are refused with `error.code = "operation"` (see `session.open`).
 
 ```json
 {"id":20,"method":"session.frame","params":{"session_id":"…","since":7,"path":"/run/user/1000/frame.raw"}}
