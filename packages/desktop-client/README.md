@@ -1,6 +1,16 @@
-# @desklink/react-native
+<h1 align="center">@desklink/react-native</h1>
 
-Show a live desktop in a React Native app, and drive it from the phone.
+<p align="center">
+  <a href="https://www.npmjs.com/package/@desklink/react-native"><img alt="npm" src="https://img.shields.io/npm/v/@desklink/react-native?style=flat&label=npm" /></a>
+  <a href="https://github.com/umeranjum17/desklink/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/umeranjum17/desklink/ci.yml?style=flat&branch=main" /></a>
+  <a href="LICENSE"><img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-666?style=flat" /></a>
+  <img alt="Android, iOS and web" src="https://img.shields.io/badge/Android%20%7C%20iOS%20%7C%20web-111?style=flat" />
+</p>
+
+<p align="center">
+  <strong>Show a live desktop in a React Native app, and drive it from the phone.</strong><br/>
+  It renders a desktop that <code>@desklink/host</code> serves on Android, iOS and the web, with touch as a desktop pointer the phone can see, sticky modifier keys, and a session that recovers from a dropped network on its own.
+</p>
 
 The package is a **view and a session**, not a screen: it renders the picture and
 turns touch, the keyboard and the clipboard into that session's input. Where it
