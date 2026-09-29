@@ -1,5 +1,24 @@
-import { MediaStream, RTCPeerConnection } from 'react-native-webrtc';
+import type { MediaStream, RTCPeerConnection } from 'react-native-webrtc';
 import type { NativeDesklinkModule, NativeSessionEvent } from './native';
+
+/**
+ * The WebRTC stack, loaded the first time a session opens rather than with
+ * this module: importing the package must not pull the native WebRTC
+ * libraries into the application's first paint. `globalThis.require` is the
+ * bundler's lazy require on device; under test the spec stubs it.
+ */
+function loadWebRTC(): { RTCPeerConnection: new (config: unknown) => RTCPeerConnection; MediaStream: new () => MediaStream } | null {
+    try {
+        const lazyRequire = (globalThis as { require?: (id: string) => unknown }).require;
+        if (typeof lazyRequire !== 'function') return null;
+        return lazyRequire('react-native-webrtc') as {
+            RTCPeerConnection: new (config: unknown) => RTCPeerConnection;
+            MediaStream: new () => MediaStream;
+        };
+    } catch {
+        return null;
+    }
+}
 
 type Session = {
     peer: RTCPeerConnection;
@@ -8,6 +27,7 @@ type Session = {
     input: boolean;
     seq: number;
     closed: boolean;
+    presented: boolean;
     candidates: Array<{ candidate: string; sdpMid: string | null; sdpMLineIndex: number }>;
     remoteSet: boolean;
 };
@@ -48,6 +68,11 @@ export function observeDesktopSurface(listener: () => void): () => void {
 }
 
 export function markDesktopPresented(id: string) {
+    // A resize or a remount must not re-mark: readiness is the first frame,
+    // and a second mark during `reconnecting` would wrongly read as `live`.
+    const session = sessions.get(id);
+    if (!session || session.presented) return;
+    session.presented = true;
     emit(id, 'presented');
 }
 
@@ -63,8 +88,10 @@ export const nativeDesklink: NativeDesklinkModule = {
     createSession(iceServersJson) {
         const id = `desklink-${++nextId}`;
         try {
-            const peer = new RTCPeerConnection({ iceServers: JSON.parse(iceServersJson) });
-            const session: Session = { peer, channel: null, stream: null, input: false, seq: 0, closed: false, candidates: [], remoteSet: false };
+            const webrtc = loadWebRTC();
+            if (!webrtc) return null;
+            const peer = new webrtc.RTCPeerConnection({ iceServers: JSON.parse(iceServersJson) });
+            const session: Session = { peer, channel: null, stream: null, input: false, seq: 0, closed: false, presented: false, candidates: [], remoteSet: false };
             sessions.set(id, session);
             peer.onicecandidate = (event) => {
                 if (event.candidate) emit(id, 'candidate', {
@@ -79,7 +106,7 @@ export const nativeDesklink: NativeDesklinkModule = {
             };
             peer.ontrack = (event) => {
                 if (session.closed || event.track.kind !== 'video') return;
-                const stream = event.streams[0] ?? new MediaStream();
+                const stream = event.streams[0] ?? new webrtc.MediaStream();
                 if (event.streams.length === 0) stream.addTrack(event.track);
                 session.stream = stream;
                 notifySurface();
