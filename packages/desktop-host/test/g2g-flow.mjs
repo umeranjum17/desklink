@@ -19,9 +19,11 @@
  *
  * Environment:
  *
- *   MUXR_DESKLINK_ENGINE  engine binary (default: this checkout's debug build;
- *                         DESKLINK_AXI_ENGINE is also honoured, so one variable
- *                         serves every engine flow)
+ *   DESKLINK_ENGINE       engine binary (default: this checkout's debug build;
+ *                         MUXR_DESKLINK_ENGINE still works as a deprecated
+ *                         fallback for one release, DESKLINK_AXI_ENGINE is
+ *                         also honoured, so one variable serves every
+ *                         engine flow)
  *   DESKLINK_CHROME       browser binary (default: google-chrome-stable,
  *                         google-chrome, chromium). With no Chrome the browser
  *                         half is skipped with a printed reason, like
@@ -176,6 +178,7 @@ function which(name) {
 }
 function findEngine() {
     const candidates = [
+        process.env.DESKLINK_ENGINE,
         process.env.MUXR_DESKLINK_ENGINE,
         process.env.DESKLINK_AXI_ENGINE,
         join(repo, 'packages/desktop-host/engine/target/debug/desklink-host'),
@@ -398,6 +401,7 @@ async function runScenario(scenario, vite) {
         stdio: ['ignore', 'pipe', 'pipe'],
         env: {
             ...process.env, DISPLAY: display, XAUTHORITY: authority, WAYLAND_DISPLAY: '',
+            DESKLINK_ENGINE: engineBinary,
             MUXR_DESKLINK_ENGINE: engineBinary,
             DESKLINK_AXI_ENGINE_PID_FILE: enginePidFile,
             DESKLINK_G2G_SESSION: `g2g-${process.pid}`,
