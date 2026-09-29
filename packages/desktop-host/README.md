@@ -123,7 +123,7 @@ Homebrew libvpx, then run `release/build-engine-macos-arm64.sh` and
 The app-bundled signed harness is for local TCC qualification, not npm
 installation. See the [macOS protocol](docs/PROTOCOL.md#macos).
 
-Point `MUXR_DESKLINK_ENGINE` at a binary built elsewhere if you have one. The
+Point `DESKLINK_ENGINE` at a binary built elsewhere if you have one. (`MUXR_DESKLINK_ENGINE` still works as a deprecated fallback and will be removed in a later release.) The
 package never searches `PATH` for a same-named program: "a binary called
 desklink-host" is not evidence of which program is about to be given control of
 someone's desktop.
