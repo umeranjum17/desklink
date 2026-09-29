@@ -26,9 +26,11 @@ use rtc::peer_connection::transport::{RTCIceCandidateInit, RTCIceServer};
 use rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtc::rtcp::receiver_report::ReceiverReport;
+use rtc::rtp::extension::playout_delay_extension::PlayoutDelayExtension;
+use rtc::rtp::extension::HeaderExtension;
 use rtc::rtp_transceiver::rtp_sender::{
     RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters,
-    RTCRtpEncodingParameters, RtpCodecKind,
+    RTCRtpEncodingParameters, RTCRtpHeaderExtensionCapability, RtpCodecKind,
 };
 use rtc::rtp_transceiver::PayloadType;
 use rtc::sansio::Protocol;
@@ -206,6 +208,17 @@ pub struct TransportOptions {
 /// socket buffer, which loses the frame and draws another key frame request —
 /// a loop that never shows a sharp picture.
 const PACE_BURST_BITS: f64 = 256_000.0;
+
+/// The receiver's playout delay, stated on every video packet: none. A
+/// remote desktop answers the hand that is driving it, so a frame should be
+/// shown when it is decoded rather than held in a jitter buffer to smooth
+/// playback; a browser otherwise adds about 10 ms of buffering and paces
+/// presentation to its own cadence, costing both latency and frames.
+const PLAYOUT_DELAY_URI: &str = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
+const NO_PLAYOUT_DELAY: HeaderExtension = HeaderExtension::PlayoutDelay(PlayoutDelayExtension {
+    min_delay: 0,
+    max_delay: 0,
+});
 
 struct Handler {
     events: tokio::sync::mpsc::UnboundedSender<PeerEvent>,
@@ -634,6 +647,15 @@ impl VideoPeer {
         media_engine
             .register_codec(video_codec.clone(), RtpCodecKind::Video)
             .with_context(|| format!("failed to offer {codec:?}"))?;
+        media_engine
+            .register_header_extension(
+                RTCRtpHeaderExtensionCapability {
+                    uri: String::from(PLAYOUT_DELAY_URI),
+                },
+                RtpCodecKind::Video,
+                None,
+            )
+            .context("failed to offer the playout-delay extension")?;
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)?
             .with(
                 Slot::Pacer,
@@ -857,7 +879,7 @@ impl VideoPeer {
         )?;
         for packet in packets {
             self.track
-                .write_rtp_with_extensions(packet, &[])
+                .write_rtp_with_extensions(packet, &[NO_PLAYOUT_DELAY])
                 .await
                 .context("failed to hand a packet to the track")?;
         }
@@ -960,6 +982,28 @@ mod tests {
         assert!(
             !offer.contains("VP9"),
             "an encoded source must not also offer the codec it cannot encode: {offer}",
+        );
+    }
+
+    #[tokio::test]
+    async fn the_offer_asks_the_receiver_to_show_frames_without_playout_delay() {
+        let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_peer, offer) = VideoPeer::offer(
+            TransportOptions {
+                ice_servers: Vec::new(),
+                loopback_tcp: false,
+                pace_bps: 20_000_000.0,
+            },
+            events,
+            VideoCodec::Vp9,
+        )
+        .await
+        .expect("a peer connection");
+        assert!(
+            offer
+                .lines()
+                .any(|line| line.starts_with("a=extmap:") && line.ends_with(PLAYOUT_DELAY_URI)),
+            "the video must negotiate the playout-delay extension its packets carry: {offer}",
         );
     }
 

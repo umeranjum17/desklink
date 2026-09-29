@@ -252,6 +252,11 @@ the SDP and candidates to the client and brings back the answer.
 
 A candidate that arrives before the remote description is buffered, not dropped.
 
+The offer negotiates the `playout-delay` RTP header extension
+(`http://www.webrtc.org/experiments/rtp-hdrext/playout-delay`), and every video
+packet asks for a playout delay of 0: a receiver that honours it shows each
+frame when it is decoded instead of buffering frames to smooth playback.
+
 A client whose ICE connection goes `disconnected` may restart ICE on the same
 peer connection instead of opening a new session: it sends
 `session.restart_ice` with the session's id and generation, and the engine
