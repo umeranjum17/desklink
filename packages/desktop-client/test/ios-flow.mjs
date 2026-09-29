@@ -11,12 +11,9 @@
  *  - the first frame reaches `presented` (the session goes `live`) and the
  *    simulator shows the desktop, which a screenshot records;
  *  - a tap on the simulator's screen arrives at the host as a click at the
- *    desktop pixel under the finger: the page on the desktop records it.
- *
- * It also measures, without failing on it, whether the simulator's picture
- * then shows those clicks: a simulator has been seen to keep its first frame
- * while later frames still decode, and only a device run can say whether a
- * phone does the same.
+ *    desktop pixel under the finger: the page on the desktop records it;
+ *  - the picture keeps following the desktop: it shows the dots the page drew
+ *    under those clicks, and it changes as the page repaints every frame.
  *
  * The host side runs here, on a private Xvfb (display >= 170, its own cookie):
  * a page on that display, the bridge with an `x11` source, and a relay in
@@ -39,6 +36,8 @@
  *                           the flow builds and caches (default desklink-ios)
  *   DESKLINK_IOS_XCODE      DEVELOPER_DIR on the Mac, when the selected Xcode has
  *                           no iOS simulator platform installed
+ *   DESKLINK_IOS_RUNTIME    iOS runtime version to run on, e.g. 18.6 (default: the
+ *                           newest the Mac has)
  *   DESKLINK_IOS_HOST_ADDR  address the simulator reaches this machine on
  *                           (default: this machine's address as the Mac's ssh
  *                           session sees it)
@@ -52,7 +51,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -65,7 +64,8 @@ const MAC = process.env.DESKLINK_IOS_MAC ?? '';
 const DIR = process.env.DESKLINK_IOS_DIR ?? 'desklink-ios';
 const BUILD = process.env.DESKLINK_IOS_SKIP_BUILD !== '1';
 const BUNDLE = 'dev.desklink.example';
-const DEVICE = 'desklink-ios-flow';
+const RUNTIME = process.env.DESKLINK_IOS_RUNTIME ?? '';
+const DEVICE = RUNTIME ? `desklink-ios-flow-${RUNTIME}` : 'desklink-ios-flow';
 const DESKTOP = { width: 1280, height: 800 };
 const MARK = `DESKLINK_IOS_FLOW=${process.pid}`;
 
@@ -131,8 +131,8 @@ function simulator() {
         if (found !== undefined) return found.udid;
     }
     const runtimes = JSON.parse(mac('xcrun simctl list -j runtimes available')).runtimes
-        .filter((runtime) => runtime.platform === 'iOS');
-    assert(runtimes.length > 0, 'the Mac has no iOS simulator runtime');
+        .filter((runtime) => runtime.platform === 'iOS' && (RUNTIME === '' || runtime.version.startsWith(RUNTIME)));
+    assert(runtimes.length > 0, `the Mac has no iOS simulator runtime ${RUNTIME}`);
     const runtime = runtimes.at(-1).identifier;
     log(`creating simulator ${DEVICE} on ${runtime}`);
     return mac(`xcrun simctl create ${DEVICE} com.apple.CoreSimulator.SimDeviceType.iPhone-16 ${runtime}`).trim();
@@ -277,6 +277,8 @@ async function cleanup() {
     if (bridgePid) await stopProcess(bridgePid, 'bridge');
     if (enginePid) await stopProcess(enginePid, 'engine');
     if (xvfbPid) await stopProcess(xvfbPid, 'Xvfb');
+    // The page's browser profile is about 100 MB; nothing here outlives the run.
+    rmSync(work, { recursive: true, force: true });
     await sleep(200);
     assert.deepEqual(strays(), [], 'task processes survived cleanup');
 }
@@ -369,7 +371,10 @@ async function main() {
         upstream.on('message', (raw) => {
             const line = String(raw);
             const message = JSON.parse(line);
-            if (message.event === 'session.description' && crossed.offer === null) crossed.offer = message.params.description.sdp;
+            if (message.event === 'session.description' && crossed.offer === null) {
+                crossed.offer = message.params.description.sdp;
+                writeFileSync(join(out, 'offer.sdp'), crossed.offer);
+            }
             if (methods.get(message.id) === 'session.open' && message.result) crossed.opened = message.result;
             if (client.readyState === WebSocket.OPEN) client.send(line);
         });
@@ -379,6 +384,7 @@ async function main() {
             methods.set(message.id, message.method);
             if (message.method === 'session.description' && message.params?.description?.type === 'answer' && crossed.answer === null) {
                 crossed.answer = message.params.description.sdp;
+                writeFileSync(join(out, 'answer.sdp'), crossed.answer);
             }
             if (upstream.readyState === WebSocket.OPEN) upstream.send(line); else queued.push(line);
         });
@@ -408,8 +414,6 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
 
     // ---- descriptions ---------------------------------------------------------------
     assert(crossed.offer !== null && crossed.answer !== null, 'both descriptions crossed the bridge');
-    writeFileSync(join(out, 'offer.sdp'), crossed.offer);
-    writeFileSync(join(out, 'answer.sdp'), crossed.answer);
     console.log(`---- iOS answer SDP ----\n${crossed.answer.trim()}\n------------------------`);
     const answered = videoCodecs(crossed.answer);
     log(`answer video codecs: ${answered.map((c) => `${c.codec}/${c.type} [${c.feedback.join(', ')}]`).join('; ')}`);
@@ -448,10 +452,11 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // desktop shows both. Each dot is sampled just up and left of its centre,
     // inside the dot and clear of the app's pointer mark.
     const shot = join(out, 'simulator.png');
-    const pixel = (png, point) => {
+    const rgb = (png, point) => {
         const i = (Math.round(point.y * png.width / screenWidth) * png.width + Math.round(point.x * png.width / screenWidth)) * 4;
-        return png.data[i] + png.data[i + 1] + png.data[i + 2];
+        return [png.data[i], png.data[i + 1], png.data[i + 2]];
     };
+    const pixel = (png, point) => rgb(png, point).reduce((sum, value) => sum + value);
     const litShare = (png) => {
         let lit = 0; let total = 0;
         for (let y = origin.y + 2; y < screenHeight - origin.y - 2; y += 2) {
@@ -462,13 +467,16 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         }
         return lit / total;
     };
+    const capture = (path) => {
+        mac(`xcrun simctl io ${udid} screenshot "$D/tmp/ios-flow.png" > /dev/null`);
+        assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${DIR}/tmp/ios-flow.png`, path]).status, 0, 'copy the screenshot back');
+        return PNG.sync.read(readFileSync(path));
+    };
     let png = null;
     let follows = false;
     for (let attempt = 0; attempt < 10 && !follows; attempt++) {
         await sleep(500);
-        mac(`xcrun simctl io ${udid} screenshot "$D/tmp/ios-flow.png" > /dev/null`);
-        assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${DIR}/tmp/ios-flow.png`, shot]).status, 0, 'copy the screenshot back');
-        png = PNG.sync.read(readFileSync(shot));
+        png = capture(shot);
         follows = litShare(png) > 0.5 && targets.every((target) => pixel(png, {
             x: origin.x + (target.x - 10) * scale, y: origin.y + (target.y - 10) * scale,
         }) < 200);
@@ -476,11 +484,21 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     const lit = litShare(png);
     assert(lit > 0.5, `the simulator shows the desktop, not a black picture: ${(100 * lit).toFixed(1)}% lit`);
     log(`screenshot ${shot}: ${(100 * lit).toFixed(1)}% of the picture lit`);
-    // Measured, not asserted: the simulator's RTCView has been seen to keep its
-    // first frame while frames still decode, which a device run must settle.
-    if (follows) log('the simulator\'s picture shows both clicks: it follows the desktop');
-    else log('FINDING stale picture: the simulator still shows a frame from before the taps');
-    console.log(`ok: the iOS receiver shows the desktop, answers VP9 with NACK, and its taps click the host (${out})`);
+    assert(follows, 'the simulator shows both clicks: its picture follows the desktop, not a frame from before the taps');
+    // The page's background changes hue every frame, so a live picture is
+    // another colour moments later, away from the text and the dots. A few
+    // tries, so a whole turn of the hue between two screenshots cannot fool it.
+    const corner = { x: origin.x + 40 * scale, y: origin.y + 40 * scale };
+    const before = rgb(png, corner);
+    let after = before;
+    for (let attempt = 0; attempt < 3 && before.every((value, i) => Math.abs(value - after[i]) <= 8); attempt++) {
+        await sleep(400);
+        after = rgb(capture(join(out, 'simulator-later.png')), corner);
+    }
+    assert(before.some((value, i) => Math.abs(value - after[i]) > 8),
+        `the picture keeps changing with the desktop: background rgb(${before}), then rgb(${after})`);
+    log(`the picture follows the desktop: both clicks shown, background rgb(${before}) → rgb(${after})`);
+    console.log(`ok: the iOS receiver shows the live desktop, answers VP9 with NACK, and its taps click the host (${out})`);
 }
 
 let failed = false;

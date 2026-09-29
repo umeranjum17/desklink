@@ -255,7 +255,11 @@ A candidate that arrives before the remote description is buffered, not dropped.
 The offer negotiates the `playout-delay` RTP header extension
 (`http://www.webrtc.org/experiments/rtp-hdrext/playout-delay`), and every video
 packet asks for a playout delay of 0: a receiver that honours it shows each
-frame when it is decoded instead of buffering frames to smooth playback.
+frame when it is decoded instead of buffering frames to smooth playback. A
+receiver may decline the extension in its answer; its packets then carry no
+playout delay and it buffers as usual. The iOS receiver in
+`@desklink/react-native` declines it, because `RTCView` draws a frame only when
+its timestamp is new and zero-delay frames all carry the same one.
 
 A client whose ICE connection goes `disconnected` may restart ICE on the same
 peer connection instead of opening a new session: it sends
