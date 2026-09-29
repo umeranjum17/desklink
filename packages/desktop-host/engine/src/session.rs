@@ -225,7 +225,19 @@ fn select_x11(
                             let hash = hasher.finish();
                             if last_hash != Some(hash) {
                                 last_hash = Some(hash);
-                                sink(frame, sequence, raw);
+                                let (w, h) = (frame.width, frame.height);
+                                let (screen_w, screen_h) = (width as usize, height as usize);
+                                sink(frame, sequence, &mut || {
+                                    crate::convert::to_bgrx(
+                                        &raw,
+                                        screen_w,
+                                        screen_h,
+                                        screen_w * 4,
+                                        crate::convert::PixelFormat::Bgrx,
+                                        w,
+                                        h,
+                                    )
+                                });
                                 sequence += 1;
                             }
                         }
@@ -506,6 +518,9 @@ pub struct OpenRequest {
     /// Offer a passive ICE-TCP candidate on the loopback, for a forwarded client.
     pub loopback_tcp: bool,
     pub agent_indicator: bool,
+    /// Keep the latest frame and its tile hashes for `session.frame` and
+    /// `session.frame.changed`; off, a frame is converted once, for the encoder.
+    pub local_frames: bool,
 }
 
 /// Events a session raises for its consumer.
@@ -595,6 +610,8 @@ struct Inner {
     events: tokio_mpsc::UnboundedSender<Notice>,
     /// Present only for an encoded source.
     encoded: Mutex<Option<Encoded>>,
+    /// `OpenRequest::local_frames`: whether `latest` is kept at all.
+    local_frames: bool,
 }
 
 /// A source whose video arrives already encoded.
@@ -832,9 +849,13 @@ impl Session {
         let capture_status = Arc::new(on_capture_status);
         let frame_events = events.clone();
         let frame_session_id = id.clone();
-        let sink = Box::new(move |frame: I420, _seq: u64, raw: Vec<u8>| {
-            let hashes = tile_hashes(&raw, frame.width, frame.height);
-            if let Ok(mut held) = observed.lock() {
+        let local_frames = request.local_frames;
+        let sink = Box::new(move |frame: I420, _seq: u64, pixels: capture::Pixels| {
+            let raw = if local_frames { pixels() } else { None };
+            let hashes = raw
+                .as_ref()
+                .map(|raw| tile_hashes(raw, frame.width, frame.height));
+            if let (Some(raw), Some(hashes), Ok(mut held)) = (raw, hashes, observed.lock()) {
                 let unchanged =
                     held.as_ref()
                         .is_some_and(|(_, _, width, height, _, current, _)| {
@@ -1092,6 +1113,7 @@ impl Session {
             pipeline: pipeline.clone(),
             events: events.clone(),
             encoded: Mutex::new(None),
+            local_frames: request.local_frames,
         });
 
         inner.notify(SessionEvent::Description {
@@ -1189,6 +1211,7 @@ impl Session {
                 peer_events,
                 feed,
             })),
+            local_frames: false,
         });
         inner.notify(SessionEvent::State {
             capture: "consented",
@@ -1266,6 +1289,7 @@ impl Session {
                 "this session forwards an encoded stream and keeps no frame",
             ));
         }
+        self.keeps_frames()?;
         let mut changes = self.inner.frame_changes.clone();
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms.min(120_000));
         loop {
@@ -1302,6 +1326,16 @@ impl Session {
         }
     }
 
+    fn keeps_frames(&self) -> std::result::Result<(), SessionError> {
+        if self.inner.local_frames {
+            return Ok(());
+        }
+        Err(SessionError::new(
+            "operation",
+            "this session was opened with local_frames off and keeps no frame",
+        ))
+    }
+
     /// Write only the requested lossless frame bytes; JSON carries metadata, never pixels.
     pub fn frame(
         &self,
@@ -1321,6 +1355,7 @@ impl Session {
                 "this session forwards an encoded stream and keeps no frame",
             ));
         }
+        self.keeps_frames()?;
         if let Some(reason) = lock(&self.inner.capture_error).clone() {
             return Err(SessionError::new("stream-stopped", reason));
         }
@@ -2575,6 +2610,7 @@ mod tests {
                 peer_events,
                 feed,
             })),
+            local_frames: false,
         });
         spawn_peer_events(&inner, peer_events_rx);
         spawn_encoded(&inner, feed_rx);
@@ -2702,6 +2738,7 @@ mod tests {
             pipeline: Arc::new(AtomicBool::new(true)),
             events,
             encoded: Mutex::new(None),
+            local_frames: true,
         });
         (inner, recorded)
     }
@@ -3074,6 +3111,7 @@ mod tests {
             ttl: Some(Duration::from_secs(30)),
             loopback_tcp: false,
             agent_indicator: false,
+            local_frames: true,
         }
     }
 
@@ -3241,6 +3279,7 @@ mod tests {
                 ttl: None,
                 loopback_tcp: false,
                 agent_indicator: false,
+                local_frames: true,
             },
             events,
         )

@@ -44,7 +44,11 @@ pub struct StreamGeometry {
     pub buffer_type: String,
 }
 
-pub type FrameSink = Box<dyn Fn(I420, u64, Vec<u8>) + Send + 'static>;
+/// Receives each converted frame, its sequence number and a way to produce the
+/// frame's packed BGRX pixels, which only a local frame consumer needs; the
+/// sink calls it at most once, and only then are the pixels copied.
+pub type FrameSink = Box<dyn Fn(I420, u64, Pixels) + Send + 'static>;
+pub type Pixels<'a> = &'a mut dyn FnMut() -> Option<Vec<u8>>;
 
 /// A running capture. Dropping it quits the PipeWire loop and joins its thread.
 pub struct Capture {
@@ -316,14 +320,26 @@ fn run_loop(
     let mut ready = Some(ready);
     let _listener = stream
         .add_local_listener_with_user_data(&mut state)
-        .state_changed({ let main_loop = main_loop.clone(); move |_, state, old, new| {
-            let reason = match new {
-                pw::stream::StreamState::Error(message) => Some(format!("PipeWire stream stopped: {message}")),
-                pw::stream::StreamState::Unconnected if old == pw::stream::StreamState::Streaming => Some(String::from("PipeWire stream disconnected")),
-                _ => None,
-            };
-            if let Some(reason) = reason { (state.on_stop)(reason); main_loop.quit(); }
-        } })
+        .state_changed({
+            let main_loop = main_loop.clone();
+            move |_, state, old, new| {
+                let reason = match new {
+                    pw::stream::StreamState::Error(message) => {
+                        Some(format!("PipeWire stream stopped: {message}"))
+                    }
+                    pw::stream::StreamState::Unconnected
+                        if old == pw::stream::StreamState::Streaming =>
+                    {
+                        Some(String::from("PipeWire stream disconnected"))
+                    }
+                    _ => None,
+                };
+                if let Some(reason) = reason {
+                    (state.on_stop)(reason);
+                    main_loop.quit();
+                }
+            }
+        })
         .param_changed(|_, state, id, param| {
             if id != pw::spa::param::ParamType::Format.as_raw() {
                 return;
@@ -383,54 +399,58 @@ fn run_loop(
             // second time and hand the encoder a frame it refuses whenever the
             // stream's size differs from the one the portal reported.
             let seq = state.frames.load(Ordering::Relaxed);
-            let raw = crate::convert::to_bgrx(
-                chunk_bytes,
-                w,
-                h,
-                stride,
-                format,
-                state.box_w,
-                state.box_h,
-            );
-            if let Some(mut raw) = raw {
-                let frame = if let Some(mask) = state.mask.as_mut() {
-                    mask.apply(&mut raw, state.box_w, state.box_h, w, h);
-                    to_i420(
-                        &raw,
-                        state.box_w,
-                        state.box_h,
-                        state.box_w * 4,
-                        PixelFormat::Bgrx,
-                        state.box_w,
-                        state.box_h,
-                    )
-                } else {
-                    to_i420(chunk_bytes, w, h, stride, format, state.box_w, state.box_h)
-                };
-                if let Some(i420) = frame {
-                    if state.geometry.lock().map(|g| g.is_none()).unwrap_or(false) {
-                        if let Ok(mut g) = state.geometry.lock() {
-                            *g = Some(StreamGeometry {
-                                source_width: w,
-                                source_height: h,
-                                origin_x: 0,
-                                origin_y: 0,
-                                format: format!("{format:?}").to_lowercase(),
-                                buffer_type: state.buffer_type.clone(),
-                            });
-                        }
-                    }
-                    state.frames.fetch_add(1, Ordering::Relaxed);
-                    (state.sink)(i420, seq, raw);
-                    // The first frame the loop actually delivers is the only
-                    // proof capture started; sending this when `run_loop`
-                    // returns would be after the main loop quits, too late for
-                    // `start` to wait on.
-                    if let Some(sender) = ready.take() {
-                        let _ = sender.send(Ok(()));
-                    }
-                } else {
+            let (box_w, box_h) = (state.box_w, state.box_h);
+            // The capture indicator is masked out of BGRX pixels, so a masked
+            // frame is converted from that copy; otherwise straight from the
+            // stream, and BGRX is only made if the sink asks for it.
+            let mut masked = None;
+            let frame = if let Some(mask) = state.mask.as_mut() {
+                let Some(mut raw) =
+                    crate::convert::to_bgrx(chunk_bytes, w, h, stride, format, box_w, box_h)
+                else {
                     state.dropped.fetch_add(1, Ordering::Relaxed);
+                    return;
+                };
+                mask.apply(&mut raw, box_w, box_h, w, h);
+                let frame = to_i420(
+                    &raw,
+                    box_w,
+                    box_h,
+                    box_w * 4,
+                    PixelFormat::Bgrx,
+                    box_w,
+                    box_h,
+                );
+                masked = Some(raw);
+                frame
+            } else {
+                to_i420(chunk_bytes, w, h, stride, format, box_w, box_h)
+            };
+            if let Some(i420) = frame {
+                if state.geometry.lock().map(|g| g.is_none()).unwrap_or(false) {
+                    if let Ok(mut g) = state.geometry.lock() {
+                        *g = Some(StreamGeometry {
+                            source_width: w,
+                            source_height: h,
+                            origin_x: 0,
+                            origin_y: 0,
+                            format: format!("{format:?}").to_lowercase(),
+                            buffer_type: state.buffer_type.clone(),
+                        });
+                    }
+                }
+                state.frames.fetch_add(1, Ordering::Relaxed);
+                (state.sink)(i420, seq, &mut || {
+                    masked.take().or_else(|| {
+                        crate::convert::to_bgrx(chunk_bytes, w, h, stride, format, box_w, box_h)
+                    })
+                });
+                // The first frame the loop actually delivers is the only
+                // proof capture started; sending this when `run_loop`
+                // returns would be after the main loop quits, too late for
+                // `start` to wait on.
+                if let Some(sender) = ready.take() {
+                    let _ = sender.send(Ok(()));
                 }
             } else {
                 state.dropped.fetch_add(1, Ordering::Relaxed);

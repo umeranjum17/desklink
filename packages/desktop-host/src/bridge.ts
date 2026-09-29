@@ -68,6 +68,7 @@ export class Bridge {
         private readonly sockets: WebSocketServer,
         private readonly engine: EngineClient,
         private readonly defaultSource: SourceRequest | undefined,
+        private readonly localFrames: boolean,
     ) {}
 
     static async start(options: BridgeOptions): Promise<Bridge> {
@@ -112,7 +113,7 @@ export class Bridge {
             },
         });
 
-        const bridge = new Bridge(server, sockets, engine, options.source);
+        const bridge = new Bridge(server, sockets, engine, options.source, options.engineOptions?.onEvent !== undefined);
         sockets.on('connection', (socket) => bridge.attach(socket));
 
         const address = splitAddress(options.listen);
@@ -152,8 +153,14 @@ export class Bridge {
                 socket.send(JSON.stringify({ id: request.id, error: { code: 'source', message: 'the client cannot choose the desktop source' } }));
                 return;
             }
-            const params = method === 'session.open' && this.defaultSource !== undefined
-                ? { ...(request.params ?? {}), source: this.defaultSource }
+            // Nothing past the socket can read local frames, so the engine keeps
+            // them only for a host that listens to its events.
+            const params = method === 'session.open'
+                ? {
+                    ...(request.params ?? {}),
+                    ...(this.defaultSource !== undefined ? { source: this.defaultSource } : {}),
+                    local_frames: this.localFrames,
+                }
                 : request.params;
             void this.engine
                 .request<Record<string, unknown>>(method, params)

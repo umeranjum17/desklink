@@ -183,6 +183,7 @@ export class EngineClient {
             ...(request.ttlSeconds === undefined ? {} : { ttl_seconds: request.ttlSeconds }),
             ...(request.loopbackTcp === true ? { loopback_tcp: true } : {}),
             ...(request.agentIndicator === true ? { agent_indicator: true } : {}),
+            ...(request.localFrames === false ? { local_frames: false } : {}),
         }, timeoutMs);
     }
 

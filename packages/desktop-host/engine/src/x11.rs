@@ -87,6 +87,9 @@ impl X11Desktop {
             .map(|(frame, _)| frame)
     }
 
+    /// The frame and the root image it came from: `width * 4`-byte BGRX rows at
+    /// the screen's own size, which a caller that keeps pre-encode pixels
+    /// samples into the frame's geometry with `convert::to_bgrx`.
     pub fn capture_with_pixels(
         &mut self,
         max_width: usize,
@@ -129,17 +132,7 @@ impl X11Desktop {
             height,
         )
         .context("the captured X11 pixels are not a format this engine can read")?;
-        let raw = crate::convert::to_bgrx(
-            &image.data,
-            self.width,
-            self.height,
-            stride,
-            crate::convert::PixelFormat::Bgrx,
-            width,
-            height,
-        )
-        .context("the captured X11 pixels could not be copied")?;
-        Ok((frame, raw))
+        Ok((frame, image.data))
     }
 
     fn flush(&self) -> Result<()> {

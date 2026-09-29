@@ -538,6 +538,7 @@ async fn dispatch(
                 ttl: params.ttl_seconds.map(Duration::from_secs),
                 loopback_tcp: params.loopback_tcp,
                 agent_indicator: params.agent_indicator,
+                local_frames: params.local_frames,
                 ice_servers: params
                     .ice_servers
                     .into_iter()
