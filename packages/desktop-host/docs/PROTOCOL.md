@@ -357,7 +357,7 @@ them). Each is a cumulative microsecond counter; divide by the frame count
 named beside it for the per-frame mean:
 
 - `capture_micros` / `captured_frames`: grabbing a frame and converting it on
-  the capture thread (on X11: `GetImage` plus both colour conversions).
+  the capture thread (on X11: `GetImage` plus the downscale to I420).
 - `convert_micros` / `captured_frames`: tile hashing and damage computation on
   the capture thread, after the grab.
 - `queue_micros` / `motion_frames`: how long a freshly captured frame waited

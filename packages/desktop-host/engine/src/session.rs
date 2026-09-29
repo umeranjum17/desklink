@@ -64,9 +64,9 @@ pub struct Metrics {
     /// Time spent in the encoder, in microseconds, over every encoded frame.
     pub encode_micros: u64,
     /// Time spent grabbing and converting a frame on the capture thread, in
-    /// microseconds, over every captured frame. On X11 this is the whole
-    /// `GetImage` plus both colour conversions; the lab harness reads it as
-    /// the grab cost L1 owns.
+    /// microseconds, over every captured frame. On X11 this is `GetImage`
+    /// plus the downscale to I420; the lab harness reads it as the grab
+    /// cost L1 owns.
     pub capture_micros: u64,
     /// Time spent hashing a captured frame and working out its damage on the
     /// capture thread, in microseconds, over every captured frame.

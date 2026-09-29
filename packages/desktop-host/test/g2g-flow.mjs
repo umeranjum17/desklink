@@ -68,7 +68,16 @@ assert(scenarios.length > 0 && scenarios.every((s) => ['typing', 'scroll', 'stil
 const gate = args.includes('--gate');
 const baselinePath = flag('baseline', null);
 const requireLoadGate = args.includes('--require-load-gate');
-const baseline = baselinePath === null ? null : JSON.parse(readFileSync(baselinePath, 'utf8'));
+const baselineRaw = baselinePath === null ? null : JSON.parse(readFileSync(baselinePath, 'utf8'));
+const baselineByScenario = (() => {
+    if (baselineRaw === null) return null;
+    const lines = Array.isArray(baselineRaw) ? baselineRaw : [baselineRaw];
+    const map = {};
+    for (const entry of lines) {
+        if (entry !== null && typeof entry === 'object' && typeof entry.scenario === 'string') map[entry.scenario] = entry;
+    }
+    return map;
+})();
 
 const dir = mkdtempSync(join(tmpdir(), 'desklink-g2g-flow-'));
 const enginePidFile = join(dir, 'engines.pid');
@@ -496,13 +505,13 @@ function checkGate(lines) {
         if (line.scenario === 'still' && !(line.engine.refined_frames >= 1)) {
             failures.push(`still: no refinement pass (refined_frames=${line.engine.refined_frames})`);
         }
-        const expected = baseline?.scenarios?.[line.scenario];
+        const expected = baselineByScenario?.[line.scenario];
         if (expected !== undefined && expected !== null) {
             if (line.presented_fps < expected.presented_fps * 0.8) {
                 failures.push(`${line.scenario}: presented ${line.presented_fps} fps, baseline ${expected.presented_fps} (-20% gate)`);
             }
-            if (line.g2g_ms.p50 !== null && line.g2g_ms.p50 > expected.g2g_p50 * 1.2) {
-                failures.push(`${line.scenario}: g2g p50 ${line.g2g_ms.p50} ms, baseline ${expected.g2g_p50} (+20% gate)`);
+            if (line.g2g_ms.p50 !== null && expected.g2g_ms?.p50 != null && line.g2g_ms.p50 > expected.g2g_ms.p50 * 1.2) {
+                failures.push(`${line.scenario}: g2g p50 ${line.g2g_ms.p50} ms, baseline ${expected.g2g_ms.p50} (+20% gate)`);
             }
         }
         if (requireLoadGate && !line.load.gate_ok) {

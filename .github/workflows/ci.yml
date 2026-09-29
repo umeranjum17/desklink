@@ -104,7 +104,8 @@ jobs:
       - run: cargo build --manifest-path packages/desktop-host/engine/Cargo.toml
       - name: Locate Playwright Chromium
         run: |
-          chrome=$(find ~/.cache/ms-playwright -path '*chrome-linux/chrome' -o -name 'headless_shell' | head -1)
+          chrome=$(find ~/.cache/ms-playwright -path '*chrome-linux/chrome' | head -1)
+          if [ -z "$chrome" ]; then chrome=$(find ~/.cache/ms-playwright -name 'headless_shell' | head -1); fi
           echo "chromium: $chrome"
           echo "DESKLINK_CHROME=$chrome" >> "$GITHUB_ENV"
       - run: node packages/desktop-host/test/g2g-flow.mjs --size 1280x720 --seconds 10
