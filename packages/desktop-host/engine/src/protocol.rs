@@ -162,8 +162,10 @@ fn default_max_height() -> usize {
 fn default_bitrate() -> u32 {
     0
 }
+/// A still desktop costs nothing at 60: frames are only produced on change,
+/// so consumers get the smooth path without naming a rate.
 fn default_fps() -> u32 {
-    30
+    60
 }
 
 #[derive(Debug, Deserialize)]
@@ -511,7 +513,7 @@ mod tests {
             params.bitrate_kbps, 0,
             "the engine sizes the rate to the surface"
         );
-        assert_eq!(params.max_fps, 30);
+        assert_eq!(params.max_fps, 60);
         assert!(params.local_frames, "session.frame works unless turned off");
         assert!(
             !params.agent_indicator,

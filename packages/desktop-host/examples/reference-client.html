@@ -272,7 +272,7 @@ async function start() {
     const permissions = ['view'];
     if (controlAvailable) permissions.push('control');
     if (clipboardAvailable) permissions.push('clipboard');
-    const session = await request('session.open', { permissions, max_fps: 30 });
+    const session = await request('session.open', { permissions });
     currentSessionId = session.sessionId;
     keyboard.disabled = !controlAvailable;
     keyboardButton.disabled = !controlAvailable;
