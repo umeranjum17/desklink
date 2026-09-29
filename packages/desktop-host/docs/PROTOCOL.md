@@ -292,8 +292,9 @@ always does.
 
 `disconnected` is ICE losing the path: the picture is frozen but the session
 is alive, and a client should show reconnecting and may restart ICE (above)
-rather than open a new session. `failed` is terminal: the engine revokes and
-closes the session, and only a new `session.open` recovers it.
+rather than open a new session. `failed` is terminal: the engine revokes the
+session with code `transport` and closes it, and only a new `session.open`
+recovers it.
 
 While its control channel is open the engine also sends a heartbeat twice a
 second, `{"kind":"ping"}`. It lets a client notice a stalled path within
@@ -324,10 +325,26 @@ picker; restoration is silent only where the backend supports it. Cancellation
 is an error, not a reason to retry or bypass consent.
 
 ```jsonc
-{"event":"session.revoked","params":{"sessionId":"…","reason":"…"}}
+{"event":"session.revoked","params":{"sessionId":"…","reason":"…",
+  "code":"transport"}}                // transport|lease|error
 ```
 
 The session ended on the engine's side; there is nothing further to drain.
+`reason` is prose for people; `code` is what a client acts on:
+
+| `code` | Meaning | A client should |
+|---|---|---|
+| `transport` | The path to the client's peer was lost (ICE `failed`, or the track refused a frame) | open a new session with fresh authority; the desktop is still available |
+| `lease` | The session's `ttl_seconds` ran out | end; the grant is spent |
+| `error` | The engine could not keep serving it, such as an encoder refusing a frame | end and report |
+
+A session the consumer closes or replaces (`session.close`, a new
+`session.open`, the consumer leaving) sends no `session.revoked`: the consumer
+asked for it, and signaling sees `session.state` with `capture` `ended`. Only
+its control channel is told, with code `closed` (below).
+
+A code a client does not know is terminal. Engines before this field sent no
+`code`; treat its absence as terminal too.
 
 Metrics are a request, not a notification:
 
@@ -418,7 +435,7 @@ The engine answers on the same channel, and sends two things unprompted:
 {"kind":"ack","seq":44}
 {"kind":"rejected","seq":44,"code":"coordinates","message":"(9000,4) is outside the 1280x720 surface"}
 {"kind":"clipboard","request":"…","text":"…","truncated":false}   // an empty "text" with "error" when the read failed
-{"kind":"revoked","reason":"…"}
+{"kind":"revoked","reason":"…","code":"closed"}  // closed, or a session.revoked code
 ```
 
 Refusal codes: `permission`, `session`, `input-replay`, `coordinates`,

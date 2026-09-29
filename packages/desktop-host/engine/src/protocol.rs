@@ -375,6 +375,7 @@ pub enum ControlReply<'a> {
     },
     Revoked {
         reason: &'a str,
+        code: &'a str,
     },
 }
 

@@ -54,6 +54,18 @@ const RESTART_REPLY_MS = 5000;
  * 8 s costs nothing next to a live desktop.
  */
 export const REOPEN_BACKOFF_MS = [1000, 2000, 4000, 8000, 8000, 8000, 8000, 8000];
+/**
+ * Away from the foreground this long, the path is presumed dead: ICE consent
+ * lapses after about 30 s (RFC 7675), and the engine then revokes the session.
+ * A return after that reopens at once instead of spending restarts on it.
+ */
+export const BACKGROUND_REOPEN_MS = 30_000;
+/**
+ * A resumed app hears what queued up while it was suspended just after it
+ * hears it is active again. A revocation among it decides whether a reopen is
+ * allowed at all, so the long-absence reopen waits this long for it first.
+ */
+const RESUME_DRAIN_MS = 750;
 
 /** The delay before attempt `n` (0-based), or null when the schedule is spent. */
 export function backoffDelay(schedule: readonly number[], attempt: number): number | null {
@@ -275,6 +287,8 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     /** The latest snapshot; mirrored eagerly so timers read exact state. */
     const snapshotRef = useRef<SessionSnapshot>(IDLE);
     const diagnostics = useRef<Record<string, string | number | boolean>>({});
+    /** When the app left the foreground, or null while it is active. */
+    const awaySince = useRef<number | null>(null);
     /** Guards every asynchronous callback against a session that already ended. */
     const generationToken = useRef(0);
     const optionsRef = useRef(options);
@@ -327,17 +341,20 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const scheduleRestartRef = useRef<(delay: number) => void>(() => undefined);
 
     /**
-     * Spend one restart from the backoff schedule, or stop asking when the
-     * schedule is spent: ICE's own failure then moves the session to a full
-     * reopen. Only refs and module constants, so stable callbacks may hold it.
+     * Spend one restart from the backoff schedule, or reopen when the schedule
+     * is spent: a peer may never report `failed` (a resumed phone often does
+     * not), and waiting for it would leave the session reconnecting forever.
      */
     const spendRestartAttempt = useCallback((): void => {
         if (statusRef.current !== 'reconnecting' || nativeRef.current == null) return;
         const wait = backoffDelay(RESTART_BACKOFF_MS, restartAttempts.current);
-        if (wait === null) return;
+        if (wait === null) {
+            transportFailed('the desktop did not come back; reopening the session');
+            return;
+        }
         restartAttempts.current += 1;
         scheduleRestartRef.current(wait);
-    }, []);
+    }, [transportFailed]);
 
     /**
      * Queue the next ICE restart after `delay`, or do nothing when an attempt
@@ -670,6 +687,13 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                     // Nothing held: the reopen policy owns recovery, and a
                     // dead session's late revocation must not end it.
                     if (held == null || !current) return;
+                    // A lost path is an outage, not a verdict: the reopen
+                    // policy asks for fresh authority. Any other code, or
+                    // none, is the session's authority ending.
+                    if (event.code === 'transport') {
+                        transportFailed(event.reason);
+                        return;
+                    }
                     void teardown(event.reason, false);
                     update({ status: 'ended', failure: { code: 'revoked', message: event.reason } });
                     return;
@@ -745,7 +769,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 await endRemote(openedResult, authorization.signaling);
             }
         }
-    }, [discardSession, endRemote, refuse, teardown, update, onTransportState]);
+    }, [discardSession, endRemote, refuse, teardown, transportFailed, update, onTransportState]);
 
     /**
      * Open (or reopen) the session with fresh authority. A deliberate call
@@ -844,7 +868,12 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                         if (reply.kind === 'revoked') {
                             // The engine ends the data channel with a revocation when
                             // the session is replaced or closed; it is the only notice
-                            // the client gets, so it has to end the session here.
+                            // the client gets, so it has to end the session here —
+                            // unless the path was lost, which a reopen heals.
+                            if (reply.code === 'transport') {
+                                transportFailed(reply.reason);
+                                return;
+                            }
                             void teardown(reply.reason, false);
                             update({ status: 'ended', failure: { code: 'revoked', message: reply.reason } });
                             return;
@@ -935,6 +964,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         // native handle that makes `connect()` a no-op.
         const owner = signaling.current;
         const openedRef = opened.current;
+        cancelRestart();
         discardSession();
         void endRemote(openedRef, owner);
         const wait = backoffDelay(REOPEN_BACKOFF_MS, attempts.current);
@@ -945,7 +975,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             reconnectTimer.current = null;
             void establish();
         }, wait);
-    }, [establish, discardSession, endRemote, snapshot.status, snapshot.failure, update]);
+    }, [establish, cancelRestart, discardSession, endRemote, snapshot.status, snapshot.failure, update]);
 
     useEffect(() => () => {
         cancelReconnect();
@@ -966,12 +996,50 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     // A phone that goes to the background must not leave a remote button held:
     // the desktop cannot know the finger left the glass. This is the same
     // release path a lost control channel takes.
+    //
+    // Coming back, a session that was away long enough for the path to lapse
+    // reopens without spending restarts on it, once anything queued has had
+    // a moment to arrive; one already waiting to reopen stops waiting: the
+    // app was suspended, so no timer or peer event can be trusted to have run.
     useEffect(() => {
+        let resumeTimer: ReturnType<typeof setTimeout> | null = null;
         const subscription = AppState.addEventListener('change', (status) => {
-            if (status !== 'active') releaseHeld();
+            if (status !== 'active') {
+                // `inactive` is Control Centre or the app switcher: the app
+                // still runs, so only `background` starts the clock.
+                if (status === 'background') awaySince.current ??= Date.now();
+                releaseHeld();
+                return;
+            }
+            const away = awaySince.current === null ? 0 : Date.now() - awaySince.current;
+            awaySince.current = null;
+            const current = statusRef.current;
+            const waiting = (current === 'reconnecting' && nativeRef.current == null)
+                || (current === 'failed' && snapshotRef.current.failure?.code === 'transport');
+            if (waiting) {
+                cancelReconnect();
+                void connect();
+                return;
+            }
+            const id = nativeRef.current;
+            if (away < BACKGROUND_REOPEN_MS || id == null) return;
+            // ponytail: a fixed drain window; a revocation queued behind it
+            // is dropped with the old session, as any reopen drops one.
+            if (resumeTimer !== null) clearTimeout(resumeTimer);
+            resumeTimer = setTimeout(() => {
+                resumeTimer = null;
+                const now = statusRef.current;
+                if (nativeRef.current !== id) return;
+                if (now !== 'live' && now !== 'connecting' && now !== 'reconnecting') return;
+                attempts.current = 0;
+                transportFailed('the app was in the background; reopening the session');
+            }, RESUME_DRAIN_MS);
         });
-        return () => subscription.remove();
-    }, [releaseHeld]);
+        return () => {
+            if (resumeTimer !== null) clearTimeout(resumeTimer);
+            subscription.remove();
+        };
+    }, [releaseHeld, cancelReconnect, connect, transportFailed]);
 
     return useMemo<DesktopSession>(() => ({
         snapshot,

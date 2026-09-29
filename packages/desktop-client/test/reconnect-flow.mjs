@@ -6,6 +6,12 @@
 // reconnecting latency plus time from unfreeze to the first new frame
 // (target <= 3 s). Freezing both server processes together also freezes the
 // bridge's wedged-engine reaper, so a 45 s outage cannot look like host death.
+// Then freezes the viewing browser for 60 s — a suspended phone: the engine
+// sees the path fail and revokes the session with code `transport` while the
+// client cannot hear it — and requires a reopen back to live. The browser
+// peer's own 'failed' is withheld from the hook there, as a resumed iOS peer
+// may never send one, so the revocation alone must drive the reopen. Last, a session
+// opened with a short lease must end when the lease expires, and stay ended.
 // Everything it starts is task-owned and reaped by recorded PID.
 // NOTE: needs TMPDIR pointing at a volume with free quota (/tmp may be full).
 import { spawn, spawnSync } from 'node:child_process';
@@ -22,9 +28,9 @@ const SRC = join(worktree, 'packages/desktop-client/src');
 // Whole-run watchdog: never wait forever. A scenario that does not recover
 // is recorded as a measured failure by its own deadlines below.
 setTimeout(() => {
-    console.error('OVERALL TIMEOUT: flow did not finish in 8 minutes');
+    console.error('OVERALL TIMEOUT: flow did not finish in 12 minutes');
     process.exit(2);
-}, 8 * 60 * 1000).unref?.();
+}, 12 * 60 * 1000).unref?.();
 const dir = mkdtempSync(join(tmpdir(), 'dl-rn-flow-'));
 const log = (...args) => console.log(new Date().toISOString(), ...args);
 
@@ -33,13 +39,13 @@ const DRIVER_TS = `
 import React from 'react';
 import TestRenderer from 'react-test-renderer';
 import { useDesktopSession } from '__SRC__/useDesktopSession';
-import { attachSurface } from '__SRC__/native.web';
+import { attachSurface, nativeDesklink } from '__SRC__/native.web';
 import type { Signaling } from '__SRC__/protocol';
 
 const PORT = __PORT__;
 const TOKEN = '__TOKEN__';
 
-const probe = { status: 'boot', opens: 0, frames: 0, lastNewFrame: 0, log: [] as Array<[number, string]>, sig: [] as Array<[number, string]> };
+const probe = { status: 'boot', failure: null as string | null, opens: 0, frames: 0, lastNewFrame: 0, log: [] as Array<[number, string]>, sig: [] as Array<[number, string]> };
 (window as any).__probe = probe;
 let opened: { sessionId: string; generation: number } | null = null;
 (window as any).__forceRestart = () => {
@@ -54,6 +60,17 @@ let opened: { sessionId: string; generation: number } | null = null;
     session.send({ kind: 'pointer', phase: 'move', x, y });
     return 'sent';
 };
+
+// A resumed iOS peer may never report its own failure. While this is set the
+// hook does not hear the browser peer's 'failed', so only the engine's
+// revocation can move a dead session on.
+(window as any).__silencePeerFailure = false;
+const addListener = nativeDesklink.addListener.bind(nativeDesklink);
+nativeDesklink.addListener = (name: any, handler: any) => addListener(name, (event: any) => {
+    const failed = event.name === 'failure' || (event.name === 'ice' && String(event.payload?.state).toLowerCase() === 'failed');
+    if (failed && (window as any).__silencePeerFailure) { probe.sig.push([Date.now(), 'muted-peer-' + event.name]); return; }
+    handler(event);
+});
 
 let seq = 0;
 const pending = new Map();
@@ -78,8 +95,8 @@ socket.addEventListener('message', (event) => {
     else if (msg.event === 'session.candidate') translated = { kind: 'candidate', candidate: { candidate: p.candidate, sdpMid: p.sdpMid ?? null, sdpMLineIndex: p.sdpMLineIndex ?? null }, sessionId: p.sessionId };
     else if (msg.event === 'session.state') translated = { kind: 'state', capture: p.capture, transport: p.transport, firstFrame: p.firstFrame, sessionId: p.sessionId };
     else if (msg.event === 'session.restoreToken') translated = { kind: 'restoreToken', token: p.token, sessionId: p.sessionId };
-    else if (msg.event === 'session.revoked') translated = { kind: 'revoked', reason: p.reason, sessionId: p.sessionId };
-    if (translated !== null) { probe.sig.push([Date.now(), 'got-' + msg.event]); for (const h of handlers) h(translated); }
+    else if (msg.event === 'session.revoked') translated = { kind: 'revoked', reason: p.reason, code: p.code, sessionId: p.sessionId };
+    if (translated !== null) { probe.sig.push([Date.now(), 'got-' + msg.event + (p.code ? ':' + p.code : '')]); for (const h of handlers) h(translated); }
 });
 const signaling: Signaling = {
     request: (method, params) => new Promise((resolve, reject) => {
@@ -101,10 +118,12 @@ function Harness() {
         authorize: async () => {
             await socketOpen;
             probe.opens += 1;
-            return { signaling, session: { permissions: ['view', 'control', 'clipboard'], maxWidth: 1280, maxHeight: 800, maxFps: 30 } };
+            const ttlSeconds = (window as any).__ttlSeconds;
+            return { signaling, session: { permissions: ['view', 'control', 'clipboard'], maxWidth: 1280, maxHeight: 800, maxFps: 30, ttlSeconds } };
         },
         onStateChange: (snapshot) => {
             probe.status = snapshot.status;
+            probe.failure = snapshot.failure?.code ?? null;
             probe.log.push([Date.now(), snapshot.status]);
         },
         onError: (failure) => {
@@ -189,6 +208,31 @@ async function stopProcess(pid, name) {
     if (alive(pid)) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
     for (let i = 0; i < 40 && alive(pid); i++) await new Promise((r) => setTimeout(r, 25));
     assert(!alive(pid), `${name} ${pid} survived cleanup`);
+}
+/** Every live process below `root`, so a whole browser can be frozen at once. */
+function descendants(root) {
+    const children = new Map();
+    for (const entry of readdirSync('/proc')) {
+        const pid = Number(entry);
+        if (!Number.isInteger(pid) || pid <= 1) continue;
+        try {
+            const ppid = Number(readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ')[1].split(' ')[1]);
+            if (!children.has(ppid)) children.set(ppid, []);
+            children.get(ppid).push(pid);
+        } catch { /* vanished */ }
+    }
+    const found = [];
+    const queue = [root];
+    while (queue.length > 0) {
+        const pid = queue.shift();
+        found.push(pid);
+        queue.push(...(children.get(pid) ?? []));
+    }
+    return found;
+}
+let frozenClient = [];
+function signalClient(signal) {
+    for (const pid of frozenClient) { try { process.kill(pid, signal); } catch { /* gone */ } }
 }
 function findEnginePid(bridgePid) {
     const found = [];
@@ -554,10 +598,66 @@ export default { root: PAGE, logLevel: 'warn',
     console.log(`FLOW-RESULT ${JSON.stringify(results)}`);
     const failed = results.filter((r) => r.failed !== undefined);
     assert(failed.length === 0, `${failed.length} scenario(s) did not recover: ${JSON.stringify(failed)}`);
+
+    // ---- suspended viewer: 60 s, the engine revokes, the client reopens ----
+    // Everything the viewing browser runs stops, as a backgrounded phone
+    // does, while the engine keeps running: its ICE declares the path failed
+    // and it revokes the session with code `transport`. The revocation waits
+    // in the socket until the viewer resumes, and must lead to a reopen.
+    log('settling 20s before the suspended-viewer block');
+    await sleep(20000);
+    await pollProbe(cdp, 10000, (p) => p.status === 'live');
+    await evaluate(cdp, 'window.__silencePeerFailure = true');
+    const beforeSuspend = await evaluate(cdp, 'window.__probe');
+    frozenClient = descendants(clientPid);
+    const suspendAt = Date.now();
+    log(`SUSPEND viewer (${frozenClient.length} processes) for 60s at ${suspendAt}`);
+    signalClient('SIGSTOP');
+    try {
+        await sleep(60000);
+    } finally {
+        signalClient('SIGCONT');
+    }
+    const resumeAt = Date.now();
+    log(`RESUME viewer at ${resumeAt}`);
+    const back = await pollProbe(cdp, 30000, (p) => p.status === 'live' && p.opens > beforeSuspend.opens && p.lastNewFrame > resumeAt);
+    const suspended = {
+        seconds: 60,
+        reopens: back.opens - beforeSuspend.opens,
+        liveMs: back.log.findLast(([at, s]) => at > resumeAt && s === 'live')?.[0] - resumeAt,
+        revoked: back.sig.filter(([at, s]) => at >= suspendAt && s.startsWith('got-session.revoked')).map(([, s]) => s),
+        statuses: back.log.filter(([at]) => at >= suspendAt).map(([, s]) => s),
+    };
+    log('suspended viewer:', JSON.stringify(suspended));
+    assert(!suspended.statuses.includes('ended'), `the suspended viewer ended instead of reopening: ${suspended.statuses}`);
+    assert(suspended.revoked.includes('got-session.revoked:transport'), `the engine did not revoke the lost path with code transport: ${suspended.revoked}`);
+    assert(await expectPointerSoft(cdp, evaluate, baseEnv, 640, 400, 'after the suspended viewer', 20000), 'control dead after the suspended viewer reopened');
+    console.log(`SUSPEND-RESULT ${JSON.stringify(suspended)}`);
+    await evaluate(cdp, 'window.__silencePeerFailure = false');
+
+    // ---- an authorization revocation still ends --------------------------
+    // A session opened with an 8 s lease: its expiry is the grant ending, not
+    // an outage, so the session ends and nothing reopens it.
+    await evaluate(cdp, 'window.__ttlSeconds = 8; true');
+    await evaluate(cdp, 'window.__session.close("lease check").then(() => true)');
+    await pollProbe(cdp, 5000, (p) => p.status === 'ended');
+    await evaluate(cdp, 'window.__session.connect().then(() => true)');
+    const leased = await pollProbe(cdp, 30000, (p) => p.status === 'live');
+    const leasedAt = Date.now();
+    const expired = await pollProbe(cdp, 20000, (p) => p.status === 'ended');
+    log(`lease: ended ${Date.now() - leasedAt}ms after live, failure=${expired.failure}`);
+    assert.equal(expired.failure, 'revoked');
+    assert(expired.sig.some(([, s]) => s === 'got-session.revoked:lease'), 'the engine did not revoke the lease with code lease');
+    await sleep(12000);
+    const stayed = await evaluate(cdp, 'window.__probe');
+    assert.equal(stayed.status, 'ended', `a lease revocation was reopened: ${stayed.status}`);
+    assert.equal(stayed.opens, leased.opens, `a lease revocation reopened the session (opens ${leased.opens} -> ${stayed.opens})`);
+    console.log(`LEASE-RESULT ${JSON.stringify({ status: stayed.status, failure: stayed.failure, opens: stayed.opens })}`);
     await cleanup();
     log('done, cleaned up');
 } catch (error) {
     console.error('FLOW-FAIL', error);
+    signalClient('SIGCONT');
     try { if (enginePid && alive(enginePid)) process.kill(enginePid, 'SIGCONT'); } catch { /* gone */ }
     try { if (bridgePid && alive(bridgePid)) process.kill(bridgePid, 'SIGCONT'); } catch { /* gone */ }
     await cleanup();

@@ -789,6 +789,183 @@ describe('events naming another session', () => {
     }, 20_000);
 });
 
+describe('a session the engine revokes', () => {
+    function emitSignaling(event: SessionEvent): void {
+        TestRenderer.act(() => {
+            for (const handler of [...signalingHandlers]) handler(event);
+        });
+    }
+
+    async function settle(ms: number): Promise<void> {
+        await TestRenderer.act(async () => {
+            await sleep(ms);
+        });
+        await TestRenderer.act(async () => {});
+    }
+
+    function opens(): number {
+        return requests.filter((request) => request.method === 'session.open').length;
+    }
+
+    it('reopens after a lost path instead of ending', async () => {
+        const session = await liveSession();
+        const first = session.current.nativeId;
+
+        emitSignaling({ kind: 'revoked', reason: 'the connection to the phone was lost', code: 'transport', sessionId: 'engine-1' });
+        expect(session.current.snapshot.status).toBe('reconnecting');
+        await settle(1300);
+        expect(opens()).toBe(2);
+        expect(session.current.nativeId).not.toBeNull();
+        expect(session.current.nativeId).not.toBe(first);
+        expect(session.current.snapshot.status).not.toBe('ended');
+    }, 20_000);
+
+    it('reopens after a lost path the control channel reports', async () => {
+        const session = await liveSession();
+        nativeEvent('control', session.current.nativeId, {
+            message: '{"kind":"revoked","reason":"the connection to the phone was lost","code":"transport"}',
+        });
+        await settle(1300);
+        expect(opens()).toBe(2);
+        expect(session.current.nativeId).not.toBeNull();
+    }, 20_000);
+
+    it('still ends when the session authority ends', async () => {
+        for (const code of ['lease', 'closed', 'error']) {
+            requests.length = 0;
+            const session = await liveSession();
+            emitSignaling({ kind: 'revoked', reason: 'the session lease expired', code, sessionId: 'engine-1' });
+            expect(session.current.snapshot.status).toBe('ended');
+            expect(session.current.snapshot.failure).toMatchObject({ code: 'revoked' });
+            await settle(1300);
+            expect(opens()).toBe(1);
+            expect(session.current.nativeId).toBeNull();
+        }
+        const session = await liveSession();
+        nativeEvent('control', session.current.nativeId, { message: '{"kind":"revoked","reason":"replaced","code":"closed"}' });
+        expect(session.current.snapshot.status).toBe('ended');
+    }, 20_000);
+
+    it('reopens when the restart schedule is spent and the peer never says failed', async () => {
+        const session = await liveSession();
+        const first = session.current.nativeId;
+        requests.length = 0;
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+        try {
+            nativeEvent('ice', first, { state: 'DISCONNECTED' });
+            expect(session.current.snapshot.status).toBe('reconnecting');
+            await TestRenderer.act(async () => {
+                await vi.advanceTimersByTimeAsync(120_000);
+            });
+            await TestRenderer.act(async () => {
+                await vi.advanceTimersByTimeAsync(2_000);
+            });
+        } finally {
+            vi.useRealTimers();
+        }
+        const methods = requests.map((request) => request.method);
+        expect(methods.filter((method) => method === 'session.restart_ice').length).toBe(RESTART_BACKOFF_MS.length + 1);
+        expect(methods).toContain('session.open');
+        expect(session.current.nativeId).not.toBeNull();
+        expect(session.current.nativeId).not.toBe(first);
+    }, 20_000);
+});
+
+describe('returning to the foreground', () => {
+    function appState(status: string): void {
+        TestRenderer.act(() => {
+            for (const listener of [...appStateListeners]) listener(status);
+        });
+    }
+
+    it('reopens at once after an absence long enough for the path to lapse', async () => {
+        const session = await liveSession();
+        const first = session.current.nativeId;
+        const now = Date.now();
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+        try {
+            appState('background');
+            clock.mockReturnValue(now + 31_000);
+            appState('active');
+        } finally {
+            clock.mockRestore();
+        }
+        await TestRenderer.act(async () => {
+            await sleep(900);
+        });
+        expect(session.current.snapshot.status).toBe('reconnecting');
+        await TestRenderer.act(async () => {
+            await sleep(1300);
+        });
+        await TestRenderer.act(async () => {});
+        expect(session.current.nativeId).not.toBeNull();
+        expect(session.current.nativeId).not.toBe(first);
+    }, 20_000);
+
+    it('leaves a short absence, or a long inactive spell, to the restart path', async () => {
+        const session = await liveSession();
+        const first = session.current.nativeId;
+        const now = Date.now();
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+        try {
+            appState('background');
+            clock.mockReturnValue(now + 5_000);
+            appState('active');
+            appState('inactive');
+            clock.mockReturnValue(now + 60_000);
+            appState('active');
+        } finally {
+            clock.mockRestore();
+        }
+        await TestRenderer.act(async () => {
+            await sleep(900);
+        });
+        expect(session.current.snapshot.status).toBe('live');
+        expect(session.current.nativeId).toBe(first);
+    }, 20_000);
+
+    it('lets a revocation queued behind the return end the session instead', async () => {
+        const session = await liveSession();
+        const now = Date.now();
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+        try {
+            appState('background');
+            clock.mockReturnValue(now + 31_000);
+            appState('active');
+        } finally {
+            clock.mockRestore();
+        }
+        // The lease ran out while the app was suspended; its notice lands
+        // just after the app hears it is active again.
+        TestRenderer.act(() => {
+            for (const handler of [...signalingHandlers]) {
+                handler({ kind: 'revoked', reason: 'the session lease expired', code: 'lease', sessionId: 'engine-1' });
+            }
+        });
+        await TestRenderer.act(async () => {
+            await sleep(2200);
+        });
+        expect(session.current.snapshot.status).toBe('ended');
+        expect(requests.filter((request) => request.method === 'session.open').length).toBe(1);
+    }, 20_000);
+
+    it('stops waiting out a pending reopen', async () => {
+        const session = await liveSession();
+        nativeEvent('failure', session.current.nativeId);
+        await TestRenderer.act(async () => {});
+        expect(session.current.nativeId).toBeNull();
+        expect(session.current.snapshot.status).toBe('reconnecting');
+
+        appState('background');
+        await TestRenderer.act(async () => {
+            appState('active');
+        });
+        await TestRenderer.act(async () => {});
+        // No backoff wait: the reopen ran on the return itself.
+        expect(session.current.nativeId).not.toBeNull();
+    }, 20_000);
+});
+
 describe('classifyOpenFailure', () => {
     it('treats an unanswering engine as transport, and refusals as refusals', async () => {
         const { classifyOpenFailure } = await import('./useDesktopSession');

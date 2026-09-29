@@ -119,7 +119,7 @@ export type EngineEvent =
     | { event: 'session.state'; params: { sessionId: string; capture: string; transport: string; firstFrame: boolean } }
     | { event: 'session.restoreToken'; params: { sessionId: string; token: string } }
     | { event: 'session.capture.stopped'; params: { sessionId: string; reason: string } }
-    | { event: 'session.revoked'; params: { sessionId: string; reason: string } };
+    | { event: 'session.revoked'; params: { sessionId: string; reason: string; code: 'transport' | 'lease' | 'error' } };
 
 export type EngineEventName = EngineEvent['event'];
 

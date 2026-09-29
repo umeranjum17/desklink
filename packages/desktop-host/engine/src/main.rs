@@ -481,9 +481,9 @@ fn render_event(notice: session::Notice) -> Option<String> {
             "session.capture.stopped",
             serde_json::json!({ "sessionId": session_id, "reason": reason }),
         ),
-        session::SessionEvent::Revoked { reason } => (
+        session::SessionEvent::Revoked { reason, code } => (
             "session.revoked",
-            serde_json::json!({ "sessionId": session_id, "reason": reason }),
+            serde_json::json!({ "sessionId": session_id, "reason": reason, "code": code }),
         ),
     };
     serde_json::to_string(&Event {

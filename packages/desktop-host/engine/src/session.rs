@@ -588,8 +588,13 @@ pub enum SessionEvent {
     CaptureStopped {
         reason: String,
     },
+    /// The session ended on the engine's side. `code` says whether a new
+    /// session may recover it: `transport` is the path to the consumer's peer
+    /// lost, which a fresh `session.open` can heal; `lease` and `error` are
+    /// the session's authority ending or a fault, which it cannot.
     Revoked {
         reason: String,
+        code: &'static str,
     },
 }
 
@@ -1517,7 +1522,7 @@ impl Session {
     }
 
     pub async fn close(&self, reason: &str) {
-        self.inner.close(reason).await;
+        self.inner.close(reason, "closed").await;
     }
 }
 
@@ -1532,7 +1537,7 @@ impl Inner {
 
     /// Stop everything and release whatever input this session held. Idempotent,
     /// and the one teardown both an explicit close and a lease expiry take.
-    async fn close(&self, reason: &str) {
+    async fn close(&self, reason: &str, code: &str) {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -1553,8 +1558,8 @@ impl Inner {
         if let Some(peer) = self.peer.lock().ok().and_then(|peer| peer.clone()) {
             let _ = peer
                 .send_control(
-                    &serde_json::to_string(&ControlReply::Revoked { reason }).unwrap_or_else(
-                        |_| String::from(r#"{"kind":"revoked","reason":"closed"}"#),
+                    &serde_json::to_string(&ControlReply::Revoked { reason, code }).unwrap_or_else(
+                        |_| String::from(r#"{"kind":"revoked","reason":"closed","code":"closed"}"#),
                     ),
                 )
                 .await;
@@ -2383,10 +2388,11 @@ fn spawn_pipeline(
                         let reason = String::from("the encoder rejected a frame");
                         inner.notify(SessionEvent::Revoked {
                             reason: reason.clone(),
+                            code: "error",
                         });
                         let target = inner.clone();
                         handle.spawn(async move {
-                            target.close(&reason).await;
+                            target.close(&reason, "error").await;
                         });
                         break;
                     }
@@ -2445,10 +2451,11 @@ fn spawn_pipeline(
                     let reason = String::from("the connection to the phone was lost");
                     inner.notify(SessionEvent::Revoked {
                         reason: reason.clone(),
+                        code: "transport",
                     });
                     let target = inner.clone();
                     handle.spawn(async move {
-                        target.close(&reason).await;
+                        target.close(&reason, "transport").await;
                     });
                     break;
                 }
@@ -2522,6 +2529,7 @@ fn spawn_encoded(inner: &Arc<Inner>, mut feed: tokio_mpsc::Receiver<FedAccessUni
                         revoke(
                             &inner,
                             format!("the transport refused the encoded stream: {error:#}"),
+                            "error",
                         )
                         .await;
                         return;
@@ -2546,7 +2554,12 @@ fn spawn_encoded(inner: &Arc<Inner>, mut feed: tokio_mpsc::Receiver<FedAccessUni
                 }
                 Err(error) => {
                     eprintln!("the video track refused a fed access unit: {error:#}");
-                    revoke(&inner, String::from("the connection to the phone was lost")).await;
+                    revoke(
+                        &inner,
+                        String::from("the connection to the phone was lost"),
+                        "transport",
+                    )
+                    .await;
                     return;
                 }
             }
@@ -2560,11 +2573,12 @@ fn current_peer(inner: &Arc<Inner>) -> Option<Arc<VideoPeer>> {
 
 /// End the session with a reason the consumer can show, exactly as the encode
 /// pipeline does when its transport goes away.
-async fn revoke(inner: &Arc<Inner>, reason: String) {
+async fn revoke(inner: &Arc<Inner>, reason: String, code: &'static str) {
     inner.notify(SessionEvent::Revoked {
         reason: reason.clone(),
+        code,
     });
-    inner.close(&reason).await;
+    inner.close(&reason, code).await;
 }
 
 fn spawn_peer_events(inner: &Arc<Inner>, mut events: tokio_mpsc::UnboundedReceiver<PeerEvent>) {
@@ -2612,8 +2626,9 @@ fn spawn_peer_events(inner: &Arc<Inner>, mut events: tokio_mpsc::UnboundedReceiv
                         let reason = String::from("the connection to the phone was lost");
                         inner.notify(SessionEvent::Revoked {
                             reason: reason.clone(),
+                            code: "transport",
                         });
-                        inner.close(&reason).await;
+                        inner.close(&reason, "transport").await;
                         continue;
                     }
                     inner.notify(SessionEvent::State {
@@ -2671,10 +2686,11 @@ fn spawn_lease(inner: &Arc<Inner>, ttl: Duration) {
         let reason = String::from("the session lease expired");
         inner.notify(SessionEvent::Revoked {
             reason: reason.clone(),
+            code: "lease",
         });
         // An expiry ends the session exactly as an explicit close does; the
         // notification above is not a substitute for stopping the desktop.
-        inner.close(&reason).await;
+        inner.close(&reason, "lease").await;
     });
 }
 
@@ -2763,7 +2779,7 @@ mod tests {
         });
         spawn_peer_events(&inner, peer_events_rx);
         spawn_encoded(&inner, feed_rx);
-        inner.close("test").await;
+        inner.close("test", "closed").await;
         for _ in 0..100 {
             if Arc::strong_count(&inner) == 1 {
                 break;
@@ -2963,11 +2979,11 @@ mod tests {
             matches!(
                 received.try_recv(),
                 Ok(Notice {
-                    event: SessionEvent::Revoked { .. },
+                    event: SessionEvent::Revoked { code: "lease", .. },
                     ..
                 })
             ),
-            "the consumer is still told why the session ended",
+            "the consumer is still told the session's authority ended",
         );
 
         let rejected = inner.metrics.lock().unwrap().input_rejected;
@@ -3254,10 +3270,11 @@ mod tests {
         let mut reason = None;
         while let Ok(event) = received.try_recv() {
             if let Notice {
-                event: SessionEvent::Revoked { reason: why },
+                event: SessionEvent::Revoked { reason: why, code },
                 ..
             } = event
             {
+                assert_eq!(code, "error", "a refused frame is a fault, not a lost path");
                 reason = Some(why);
             }
         }
@@ -3508,8 +3525,17 @@ mod tests {
         );
 
         peer_tx.send(PeerEvent::State(State::Failed)).unwrap();
+        let mut transport_lost = false;
         tokio::time::timeout(Duration::from_secs(2), async {
             while let Some(notice) = received.recv().await {
+                // A lost path is the one revocation a new session can heal.
+                transport_lost |= matches!(
+                    notice.event,
+                    SessionEvent::Revoked {
+                        code: "transport",
+                        ..
+                    }
+                );
                 if matches!(
                     notice.event,
                     SessionEvent::State {
@@ -3524,6 +3550,10 @@ mod tests {
         })
         .await
         .unwrap();
+        assert!(
+            transport_lost,
+            "a failed transport must revoke with code transport"
+        );
         assert!(inner.revoked_reason().is_some());
         assert!(!inner.pipeline.load(Ordering::SeqCst));
         assert!(inner.input.lock().unwrap().is_none());

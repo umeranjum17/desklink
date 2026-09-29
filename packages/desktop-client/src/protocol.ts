@@ -83,7 +83,11 @@ export type SessionEvent =
     | { kind: 'candidate'; candidate: RtcCandidate; sessionId?: string }
     | { kind: 'state'; capture: string; transport: string; firstFrame: boolean; sessionId?: string }
     | { kind: 'restoreToken'; token: string; sessionId?: string }
-    | { kind: 'revoked'; reason: string; sessionId?: string };
+    /**
+     * `code` is the engine's revocation code: `transport` means the path was
+     * lost and a new session may recover it; anything else, or none, is final.
+     */
+    | { kind: 'revoked'; reason: string; code?: string; sessionId?: string };
 
 /**
  * The application's own authenticated channel to the host engine.
@@ -155,7 +159,7 @@ export type ControlReply =
     | { kind: 'ack'; seq: number }
     | { kind: 'rejected'; seq: number; code: string; message: string }
     | { kind: 'clipboard'; request: string; text: string; truncated?: boolean; error?: string }
-    | { kind: 'revoked'; reason: string }
+    | { kind: 'revoked'; reason: string; code?: string }
     /**
      * The engine's heartbeat, twice a second while the control channel is
      * open. A client that has seen one and then sees none for a while reads
