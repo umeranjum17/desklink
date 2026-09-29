@@ -332,9 +332,11 @@ Metrics are a request, not a notification:
 
 ```jsonc
 {"id":7,"result":{"captured_frames":812,"dropped_frames":3,"encoded_frames":809,
-  "encoded_bytes":12345678,"key_frames":1,"refined_frames":37,"halved_frames":0,
+  "encoded_bytes":12345678,"key_frames":1,"refined_frames":37,"halved_frames":0,"motion_frames":770,
   "encode_micros":7390000,"target_kbps":16430,"input_applied":44,"input_rejected":0,
-  "fed_frames":0,"input_forwarded":0}}
+  "fed_frames":0,"input_forwarded":0,
+  "capture_micros":14100000,"convert_micros":3200000,
+  "queue_micros":410000,"send_micros":180000}}
 ```
 
 `dropped_frames` counts frames superseded by a newer one before they were coded;
@@ -349,6 +351,29 @@ frames are sent only for the first frame, when the receiver asks (RTCP PLI or
 FIR), and when the coded size changes that way, so a receiver never has to scale
 references across a size change. `target_kbps` is the current rate target after
 any back-off for loss the receiver reported.
+
+Per-stage timings (the L0 lab harness reads these, and every later lane cites
+them). Each is a cumulative microsecond counter; divide by the frame count
+named beside it for the per-frame mean:
+
+- `capture_micros` / `captured_frames`: grabbing a frame and converting it on
+  the capture thread (on X11: `GetImage` plus the downscale to I420), over
+  forwarded (changed) frames only — unchanged polls are excluded.
+- `convert_micros` / `captured_frames`: tile hashing and damage computation on
+  the capture thread, after the grab; the hash branch runs only with
+  `local_frames` on.
+- `queue_micros` / `motion_frames`: how long a freshly captured frame waited
+  between the capture handoff and the start of its encode. Refinement,
+  keepalive and receiver-requested re-encodes re-code a picture that was
+  already sent; they queue nothing and stay out of this mean.
+- `send_micros` / `encoded_frames`: packetizing a frame and handing it to the
+  transport.
+- `encode_micros` / `encoded_frames`: the encoder alone.
+
+`capture + convert` per captured frame plus `queue` per motion-coded frame and
+`encode + send` per encoded frame reconciles against engine-side wall time per
+frame within measurement noise; a stage that will not reconcile is a stage
+whose accounting is wrong.
 
 ## Input and clipboard: the session's control channel
 
@@ -509,10 +534,12 @@ is the consumer's to carry.
 
 `session.frame` and `session.wait_frame` are refused with `error.code =
 "operation"` — there is no lossless frame to read — and `captured_frames`,
-`refined_frames`, `halved_frames` and `target_kbps` stay at zero while
+`refined_frames`, `halved_frames`, `motion_frames`, `target_kbps`, `capture_micros`,
+`convert_micros`, `queue_micros` and `send_micros` stay at zero while
 `fed_frames` counts what the consumer handed over and `encoded_frames`,
 `encoded_bytes`, `key_frames` and `encode_micros` describe what was packetized
-and sent.
+and sent — on this path `encode_micros` covers packetizing and sending too,
+because packetization is the only stage the engine itself runs.
 
 ## Latest frame over the local protocol
 

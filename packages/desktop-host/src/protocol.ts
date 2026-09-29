@@ -128,6 +128,24 @@ export interface SessionMetrics {
     dropped_frames: number;
     encoded_frames: number;
     encoded_bytes: number;
+    key_frames: number;
+    refined_frames: number;
+    /** Motion frames coded at half size because full size could not keep up. */
+    halved_frames: number;
+    /** Fresh captures coded at the pace of change; the queue_micros population (L0 lab). */
+    motion_frames: number;
+    encode_micros: number;
+    target_kbps: number;
+    /** GetImage plus downscale-to-I420 time, over forwarded frames (L0 lab). */
+    capture_micros: number;
+    /** Tile-hash and damage time, only with local_frames on (L0 lab). */
+    convert_micros: number;
+    /** Capture-handoff to encode-start wait per motion-coded frame (L0 lab). */
+    queue_micros: number;
+    /** Packetize plus transport-send time per sent frame (L0 lab). */
+    send_micros: number;
+    fed_frames: number;
+    input_forwarded: number;
     input_applied: number;
     input_rejected: number;
 }

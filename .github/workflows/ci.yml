@@ -72,3 +72,42 @@ jobs:
       - run: node packages/desktop-host/test/encoded-flow.mjs
         env:
           DESKLINK_AXI_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/desklink-host
+
+  # The glass-to-glass latency/fps lab: a stamp target on a private Xvfb, read
+  # back in headless Chromium. Report-only (continue-on-error): CI runners are
+  # small and contended, so their numbers are a floor, not a gate.
+  g2g-lab:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Native prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config libclang-dev \
+            libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libevdev-dev libxcb1-dev libxcursor-dev xvfb x11-utils xauth
+          npx -y playwright@1.62.1 install --with-deps chromium
+      - name: Rust (the version the release build pins)
+        run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            packages/desktop-host/engine/target
+          key: engine-${{ hashFiles('packages/desktop-host/engine/Cargo.lock') }}
+      - run: npm ci && npm run build
+      - run: cargo build --manifest-path packages/desktop-host/engine/Cargo.toml
+      - name: Locate Playwright Chromium
+        run: |
+          chrome=$(find ~/.cache/ms-playwright -path '*chrome-linux/chrome' | head -1)
+          if [ -z "$chrome" ]; then chrome=$(find ~/.cache/ms-playwright -name 'headless_shell' | head -1); fi
+          echo "chromium: $chrome"
+          echo "DESKLINK_CHROME=$chrome" >> "$GITHUB_ENV"
+      - run: node packages/desktop-host/test/g2g-flow.mjs --size 1280x720 --seconds 10
+        env:
+          DESKLINK_AXI_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/desklink-host
