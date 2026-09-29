@@ -21,6 +21,16 @@ vi.mock('react-native', () => ({
     View: 'View',
 }));
 
+/** Whether the build carries the package's native input view; by default it stands for one without. */
+const nativeInput = { installed: false };
+vi.mock('expo-modules-core', () => ({
+    requireOptionalNativeModule: (name: string) => (nativeInput.installed && name === 'DesklinkInput' ? {} : null),
+    requireNativeViewManager: () => 'DesklinkInput',
+}));
+
+// The bundler's inline require, standing in: it goes through the stubbed global so the spec sees when it runs.
+vi.mock('./webrtc.ios', () => ({ requireWebRTC: () => (globalThis as unknown as { require: (id: string) => unknown }).require('react-native-webrtc') }));
+
 class MockStream {
     addTrack = vi.fn();
     toURL() { return 'stream'; }
@@ -50,10 +60,11 @@ const DESKTOP = { width: 1280, height: 720 };
 const SCALE = Math.min(BOUNDS.width / DESKTOP.width, BOUNDS.height / DESKTOP.height);
 const ORIGIN_Y = (BOUNDS.height - DESKTOP.height * SCALE) / 2;
 
-type Touch = { locationX: number; locationY: number };
-function touch(x: number, y: number): Touch { return { locationX: x, locationY: y }; }
+type Touch = { locationX: number; locationY: number; timestamp?: number };
+function touch(x: number, y: number, timestamp?: number): Touch { return { locationX: x, locationY: y, timestamp }; }
 
-async function openView(options: { gestures?: 'desktop' | 'browser' | 'device'; accessibilityLabel?: string } = {}) {
+async function openView(options: { gestures?: 'desktop' | 'browser' | 'device'; accessibilityLabel?: string; native?: boolean } = {}) {
+    nativeInput.installed = options.native === true;
     const { desktopInputEnabled, nativeDesklink } = await import('./native.ios');
     const { DesktopView } = await import('./DesktopView.ios');
     const id = nativeDesklink.createSession('[]')!;
@@ -70,7 +81,7 @@ async function openView(options: { gestures?: 'desktop' | 'browser' | 'device'; 
             <DesktopView sessionId={id} gestures={options.gestures} accessibilityLabel={options.accessibilityLabel} />,
         );
     });
-    const outer = () => renderer!.root.findByType('View').props as {
+    const outer = () => renderer!.root.findByType(options.native ? 'DesklinkInput' as never : 'View').props as {
         onLayout: (event: { nativeEvent: { layout: { width: number; height: number } } }) => void;
         onResponderGrant: (event: { nativeEvent: { touches: Touch[] } }) => void;
         onResponderMove: (event: { nativeEvent: { touches: Touch[] } }) => void;
@@ -89,7 +100,19 @@ async function openView(options: { gestures?: 'desktop' | 'browser' | 'device'; 
         renderer!.root.findByType('TextInput').props.onSubmitEditing();
     });
     const rtcStyle = () => renderer!.root.findByType(MockRTCView).props.style as { left: number; top: number; width: number; height: number };
-    return { id, nativeDesklink, renderer: renderer!, sent, outer, grant, move, release, submit, rtcStyle };
+    /** What the native input view reports, as its events. */
+    const native = {
+        key: (usage: number, down: boolean, characters = '', modifiers: string[] = []) => TestRenderer.act(() => {
+            (outer().onKey as (event: unknown) => void)({ nativeEvent: { usage, down, characters, modifiers } });
+        }),
+        pointer: (phase: string, x: number, y: number, buttons = 0, timestamp?: number) => TestRenderer.act(() => {
+            (outer().onPointer as (event: unknown) => void)({ nativeEvent: { phase, x, y, buttons, timestamp } });
+        }),
+        wheel: (phase: string, dx: number, dy: number, x = 195, y = 420) => TestRenderer.act(() => {
+            (outer().onWheel as (event: unknown) => void)({ nativeEvent: { phase, dx, dy, x, y } });
+        }),
+    };
+    return { id, nativeDesklink, renderer: renderer!, sent, outer, grant, move, release, submit, rtcStyle, native };
 }
 
 beforeEach(() => {
@@ -206,5 +229,126 @@ describe('DesktopView.ios parity with DesktopView.kt', () => {
         expect(required).not.toContain('react-native-webrtc');
         await openView();
         expect(required).toContain('react-native-webrtc');
+    });
+});
+
+describe('DesktopView.ios hardware keyboard and pointer', () => {
+    /** Desktop pixels under a point of the view. */
+    const pixel = (x: number, y: number) => ({ x: Math.floor(x / SCALE), y: Math.floor((y - ORIGIN_Y) / SCALE) });
+    const pointers = (sent: Record<string, unknown>[]) => sent.filter((message) => message.kind === 'pointer')
+        .map(({ phase, x, y, button }) => ({ phase, x, y, button }));
+
+    it('keeps a plain view where the build has no native input view', async () => {
+        const { renderer } = await openView();
+        expect(renderer.root.findAllByType('DesklinkInput' as never)).toEqual([]);
+    });
+
+    it('arms the native view only while control is enabled', async () => {
+        const { id, nativeDesklink, outer } = await openView({ native: true });
+        expect(outer().enabled).toBe(true);
+        TestRenderer.act(() => { nativeDesklink.setInputEnabled(id, false); });
+        expect(outer().enabled).toBe(false);
+    });
+
+    it('sends arrows, Esc, Tab and a Command chord from the hardware keyboard', async () => {
+        const { sent, native } = await openView({ native: true });
+        native.key(0x52, true); native.key(0x52, false);
+        native.key(0x29, true); native.key(0x29, false);
+        native.key(0x2b, true, '\t'); native.key(0x2b, false, '\t');
+        native.key(0xe3, true, '', ['Meta']);
+        native.key(0x06, true, 'c', ['Meta']);
+        native.key(0x06, false, 'c', ['Meta']);
+        native.key(0xe3, false);
+        native.key(0x0b, true, 'h'); native.key(0x0b, false, 'h');
+        expect(sent.map(({ seq: _seq, ...message }) => message)).toEqual([
+            { kind: 'key', name: 'ArrowUp', modifiers: [], down: true }, { kind: 'key', name: 'ArrowUp', modifiers: [], down: false },
+            { kind: 'key', name: 'Escape', modifiers: [], down: true }, { kind: 'key', name: 'Escape', modifiers: [], down: false },
+            { kind: 'key', name: 'Tab', modifiers: [], down: true }, { kind: 'key', name: 'Tab', modifiers: [], down: false },
+            { kind: 'key', name: 'Meta', modifiers: ['Meta'], down: true },
+            { kind: 'key', character: 'c', modifiers: ['Meta'], down: true }, { kind: 'key', character: 'c', modifiers: ['Meta'], down: false },
+            { kind: 'key', name: 'Meta', modifiers: [], down: false },
+            { kind: 'text', text: 'h' },
+        ]);
+    });
+
+    it('hands hardware keys to the session while a sticky modifier waits', async () => {
+        const { id, nativeDesklink, sent, native } = await openView({ native: true });
+        const keys: Record<string, unknown>[] = [];
+        const listener = nativeDesklink.addListener!('onSessionEvent', (event) => {
+            if (event.sessionId === id && event.name === 'keyboard') keys.push(event.payload);
+        });
+        nativeDesklink.captureKeyboard(id, true);
+        native.key(0x19, true, 'v');
+        native.key(0x28, true, '\r');
+        listener.remove();
+        expect(keys).toEqual([{ text: 'v' }, { key: 'Enter' }]);
+        expect(sent).toEqual([]);
+    });
+
+    it('hovers the desktop pointer without a button or a drawn mark, and not from the letterbox', async () => {
+        const { sent, native, renderer } = await openView({ native: true });
+        native.pointer('hover', 10, 10);
+        native.pointer('hover', 200, 400);
+        expect(pointers(sent)).toEqual([{ phase: 'move', ...pixel(200, 400), button: undefined }]);
+        // The system draws the trackpad's own pointer.
+        expect(renderer.root.findAllByType('View')).toEqual([]);
+    });
+
+    it('drags with a trackpad press the native view reported before touch saw it', async () => {
+        const { sent, native, grant, move, release } = await openView({ native: true });
+        native.pointer('down', 100, 400, 1, 5000);
+        grant([touch(100, 400, 5000)]);
+        native.pointer('move', 160, 410, 1);
+        move([touch(160, 410, 5010)]);
+        native.pointer('up', 160, 410, 0);
+        release();
+        expect(pointers(sent)).toEqual([
+            { phase: 'down', ...pixel(100, 400), button: 1 },
+            { phase: 'move', ...pixel(160, 410), button: 1 },
+            { phase: 'up', ...pixel(160, 410), button: 1 },
+        ]);
+    });
+
+    it('right-clicks with a secondary press touch saw first, and no long press follows', async () => {
+        vi.useFakeTimers();
+        try {
+            const { sent, native, grant, release } = await openView({ native: true });
+            grant([touch(100, 400, 6000)]);
+            native.pointer('down', 100, 400, 2, 6000);
+            TestRenderer.act(() => { vi.advanceTimersByTime(600); });
+            native.pointer('up', 100, 400, 0);
+            release();
+            expect(pointers(sent)).toEqual([
+                { phase: 'down', ...pixel(100, 400), button: 3 },
+                { phase: 'up', ...pixel(100, 400), button: 3 },
+            ]);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('does not press twice when a device-profile touch already pressed for the trackpad', async () => {
+        const { sent, native, grant, release } = await openView({ native: true, gestures: 'device' });
+        grant([touch(100, 400, 7000)]);
+        native.pointer('down', 100, 400, 1, 7000);
+        native.pointer('up', 100, 400, 0);
+        release();
+        expect(pointers(sent)).toEqual([
+            { phase: 'down', ...pixel(100, 400), button: 1 },
+            { phase: 'up', ...pixel(100, 400), button: 1 },
+        ]);
+    });
+
+    it('scrolls the desktop under the pointer with a trackpad, content following the fingers', async () => {
+        const { sent, native } = await openView({ native: true });
+        native.wheel('begin', 0, -30, 200, 400);
+        native.wheel('move', 0, -0.01, 200, 400);
+        native.wheel('end', 0, 0, 200, 400);
+        expect(pointers(sent)).toEqual([{ phase: 'move', ...pixel(200, 400), button: undefined }]);
+        const wheels = sent.filter((message) => message.kind === 'wheel');
+        expect(wheels).toHaveLength(2);
+        expect(wheels[0].dy).toBeCloseTo(30 / SCALE / 120, 5);
+        // What stayed below the send threshold goes out when the scroll ends.
+        expect(wheels[1].dy).toBeCloseTo(0.01 / SCALE / 120, 5);
     });
 });

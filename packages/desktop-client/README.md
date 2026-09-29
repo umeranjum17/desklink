@@ -27,10 +27,24 @@ npx expo install @desklink/react-native      # or yarn add, then prebuild/rebuil
 ```
 
 Android uses an Expo native module; iOS uses the app's existing
-`react-native-webrtc` peer connection and `RTCView` from JavaScript. Both need a
+`react-native-webrtc` peer connection and `RTCView` from JavaScript, plus a small
+Expo module of its own for the hardware keyboard and an iPad pointer. Both need a
 dev client or native build containing that binding. Web uses the browser's WebRTC.
 No second WebRTC binary is linked. The Android module has its own hardware-first
 decoder factory; iOS uses the decoder shipped by `react-native-webrtc`.
+
+On iPad, a trackpad or mouse hovers and scrolls the desktop as it is. For its
+presses to carry their buttons — a click-drag that selects, a secondary click
+that is a right click — add the package's config plugin, which sets
+`UIApplicationSupportsIndirectInputEvents`:
+
+```json
+{ "expo": { "plugins": ["@desklink/react-native"] } }
+```
+
+That key changes how every screen of the app receives trackpad input, so the
+package never sets it on its own; without the plugin nothing about the app
+changes, and trackpad presses reach the desktop as touches.
 
 ## Use
 
@@ -99,8 +113,9 @@ under full-screen motion.
 - **A pointer a phone can see.** Once a touch has sent the desktop's pointer
   somewhere, the view draws it there at a readable size, over a picture whose
   own cursor is a few pixels tall or not captured at all. Android hides the
-  extra mark when a mouse is attached, and the `device` profile draws no mark
-  on any platform — the screen being touched shows the finger itself.
+  extra mark when a mouse is attached, iOS when an iPad trackpad or mouse
+  drives it, and the `device` profile draws no mark on any platform — the
+  screen being touched shows the finger itself.
 - **The picture above the keyboard.** While the phone's keyboard is up, the
   picture sits above it and above the room the app keeps for its own controls
   (`keyboardClearance`). Android follows the keyboard animation and keeps the
@@ -126,6 +141,16 @@ under full-screen motion.
   release, so a tap clicks and a hold holds with no long-press right click,
   and no drawn pointer — while the default `desktop` is the trackpad above.
   Two fingers scroll and pinch the same under every profile.
+- **A hardware keyboard and a trackpad.** A hardware keyboard's keys reach the
+  desktop with their down and up and what is held: arrows, Esc, Tab, Home/End,
+  Page Up/Down, Delete and the modifiers, with Control and Command
+  chords as the key's own letter (iOS sends Command as the desktop's Meta);
+  other keys type their text. On iOS the view holds the keyboard while control
+  is enabled and gives it to the on-screen keyboard while the app shows it;
+  shortcuts the system keeps, such as Command-Tab and the Globe key, stay with
+  the system. An iPad pointer hovers the desktop's pointer, scrolls under it,
+  and — with the config plugin — presses, drags and right-clicks with its own
+  buttons.
 - **The keys a phone lacks.** `modifiers`, `tapModifier` and `pressKey` give
   sticky Ctrl and Shift: tap arms one for the next key, tap again locks it.
   While one is armed, the next key or character the phone's keyboard types is
@@ -201,8 +226,12 @@ build with `react-native-webrtc`, connecting to `desklink-host bridge` with the
 URL it is launched with. `test/ios-flow.mjs` builds it for the iOS simulator on
 a Mac over ssh, serves a private Xvfb desktop from this machine through the
 bridge, and checks that the first frame is presented, that the answer is VP9
-with NACK (both descriptions are written out), that a tap clicks the host and
-that the picture keeps following the desktop afterwards:
+with NACK (both descriptions are written out), that a tap clicks the host, that
+the picture keeps following the desktop afterwards, and that hardware keys
+pressed on the simulator reach the desktop. With `DESKLINK_IOS_IPAD=1` it runs on
+an iPad simulator and also drives a trackpad through XCUITest
+(`test/ios-pointer/`): hover, a click-drag that selects text, a right click and
+a scroll:
 
 ```sh
 npm run build && cargo build --manifest-path packages/desktop-host/engine/Cargo.toml
