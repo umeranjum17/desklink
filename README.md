@@ -25,6 +25,24 @@
   <picture><source srcset="docs/assets/readme/hero.webp" type="image/webp"><img src="docs/assets/readme/hero.jpg" alt="The reference client in a browser showing a private desktop live: the pointer picks notes in a notes app, clicks into a checklist, types a new line and presses Save" width="960" /></picture>
 </p>
 
+## Install
+
+```sh
+npm install @desklink/host               # the engine
+npx expo install @desklink/react-native  # the view and session
+```
+
+| Package | Latest | Unpacked size | Release tag |
+| --- | --- | --- | --- |
+| `@desklink/host` (plus the `@desklink/host-linux-x64-gnu` platform package) | 0.2.0 | ~1.1 MB (platform package ~17 MB) | [`desklink-host-v0.2.0`](https://github.com/umeranjum17/desklink/releases/tag/desklink-host-v0.2.0) |
+| `@desklink/react-native` | 0.2.0 | ~266 KB | [`desklink-react-native-v0.2.0`](https://github.com/umeranjum17/desklink/releases/tag/desklink-react-native-v0.2.0) |
+
+The npm version badges at the top of this page track the registry, so they never go stale. npm verifies each package's integrity on install, so there is no separate checksum to copy. The GitHub releases carry no attached assets — npm is the distribution channel: [latest release](https://github.com/umeranjum17/desklink/releases/latest).
+
+Supported platforms: Linux x64 with glibc 2.36 or newer (prebuilt engine); macOS stays behind `DESKLINK_MACOS=1` with a source build and has no published platform package yet.
+
+`@desklink/axi` is not published yet — build it from source as its [README](packages/axi/README.md#install) describes.
+
 ## Why desklink exists
 
 Reaching your own computer from somewhere else usually means handing it to someone else's service: an account, a relay, a pairing flow, and a second identity system beside the one your application already has. desklink turns that inside out. The engine runs as you, starts when asked and stops when told, and trusts the application that started it to decide who may see the desktop.
