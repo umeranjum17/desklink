@@ -181,6 +181,9 @@ pub fn to_i420(
     let pairs = dst_h / 2;
     let per_band = pairs.div_ceil(bands());
     let cw = dst_w / 2;
+    let (columns, rows) = (spans(src_w, dst_w), spans(src_h, dst_h));
+    let widest = |spans: &[(usize, usize)]| spans.iter().map(|(a, b)| b - a).max().unwrap_or(1);
+    let largest_box = (widest(&columns) * widest(&rows)).min(4095) as u64;
     let source = Source {
         data: src,
         width: src_w,
@@ -188,8 +191,11 @@ pub fn to_i420(
         stride: src_stride,
         bytes_per_pixel,
         order,
-        columns: spans(src_w, dst_w),
-        rows: spans(src_h, dst_h),
+        columns,
+        rows,
+        reciprocals: (0..=largest_box)
+            .map(|n| (1 << 32) / n.max(1) + 1)
+            .collect(),
     };
     std::thread::scope(|scope| {
         let y_bands = y_plane.chunks_mut(per_band * 2 * dst_w);
@@ -198,28 +204,70 @@ pub fn to_i420(
         for (band, ((y, u), v)) in y_bands.zip(u_bands).zip(v_bands).enumerate() {
             let source = &source;
             scope.spawn(move || {
-                let first_pair = band * per_band;
-                // One destination row of box sums, reused for every row.
-                let mut rgb = vec![[0i32; 3]; dst_w * 2];
-                for pair in 0..u.len() / cw {
-                    let dy = (first_pair + pair) * 2;
-                    let (top, bottom) =
-                        y[pair * 2 * dst_w..(pair + 1) * 2 * dst_w].split_at_mut(dst_w);
-                    let u_row = &mut u[pair * cw..(pair + 1) * cw];
-                    let v_row = &mut v[pair * cw..(pair + 1) * cw];
-                    if source.native(dst_w, dst_h) && bytes_per_pixel == 4 {
-                        source.native_pair(dy, top, bottom, u_row, v_row);
-                    } else {
-                        let (a, b) = rgb.split_at_mut(dst_w);
-                        source.box_row(dy, a);
-                        source.box_row(dy + 1, b);
-                        pack(a, b, top, bottom, u_row, v_row);
-                    }
+                #[cfg(target_arch = "x86_64")]
+                if std::arch::is_x86_feature_detected!("avx2") {
+                    // SAFETY: the CPU was just checked for AVX2.
+                    return unsafe { band_avx2(source, band * per_band, dst_w, dst_h, y, u, v) };
                 }
+                convert_band(source, band * per_band, dst_w, dst_h, y, u, v)
             });
         }
     });
     Some(out)
+}
+
+/// Rows `first_pair * 2..` of the destination into this band's planes.
+#[inline(always)]
+fn convert_band(
+    source: &Source,
+    first_pair: usize,
+    dst_w: usize,
+    dst_h: usize,
+    y: &mut [u8],
+    u: &mut [u8],
+    v: &mut [u8],
+) {
+    let cw = dst_w / 2;
+    // A destination row pair of box averages and a row of box-row sums, made
+    // once per band and only when this is not the native path.
+    let mut rgb = Vec::new();
+    let mut sums = Vec::new();
+    for pair in 0..u.len() / cw {
+        let dy = (first_pair + pair) * 2;
+        let (top, bottom) = y[pair * 2 * dst_w..(pair + 1) * 2 * dst_w].split_at_mut(dst_w);
+        let u_row = &mut u[pair * cw..(pair + 1) * cw];
+        let v_row = &mut v[pair * cw..(pair + 1) * cw];
+        if source.native(dst_w, dst_h) && source.bytes_per_pixel == 4 {
+            source.native_pair(dy, top, bottom, u_row, v_row);
+        } else {
+            rgb.resize(dst_w * 2, [0i32; 3]);
+            let (a, b) = rgb.split_at_mut(dst_w);
+            if source.bytes_per_pixel == 4 {
+                source.box_row::<4>(dy, a, &mut sums);
+                source.box_row::<4>(dy + 1, b, &mut sums);
+            } else {
+                source.box_row::<3>(dy, a, &mut sums);
+                source.box_row::<3>(dy + 1, b, &mut sums);
+            }
+            pack(a, b, top, bottom, u_row, v_row);
+        }
+    }
+}
+
+/// `convert_band` compiled for AVX2, for the x86-64 machines that have it; the
+/// build itself targets the x86-64 baseline.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn band_avx2(
+    source: &Source,
+    first_pair: usize,
+    dst_w: usize,
+    dst_h: usize,
+    y: &mut [u8],
+    u: &mut [u8],
+    v: &mut [u8],
+) {
+    convert_band(source, first_pair, dst_w, dst_h, y, u, v)
 }
 
 /// The source span `[start, end)` each of `dst` destination pixels covers: the
@@ -243,6 +291,9 @@ struct Source<'a> {
     order: [usize; 3],
     columns: Vec<(usize, usize)>,
     rows: Vec<(usize, usize)>,
+    /// `2^32 / n + 1` for each box area `n` up to this conversion's largest,
+    /// capped at 4095; a larger box divides.
+    reciprocals: Vec<u64>,
 }
 
 impl Source<'_> {
@@ -252,30 +303,40 @@ impl Source<'_> {
 
     /// Destination row `dy` as the average colour of the source box each pixel
     /// covers (at the source's own size, a box of one pixel: its exact colour).
-    fn box_row(&self, dy: usize, out: &mut [[i32; 3]]) {
+    /// The box's rows are summed byte for byte first, which vectorises, so the
+    /// per-pixel work is only the few columns of each box.
+    #[inline(always)]
+    fn box_row<const BPP: usize>(&self, dy: usize, out: &mut [[i32; 3]], sums: &mut Vec<u32>) {
         let (y0, y1) = self.rows[dy];
-        out.fill([0; 3]);
+        let bytes = self.width * BPP;
+        sums.clear();
+        sums.resize(bytes, 0);
         for y in y0..y1 {
-            let line = &self.data[y * self.stride..];
-            for (sum, &(x0, x1)) in out.iter_mut().zip(&self.columns) {
-                for pixel in line[x0 * self.bytes_per_pixel..x1 * self.bytes_per_pixel]
-                    .chunks_exact(self.bytes_per_pixel)
-                {
-                    sum[0] += pixel[self.order[0]] as i32;
-                    sum[1] += pixel[self.order[1]] as i32;
-                    sum[2] += pixel[self.order[2]] as i32;
-                }
+            let line = &self.data[y * self.stride..y * self.stride + bytes];
+            for (sum, &byte) in sums.iter_mut().zip(line) {
+                *sum += byte as u32;
             }
         }
-        let height = (y1 - y0) as i32;
+        let height = (y1 - y0) as u32;
+        let [r, g, b] = self.order;
         for (sum, &(x0, x1)) in out.iter_mut().zip(&self.columns) {
-            let n = (x1 - x0) as i32 * height;
-            *sum = [sum[0] / n, sum[1] / n, sum[2] / n];
+            let mut rgb = [0u32; 3];
+            for pixel in sums[x0 * BPP..x1 * BPP].chunks_exact(BPP) {
+                rgb = [rgb[0] + pixel[r], rgb[1] + pixel[g], rgb[2] + pixel[b]];
+            }
+            let n = (x1 - x0) * height as usize;
+            *sum = match self.reciprocals.get(n) {
+                // floor(c / n) as a multiply by 2^32 / n + 1, exact while
+                // c * n < 2^32; c is at most 255 * n, and 255 * 4095^2 < 2^32.
+                Some(&m) => rgb.map(|c| ((c as u64 * m) >> 32) as i32),
+                None => rgb.map(|c| (c / n as u32) as i32),
+            };
         }
     }
 
     /// A 4-byte source at its own size: the path every full-size desktop takes,
     /// so it reads the two rows directly and in a shape the compiler vectorises.
+    #[inline(always)]
     fn native_pair(
         &self,
         dy: usize,
@@ -287,36 +348,11 @@ impl Source<'_> {
         let width = top.len();
         let row = |y: usize| &self.data[y * self.stride..y * self.stride + width * 4];
         let (upper, lower) = (row(dy), row(dy + 1));
-        #[cfg(target_arch = "x86_64")]
-        if std::arch::is_x86_feature_detected!("avx2") {
-            // SAFETY: the CPU was just checked for AVX2.
-            unsafe {
-                return match self.order {
-                    [2, 1, 0] => pair4_avx2::<2, 1, 0>(upper, lower, top, bottom, u, v),
-                    _ => pair4_avx2::<0, 1, 2>(upper, lower, top, bottom, u, v),
-                };
-            }
-        }
         match self.order {
             [2, 1, 0] => pair4::<2, 1, 0>(upper, lower, top, bottom, u, v),
             _ => pair4::<0, 1, 2>(upper, lower, top, bottom, u, v),
         }
     }
-}
-
-/// `pair4` compiled for AVX2, for the x86-64 machines that have it; the build
-/// itself targets the x86-64 baseline.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn pair4_avx2<const R: usize, const G: usize, const B: usize>(
-    upper: &[u8],
-    lower: &[u8],
-    top: &mut [u8],
-    bottom: &mut [u8],
-    u: &mut [u8],
-    v: &mut [u8],
-) {
-    pair4::<R, G, B>(upper, lower, top, bottom, u, v)
 }
 
 #[inline(always)]
@@ -350,6 +386,7 @@ fn pair4<const R: usize, const G: usize, const B: usize>(
 
 /// Two rows of RGB into two luma rows and the chroma row they share, chroma
 /// being the average of each 2x2 block.
+#[inline(always)]
 fn pack(
     a: &[[i32; 3]],
     b: &[[i32; 3]],
@@ -497,7 +534,11 @@ mod tests {
             PixelFormat::Bgr,
             PixelFormat::Rgb,
         ];
+        // Native, a few pixels off, box downscales, and boxes near and past the
+        // largest area the reciprocal table covers.
         for (sw, sh, dw, dh) in [
+            (256, 126, 4, 2),
+            (400, 200, 4, 2),
             (64, 36, 64, 36),
             (67, 41, 66, 40),
             (100, 60, 38, 22),
