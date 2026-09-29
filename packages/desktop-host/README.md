@@ -1,8 +1,16 @@
-# @desklink/host
+<h1 align="center">@desklink/host</h1>
 
-A per-user, on-demand desktop engine: capture the user's own screen, encode it,
-carry it over WebRTC, and apply that session's pointer, keyboard and clipboard
-actions back to the same desktop.
+<p align="center">
+  <a href="https://www.npmjs.com/package/@desklink/host"><img alt="npm" src="https://img.shields.io/npm/v/@desklink/host?style=flat&label=npm" /></a>
+  <a href="https://github.com/umeranjum17/desklink/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/umeranjum17/desklink/ci.yml?style=flat&branch=main" /></a>
+  <a href="LICENSE"><img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-666?style=flat" /></a>
+  <img alt="Linux; macOS behind DESKLINK_MACOS" src="https://img.shields.io/badge/Linux%20%7C%20macOS%20behind%20DESKLINK__MACOS-111?style=flat" />
+</p>
+
+<p align="center">
+  <strong>The desktop engine behind desklink, as a process you start and stop.</strong><br/>
+  A per-user, on-demand desktop engine: capture the user's own screen, encode it, carry it over WebRTC, and apply that session's pointer, keyboard and clipboard actions back to the same desktop.
+</p>
 
 It is a **process with a documented local protocol**, not a service. A consumer
 starts it, owns its stdin/stdout, carries the SDP/ICE over its own authenticated
@@ -192,8 +200,8 @@ linked crate's, in its package's `THIRD_PARTY_LICENSES.txt`, with the Rust
 standard library's own notices in `COPYRIGHT-rust-library.html`. Its build
 refuses any crate whose licence is not permissive.
 
-No GPL/AGPL remote-desktop code is copied, linked or derived; Sunshine,
-Moonlight, Apollo and RustDesk were read as architecture references only.
+No GPL/AGPL remote-desktop code is copied, linked or derived; other
+remote-desktop projects were read as architecture references only.
 
 ## Connecting an application to it
 
@@ -267,7 +275,7 @@ build, and it never searches `PATH`: a program that happens to be called
 a desktop.
 
 The platform packages must be usable **without lifecycle scripts**, because
-muxr's documented install uses `npm install --global --ignore-scripts`. Nothing
+a global install with `npm install --global --ignore-scripts` must work. Nothing
 here downloads or chmods anything at install time; the executable arrives with
 the executable bit already set in the tarball.
 
