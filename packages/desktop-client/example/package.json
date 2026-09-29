@@ -1,0 +1,16 @@
+{
+    "name": "desklink-react-native-example",
+    "private": true,
+    "main": "index.js",
+    "scripts": {
+        "ios": "expo run:ios"
+    },
+    "dependencies": {
+        "@config-plugins/react-native-webrtc": "14.0.0",
+        "@desklink/react-native": "file:..",
+        "expo": "55.0.31",
+        "react": "19.2.0",
+        "react-native": "0.83.10",
+        "react-native-webrtc": "124.0.8"
+    }
+}

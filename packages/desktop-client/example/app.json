@@ -1,0 +1,13 @@
+{
+    "expo": {
+        "name": "desklink example",
+        "slug": "desklink-example",
+        "version": "0.0.0",
+        "orientation": "default",
+        "ios": {
+            "bundleIdentifier": "dev.desklink.example",
+            "supportsTablet": true
+        },
+        "plugins": ["@config-plugins/react-native-webrtc"]
+    }
+}

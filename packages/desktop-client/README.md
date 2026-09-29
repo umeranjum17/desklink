@@ -168,6 +168,33 @@ interface Signaling {
 candidates, state and revocation. Pixels and input do **not** use this
 channel — they are the desktop's own WebRTC session.
 
+## iOS simulator proof
+
+`example/` is the smallest app that shows a desktop: a native (non-Expo Go)
+build with `react-native-webrtc`, connecting to `desklink-host bridge` with the
+URL it is launched with. `test/ios-flow.mjs` builds it for the iOS simulator on
+a Mac over ssh, serves a private Xvfb desktop from this machine through the
+bridge, and checks that the first frame is presented, that the answer is VP9
+with NACK (both descriptions are written out) and that a tap clicks the host:
+
+```sh
+npm run build && cargo build --manifest-path packages/desktop-host/engine/Cargo.toml
+DESKLINK_IOS_MAC=user@mac npm run test:ios --workspace @desklink/react-native
+```
+
+The Mac needs Xcode with an iOS simulator runtime, CocoaPods, node and
+[`axe`](https://github.com/cameroncooke/AXe) on its login `PATH`; everything
+the run builds or caches stays in `~/desklink-ios` there. When the selected
+Xcode has no simulator platform, point `DESKLINK_IOS_XCODE` at one that does;
+the script's header lists the other settings. The simulator has been seen to
+keep showing its first frame while later frames still decode, so the run
+reports whether the picture followed the taps rather than failing on it; a
+device run settles whether a phone does the same. To try the example by hand against any bridge:
+
+```sh
+xcrun simctl launch <device> dev.desklink.example -desklinkUrl 'ws://HOST:PORT/desktop?token=TOKEN'
+```
+
 ## Licence
 
 Apache-2.0. See `NOTICE`.
