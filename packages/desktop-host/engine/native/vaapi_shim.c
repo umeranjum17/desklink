@@ -262,7 +262,10 @@ dl_vaapi_encoder *dl_vaapi_create(const char *device, int width, int height, int
         return NULL;
     }
     unsigned int rc = attributes[1].value == VA_ATTRIB_NOT_SUPPORTED ? 0 : attributes[1].value;
-    self->rc_mode = rc & VA_RC_CBR ? VA_RC_CBR : rc & VA_RC_VBR ? VA_RC_VBR : 0;
+    /* VBR first: under CBR Mesa pads every frame with filler data up to the
+     * rate, so a still desktop would cost the full target. The rate is then
+     * a ceiling, as it is for the other encoders' still frames. */
+    self->rc_mode = rc & VA_RC_VBR ? VA_RC_VBR : rc & VA_RC_CBR ? VA_RC_CBR : 0;
     if (self->rc_mode == 0) {
         fail(error, error_size, "%s: the H.264 encoder has neither CBR nor VBR", device);
         dl_vaapi_destroy(self);
