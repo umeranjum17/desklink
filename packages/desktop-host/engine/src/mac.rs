@@ -327,7 +327,7 @@ fn encode_probe() -> Result<(), String> {
     let mut encoder = crate::encoder::Encoder::new(640, 360, 1000, 30, 1)
         .map_err(|error| format!("VP9 encoder initialization failed: {error:#}"))?;
     let packet = encoder
-        .encode(&frame, true)
+        .encode(&frame, true, false)
         .map_err(|error| format!("VP9 encoding failed: {error:#}"))?;
     println!(
         "{}",
