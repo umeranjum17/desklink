@@ -34,7 +34,7 @@
 
 #define DL_VA_FUNCTIONS(F)                                                         \
     F(vaInitialize) F(vaTerminate) F(vaSetErrorCallback) F(vaSetInfoCallback)      \
-    F(vaErrorStr) F(vaQueryConfigEntrypoints) F(vaGetConfigAttributes)             \
+    F(vaErrorStr) F(vaMaxNumEntrypoints) F(vaQueryConfigEntrypoints) F(vaGetConfigAttributes)             \
     F(vaCreateConfig) F(vaDestroyConfig) F(vaCreateSurfaces) F(vaDestroySurfaces)  \
     F(vaCreateContext) F(vaDestroyContext) F(vaCreateBuffer) F(vaDestroyBuffer)    \
     F(vaMapBuffer) F(vaUnmapBuffer) F(vaCreateImage) F(vaDestroyImage)             \
@@ -231,18 +231,22 @@ dl_vaapi_encoder *dl_vaapi_create(const char *device, int width, int height, int
         return NULL;
     }
 
+    /* libva writes up to vaMaxNumEntrypoints() entries, whatever it is given. */
     int count = 0;
-    VAEntrypoint entrypoints[32];
+    int capacity = va.vaMaxNumEntrypoints(self->dpy);
+    VAEntrypoint *entrypoints = capacity > 0 ? calloc((size_t)capacity, sizeof *entrypoints) : NULL;
     VAEntrypoint entrypoint = 0;
     const VAProfile profile = VAProfileH264ConstrainedBaseline;
-    if (va.vaQueryConfigEntrypoints(self->dpy, profile, entrypoints, &count) == VA_STATUS_SUCCESS) {
-        for (int i = 0; i < count && i < 32; i++) {
+    if (entrypoints != NULL &&
+        va.vaQueryConfigEntrypoints(self->dpy, profile, entrypoints, &count) == VA_STATUS_SUCCESS) {
+        for (int i = 0; i < count && i < capacity; i++) {
             if (entrypoints[i] == VAEntrypointEncSlice ||
                 (entrypoints[i] == VAEntrypointEncSliceLP && entrypoint == 0)) {
                 entrypoint = entrypoints[i];
             }
         }
     }
+    free(entrypoints);
     if (entrypoint == 0) {
         fail(error, error_size, "%s: no H.264 Constrained Baseline encoder", device);
         dl_vaapi_destroy(self);
