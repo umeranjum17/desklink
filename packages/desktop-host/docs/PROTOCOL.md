@@ -362,7 +362,8 @@ them). Each is a cumulative microsecond counter; divide by the frame count
 named beside it for the per-frame mean:
 
 - `capture_micros` / `captured_frames`: grabbing a frame and converting it on
-  the capture thread (on X11: `GetImage` plus the downscale to I420), over
+  the capture thread (on X11: an MIT-SHM grab, falling back to socket
+  `GetImage` where the server lacks MIT-SHM, plus the downscale to I420), over
   forwarded (changed) frames only — unchanged polls are excluded.
 - `convert_micros` / `captured_frames`: tile hashing and damage computation on
   the capture thread, after the grab; the hash branch runs only with
