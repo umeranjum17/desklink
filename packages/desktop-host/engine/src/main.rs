@@ -287,12 +287,19 @@ fn frame_shape(frame: &crate::convert::I420) -> u64 {
 async fn probe_portal(seconds: u64) -> Result<()> {
     let portal = portal::open(None).await?;
     eprintln!("portal source: {:?}", portal.source);
+    // The source's own size: a zero box converts nothing and reports no frames.
+    let (width, height) = crate::convert::fit(
+        portal.source.width.max(0) as usize,
+        portal.source.height.max(0) as usize,
+        usize::MAX,
+        usize::MAX,
+    );
 
     let (tx, rx) = std_mpsc::channel();
     let capture = capture::start(
         portal,
-        0,
-        0,
+        width,
+        height,
         30,
         Box::new(move |frame, seq, _raw| {
             let _ = tx.send((frame.width, frame.height, seq));
