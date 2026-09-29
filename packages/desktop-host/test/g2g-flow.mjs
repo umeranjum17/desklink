@@ -12,10 +12,13 @@
  *
  *   node packages/desktop-host/test/g2g-flow.mjs [--size 1920x1080] [--max-fps 60]
  *     [--seconds 15] [--scenarios typing,scroll,still] [--gate]
- *     [--baseline <file>] [--require-load-gate]
+ *     [--baseline <file>] [--require-load-gate] [--netem '<netem args>']
  *
  * Scenarios: `typing` (stamp only), `scroll` (full-screen motion) and `still`
  * (the stamp freezes 2 s after mapping, to check the refine pass still runs).
+ *
+ * `--netem` runs the lab over an emulated link, for example
+ * `--netem 'delay 15ms loss 1% rate 15mbit'` (30 ms round trip): see below.
  *
  * Environment:
  *
@@ -95,6 +98,41 @@ const baselineByScenario = (() => {
     return map;
 })();
 assert(baselineByScenario === null || Object.keys(baselineByScenario).length > 0, `--baseline ${baselinePath} holds no scenario lines`);
+const netem = flag('netem', null);
+
+// A constrained link: the whole run moves into a private user and network
+// namespace (`unshare -rn`, no root) whose loopback carries a netem qdisc, so
+// the media path queues, delays and drops like a real one while the host
+// network is never touched. A dummy interface gives both ICE agents a
+// non-loopback host address to pair on; traffic to it still crosses `lo`.
+if (netem !== null && process.env.DESKLINK_G2G_NETNS !== '1') {
+    const inside = spawnSync('unshare', ['-rn', process.execPath, fileURLToPath(import.meta.url), ...args], {
+        stdio: 'inherit',
+        env: { ...process.env, DESKLINK_G2G_NETNS: '1' },
+    });
+    process.exit(inside.status ?? 1);
+}
+if (netem !== null) {
+    for (const command of [
+        'ip link set lo up',
+        'ip link add g2g0 type dummy',
+        'ip link set g2g0 multicast on',
+        'ip addr add 10.203.0.1/24 dev g2g0',
+        'ip link set g2g0 up',
+        // The engine's mDNS socket joins a multicast group, which needs a route.
+        'ip route add default dev g2g0',
+        // Only UDP (the media path, both ways) crosses the emulated link, so
+        // the harness's own page, bridge and DevTools traffic never queues
+        // behind the stream it is measuring.
+        'tc qdisc add dev lo root handle 1: prio',
+        `tc qdisc add dev lo parent 1:3 handle 30: netem ${netem}`,
+        'tc filter add dev lo parent 1: protocol ip u32 match ip protocol 17 0xff flowid 1:3',
+    ]) {
+        const [bin, ...rest] = command.split(/\s+/);
+        const done = spawnSync(bin, rest, { encoding: 'utf8' });
+        assert.equal(done.status, 0, `${command}: ${done.stderr}`);
+    }
+}
 
 const dir = mkdtempSync(join(tmpdir(), 'desklink-g2g-flow-'));
 const enginePidFile = join(dir, 'engines.pid');
@@ -114,7 +152,13 @@ function remember(pid, command) {
     const state = proc(pid);
     if (!state || state.state === 'Z') { owned.set(pid, undefined); return; }
     let cmdline = '';
-    try { cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' '); } catch { owned.set(pid, undefined); return; }
+    // A child caught mid-exec (a `taskset` launch on a loaded host) briefly
+    // shows an empty cmdline while it is very much alive; recording it as gone
+    // would leave it unreaped and holding this process open.
+    for (let i = 0; i < 100 && cmdline === '' && proc(pid)?.state !== 'Z'; i++) {
+        try { cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' '); } catch { owned.set(pid, undefined); return; }
+        if (cmdline === '') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
     // Launcher shims (e.g. distro chromium wrappers) exit and zombify between
     // the stat and cmdline reads, leaving an empty cmdline: already gone.
     if (cmdline === '') { owned.set(pid, undefined); return; }
@@ -237,6 +281,9 @@ async function startChrome(binary, pageUrl) {
             '--mute-audio',
             '--autoplay-policy=no-user-gesture-required',
             `--window-size=${Math.min(sizeW, 1600)},${Math.min(sizeH, 1000)}`,
+            // Root inside the `--netem` namespace is the invoking user outside
+            // it; Chromium refuses to start its sandbox as uid 0.
+            ...(process.getuid?.() === 0 && netem !== null ? ['--no-sandbox'] : []),
             'about:blank',
         ],
         {
@@ -463,10 +510,12 @@ async function runScenario(scenario, vite) {
         const line = {
             scenario,
             size: `${sizeW}x${sizeH}`,
+            netem,
             max_fps: maxFps,
             seconds: Math.round(elapsed * 10) / 10,
             presented_fps: Math.round((result.frames / elapsed) * 10) / 10,
             frame_interval_p95_ms: percentile(intervals, 95),
+            frame_interval_max_ms: intervals.length > 0 ? intervals[intervals.length - 1] : null,
             g2g_ms: {
                 p50: percentile(g2g, 50),
                 p95: percentile(g2g, 95),
@@ -583,3 +632,6 @@ try {
     await vite?.close().catch(() => undefined);
     rmSync(dir, { recursive: true, force: true });
 }
+// Every task-owned process is reaped above; a handle left open (a CDP socket,
+// a child's pipe) must not keep the run from reporting done.
+process.exit(process.exitCode ?? 0);

@@ -11,7 +11,9 @@ use crate::convert::{fit, I420};
 use crate::encoder::Encoder;
 use crate::input::{Button, HeldState, InputDevices};
 use crate::keymap::{self, Layout};
-use crate::peer::{h264_profile_level_id, PeerEvent, TransportOptions, VideoCodec, VideoPeer};
+use crate::peer::{
+    h264_profile_level_id, PathReport, PeerEvent, TransportOptions, VideoCodec, VideoPeer,
+};
 use crate::portal::{self, SelectedSource};
 use crate::protocol::{
     ControlMessage, ControlReply, EncodedCodec, Permission, PointerPhase, SourceRequest,
@@ -2108,12 +2110,32 @@ fn auto_bitrate(width: usize, height: usize) -> u32 {
     (1500 + (width * height * 18 / 10_000) as u32).min(25_000)
 }
 
-/// Loss-based rate target: back off quickly when the far end reports loss,
-/// creep back when it reports none, never above what the session asked for.
+/// Queueing delay that means the link carries more than it drains: well under
+/// the latency budget, well over the noise of a busy host's scheduling.
+const QUEUE_HIGH: Duration = Duration::from_millis(25);
+/// Below this the path has room again and the target may creep back up.
+const QUEUE_LOW: Duration = Duration::from_millis(10);
+/// How often queueing delay may back the target off: long enough for the last
+/// back-off to reach the far end and show in its feedback, short enough that a
+/// queue is drained in a few steps rather than a few seconds.
+const DELAY_BACKOFF_EVERY: Duration = Duration::from_millis(300);
+
+/// The rate target: back off when the far end reports a standing queue or
+/// loss, creep back when it reports neither, never above what the session
+/// asked for.
+///
+/// Delay leads. A link with a deep buffer (most Wi-Fi and cellular ones) never
+/// loses a packet it can queue, so loss alone lets queueing delay grow to
+/// seconds before anything reacts. A standing queue backs the target off to
+/// 85% of what the path delivered, which drains it; never more than halving
+/// per step, so a stream that was idle and sent little is not taken for a
+/// slow link. Receivers without transport-wide feedback leave it loss-only.
 struct RateControl {
     ceiling: u32,
     target: u32,
     last_change: Option<Instant>,
+    /// The last queueing delay reported, while the path reports one.
+    queue: Option<Duration>,
 }
 
 impl RateControl {
@@ -2122,26 +2144,40 @@ impl RateControl {
             ceiling,
             target: ceiling,
             last_change: None,
+            queue: None,
         }
     }
 
-    /// The new target when these reports move it, at most once a second.
-    fn update(&mut self, reports: &[u8], now: Instant) -> Option<u32> {
-        let worst = *reports.iter().max()?;
-        if self
-            .last_change
-            .is_some_and(|at| now.duration_since(at) < Duration::from_secs(1))
-        {
-            return None;
+    /// The new target when these loss reports (RFC 3550 fractions, /256) or
+    /// this path report move it: down on a standing queue at most every
+    /// `DELAY_BACKOFF_EVERY`, otherwise at most once a second.
+    fn update(&mut self, reports: &[u8], path: Option<PathReport>, now: Instant) -> Option<u32> {
+        if let Some(path) = path {
+            self.queue = Some(path.queue_delay);
         }
-        let loss = worst as f64 / 256.0;
+        let since = self.last_change.map(|at| now.duration_since(at));
+        let waited = |gap: Duration| since.is_none_or(|since| since >= gap);
         let floor = (self.ceiling / 8).max(500);
-        let next = if loss > 0.10 {
-            ((self.target as f64 * 0.7) as u32).max(floor)
-        } else if loss < 0.02 {
-            ((self.target as f64 * 1.08) as u32 + 64).min(self.ceiling)
+        let next = if let Some(path) = path.filter(|path| path.queue_delay > QUEUE_HIGH) {
+            if !waited(DELAY_BACKOFF_EVERY) {
+                return None;
+            }
+            let delivered = path.delivered_kbps.clamp(self.target / 2, self.target);
+            ((delivered as f64 * 0.85) as u32).max(floor)
         } else {
-            self.target
+            let worst = *reports.iter().max()?;
+            if !waited(Duration::from_secs(1)) {
+                return None;
+            }
+            let loss = worst as f64 / 256.0;
+            let roomy = self.queue.is_none_or(|queue| queue < QUEUE_LOW);
+            if loss > 0.10 {
+                ((self.target as f64 * 0.7) as u32).max(floor)
+            } else if loss < 0.02 && roomy {
+                ((self.target as f64 * 1.08) as u32 + 64).min(self.ceiling)
+            } else {
+                self.target
+            }
         };
         if next == self.target {
             return None;
@@ -2149,6 +2185,53 @@ impl RateControl {
         self.target = next;
         self.last_change = Some(now);
         Some(next)
+    }
+}
+
+/// How far the stream may run ahead of its rate target before the next frame
+/// waits: one large frame (a key frame, a refinement) goes at once, but the
+/// frames behind it hold until the link has had time to carry it, instead of
+/// queueing behind it. The frame that goes then is the newest one.
+const FRAME_BURST: Duration = Duration::from_millis(60);
+
+/// How much faster than the target the budget drains. A rate-controlled
+/// encoder averages its target but overshoots it frame to frame; drained at
+/// the target itself, that ordinary overshoot would add up and hold frames on
+/// a link with room to spare. The rate control, not this, keeps the average
+/// under what the path carries.
+const BUDGET_HEADROOM: f64 = 1.25;
+
+/// What has been sent beyond the rate target, draining a little faster than
+/// it: a leaky bucket that bounds a burst to `FRAME_BURST` plus one frame.
+#[derive(Default)]
+struct SendBudget {
+    bits: f64,
+    at: Option<Instant>,
+}
+
+impl SendBudget {
+    /// The drain rate, in bits per second.
+    fn rate(kbps: u32) -> f64 {
+        kbps.max(1) as f64 * 1000.0 * BUDGET_HEADROOM
+    }
+
+    fn drained(&self, now: Instant, kbps: u32) -> f64 {
+        let elapsed = self
+            .at
+            .map_or(0.0, |at| now.saturating_duration_since(at).as_secs_f64());
+        (self.bits - elapsed * Self::rate(kbps)).max(0.0)
+    }
+
+    /// How long until a frame may go; zero when it may go now.
+    fn wait(&self, now: Instant, kbps: u32) -> Duration {
+        let rate = Self::rate(kbps);
+        let over = self.drained(now, kbps) - FRAME_BURST.as_secs_f64() * rate;
+        Duration::from_secs_f64((over / rate).max(0.0))
+    }
+
+    fn sent(&mut self, now: Instant, bytes: usize, kbps: u32) {
+        self.bits = self.drained(now, kbps) + bytes as f64 * 8.0;
+        self.at = Some(now);
     }
 }
 
@@ -2269,12 +2352,13 @@ fn spawn_pipeline(
             let mut last_sent: Option<Instant> = None;
             let mut size = MotionSize::default();
             let mut cadence = Cadence::new(interval, Instant::now());
+            let mut budget = SendBudget::default();
             // What the last frame was stamped with: the RTP clock never runs
             // backwards, even for a re-coded picture.
             let mut last_stamp: Option<Instant> = None;
             loop {
                 let now = Instant::now();
-                let slot = cadence.wait(now);
+                let slot = cadence.wait(now).max(budget.wait(now, rate.target));
                 let connected = peer.is_connected();
                 let wait = if !connected {
                     // Nothing sent before the transport connects arrives; the
@@ -2315,7 +2399,8 @@ fn spawn_pipeline(
                     keyframe = true;
                 }
                 let reports = peer.take_loss_reports();
-                if let Some(kbps) = rate.update(&reports, Instant::now()) {
+                let path = peer.take_path_report();
+                if let Some(kbps) = rate.update(&reports, path, Instant::now()) {
                     let applied = inner.encoder.lock().map(|mut encoder| {
                         encoder
                             .as_mut()
@@ -2335,7 +2420,7 @@ fn spawn_pipeline(
                     continue;
                 }
                 let now = Instant::now();
-                if !cadence.wait(now).is_zero() {
+                if !cadence.wait(now).is_zero() || !budget.wait(now, rate.target).is_zero() {
                     continue;
                 }
                 let pass = if pending || keyframe {
@@ -2425,6 +2510,7 @@ fn spawn_pipeline(
                 }
                 last_sent = Some(now);
                 cadence.sent(now);
+                budget.sent(now, packet.data.len(), rate.target);
                 // A new picture carries the moment it was captured, so the
                 // receiver paces playout by the desktop's clock rather than by
                 // encode time; a re-coded one (refinement, keepalive) is new
@@ -3527,6 +3613,102 @@ mod tests {
         assert!(inner.revoked_reason().is_some());
         assert!(!inner.pipeline.load(Ordering::SeqCst));
         assert!(inner.input.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_standing_queue_backs_the_rate_off_to_what_the_path_delivers() {
+        let start = Instant::now();
+        let queued = |ms: u64, delivered_kbps: u32| {
+            Some(PathReport {
+                queue_delay: Duration::from_millis(ms),
+                delivered_kbps,
+            })
+        };
+        let mut rate = RateControl::new(8000);
+        // A burst's worth of queue and no loss moves nothing.
+        assert_eq!(rate.update(&[], queued(15, 3000), start), None);
+        // A standing queue on a 4 Mbps link: 85% of what got through, at once,
+        // with no loss reported at all.
+        assert_eq!(rate.update(&[], queued(80, 4000), start), Some(3400));
+        // Not again until the back-off has had time to show in the feedback.
+        assert_eq!(
+            rate.update(&[], queued(80, 3400), start + Duration::from_millis(100)),
+            None
+        );
+        assert_eq!(
+            rate.update(&[], queued(60, 3400), start + Duration::from_millis(300)),
+            Some(2890)
+        );
+        // A stream that sent little is not taken for a slow link: at most half.
+        assert_eq!(
+            rate.update(&[], queued(60, 100), start + Duration::from_millis(600)),
+            Some(1228)
+        );
+        // Clean loss reports do not raise it while the queue has not drained...
+        assert_eq!(
+            rate.update(&[0], queued(15, 1200), start + Duration::from_secs(2)),
+            None
+        );
+        // ...and do once it has.
+        assert_eq!(
+            rate.update(&[0], queued(2, 1200), start + Duration::from_secs(3)),
+            Some(1390)
+        );
+        // Nothing drops below the floor.
+        let mut rate = RateControl::new(8000);
+        for step in 0..20u64 {
+            rate.update(
+                &[],
+                queued(200, 1),
+                start + DELAY_BACKOFF_EVERY * step as u32,
+            );
+        }
+        assert_eq!(rate.target, 1000);
+    }
+
+    #[test]
+    fn without_transport_feedback_the_rate_follows_loss_alone() {
+        let start = Instant::now();
+        let mut rate = RateControl::new(8000);
+        assert_eq!(rate.update(&[], None, start), None);
+        assert_eq!(rate.update(&[64], None, start), Some(5600));
+        assert_eq!(
+            rate.update(&[64], None, start + Duration::from_millis(500)),
+            None
+        );
+        assert_eq!(
+            rate.update(&[10], None, start + Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            rate.update(&[0], None, start + Duration::from_secs(2)),
+            Some(6112)
+        );
+    }
+
+    #[test]
+    fn a_large_frame_holds_the_next_until_the_link_has_carried_it() {
+        let start = Instant::now();
+        let mut budget = SendBudget::default();
+        // Frames at the target, one per 20 ms at 4000 kbps, never wait, and
+        // neither does the ordinary overshoot of a frame at twice the budget.
+        for n in 0..50u32 {
+            let at = start + Duration::from_millis(20) * n;
+            assert_eq!(budget.wait(at, 4000), Duration::ZERO, "frame {n} waited");
+            budget.sent(at, if n % 5 == 0 { 20_000 } else { 10_000 }, 4000);
+        }
+        // A 100 kB key frame drains in 160 ms (4000 kbps and a quarter): it
+        // goes at once, and the next waits out all of it past the 60 ms burst
+        // allowance.
+        let at = start + Duration::from_secs(1);
+        assert_eq!(budget.wait(at, 4000), Duration::ZERO);
+        budget.sent(at, 100_000, 4000);
+        let wait = budget.wait(at, 4000);
+        assert!(
+            (Duration::from_millis(99)..=Duration::from_millis(101)).contains(&wait),
+            "waited {wait:?}"
+        );
+        assert_eq!(budget.wait(at + wait, 4000), Duration::ZERO);
     }
 
     #[test]
