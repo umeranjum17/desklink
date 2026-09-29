@@ -69,13 +69,21 @@ export interface RtcCandidate {
     sdpMLineIndex?: number | null;
 }
 
-/** Engine → client lifecycle events, already unwrapped from the local protocol. */
+/**
+ * Engine → client lifecycle events, already unwrapped from the local protocol.
+ *
+ * `sessionId` names the engine session the event belongs to, when the
+ * carrier preserves it. The hook ignores an event whose id does not match
+ * the session it holds: after an outage, a previous session's queued offer
+ * or revocation can arrive beside the new session's, and applying those to
+ * the new session corrupts or kills a healthy recovery.
+ */
 export type SessionEvent =
-    | { kind: 'description'; description: RtcDescription }
-    | { kind: 'candidate'; candidate: RtcCandidate }
-    | { kind: 'state'; capture: string; transport: string; firstFrame: boolean }
-    | { kind: 'restoreToken'; token: string }
-    | { kind: 'revoked'; reason: string };
+    | { kind: 'description'; description: RtcDescription; sessionId?: string }
+    | { kind: 'candidate'; candidate: RtcCandidate; sessionId?: string }
+    | { kind: 'state'; capture: string; transport: string; firstFrame: boolean; sessionId?: string }
+    | { kind: 'restoreToken'; token: string; sessionId?: string }
+    | { kind: 'revoked'; reason: string; sessionId?: string };
 
 /**
  * The application's own authenticated channel to the host engine.
@@ -147,7 +155,14 @@ export type ControlReply =
     | { kind: 'ack'; seq: number }
     | { kind: 'rejected'; seq: number; code: string; message: string }
     | { kind: 'clipboard'; request: string; text: string; truncated?: boolean; error?: string }
-    | { kind: 'revoked'; reason: string };
+    | { kind: 'revoked'; reason: string }
+    /**
+     * The engine's heartbeat, twice a second while the control channel is
+     * open. A client that has seen one and then sees none for a while reads
+     * the path as stalled, long before ICE consent timers notice. Clients that
+     * predate it simply ignore it.
+     */
+    | { kind: 'ping' };
 
 export function parseControlReply(raw: string): ControlReply | null {
     try {

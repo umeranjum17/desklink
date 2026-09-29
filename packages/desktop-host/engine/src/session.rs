@@ -1392,6 +1392,17 @@ impl Session {
             .ok_or_else(|| anyhow::anyhow!("no offer has been made for this session yet"))
     }
 
+    /// Restart ICE: a fresh offer on the same peer, announced as a new
+    /// `session.description` event for the client to answer as usual.
+    pub async fn restart_ice(&self) -> Result<()> {
+        let offer = self.current_peer()?.restart_ice().await?;
+        self.inner.notify(SessionEvent::Description {
+            generation: self.inner.generation,
+            sdp: offer,
+        });
+        Ok(())
+    }
+
     pub async fn add_candidate(
         &self,
         candidate: String,

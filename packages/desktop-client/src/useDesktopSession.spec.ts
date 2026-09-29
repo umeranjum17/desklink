@@ -1,9 +1,16 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
 import TestRenderer from 'react-test-renderer';
 
-import type { Signaling } from './protocol';
-import { useDesktopSession, type DesktopSession } from './useDesktopSession';
+import type { SessionEvent, Signaling } from './protocol';
+import {
+    REOPEN_BACKOFF_MS,
+    RESTART_BACKOFF_MS,
+    backoffDelay,
+    connectionStatusFor,
+    useDesktopSession,
+    type DesktopSession,
+} from './useDesktopSession';
 
 /** `act` refuses to flush state updates unless React is told this is a test. */
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -18,7 +25,10 @@ type NativeSessionEvent = { sessionId: string; name: string; payload: Record<str
 
 const appStateListeners = new Set<(status: string) => void>();
 const nativeListeners = new Set<(event: NativeSessionEvent) => void>();
+const signalingHandlers = new Set<(event: SessionEvent) => void>();
 const sent: string[] = [];
+const remoteDescriptions: Array<{ id: string; type: string; sdp: string }> = [];
+const requests: Array<{ method: string; params?: Record<string, unknown> }> = [];
 let createdSessions = 0;
 let nativeCreation: 'ok' | 'null' | 'throw' = 'ok';
 
@@ -38,7 +48,18 @@ vi.mock('./native', () => ({
             if (nativeCreation === 'null') return null;
             return `native-${++createdSessions}`;
         },
-        setRemoteDescription: () => true,
+        setRemoteDescription: (id: string, type: string, sdp: string) => {
+            remoteDescriptions.push({ id, type, sdp });
+            if (type === 'offer' && sdp !== '') {
+                // The binding answers on its own; the event is what the
+                // hook sends back, like the real one but synchronously so
+                // tests stay deterministic.
+                for (const listener of [...nativeListeners]) {
+                    listener({ sessionId: id, name: 'answer', payload: { sdp: 'mock-answer-sdp' } });
+                }
+            }
+            return true;
+        },
         addRemoteCandidate: () => true,
         sendControl: (_id: string, message: string) => {
             sent.push(message);
@@ -57,17 +78,28 @@ vi.mock('./native', () => ({
     },
 }));
 
+/** Every mounted harness, torn down after each test so no timers leak. */
+const mounted: Array<ReturnType<typeof TestRenderer.create>> = [];
+
+afterEach(() => {
+    for (const renderer of mounted.splice(0)) renderer.unmount();
+});
+
 beforeEach(() => {
     appStateListeners.clear();
     nativeListeners.clear();
+    signalingHandlers.clear();
     sent.length = 0;
+    remoteDescriptions.length = 0;
+    requests.length = 0;
     createdSessions = 0;
     nativeCreation = 'ok';
 });
 
 function signaling(): Signaling {
     return {
-        async request<T>(method: string): Promise<T> {
+        async request<T>(method: string, params?: Record<string, unknown>): Promise<T> {
+            requests.push({ method, params });
             if (method === 'session.open') {
                 return {
                     sessionId: 'engine-1',
@@ -80,9 +112,22 @@ function signaling(): Signaling {
                     },
                 } as T;
             }
+            if (method === 'session.restart_ice') {
+                // The engine re-offers through the usual description event,
+                // like the real one.
+                setTimeout(() => {
+                    for (const handler of [...signalingHandlers]) {
+                        handler({ kind: 'description', description: { type: 'offer', sdp: 'restart-engine-offer' } });
+                    }
+                }, 10);
+                return { accepted: true } as T;
+            }
             return { accepted: true } as T;
         },
-        subscribe: () => () => undefined,
+        subscribe: (handler: (event: SessionEvent) => void) => {
+            signalingHandlers.add(handler);
+            return () => { signalingHandlers.delete(handler); };
+        },
     };
 }
 
@@ -95,7 +140,7 @@ async function connectedSession(): Promise<{ current: DesktopSession }> {
         return null;
     }
     await TestRenderer.act(async () => {
-        TestRenderer.create(React.createElement(Harness));
+        mounted.push(TestRenderer.create(React.createElement(Harness)));
     });
     await TestRenderer.act(async () => {
         await held.current?.connect();
@@ -105,12 +150,23 @@ async function connectedSession(): Promise<{ current: DesktopSession }> {
     return held as { current: DesktopSession };
 }
 
-function nativeEvent(name: string, sessionId: string | null): void {
+function nativeEvent(name: string, sessionId: string | null, payload: Record<string, unknown> = {}): void {
     TestRenderer.act(() => {
         for (const listener of [...nativeListeners]) {
-            listener({ sessionId: sessionId ?? '', name, payload: {} });
+            listener({ sessionId: sessionId ?? '', name, payload });
         }
     });
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function liveSession(): Promise<{ current: DesktopSession }> {
+    const session = await connectedSession();
+    nativeEvent('presented', session.current.nativeId);
+    expect(session.current.snapshot.status).toBe('live');
+    return session;
 }
 
 function sentKinds(): string[] {
@@ -164,28 +220,39 @@ describe('held input across a background transition', () => {
     });
 });
 
-describe('a transport failure the automatic reconnect cannot fix', () => {
-    it('lets the user try again instead of holding a dead session', async () => {
+describe('a transport failure the automatic reconnect cannot fix at once', () => {
+    it('keeps reopening with backoff and never holds a dead session', async () => {
         const session = await connectedSession();
         const first = session.current.nativeId;
         expect(first).not.toBeNull();
 
-        // First failure: the hook retries once on its own.
+        // First failure: the hook reopens on its own after the first backoff.
         nativeEvent('failure', first);
         await TestRenderer.act(async () => {
-            await new Promise((resolve) => setTimeout(resolve, 900));
+            await sleep(1300);
         });
         await TestRenderer.act(async () => {});
         expect(session.current.nativeId).not.toBeNull();
         expect(session.current.nativeId).not.toBe(first);
 
-        // Second failure: the retry is spent and the dead handle must not
-        // survive it, or the overlay's "Try again" would be a no-op.
-        nativeEvent('failure', session.current.nativeId);
+        // Second failure: the dead handle is dropped at once and the hook
+        // reopens again after the next backoff step.
+        const second = session.current.nativeId;
+        nativeEvent('failure', second);
         await TestRenderer.act(async () => {});
-        expect(session.current.snapshot.status).toBe('failed');
+        expect(session.current.snapshot.status).toBe('reconnecting');
         expect(session.current.nativeId).toBeNull();
+        await TestRenderer.act(async () => {
+            await sleep(2300);
+        });
+        await TestRenderer.act(async () => {});
+        expect(session.current.nativeId).not.toBeNull();
+        expect(session.current.nativeId).not.toBe(second);
 
+        // And the user can still retry by hand on top of the budget.
+        await TestRenderer.act(async () => {
+            await session.current.close('left the desktop');
+        });
         await TestRenderer.act(async () => {
             await session.current.connect();
         });
@@ -224,7 +291,7 @@ describe('a refusal the host makes', () => {
         }
 
         await TestRenderer.act(async () => {
-            TestRenderer.create(React.createElement(Harness));
+            mounted.push(TestRenderer.create(React.createElement(Harness)));
         });
         await TestRenderer.act(async () => {
             await held.current?.connect();
@@ -259,6 +326,7 @@ describe('an opened host session whose native creation fails', () => {
         }
         let renderer!: ReturnType<typeof TestRenderer.create>;
         await TestRenderer.act(async () => { renderer = TestRenderer.create(React.createElement(Harness)); });
+        mounted.push(renderer);
 
         nativeCreation = 'null';
         await TestRenderer.act(async () => { await held.current!.connect(); });
@@ -312,7 +380,7 @@ describe('a session that finishes opening after the screen was torn down', () =>
         }
 
         await TestRenderer.act(async () => {
-            TestRenderer.create(React.createElement(Harness));
+            mounted.push(TestRenderer.create(React.createElement(Harness)));
         });
 
         let opening: Promise<void> | undefined;
@@ -330,4 +398,404 @@ describe('a session that finishes opening after the screen was torn down', () =>
 
         expect(requests).toContain('session.close');
     }, 20_000);
+});
+
+describe('connectionStatusFor', () => {
+    it.each([
+        ['disconnected', 'live', true, 'reconnecting'],
+        ['disconnected', 'live', false, 'reconnecting'],
+        ['disconnected', 'connecting', false, 'reconnecting'],
+        ['disconnected', 'reconnecting', true, null],
+        ['disconnected', 'failed', true, null],
+        ['disconnected', 'idle', false, null],
+        ['connected', 'reconnecting', true, 'live'],
+        ['completed', 'reconnecting', true, 'live'],
+        // Frames were never shown: still the first connection, not a recovery.
+        ['connected', 'reconnecting', false, 'connecting'],
+        ['connected', 'connecting', false, null],
+        ['connected', 'live', true, null],
+        ['checking', 'live', true, null],
+        ['closed', 'reconnecting', true, null],
+        ['failed', 'live', true, null],
+    ])('maps %s from %s (presented %s) to %s', (state, status, presented, next) => {
+        expect(connectionStatusFor(state, status as never, presented as boolean)).toBe(next);
+    });
+});
+
+describe('backoffDelay', () => {
+    it('walks the schedule and reports when it is spent', () => {
+        expect(backoffDelay([1000, 2000], 0)).toBe(1000);
+        expect(backoffDelay([1000, 2000], 1)).toBe(2000);
+        expect(backoffDelay([1000, 2000], 2)).toBeNull();
+        expect(backoffDelay(REOPEN_BACKOFF_MS, REOPEN_BACKOFF_MS.length)).toBeNull();
+        expect(backoffDelay(RESTART_BACKOFF_MS, RESTART_BACKOFF_MS.length)).toBeNull();
+    });
+});
+
+describe('an ICE disconnection after frames were shown', () => {
+    it('reads reconnecting at once, restarts ICE on the same session, and goes live on recovery', async () => {
+        const session = await liveSession();
+        const id = session.current.nativeId;
+        expect(id).not.toBeNull();
+        requests.length = 0;
+        remoteDescriptions.length = 0;
+
+        nativeEvent('ice', id, { state: 'DISCONNECTED' });
+        expect(session.current.snapshot.status).toBe('reconnecting');
+        // The session is untouched: no reopen, no close.
+        expect(session.current.nativeId).toBe(id);
+        expect(requests.map((request) => request.method)).not.toContain('session.open');
+
+        // Brief blips heal alone; the restart waits them out.
+        await TestRenderer.act(async () => {
+            await sleep(500);
+        });
+        expect(requests.map((request) => request.method)).not.toContain('session.restart_ice');
+
+        await TestRenderer.act(async () => {
+            await sleep(2000);
+        });
+        // The restart asks the engine to re-offer on the same peer; the
+        // offer arrives as the usual description event and is answered as
+        // usual, all without reopening the session.
+        const restart = requests.find((request) => request.method === 'session.restart_ice');
+        expect(restart?.params).toMatchObject({ session_id: 'engine-1', generation: 1 });
+        await TestRenderer.act(async () => {
+            await sleep(100);
+        });
+        expect(remoteDescriptions).toContainEqual({ id, type: 'offer', sdp: 'restart-engine-offer' });
+        const answer = requests.find((request) => request.method === 'session.description');
+        expect(answer?.params).toMatchObject({
+            session_id: 'engine-1',
+            generation: 1,
+            description: { type: 'answer' },
+        });
+        expect(requests.map((request) => request.method)).not.toContain('session.open');
+        expect(session.current.nativeId).toBe(id);
+
+        nativeEvent('ice', id, { state: 'CONNECTED' });
+        expect(session.current.snapshot.status).toBe('live');
+    }, 20_000);
+
+    it('reports a duplicate failure once instead of spending the budget twice', async () => {
+        const session = await liveSession();
+        const id = session.current.nativeId;
+
+        nativeEvent('ice', id, { state: 'FAILED' });
+        // The peer's failure event for the same outage is not a second outage.
+        nativeEvent('failure', id);
+        await TestRenderer.act(async () => {
+            await sleep(1300);
+        });
+        await TestRenderer.act(async () => {});
+        // Exactly one reopen: the duplicate did not consume a second attempt.
+        expect(createdSessions).toBe(2);
+    }, 20_000);
+});
+
+describe('an ICE disconnection before any frame', () => {
+    it('reads reconnecting but does not restart a path that never worked', async () => {
+        const session = await connectedSession();
+        const id = session.current.nativeId;
+
+        nativeEvent('ice', id, { state: 'DISCONNECTED' });
+        expect(session.current.snapshot.status).toBe('reconnecting');
+
+        await TestRenderer.act(async () => {
+            await sleep(2600);
+        });
+        expect(requests.map((request) => request.method)).not.toContain('session.restart_ice');
+    }, 20_000);
+});
+
+describe('a terminal failure that outlasts one attempt', () => {
+    it('backs the reopens off instead of spending them while the outage lasts', async () => {
+        const session = await liveSession();
+
+        nativeEvent('failure', session.current.nativeId);
+        await TestRenderer.act(async () => {
+            await sleep(1300);
+        });
+        await TestRenderer.act(async () => {});
+        const second = session.current.nativeId;
+        expect(second).not.toBeNull();
+
+        // The next failure waits out the second backoff step before reopening.
+        nativeEvent('failure', second);
+        const started = Date.now();
+        await TestRenderer.act(async () => {
+            for (let waited = 0; waited < 5000 && session.current.nativeId === null; waited += 100) {
+                await sleep(100);
+            }
+        });
+        await TestRenderer.act(async () => {});
+        expect(session.current.nativeId).not.toBeNull();
+        expect(session.current.nativeId).not.toBe(second);
+        expect(Date.now() - started).toBeGreaterThanOrEqual(1800);
+    }, 20_000);
+});
+
+describe('the engine heartbeat', () => {
+    function ping(sessionId: string | null): void {
+        nativeEvent('control', sessionId, { message: '{"kind":"ping"}' });
+    }
+
+    it('leaves an engine that predates heartbeats alone', async () => {
+        const session = await liveSession();
+        await TestRenderer.act(async () => {
+            await sleep(1800);
+        });
+        expect(session.current.snapshot.status).toBe('live');
+        expect(requests.map((request) => request.method)).not.toContain('session.restart_ice');
+    }, 20_000);
+
+    it('reads a stalled path as reconnecting and a resumed one as live', async () => {
+        const session = await liveSession();
+        const id = session.current.nativeId;
+
+        ping(id);
+        await TestRenderer.act(async () => {
+            await sleep(400);
+        });
+        expect(session.current.snapshot.status).toBe('live');
+        expect(requests.map((request) => request.method)).not.toContain('session.restart_ice');
+
+        // No heartbeat for longer than the stall threshold: reconnecting,
+        // without waiting for ICE consent timers.
+        await TestRenderer.act(async () => {
+            await sleep(1400);
+        });
+        expect(session.current.snapshot.status).toBe('reconnecting');
+
+        // The path works again: heartbeats clear the stall.
+        ping(id);
+        expect(session.current.snapshot.status).toBe('live');
+    }, 20_000);
+});
+
+describe('an offer that beats the open result back', () => {
+    it('is answered instead of leaving the session connecting forever', async () => {
+        const answers: unknown[] = [];
+        let emit: ((event: SessionEvent) => void) | null = null;
+        const held: { current: DesktopSession | null } = { current: null };
+        function Harness() {
+            held.current = useDesktopSession({
+                authorize: async () => ({
+                    signaling: {
+                        async request<T>(method: string): Promise<T> {
+                            if (method === 'session.open') {
+                                // The engine's offer and candidates beat the
+                                // result back; the subscription is already up.
+                                emit?.({ kind: 'description', description: { type: 'offer', sdp: 'early-offer' } });
+                                return {
+                                    sessionId: 'engine-1',
+                                    generation: 1,
+                                    source: { kind: 'monitor', width: 2560, height: 1440, origin: { x: 0, y: 0 } },
+                                    geometry: {
+                                        source: { width: 2560, height: 1440 },
+                                        encoded: { width: 1280, height: 720 },
+                                        origin: { x: 0, y: 0 },
+                                    },
+                                } as T;
+                            }
+                            if (method === 'session.description') answers.push(true);
+                            return { accepted: true } as T;
+                        },
+                        subscribe: (handler: (event: SessionEvent) => void) => {
+                            emit = handler;
+                            return () => { emit = null; };
+                        },
+                    },
+                    session: { permissions: ['view', 'control'] },
+                }),
+            });
+            return null;
+        }
+        await TestRenderer.act(async () => {
+            mounted.push(TestRenderer.create(React.createElement(Harness)));
+        });
+        await TestRenderer.act(async () => {
+            await held.current?.connect();
+        });
+        const id = held.current?.nativeId;
+        expect(id).not.toBeNull();
+        // The stashed offer is replayed into the native session, which answers.
+        expect(remoteDescriptions).toContainEqual({ id, type: 'offer', sdp: 'early-offer' });
+        await TestRenderer.act(async () => {});
+        expect(answers).toHaveLength(1);
+    }, 20_000);
+});
+
+describe('a restart the session asked for itself', () => {
+    it('rides out renegotiation transients without flapping or re-asking', async () => {
+        const session = await liveSession();
+        const id = session.current.nativeId;
+        requests.length = 0;
+
+        nativeEvent('ice', id, { state: 'DISCONNECTED' });
+        expect(session.current.snapshot.status).toBe('reconnecting');
+        await TestRenderer.act(async () => {
+            await sleep(2300);
+        });
+        // The restart was asked; the engine re-offered and was answered.
+        const restarts = () => requests.filter((request) => request.method === 'session.restart_ice');
+        expect(restarts()).toHaveLength(1);
+
+        // Recovery lands live inside the grace window…
+        nativeEvent('ice', id, { state: 'CONNECTED' });
+        expect(session.current.snapshot.status).toBe('live');
+        // …and a renegotiation transient inside the same window is expected,
+        // not a new outage: no flap, no second restart.
+        nativeEvent('ice', id, { state: 'DISCONNECTED' });
+        expect(session.current.snapshot.status).toBe('live');
+        await TestRenderer.act(async () => {
+            await sleep(300);
+        });
+        expect(restarts()).toHaveLength(1);
+
+        // Past the grace window a drop reads as reconnecting again. The
+        // window is wall-clock, so poll rather than assume exact timing.
+        let status = session.current.snapshot.status;
+        for (let i = 0; i < 10 && status !== 'reconnecting'; i++) {
+            nativeEvent('ice', id, { state: 'DISCONNECTED' });
+            await TestRenderer.act(async () => {
+                await sleep(500);
+            });
+            status = session.current.snapshot.status;
+        }
+        expect(status).toBe('reconnecting');
+    }, 20_000);
+});
+
+describe('a mid-session re-offer asked for outside the policy', () => {
+    it('still rides out the renegotiation without flapping', async () => {
+        const session = await liveSession();
+        const id = session.current.nativeId;
+        // An engine re-offer while live: a restart asked for directly.
+        TestRenderer.act(() => {
+            for (const handler of [...signalingHandlers]) {
+                handler({ kind: 'description', description: { type: 'offer', sdp: 'direct-reoffer' } });
+            }
+        });
+        expect(remoteDescriptions).toContainEqual({ id, type: 'offer', sdp: 'direct-reoffer' });
+        // Renegotiation transients are expected, not a new outage.
+        nativeEvent('ice', id, { state: 'DISCONNECTED' });
+        expect(session.current.snapshot.status).toBe('live');
+        nativeEvent('ice', id, { state: 'CONNECTED' });
+        expect(session.current.snapshot.status).toBe('live');
+    }, 20_000);
+});
+
+describe('the engine restore token', () => {
+    it('reopens with the live session token instead of asking again', async () => {
+        const session = await liveSession();
+        const id = session.current.nativeId;
+        requests.length = 0;
+
+        // The engine grants a restore token while the session is live.
+        TestRenderer.act(() => {
+            for (const handler of [...signalingHandlers]) {
+                handler({ kind: 'restoreToken', token: 'restore-123' });
+            }
+        });
+
+        nativeEvent('failure', id);
+        await TestRenderer.act(async () => {
+            await sleep(1300);
+        });
+        await TestRenderer.act(async () => {});
+        const reopen = requests.find((request) => request.method === 'session.open');
+        expect(reopen?.params).toMatchObject({ restore_token: 'restore-123' });
+        expect(session.current.nativeId).not.toBeNull();
+    }, 20_000);
+});
+
+describe('a live transport that stays quiet', () => {
+    it('rechecks for heartbeats on recovery, then reopens after clean restarts fail', async () => {
+        const session = await liveSession();
+        const id = session.current.nativeId;
+        requests.length = 0;
+
+        // ICE is up and a heartbeat was seen: the watchdog is armed.
+        nativeEvent('ice', id, { state: 'CONNECTED' });
+        TestRenderer.act(() => {
+            nativeEvent('control', id, { message: '{"kind":"ping"}' });
+        });
+        // A drop and fast recovery with no further heartbeats…
+        nativeEvent('ice', id, { state: 'DISCONNECTED' });
+        expect(session.current.snapshot.status).toBe('reconnecting');
+        nativeEvent('ice', id, { state: 'CONNECTED' });
+        expect(session.current.snapshot.status).toBe('live');
+        // …reads as stalled again once the recovery arm expires.
+        await TestRenderer.act(async () => {
+            await sleep(1600);
+        });
+        expect(session.current.snapshot.status).toBe('reconnecting');
+
+        // Clean restarts on a live transport do not heal it: the session
+        // escalates to a reopen instead of asking forever. `failed` itself is
+        // transient on the way there and `act` can hide it, so prove the path
+        // by its requests: the effect closes the dead session, then reopens.
+        // Only a transport failure reopens at all.
+        let reopened = false;
+        for (let i = 0; i < 40 && !reopened; i++) {
+            const methods = requests.map((request) => request.method);
+            const closedAt = methods.indexOf('session.close');
+            reopened = closedAt >= 0 && methods.slice(closedAt + 1).includes('session.open');
+            if (!reopened) {
+                await TestRenderer.act(async () => {
+                    await sleep(500);
+                });
+            }
+        }
+        expect(reopened).toBe(true);
+    }, 30_000);
+});
+
+describe('events naming another session', () => {
+    function emitSignaling(event: SessionEvent): void {
+        TestRenderer.act(() => {
+            for (const handler of [...signalingHandlers]) handler(event);
+        });
+    }
+
+    it('ignores a previous generation revocation, offer and state', async () => {
+        const session = await liveSession();
+        const id = session.current.nativeId;
+        expect(id).not.toBeNull();
+        const described = remoteDescriptions.length;
+
+        // A previous session's queued leftovers arrive beside the live one.
+        emitSignaling({ kind: 'revoked', reason: 'the connection to the phone was lost', sessionId: 'dead-session' });
+        emitSignaling({ kind: 'description', description: { type: 'offer', sdp: 'stale-offer' }, sessionId: 'dead-session' });
+        emitSignaling({ kind: 'state', capture: 'streaming', transport: 'disconnected', firstFrame: true, sessionId: 'dead-session' });
+        expect(session.current.snapshot.status).toBe('live');
+        expect(session.current.nativeId).toBe(id);
+        expect(remoteDescriptions.length).toBe(described);
+
+        // The live session's own events still apply.
+        emitSignaling({ kind: 'state', capture: 'streaming', transport: 'disconnected', firstFrame: true, sessionId: 'engine-1' });
+        expect(session.current.snapshot.status).toBe('reconnecting');
+        emitSignaling({ kind: 'description', description: { type: 'offer', sdp: 'fresh-offer' }, sessionId: 'engine-1' });
+        expect(remoteDescriptions).toContainEqual({ id, type: 'offer', sdp: 'fresh-offer' });
+        emitSignaling({ kind: 'revoked', reason: 'done', sessionId: 'engine-1' });
+        expect(session.current.snapshot.status).toBe('ended');
+    }, 20_000);
+
+    it('still ends on a revocation without an id', async () => {
+        const session = await liveSession();
+        emitSignaling({ kind: 'revoked', reason: 'done' });
+        expect(session.current.snapshot.status).toBe('ended');
+    }, 20_000);
+});
+
+describe('classifyOpenFailure', () => {
+    it('treats an unanswering engine as transport, and refusals as refusals', async () => {
+        const { classifyOpenFailure } = await import('./useDesktopSession');
+        expect(classifyOpenFailure(Object.assign(new Error('the desktop engine did not answer session.open in 30000ms'), { code: 'engine' }))).toBe('transport');
+        expect(classifyOpenFailure(new Error('boom'))).toBe('transport');
+        expect(classifyOpenFailure(Object.assign(new Error('refused'), { code: 'consent-timeout' }))).toBe('consent');
+        expect(classifyOpenFailure(Object.assign(new Error('refused'), { code: 'no-screen' }))).toBe('no-screen');
+        expect(classifyOpenFailure(Object.assign(new Error('refused'), { code: 'permission' }))).toBe('permission');
+    });
 });

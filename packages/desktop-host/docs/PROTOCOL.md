@@ -243,6 +243,22 @@ the SDP and candidates to the client and brings back the answer.
 
 A candidate that arrives before the remote description is buffered, not dropped.
 
+A client whose ICE connection goes `disconnected` may restart ICE on the same
+peer connection instead of opening a new session: it sends
+`session.restart_ice` with the session's id and generation, and the engine
+re-offers — a fresh offer with a new ICE generation — as a new
+`session.description` event, which the client answers as usual. The session
+and its generation survive; only the ICE generation turns over. Fresh
+candidates from the restart trickle through `session.candidate` on both sides
+exactly as the initial ones do.
+
+```jsonc
+{"id":7,"method":"session.restart_ice","params":{"session_id":"…","generation":1}}
+// → {"id":7,"result":{"accepted":true}}
+// …then {"event":"session.description","params":{"sessionId":"…","generation":1,
+//   "description":{"type":"offer","sdp":"v=0\r\n…"}}}
+```
+
 With `loopback_tcp`, the engine also listens for ICE over TCP on
 `127.0.0.1` and offers that passive candidate. It is for a client whose only
 way to this computer is a forward of its loopback, such as an SSH tunnel: the
@@ -256,9 +272,20 @@ always does.
 ```jsonc
 {"event":"session.state","params":{"sessionId":"…",
   "capture":"streaming",              // consented|streaming|ended
-  "transport":"connected",            // new|connecting|connected|failed|closed
+  "transport":"connected",            // new|connecting|connected|disconnected|failed|closed
   "firstFrame":true}}                 // false until a frame has been encoded
 ```
+
+`disconnected` is ICE losing the path: the picture is frozen but the session
+is alive, and a client should show reconnecting and may restart ICE (above)
+rather than open a new session. `failed` is terminal: the engine revokes and
+closes the session, and only a new `session.open` recovers it.
+
+While its control channel is open the engine also sends a heartbeat twice a
+second, `{"kind":"ping"}`. It lets a client notice a stalled path within
+about a second and a half, long before ICE consent timers declare it
+`disconnected` — and a resumed heartbeat is the path working again. Clients
+that predate it ignore the unknown kind.
 
 A stopped capture emits `{"event":"session.capture.stopped","params":{"sessionId":"…","reason":"SCStream stopped (SCStreamErrorDomain -3821): …"}}`. Frame requests then return `stream-stopped` rather than stale pixels. On macOS the engine retries opening the stream up to three times and emits `session.state` with `capture=streaming` on recovery; Linux capture errors also surface instead of serving an old frame.\n\nThe `geometry` a client maps touch against is the one `session.open` returned,
 and the one the control channel's `hello` repeats. A session keeps the one
@@ -338,10 +365,11 @@ are JSON, one per message:
 | `release_all` | — | explicit safety net; the engine also does this on close and on channel loss |
 | `clipboard_read` / `clipboard_write` | `request` (echoed back), `text` | explicit, on user action; never polled |
 
-The engine answers on the same channel:
+The engine answers on the same channel, and sends two things unprompted:
 
 ```jsonc
 {"kind":"hello","protocol":3,"geometry":{…}}     // once, when the channel opens
+{"kind":"ping"}                                  // heartbeat, twice a second; see "State" above
 {"kind":"ack","seq":44}
 {"kind":"rejected","seq":44,"code":"coordinates","message":"(9000,4) is outside the 1280x720 surface"}
 {"kind":"clipboard","request":"…","text":"…","truncated":false}   // an empty "text" with "error" when the read failed

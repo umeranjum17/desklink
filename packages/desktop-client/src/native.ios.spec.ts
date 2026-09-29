@@ -60,3 +60,19 @@ it('buffers ICE until offer, emits answer and gates/stamps control input per ses
     expect(nativeDesklink.sendControl(id, '{"kind":"release_all"}')).toBe(false);
     listener.remove();
 });
+
+it('emits ICE connection states as they happen', async () => {
+    const { nativeDesklink } = await import('./native.ios');
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const listener = nativeDesklink.addListener!('onSessionEvent', (event) => {
+        events.push({ name: event.name, payload: event.payload });
+    });
+    const id = nativeDesklink.createSession('[]')!;
+    const peer = peers.at(-1)!;
+    peer.iceConnectionState = 'disconnected';
+    (peer.oniceconnectionstatechange as (() => void) | undefined)?.();
+    expect(events).toContainEqual({ name: 'ice', payload: { state: 'DISCONNECTED' } });
+    expect(id).not.toBeNull();
+    listener.remove();
+    nativeDesklink.closeSession(id);
+});
