@@ -75,6 +75,7 @@ export interface OpenSessionRequest {
     maxWidth?: number;
     maxHeight?: number;
     bitrateKbps?: number;
+    /** Caps the encoded frame rate (default 60, bounded to 1–60); omit it unless a slower rate is wanted. */
     maxFps?: number;
     iceServers?: Array<{ urls: string[]; username?: string; credential?: string }>;
     restoreToken?: string;

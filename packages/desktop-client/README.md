@@ -66,6 +66,22 @@ import { desktopAvailable } from '@desklink/react-native/availability';
 {desktopAvailable && <ComputerAction onPress={openDesktop} />}
 ```
 
+### Frame rate and encode size
+
+The engine streams at up to 60 fps unless `session.maxFps` names a lower cap —
+omit it for the smooth path. A still desktop costs nothing at 60, because the
+engine only produces frames on change.
+
+Keep the encoded picture inside a 1920×1080 box:
+
+```tsx
+session: { permissions: CONTROL_PERMISSIONS, maxWidth: 1920, maxHeight: 1080 },
+```
+
+The engine never upscales, so a smaller desktop is sent at its own size and a
+larger one is scaled to fit. Above that box the encoder cannot sustain 50+ fps
+under full-screen motion.
+
 ### What the package guarantees
 
 - **VP9 decoding.** Android builds a session-scoped hardware-first decoder

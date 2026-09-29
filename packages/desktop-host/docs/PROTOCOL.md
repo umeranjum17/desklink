@@ -168,7 +168,7 @@ trigger a capture request.
   "permissions": ["view","control","clipboard"],
   "max_width": 3840, "max_height": 2160, // encode box (default); never upscales
   "bitrate_kbps": 0,                    // 0 (default): sized to the encoded surface
-  "max_fps": 30,
+  "max_fps": 60,
   "ice_servers": [{"urls":["stun:..."],"username":null,"credential":null}],
   "restore_token": null,                // from a previous session.restoreToken
   "ttl_seconds": 3600,                 // session lease; default 3600
@@ -202,7 +202,7 @@ clipboard action and never infers them from a source, a peer or an SDP.
 `control` without a working input backend is refused at `session.open` with
 `error.code = "input-unavailable"` — the consumer must ask for `view` explicitly instead.
 
-`max_fps` defaults to 30 and is bounded to 1–60. It caps the encoded frame
+`max_fps` defaults to 60 and is bounded to 1–60. It caps the encoded frame
 rate and X11 capture loop; portal capture offers it as the preferred PipeWire
 frame rate, and macOS sets its ScreenCaptureKit stream minimum frame interval.
 A source may still supply fewer frames.
