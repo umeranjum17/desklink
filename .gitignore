@@ -8,3 +8,4 @@ dist-desklink/
 # Task-owned display recordings and screenshots; never publish a real desktop.
 evidence/agent-cursor/
 .task-target/
+target-review/

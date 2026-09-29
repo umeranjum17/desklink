@@ -71,7 +71,6 @@ const requireLoadGate = args.includes('--require-load-gate');
 const baseline = baselinePath === null ? null : JSON.parse(readFileSync(baselinePath, 'utf8'));
 
 const dir = mkdtempSync(join(tmpdir(), 'desklink-g2g-flow-'));
-const pidFile = join(dir, 'bridges.pid');
 const enginePidFile = join(dir, 'engines.pid');
 const sessionMarker = `DESKLINK_G2G_SESSION=g2g-${process.pid}`;
 
@@ -320,10 +319,8 @@ async function verifyXvfb() {
     assert.match(info.stdout, new RegExp(`size=${sizeW}x${sizeH} xwayland=false`), 'unexpected server geometry');
 }
 
-async function runScenario(scenario, vite) {
-    const mode = scenario === 'scroll' ? 'scroll' : scenario === 'still' ? 'still' : 'typing';
-    const loadBefore = load();
-    // The stamp target: the only X client on the private display.
+/** The stamp target: the only X client on the private display. */
+async function startStamp(mode) {
     const stamp = spawn(stampBinary, [], {
         stdio: ['ignore', 'pipe', 'ignore'],
         env: {
@@ -348,7 +345,12 @@ async function runScenario(scenario, vite) {
         }, 100);
         timer.unref?.();
     });
+    return stamp;
+}
 
+async function runScenario(scenario, vite) {
+    const mode = scenario === 'scroll' ? 'scroll' : scenario === 'still' ? 'still' : 'typing';
+    const loadBefore = load();
     // The bridge serves the engine's protocol; the engine child PID it records
     // is what lets this harness reap the engine even if the bridge dies first.
     const port = await freePort();
@@ -364,7 +366,7 @@ async function runScenario(scenario, vite) {
         env: {
             ...process.env, DISPLAY: display, XAUTHORITY: authority, WAYLAND_DISPLAY: '',
             MUXR_DESKLINK_ENGINE: engineBinary,
-            DESKLINK_AXI_PID_FILE: pidFile, DESKLINK_AXI_ENGINE_PID_FILE: enginePidFile,
+            DESKLINK_AXI_ENGINE_PID_FILE: enginePidFile,
             DESKLINK_G2G_SESSION: `g2g-${process.pid}`,
         },
     });
@@ -390,8 +392,10 @@ async function runScenario(scenario, vite) {
 
     const pageUrl = `${vite.url}packages/desktop-host/test/g2g-flow.html?engine=${encodeURIComponent(bridgeUrl)}&width=${sizeW}&height=${sizeH}`;
     const chrome = await startChrome(chromeBinary, pageUrl);
+    let stamp = null;
     try {
         await chrome.until('window.__flow?.ready === true', 20_000, 'the page to load');
+        stamp = await startStamp(mode);
         const opened = await chrome.evaluate(`window.__flow.open(${maxFps})`);
         assert.equal(typeof opened.sessionId, 'string', 'session.open returned no session');
         await chrome.until('window.__flow.state.presented === true', 25_000, 'a first decoded frame');
@@ -439,7 +443,7 @@ async function runScenario(scenario, vite) {
                 encoded_fps: Math.round((m.encoded_frames / elapsed) * 10) / 10,
                 capture_ms_mean: m.captured_frames > 0 ? Math.round((m.capture_micros / m.captured_frames / 1000) * 100) / 100 : null,
                 convert_ms_mean: m.captured_frames > 0 ? Math.round((m.convert_micros / m.captured_frames / 1000) * 100) / 100 : null,
-                queue_ms_mean: m.encoded_frames > 0 ? Math.round((m.queue_micros / m.encoded_frames / 1000) * 100) / 100 : null,
+                queue_ms_mean: m.motion_frames > 0 ? Math.round((m.queue_micros / m.motion_frames / 1000) * 100) / 100 : null,
                 encode_ms_mean: m.encoded_frames > 0 ? Math.round((m.encode_micros / m.encoded_frames / 1000) * 100) / 100 : null,
                 send_ms_mean: m.encoded_frames > 0 ? Math.round((m.send_micros / m.encoded_frames / 1000) * 100) / 100 : null,
             },
@@ -463,16 +467,14 @@ async function runScenario(scenario, vite) {
             if (pid === xvfb.pid) continue;
             await stopProcess(pid, 'SIGKILL');
         }
-        await stopProcess(stamp.pid, 'SIGTERM');
+        if (stamp !== null) await stopProcess(stamp.pid, 'SIGTERM');
     }
 }
 
 function recordPidFiles() {
-    for (const [file, command] of [[pidFile, '--bridge'], [enginePidFile, engineBinary]]) {
-        if (!existsSync(file)) continue;
-        for (const pid of readFileSync(file, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number)) {
-            try { remember(pid, command); } catch { /* a reused PID is not ours to signal */ }
-        }
+    if (!existsSync(enginePidFile)) return;
+    for (const pid of readFileSync(enginePidFile, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number)) {
+        try { remember(pid, engineBinary); } catch { /* a reused PID is not ours to signal */ }
     }
 }
 

@@ -58,6 +58,9 @@ pub struct Metrics {
     pub refined_frames: u64,
     /// Motion frames coded at half size because full size could not keep up.
     pub halved_frames: u64,
+    /// Fresh captures coded at the pace of change: a motion pass on a frame
+    /// the encoder had not coded yet — the population `queue_micros` is over.
+    pub motion_frames: u64,
     /// Time spent in the encoder, in microseconds, over every encoded frame.
     pub encode_micros: u64,
     /// Time spent grabbing and converting a frame on the capture thread, in
@@ -68,8 +71,8 @@ pub struct Metrics {
     /// Time spent hashing a captured frame and working out its damage on the
     /// capture thread, in microseconds, over every captured frame.
     pub convert_micros: u64,
-    /// Time a coded frame waited between the capture handoff and the start
-    /// of its encode, in microseconds, over every encoded frame.
+    /// Time a freshly captured frame waited between the capture handoff and
+    /// the start of its encode, in microseconds, over motion frames.
     pub queue_micros: u64,
     /// Time spent packetizing a frame and handing it to the transport, in
     /// microseconds, over every sent frame.
@@ -913,7 +916,7 @@ impl Session {
             }
             // An encoder that is behind gets the newest frame, not a queue: a
             // desktop stream is live, and the last state is the one that counts.
-            if frame_tx.put(frame, converted) {
+            if frame_tx.put(frame, Instant::now()) {
                 if let Ok(mut m) = captured.lock() {
                     m.dropped_frames += 1;
                 }
@@ -2358,8 +2361,9 @@ fn spawn_pipeline(
                     m.encoded_bytes += packet.data.len() as u64;
                     m.encode_micros += took.as_micros() as u64;
                     m.key_frames += packet.keyframe as u64;
-                    if matches!(pass, Pass::Motion { .. }) {
+                    if matches!(pass, Pass::Motion { .. }) && pending {
                         m.queue_micros += started.duration_since(*captured).as_micros() as u64;
+                        m.motion_frames += 1;
                     }
                     match pass {
                         Pass::Motion { half: true, .. } => m.halved_frames += 1,
@@ -2482,14 +2486,12 @@ fn spawn_encoded(inner: &Arc<Inner>, mut feed: tokio_mpsc::Receiver<FedAccessUni
             };
             let started = Instant::now();
             let sent = peer.send_frame(&unit.data, unit.keyframe, started).await;
-            let send_micros = started.elapsed().as_micros() as u64;
             match sent {
                 Ok(()) => {
                     if let Ok(mut m) = inner.metrics.lock() {
                         m.encoded_frames += 1;
                         m.encoded_bytes += unit.data.len() as u64;
                         m.encode_micros += started.elapsed().as_micros() as u64;
-                        m.send_micros += send_micros;
                         if unit.keyframe {
                             m.key_frames += 1;
                         }
