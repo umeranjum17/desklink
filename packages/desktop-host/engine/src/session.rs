@@ -1993,6 +1993,16 @@ enum Taken {
 }
 
 impl FrameReceiver {
+    /// Whether a frame is waiting to be taken.
+    fn waiting(&self) -> bool {
+        self.0
+            .frame
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .0
+            .is_some()
+    }
+
     fn take(&self, wait: Duration) -> Taken {
         let held = self
             .0
@@ -2075,16 +2085,20 @@ impl RateControl {
     }
 }
 
-/// Whether motion is coded at half size. Full-size frames that change much of
-/// the picture (a packet over a quarter of the per-frame rate budget) and take
-/// longer to code than a frame interval, several in a row, cannot reach the
-/// frame rate, so the rest of the motion is coded at half size, until it stops
-/// (the refinement pass is always full size) or a run of small frames shows it
-/// has become typing-sized. Coding time alone never returns it to full size: a
-/// half-size frame costs well under half a full one, so that would flap
-/// between sizes, and each change of size costs a key frame. Both directions
-/// need a run of frames rather than one, so a slow key frame or a busy moment
-/// on the host does not flip it, and typing never halves.
+/// Whether motion is coded at half size. A full-size frame is slow when it
+/// took longer to code than a frame interval and the source already had a
+/// newer frame waiting: the encoder, not the source, set the pace. Content that
+/// arrives slower than the frame cap (30 fps into a 60 fps session) is never
+/// slow however long a frame takes, as long as it is done before the next one.
+/// Several slow frames that each change much of the picture (a packet over a
+/// quarter of the per-frame rate budget) mean full size cannot reach the frame
+/// rate, so the rest of the motion is coded at half size, until it stops (the
+/// refinement pass is always full size) or a run of frames that are both small
+/// and not slow shows full size would keep up again. Packet size or coding time
+/// alone never returns it to full size, so heavy motion does not flap between
+/// sizes; each change costs a key frame. Both directions need a run of frames
+/// rather than one, so a slow key frame or a busy moment on the host does not
+/// flip it, and typing never halves.
 #[derive(Default)]
 struct MotionSize {
     half: bool,
@@ -2096,12 +2110,14 @@ impl MotionSize {
     const SMALL_RUN: u32 = 30;
 
     /// Account for a motion frame coded at the current size in `took`; `large`
-    /// when its packet was over a quarter of the per-frame rate budget.
-    fn coded(&mut self, took: Duration, large: bool, interval: Duration) {
+    /// when its packet was over a quarter of the per-frame rate budget, `behind`
+    /// when a newer frame was already waiting once it was coded.
+    fn coded(&mut self, took: Duration, large: bool, behind: bool, interval: Duration) {
+        let slow = took > interval && behind;
         let (counts, needed) = if self.half {
-            (!large, Self::SMALL_RUN)
+            (!large && !slow, Self::SMALL_RUN)
         } else {
-            (large && took > interval, Self::SLOW_RUN)
+            (large && slow, Self::SLOW_RUN)
         };
         self.run = if counts { self.run + 1 } else { 0 };
         if self.run >= needed {
@@ -2297,7 +2313,8 @@ fn spawn_pipeline(
                         refined = false;
                         still_since = now;
                         let budget = rate.target as u64 * 1000 / 8 / max_fps.max(1) as u64;
-                        size.coded(took, packet.data.len() as u64 * 4 > budget, interval);
+                        let large = packet.data.len() as u64 * 4 > budget;
+                        size.coded(took, large, frame_rx.waiting(), interval);
                     }
                     Pass::Refine => {
                         refined = true;
@@ -3355,36 +3372,49 @@ mod tests {
     }
 
     #[test]
-    fn motion_halves_only_after_a_slow_large_run_and_returns_after_a_small_one() {
+    fn motion_halves_only_when_the_encoder_sets_the_pace_and_does_not_flap() {
         let interval = Duration::from_millis(16);
         let (slow, fast) = (Duration::from_millis(30), Duration::from_millis(2));
         let mut size = MotionSize::default();
         for _ in 0..MotionSize::SLOW_RUN * 4 {
-            size.coded(slow, false, interval);
+            size.coded(slow, false, true, interval);
         }
         assert!(
             !size.half,
             "slow small frames (typing on a busy host) keep full size"
         );
-        for _ in 0..MotionSize::SLOW_RUN - 1 {
-            size.coded(slow, true, interval);
-        }
-        size.coded(fast, true, interval);
-        assert!(!size.half, "a broken run of slow frames keeps full size");
-        for _ in 0..MotionSize::SLOW_RUN {
-            size.coded(slow, true, interval);
-        }
-        assert!(size.half, "a run of slow large frames halves");
-        for _ in 0..MotionSize::SMALL_RUN * 2 {
-            size.coded(fast, true, interval);
-        }
-        assert!(size.half, "large half-size frames stay half, however fast");
-        for _ in 0..MotionSize::SMALL_RUN {
-            size.coded(slow, false, interval);
+        for _ in 0..MotionSize::SLOW_RUN * 4 {
+            size.coded(slow, true, false, interval);
         }
         assert!(
             !size.half,
-            "a run of small half-size frames returns to full size"
+            "a source slower than the cap (30 fps, 30 ms encode) never halves"
+        );
+        for _ in 0..MotionSize::SLOW_RUN - 1 {
+            size.coded(slow, true, true, interval);
+        }
+        size.coded(fast, true, true, interval);
+        assert!(!size.half, "a broken run of slow frames keeps full size");
+        for _ in 0..MotionSize::SLOW_RUN {
+            size.coded(slow, true, true, interval);
+        }
+        assert!(size.half, "a run of slow large frames halves");
+        // The marginal band: half-size frames that are small but still slow,
+        // between large ones. Neither may send it back to full size.
+        for i in 0..MotionSize::SMALL_RUN * 10 {
+            size.coded(slow, i % 7 == 0, true, interval);
+            assert!(size.half, "marginal half-size motion must not flap back");
+        }
+        for _ in 0..MotionSize::SMALL_RUN * 2 {
+            size.coded(fast, true, true, interval);
+        }
+        assert!(size.half, "large half-size frames stay half, however fast");
+        for _ in 0..MotionSize::SMALL_RUN {
+            size.coded(fast, false, true, interval);
+        }
+        assert!(
+            !size.half,
+            "a run of small, fast half-size frames returns to full size"
         );
     }
 

@@ -333,12 +333,13 @@ the newest frame is always coded. `refined_frames` counts refinement passes: a
 desktop that stops changing is coded once more at a fine quantizer, so it reads
 sharp. `halved_frames` counts motion frames coded at half width and height: when
 full-size frames that change much of the picture take longer to code than a
-frame interval several frames in a row, motion is coded at half size until the
-desktop stops or its changes shrink to small ones; the refinement pass is always
-full size. Key frames are sent only for the first frame, when the receiver asks
-(RTCP PLI or FIR), and when the coded size changes that way, so a receiver never
-has to scale references across a size change. `target_kbps` is the current rate
-target after any back-off for loss the receiver reported.
+frame interval while a newer frame is already waiting, several frames in a row,
+motion is coded at half size until the desktop stops or its changes shrink to
+small ones that code in time; the refinement pass is always full size. Key
+frames are sent only for the first frame, when the receiver asks (RTCP PLI or
+FIR), and when the coded size changes that way, so a receiver never has to scale
+references across a size change. `target_kbps` is the current rate target after
+any back-off for loss the receiver reported.
 
 ## Input and clipboard: the session's control channel
 
