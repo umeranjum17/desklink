@@ -26,8 +26,17 @@
 /* Not an OSStatus: the encoder chose to drop the frame rather than fail. */
 #define DL_VT_DROPPED 1
 
-/* How many times one picture is offered before a skip is reported. */
-#define DL_VT_ATTEMPTS 6
+/* How many times one picture is offered to low-latency rate control before
+ * the session falls back to the ordinary real-time mode. */
+#define DL_VT_ATTEMPTS 4
+
+/* Outside low-latency mode MaxAllowedFrameQP (and MinAllowedFrameQP) are
+ * accepted but ignored, and the per-frame BaseFrameQP would have to be set on
+ * every frame, so a refinement frame gets a rate target this many times the
+ * session's instead. Rate control moves QP about 5 steps per frame whatever
+ * the target, so the refinement lands about 5 below its neighbours: QP 20 when
+ * they sit at 25, QP 40 when they sit at 45. */
+#define DL_VT_REFINE_RATE_SCALE 16
 
 typedef struct {
     VTCompressionSessionRef session;
@@ -38,6 +47,7 @@ typedef struct {
      * Constrained Baseline; otherwise the ordinary real-time mode, which needs
      * a hard data-rate cap to keep a key frame from flooding the link. */
     int low_latency;
+    int bitrate_kbps;
     int64_t frame_index;
     /* The access unit the callback last produced, Annex-B. */
     uint8_t *out;
@@ -157,6 +167,7 @@ static OSStatus set_int(VTSessionRef session, CFStringRef key, int64_t value) {
  * letting it take the link. Only used outside low-latency mode, which paces
  * itself. */
 static OSStatus set_rate(dl_vt_encoder *self, int bitrate_kbps) {
+    self->bitrate_kbps = bitrate_kbps;
     OSStatus status =
         set_int(self->session, kVTCompressionPropertyKey_AverageBitRate, (int64_t)bitrate_kbps * 1000);
     if (status != noErr || self->low_latency) {
@@ -174,10 +185,20 @@ static OSStatus set_rate(dl_vt_encoder *self, int bitrate_kbps) {
     return status;
 }
 
+static void close_session(dl_vt_encoder *self) {
+    if (self->session != NULL) {
+        VTCompressionSessionInvalidate(self->session);
+        CFRelease(self->session);
+        self->session = NULL;
+    }
+}
+
 static OSStatus open_session(dl_vt_encoder *self, int low_latency, int bitrate_kbps) {
     CFMutableDictionaryRef spec = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
                                                             &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(spec, kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
+    /* Required, not just enabled: the backend reports itself as hardware, and
+     * a software fallback would code 4K at a fraction of the frame rate. */
+    CFDictionarySetValue(spec, kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
                          kCFBooleanTrue);
     if (low_latency) {
         CFDictionarySetValue(spec, kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
@@ -221,6 +242,21 @@ static OSStatus open_session(dl_vt_encoder *self, int low_latency, int bitrate_k
     if (status == noErr) {
         status = set_int(s, kVTCompressionPropertyKey_ExpectedFrameRate, self->fps);
     }
+    /* The converter produces BT.601 limited range, as the VP9 path signals;
+     * without these in the VUI a receiver guesses BT.709 for HD and shifts
+     * every colour. */
+    if (status == noErr) {
+        status = VTSessionSetProperty(s, kVTCompressionPropertyKey_YCbCrMatrix,
+                                      kCVImageBufferYCbCrMatrix_ITU_R_601_4);
+    }
+    if (status == noErr) {
+        status = VTSessionSetProperty(s, kVTCompressionPropertyKey_ColorPrimaries,
+                                      kCVImageBufferColorPrimaries_SMPTE_C);
+    }
+    if (status == noErr) {
+        status = VTSessionSetProperty(s, kVTCompressionPropertyKey_TransferFunction,
+                                      kCVImageBufferTransferFunction_ITU_R_709_2);
+    }
     if (status == noErr) {
         status = set_rate(self, bitrate_kbps);
     }
@@ -231,9 +267,7 @@ static OSStatus open_session(dl_vt_encoder *self, int low_latency, int bitrate_k
         status = VTCompressionSessionPrepareToEncodeFrames(self->session);
     }
     if (status != noErr) {
-        VTCompressionSessionInvalidate(self->session);
-        CFRelease(self->session);
-        self->session = NULL;
+        close_session(self);
     }
     return status;
 }
@@ -242,10 +276,7 @@ void dl_vt_destroy(dl_vt_encoder *self) {
     if (self == NULL) {
         return;
     }
-    if (self->session != NULL) {
-        VTCompressionSessionInvalidate(self->session);
-        CFRelease(self->session);
-    }
+    close_session(self);
     free(self->out);
     free(self);
 }
@@ -289,7 +320,11 @@ static OSStatus copy_i420(dl_vt_encoder *self, const uint8_t *i420, CVPixelBuffe
     if (made != kCVReturnSuccess) {
         return made;
     }
-    CVPixelBufferLockBaseAddress(buffer, 0);
+    CVReturn locked = CVPixelBufferLockBaseAddress(buffer, 0);
+    if (locked != kCVReturnSuccess) {
+        CVPixelBufferRelease(buffer);
+        return locked;
+    }
     int w = self->width, h = self->height;
     uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(buffer, 0);
     size_t y_stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0);
@@ -314,18 +349,21 @@ static OSStatus copy_i420(dl_vt_encoder *self, const uint8_t *i420, CVPixelBuffe
     return noErr;
 }
 
-/* Encode one tightly packed I420 frame. With `max_qp` below H.264's 51 the
- * frame is coded under that ceiling and the ceiling restored afterwards: a
- * refinement pass. The access unit is available through dl_vt_out_* until the
- * next call. */
-OSStatus dl_vt_encode(dl_vt_encoder *self, const uint8_t *i420, int force_keyframe, int max_qp) {
+/* Offer one picture to the current session. Low-latency rate control skips a
+ * frame to pay for a large one (an IDR or a refinement); the same picture then
+ * goes in again, stamped later each time, which is normally enough. */
+static OSStatus submit(dl_vt_encoder *self, const uint8_t *i420, int force_keyframe, int max_qp) {
     CVPixelBufferRef buffer = NULL;
     OSStatus status = copy_i420(self, i420, &buffer);
     if (status != noErr) {
         return status;
     }
-    if (max_qp < DL_VT_MOTION_MAX_QP) {
-        status = set_int(self->session, kVTCompressionPropertyKey_MaxAllowedFrameQP, max_qp);
+    int refine = max_qp < DL_VT_MOTION_MAX_QP;
+    int bitrate_kbps = self->bitrate_kbps;
+    if (refine) {
+        status = self->low_latency
+                     ? set_int(self->session, kVTCompressionPropertyKey_MaxAllowedFrameQP, max_qp)
+                     : set_rate(self, self->bitrate_kbps * DL_VT_REFINE_RATE_SCALE);
     }
     CFDictionaryRef options = NULL;
     if (status == noErr && force_keyframe) {
@@ -334,11 +372,6 @@ OSStatus dl_vt_encode(dl_vt_encoder *self, const uint8_t *i420, int force_keyfra
         options = CFDictionaryCreate(NULL, &key, &value, 1, &kCFTypeDictionaryKeyCallBacks,
                                      &kCFTypeDictionaryValueCallBacks);
     }
-    /* Low-latency rate control skips a frame to pay for a large one (an IDR or
-     * a refinement) at low rates. The session needs every frame coded, so the
-     * same picture goes in again, stamped later each time: one frame interval
-     * is normally enough, and the doubling gap spans 63 intervals in all:
-     * enough budget for an IDR at the session's lowest rate target. */
     int64_t gap = 1;
     for (int attempt = 0; status == noErr && attempt < DL_VT_ATTEMPTS; attempt++, gap *= 2) {
         self->out_size = 0;
@@ -361,9 +394,12 @@ OSStatus dl_vt_encode(dl_vt_encoder *self, const uint8_t *i420, int force_keyfra
             break;
         }
     }
-    if (max_qp < DL_VT_MOTION_MAX_QP) {
+    if (refine) {
         OSStatus restored =
-            set_int(self->session, kVTCompressionPropertyKey_MaxAllowedFrameQP, DL_VT_MOTION_MAX_QP);
+            self->low_latency
+                ? set_int(self->session, kVTCompressionPropertyKey_MaxAllowedFrameQP,
+                          DL_VT_MOTION_MAX_QP)
+                : set_rate(self, bitrate_kbps);
         if (status == noErr) {
             status = restored;
         }
@@ -375,7 +411,33 @@ OSStatus dl_vt_encode(dl_vt_encoder *self, const uint8_t *i420, int force_keyfra
     return status;
 }
 
+/* Encode one tightly packed I420 frame. With `max_qp` below H.264's 51 the
+ * frame is a refinement pass, coded under that ceiling. The access unit is
+ * available through dl_vt_out_* until the next call.
+ *
+ * At a rate too low for the size, low-latency rate control skips frame after
+ * frame (1080p at a few hundred kbps); the session needs every frame coded, so
+ * it moves to the ordinary real-time mode, which has not been seen to skip
+ * at any rate, and this picture becomes the new session's IDR. */
+OSStatus dl_vt_encode(dl_vt_encoder *self, const uint8_t *i420, int force_keyframe, int max_qp) {
+    if (self->session == NULL) {
+        return kVTInvalidSessionErr; /* a failed fallback reopen */
+    }
+    OSStatus status = submit(self, i420, force_keyframe, max_qp);
+    if (status == DL_VT_DROPPED && self->low_latency) {
+        close_session(self);
+        status = open_session(self, 0, self->bitrate_kbps);
+        if (status == noErr) {
+            status = submit(self, i420, 1, max_qp);
+        }
+    }
+    return status;
+}
+
 OSStatus dl_vt_set_bitrate(dl_vt_encoder *self, int bitrate_kbps) {
+    if (self->session == NULL) {
+        return kVTInvalidSessionErr;
+    }
     return bitrate_kbps > 0 ? set_rate(self, bitrate_kbps) : kVTParameterErr;
 }
 

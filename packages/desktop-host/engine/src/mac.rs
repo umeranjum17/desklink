@@ -707,7 +707,10 @@ mod tests {
         assert_eq!(value["protocol"], crate::protocol::PROTOCOL_VERSION);
         assert_eq!(value["platform"], "macos");
         assert_eq!(value["capture"]["mechanism"], "screencapturekit");
-        assert_eq!(value["encode"]["codecs"], json!(["vp9"]));
+        assert_eq!(value["encode"]["codecs"][0], "vp9", "VP9 is always offered");
+        // Every Mac this engine runs on has a hardware H.264 encoder.
+        assert_eq!(value["encode"]["codecs"][1], "h264");
+        assert_eq!(value["encode"]["h264"]["encoder"], "videotoolbox");
         assert!(value["capture"]["displays"].is_array());
         assert!(value["clipboard"]["read"].as_bool().unwrap());
         assert!(matches!(

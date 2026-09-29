@@ -2,7 +2,8 @@
 //! the C shim in `native/vt_shim.c`.
 //!
 //! Low-latency rate control where the machine's encoder offers it for
-//! Constrained Baseline, the ordinary real-time mode otherwise; either way no
+//! Constrained Baseline, the ordinary real-time mode otherwise, or once the rate
+//! is too low for low-latency mode to code every frame; either way no
 //! reordering and no lookahead, and the shim flushes each frame before it
 //! returns, so one frame in is one access unit out. VideoToolbox is a system
 //! framework present on every supported macOS, so it is linked, not loaded.
@@ -33,6 +34,7 @@ extern "C" {
         max_qp: c_int,
     ) -> i32;
     fn dl_vt_set_bitrate(encoder: *mut NativeEncoder, bitrate_kbps: c_int) -> i32;
+    #[cfg(test)]
     fn dl_vt_low_latency(encoder: *const NativeEncoder) -> c_int;
     fn dl_vt_out_data(encoder: *const NativeEncoder) -> *const u8;
     fn dl_vt_out_size(encoder: *const NativeEncoder) -> usize;
@@ -40,10 +42,9 @@ extern "C" {
     fn dl_vt_destroy(encoder: *mut NativeEncoder);
 }
 
-/// The shim's report of a frame the rate control skipped on every attempt
-/// (`DL_VT_DROPPED`, `DL_VT_ATTEMPTS`).
+/// The shim's report of a frame the rate control skipped on every attempt,
+/// even in the ordinary real-time mode (`DL_VT_DROPPED`).
 const DROPPED: i32 = 1;
-const ATTEMPTS: u32 = 6;
 
 /// H.264's own quantizer ceiling: no cap outside a refinement pass.
 const MOTION_MAX_QP: c_int = 51;
@@ -101,7 +102,7 @@ impl Encoder {
         let status =
             unsafe { dl_vt_encode(self.native, frame.data.as_ptr(), keyframe as c_int, max_qp) };
         if status == DROPPED {
-            anyhow::bail!("VideoToolbox skipped the same frame {ATTEMPTS} times; the rate is too low for this size");
+            anyhow::bail!("VideoToolbox skipped the same frame on every attempt");
         }
         if status != 0 {
             anyhow::bail!("VideoToolbox failed to code a frame (OSStatus {status})");
@@ -123,10 +124,11 @@ impl crate::h264::Backend for Encoder {
         self.code(frame, keyframe, MOTION_MAX_QP)
     }
 
-    /// `MaxAllowedFrameQP` lowered for this one frame, then restored. Only
-    /// low-latency mode honours it: the ordinary mode accepts the property and
-    /// codes at the rate target anyway, so there a refinement is a plain
-    /// re-code of the still.
+    /// Low-latency mode lowers `MaxAllowedFrameQP` for this one frame. The
+    /// ordinary mode accepts that property and ignores it, so there the frame
+    /// gets a rate target many times the session's instead, which buys about 5
+    /// QP below the frames around it: [`REFINE_MAX_QP`] only when those sit
+    /// near 25 (`DL_VT_REFINE_RATE_SCALE` in the shim).
     fn refine(&mut self, frame: &I420) -> Result<EncodedFrame> {
         self.code(frame, false, REFINE_MAX_QP as c_int)
     }
@@ -151,19 +153,31 @@ mod tests {
     use super::*;
     use crate::h264::Backend;
 
-    /// A box that moves with `t` over a gradient: something to predict from.
+    /// A coloured box that moves with `t` over a grey gradient: something to
+    /// predict from, and colour a decoder could get wrong.
     fn pattern(width: usize, height: usize, t: usize) -> I420 {
         let mut data = vec![128u8; width * height * 3 / 2];
+        let inside = |x: usize, y: usize| {
+            (x + width - (t * 8) % width) % width < width / 4
+                && y > height / 3
+                && y < height * 2 / 3
+        };
         for y in 0..height {
             for x in 0..width {
-                let inside = (x + width - (t * 8) % width) % width < width / 4
-                    && y > height / 3
-                    && y < height * 2 / 3;
-                data[y * width + x] = if inside {
-                    235
+                data[y * width + x] = if inside(x, y) {
+                    160
                 } else {
                     ((x + y + t * 3) % 200) as u8 + 16
                 };
+            }
+        }
+        let (cw, ch) = (width / 2, height / 2);
+        for y in 0..ch {
+            for x in 0..cw {
+                if inside(x * 2, y * 2) {
+                    data[width * height + y * cw + x] = 90;
+                    data[width * height + cw * ch + y * cw + x] = 200;
+                }
             }
         }
         I420 {
@@ -261,6 +275,43 @@ mod tests {
         }
     }
 
+    /// The lowest rates a session sets at each size: low-latency rate control
+    /// skips frames there, and a skip must never reach the session as an error.
+    #[test]
+    fn h264_vt_codes_every_frame_at_the_lowest_rates() {
+        for (w, h, kbps) in [
+            (640, 360, 100),
+            (1366, 768, 200),
+            (1920, 1080, 300),
+            (1920, 1080, 654),
+            (3840, 2160, 1500),
+        ] {
+            let Some(mut encoder) = open(w, h, kbps, 30) else {
+                return;
+            };
+            // Few distinct pictures: building a 4K one is slow in a debug build.
+            let frames: Vec<_> = (0..8).map(|t| pattern(w, h, t)).collect();
+            for t in 0..40 {
+                let frame = &frames[t % 8];
+                let coded = match t {
+                    0 | 20 => encoder.encode(frame, true),
+                    30 => encoder.refine(&frames[29 % 8]),
+                    _ => encoder.encode(frame, false),
+                }
+                .unwrap_or_else(|error| panic!("{w}x{h} at {kbps} kbps, frame {t}: {error:#}"));
+                let types = nal_types(&coded.data);
+                assert_eq!(coded.keyframe, types.contains(&5), "frame {t}: {types:?}");
+                if t == 0 || t == 20 {
+                    assert_idr(&coded);
+                }
+            }
+            eprintln!(
+                "{w}x{h} at {kbps} kbps: low latency {}",
+                encoder.low_latency()
+            );
+        }
+    }
+
     /// Writes `$DESKLINK_VT_DUMP` (60 frames of motion, an IDR and a refine in
     /// the middle) for an external decoder, and times 1080p and 4K. The rate is
     /// low so motion frames sit above the refinement ceiling.
@@ -286,6 +337,24 @@ mod tests {
             out.extend_from_slice(&coded.data);
         }
         std::fs::write(&path, out).unwrap();
+        std::fs::write(format!("{path}.yuv"), pattern(w, h, 0).data).unwrap();
+        // The ordinary mode, reached through a rate low-latency mode cannot
+        // hold, then raised: its refinement's quantizer for an external parser.
+        let mut encoder = open(w, h, 100, 30).unwrap();
+        let mut out = Vec::new();
+        for t in 0..60 {
+            if t == 10 {
+                assert!(!encoder.low_latency(), "still in low-latency mode");
+                encoder.set_bitrate(1000).unwrap();
+            }
+            let coded = match t {
+                45 => encoder.refine(&pattern(w, h, 44)),
+                _ => encoder.encode(&pattern(w, h, t), t == 0),
+            }
+            .unwrap_or_else(|error| panic!("fallback frame {t}: {error:#}"));
+            out.extend_from_slice(&coded.data);
+        }
+        std::fs::write(format!("{path}.fallback"), out).unwrap();
         for (w, h, kbps) in [(1920, 1080, 8000), (3840, 2160, 20000)] {
             let frames: Vec<_> = (0..8).map(|t| pattern(w, h, t)).collect();
             let mut encoder = open(w, h, kbps, 60).unwrap();
