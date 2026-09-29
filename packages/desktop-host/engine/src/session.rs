@@ -4043,11 +4043,20 @@ mod tests {
         let metrics = inner.metrics.lock().unwrap().clone();
         assert_eq!((metrics.codec, metrics.encoder), ("h264", info.encoder));
         assert!(metrics.encoded_frames >= 2, "{metrics:?}");
-        assert_eq!(metrics.key_frames, 1, "one IDR, then inter frames: {metrics:?}");
+        assert_eq!(
+            metrics.key_frames, 1,
+            "one IDR, then inter frames: {metrics:?}"
+        );
         assert_eq!(metrics.refined_frames, 1, "a still desktop is refined once");
-        assert_eq!(metrics.halved_frames, 0, "H.264 is always coded at full size");
+        assert_eq!(
+            metrics.halved_frames, 0,
+            "H.264 is always coded at full size"
+        );
         pin.abort();
         inner.close("done").await;
-        assert!(lock(&inner.encoder).is_none(), "closing releases the encoder");
+        assert!(
+            lock(&inner.encoder).is_none(),
+            "closing releases the encoder"
+        );
     }
 }

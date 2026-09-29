@@ -794,10 +794,7 @@ impl VideoPeer {
         // states no preference of its own answers with the first.
         let video_codecs = match &codec {
             VideoCodec::Vp9 => vec![vp9_codec()],
-            VideoCodec::Vp9OrH264 => vec![
-                vp9_codec(),
-                h264_codec(crate::h264::PROFILE_LEVEL_ID),
-            ],
+            VideoCodec::Vp9OrH264 => vec![vp9_codec(), h264_codec(crate::h264::PROFILE_LEVEL_ID)],
             VideoCodec::H264 { profile_level_id } => vec![h264_codec(profile_level_id)],
         };
         let video_codec = video_codecs[0].clone();
@@ -997,8 +994,7 @@ impl VideoPeer {
                 .payloader()
                 .context("the media engine has no H.264 payloader")?;
             *lock(&self.packetizer) = Packetizer::H264(H264Packetizer::new(payloader));
-            self.payload_type
-                .store(H264_PAYLOAD_TYPE, Ordering::SeqCst);
+            self.payload_type.store(H264_PAYLOAD_TYPE, Ordering::SeqCst);
             self.sends_h264.store(true, Ordering::SeqCst);
         }
         let mut applied = 0;

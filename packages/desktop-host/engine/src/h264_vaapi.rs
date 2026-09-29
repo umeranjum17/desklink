@@ -70,8 +70,7 @@ fn devices() -> Vec<String> {
             let driver = std::path::Path::new("/sys/class/drm")
                 .join(entry.file_name())
                 .join("device/driver");
-            std::fs::read_link(driver)
-                .map_or(true, |driver| !driver.ends_with("nvidia"))
+            std::fs::read_link(driver).map_or(true, |driver| !driver.ends_with("nvidia"))
         })
         .map(|entry| entry.path().to_string_lossy().into_owned())
         .collect();
