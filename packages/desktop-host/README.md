@@ -62,6 +62,8 @@ a source build with a static VP9 library.
 
 ## Install and run
 
+Latest: 0.2.0 — ~1.1 MB unpacked, plus the `@desklink/host-linux-x64-gnu` 0.2.0 platform package (~17 MB) that carries the prebuilt engine. The npm badge at the top of this page tracks the registry, so it never goes stale, and npm verifies each package's integrity on install, so there is no separate checksum to copy. The GitHub release ([latest](https://github.com/umeranjum17/desklink/releases/latest), tag [`desklink-host-v0.2.0`](https://github.com/umeranjum17/desklink/releases/tag/desklink-host-v0.2.0)) carries no attached assets — npm is the distribution channel. Supported platforms: Linux x64 with glibc 2.36 or newer (prebuilt); macOS stays behind `DESKLINK_MACOS=1` with a source build and has no published platform package yet.
+
 ```sh
 npm install @desklink/host
 npx desklink-host path            # the engine this install will run

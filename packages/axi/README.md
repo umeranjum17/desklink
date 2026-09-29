@@ -12,9 +12,19 @@
   A desktop CLI for coding agents on the desklink engine. It answers with OCR text, refs to click and changed regions, and returns an image crop only when asked, so a turn costs text tokens rather than screenshots.
 </p>
 
+## Install
+
+Not on npm yet — build it from source. The npm badge above will track the registry once it is published. Until then, from the repository root:
+
+```sh
+npm install && npm run build
+```
+
+The engine is resolved by `@desklink/host` (install it from npm, or set `DESKLINK_AXI_ENGINE` to an executable built from source); on macOS use `DESKLINK_MACOS=1` as that package describes. There is no `@desklink/axi` release yet — watch the [releases page](https://github.com/umeranjum17/desklink/releases/latest) for one.
+
 A Linux/macOS desktop AXI. It runs a private bridge per session, captures read-only frames through `@desklink/host` protocol v3, and sends input only through a WebRTC `control` channel. The bridge's Unix socket lives in `$XDG_RUNTIME_DIR/desklink-axi` (or the OS temp directory), with `DESKLINK_AXI_SESSION` selecting an isolated socket. It opens a separate engine session; don't drive the desktop while someone else is controlling it.
 
-Build: `npm install && npm run build` from the repository root. The engine is resolved by `@desklink/host`; set `DESKLINK_AXI_ENGINE` to an executable built from source if no packaged binary is installed. On macOS use `PATH=/opt/homebrew/bin:$PATH`, Rust >= 1.97.1, delete copied `*.tsbuildinfo` before rebuilding a moved worktree, and `DESKLINK_VPX_STATIC_DIR=/opt/homebrew` (the install **prefix**, not `/opt/homebrew/lib`). For macOS start the bridge from a stable signed app, not `desklink-axi start` in Terminal/SSH: `open -n /absolute/DesklinkHost.app --args axi-bridge /absolute/path/to/packages/axi/bin/desklink-axi.js --control`. Install or update that app using `packages/desktop-host/release/install-mac-app.sh`; grant Screen Recording and Accessibility to it once. An SSH-launched Node helper does not inherit those grants. OCR needs the optional `tesseract` executable (`brew install tesseract`, `sudo pacman -S tesseract` or `sudo apt install tesseract-ocr`); on macOS AXI also finds Homebrew's standard install paths when LaunchServices omits them from PATH. `look` works without it.
+The engine is resolved by `@desklink/host`; set `DESKLINK_AXI_ENGINE` to an executable built from source if no packaged binary is installed. On macOS use `PATH=/opt/homebrew/bin:$PATH`, Rust >= 1.97.1, delete copied `*.tsbuildinfo` before rebuilding a moved worktree, and `DESKLINK_VPX_STATIC_DIR=/opt/homebrew` (the install **prefix**, not `/opt/homebrew/lib`). For macOS start the bridge from a stable signed app, not `desklink-axi start` in Terminal/SSH: `open -n /absolute/DesklinkHost.app --args axi-bridge /absolute/path/to/packages/axi/bin/desklink-axi.js --control`. Install or update that app using `packages/desktop-host/release/install-mac-app.sh`; grant Screen Recording and Accessibility to it once. An SSH-launched Node helper does not inherit those grants. OCR needs the optional `tesseract` executable (`brew install tesseract`, `sudo pacman -S tesseract` or `sudo apt install tesseract-ocr`); on macOS AXI also finds Homebrew's standard install paths when LaunchServices omits them from PATH. `look` works without it.
 
 ```
 desklink-axi start --control --source x11 --display :97

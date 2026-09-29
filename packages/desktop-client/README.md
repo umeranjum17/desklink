@@ -19,6 +19,8 @@ the application.
 
 ## Install
 
+Latest: 0.2.0 (~236 KB unpacked). The npm badge at the top of this page tracks the registry, so it never goes stale, and npm verifies the package's integrity on install, so there is no separate checksum to copy. The GitHub release ([latest](https://github.com/umeranjum17/desklink/releases/latest), tag [`desklink-react-native-v0.2.0`](https://github.com/umeranjum17/desklink/releases/tag/desklink-react-native-v0.2.0)) carries no attached assets — npm is the distribution channel. Supported platforms: Android, iOS and web.
+
 The package contains native code and is not an Expo Go package. Inside this
 repository it resolves through the workspace; anywhere else, install it from npm:
 
