@@ -60,6 +60,20 @@ pub struct Metrics {
     pub halved_frames: u64,
     /// Time spent in the encoder, in microseconds, over every encoded frame.
     pub encode_micros: u64,
+    /// Time spent grabbing and converting a frame on the capture thread, in
+    /// microseconds, over every captured frame. On X11 this is the whole
+    /// `GetImage` plus both colour conversions; the lab harness reads it as
+    /// the grab cost L1 owns.
+    pub capture_micros: u64,
+    /// Time spent hashing a captured frame and working out its damage on the
+    /// capture thread, in microseconds, over every captured frame.
+    pub convert_micros: u64,
+    /// Time a coded frame waited between the capture handoff and the start
+    /// of its encode, in microseconds, over every encoded frame.
+    pub queue_micros: u64,
+    /// Time spent packetizing a frame and handing it to the transport, in
+    /// microseconds, over every sent frame.
+    pub send_micros: u64,
     /// The current rate target, after any loss back-off.
     pub target_kbps: u32,
     pub input_applied: u64,
@@ -216,10 +230,12 @@ fn select_x11(
                 let mut last_hash = None;
                 while !stop.load(Ordering::SeqCst) {
                     let started = Instant::now();
+                    let grabbed = Instant::now();
                     let frame = {
                         let mut desktop = lock(&desktop);
                         desktop.capture_with_pixels(max_width, max_height)
                     };
+                    let grab_micros = grabbed.elapsed().as_micros() as u64;
                     match frame {
                         Ok((frame, raw)) => {
                             use std::hash::{Hash, Hasher};
@@ -228,6 +244,9 @@ fn select_x11(
                             let hash = hasher.finish();
                             if last_hash != Some(hash) {
                                 last_hash = Some(hash);
+                                if let Ok(mut m) = captured.lock() {
+                                    m.capture_micros += grab_micros;
+                                }
                                 let (w, h) = (frame.width, frame.height);
                                 let (screen_w, screen_h) = (width as usize, height as usize);
                                 sink(frame, sequence, &mut || {
@@ -854,6 +873,7 @@ impl Session {
         let frame_session_id = id.clone();
         let local_frames = request.local_frames;
         let sink = Box::new(move |frame: I420, _seq: u64, pixels: capture::Pixels| {
+            let converted = Instant::now();
             let raw = if local_frames { pixels() } else { None };
             let hashes = raw
                 .as_ref()
@@ -889,10 +909,11 @@ impl Session {
             }
             if let Ok(mut m) = captured.lock() {
                 m.captured_frames += 1;
+                m.convert_micros += converted.elapsed().as_micros() as u64;
             }
             // An encoder that is behind gets the newest frame, not a queue: a
             // desktop stream is live, and the last state is the one that counts.
-            if frame_tx.put(frame) {
+            if frame_tx.put(frame, converted) {
                 if let Ok(mut m) = captured.lock() {
                     m.dropped_frames += 1;
                 }
@@ -1977,9 +1998,11 @@ fn frame_interval(max_fps: u32) -> Duration {
 
 /// The newest captured frame, handed from the capture thread to the encoder. A
 /// newer frame replaces one the encoder has not taken, so however far behind
-/// it falls, what it codes next is the desktop as it is now.
+/// it falls, what it codes next is the desktop as it is now. The instant
+/// travels with the picture so the pipeline can report how long a coded frame
+/// waited for its encode.
 struct FrameSlot {
-    frame: Mutex<(Option<I420>, bool)>,
+    frame: Mutex<(Option<(I420, Instant)>, bool)>,
     ready: Condvar,
 }
 
@@ -1996,13 +2019,13 @@ fn latest_frame() -> (FrameSender, FrameReceiver) {
 
 impl FrameSender {
     /// Hand over a frame; true when it replaced one the encoder never took.
-    fn put(&self, frame: I420) -> bool {
+    fn put(&self, frame: I420, captured: Instant) -> bool {
         let mut held = self
             .0
             .frame
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let replaced = held.0.replace(frame).is_some();
+        let replaced = held.0.replace((frame, captured)).is_some();
         self.0.ready.notify_one();
         replaced
     }
@@ -2022,7 +2045,7 @@ impl Drop for FrameSender {
 }
 
 enum Taken {
-    Frame(I420),
+    Frame(I420, Instant),
     Timeout,
     Ended,
 }
@@ -2050,7 +2073,7 @@ impl FrameReceiver {
             .wait_timeout_while(held, wait, |(frame, ended)| frame.is_none() && !*ended)
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match held.0.take() {
-            Some(frame) => Taken::Frame(frame),
+            Some((frame, captured)) => Taken::Frame(frame, captured),
             None if held.1 => Taken::Ended,
             None => Taken::Timeout,
         }
@@ -2199,7 +2222,7 @@ fn spawn_pipeline(
             if let Ok(mut m) = inner.metrics.lock() {
                 m.target_kbps = bitrate_kbps;
             }
-            let mut latest: Option<I420> = None;
+            let mut latest: Option<(I420, Instant)> = None;
             // `pending`: the latest frame has not been coded. `refined`: it has
             // had its refinement pass, or there is nothing to refine.
             let mut pending = false;
@@ -2232,13 +2255,13 @@ fn spawn_pipeline(
                         .clamp(Duration::from_millis(10), Duration::from_millis(100))
                 };
                 match frame_rx.take(wait) {
-                    Taken::Frame(frame) => {
+                    Taken::Frame(frame, captured) => {
                         if pending {
                             if let Ok(mut m) = inner.metrics.lock() {
                                 m.dropped_frames += 1;
                             }
                         }
-                        latest = Some(frame);
+                        latest = Some((frame, captured));
                         pending = true;
                         refined = false;
                         still_since = Instant::now();
@@ -2266,7 +2289,7 @@ fn spawn_pipeline(
                         }
                     }
                 }
-                let Some(frame) = latest.as_ref() else {
+                let Some((frame, captured)) = latest.as_ref() else {
                     continue;
                 };
                 if !connected {
@@ -2335,6 +2358,9 @@ fn spawn_pipeline(
                     m.encoded_bytes += packet.data.len() as u64;
                     m.encode_micros += took.as_micros() as u64;
                     m.key_frames += packet.keyframe as u64;
+                    if matches!(pass, Pass::Motion { .. }) {
+                        m.queue_micros += started.duration_since(*captured).as_micros() as u64;
+                    }
                     match pass {
                         Pass::Motion { half: true, .. } => m.halved_frames += 1,
                         Pass::Refine => m.refined_frames += 1,
@@ -2358,6 +2384,7 @@ fn spawn_pipeline(
                     Pass::Keepalive => {}
                 }
                 last_sent = Some(now);
+                let sending = Instant::now();
                 if let Err(error) =
                     handle.block_on(peer.send_frame(&packet.data, packet.keyframe, now))
                 {
@@ -2373,6 +2400,9 @@ fn spawn_pipeline(
                         target.close(&reason).await;
                     });
                     break;
+                }
+                if let Ok(mut m) = inner.metrics.lock() {
+                    m.send_micros += sending.elapsed().as_micros() as u64;
                 }
             }
         })
@@ -2452,12 +2482,14 @@ fn spawn_encoded(inner: &Arc<Inner>, mut feed: tokio_mpsc::Receiver<FedAccessUni
             };
             let started = Instant::now();
             let sent = peer.send_frame(&unit.data, unit.keyframe, started).await;
+            let send_micros = started.elapsed().as_micros() as u64;
             match sent {
                 Ok(()) => {
                     if let Ok(mut m) = inner.metrics.lock() {
                         m.encoded_frames += 1;
                         m.encoded_bytes += unit.data.len() as u64;
                         m.encode_micros += started.elapsed().as_micros() as u64;
+                        m.send_micros += send_micros;
                         if unit.keyframe {
                             m.key_frames += 1;
                         }
@@ -3129,7 +3161,7 @@ mod tests {
             width: 32,
             height: 32,
             data: vec![128u8; 32 * 32 + 2 * 16 * 16],
-        });
+        }, Instant::now());
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         let mut reason = None;
@@ -3477,7 +3509,7 @@ mod tests {
                 width: 64,
                 height: 64,
                 data: vec![128u8; 64 * 64 + 2 * 32 * 32],
-            });
+            }, Instant::now());
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let motion = inner.metrics.lock().unwrap().encoded_frames;

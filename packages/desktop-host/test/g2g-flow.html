@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>desklink glass-to-glass lab</title>
+<!--
+  The browser half of `g2g-flow.mjs`.
+
+  Like `encoded-flow.html` this is the client package's own web implementation
+  (`native.web.ts`) driven the way an application drives it: open a session
+  over the signalling channel, take the offer the engine sends, answer it and
+  mount the surface. The difference is what it measures: on every presented
+  frame it reads the stamp strip the `stamp_target` example paints (24
+  black-or-white 48 px blocks in the top 48 px row, encoding CLOCK_REALTIME
+  milliseconds, low 24 bits) and stores the glass-to-glass delay, so the driver
+  can report fps and latency without re-implementing the media path.
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #000; }
+  #surface { position: absolute; inset: 0; overflow: hidden; }
+</style>
+</head>
+<body>
+<div id="surface"></div>
+<script>
+// The client's own module owns its peer connections; record them at
+// construction so the lab can read receiver-side WebRTC counters.
+window.__pcs = [];
+const RealRTCPeerConnection = window.RTCPeerConnection;
+window.RTCPeerConnection = function (...args) {
+    const pc = new RealRTCPeerConnection(...args);
+    window.__pcs.push(pc);
+    return pc;
+};
+window.RTCPeerConnection.prototype = RealRTCPeerConnection.prototype;
+</script>
+<script type="module">
+import { attachSurface, nativeDesklink } from '/packages/desktop-client/src/native.web.ts';
+
+const query = new URLSearchParams(location.search);
+const socket = new WebSocket(query.get('engine'));
+const pending = new Map();
+const state = {
+    localId: null,
+    sessionId: null,
+    geometry: null,
+    offer: null,
+    answer: null,
+    presented: false,
+    failure: null,
+    /** Glass-to-glass samples in ms, one per presented frame that decoded. */
+    g2g: [],
+    /** Presented frames whose stamp could not be read (blur, scaling, loss). */
+    discarded: 0,
+    /** Presentation timestamps in ms, for the frame-interval distribution. */
+    intervals: [],
+    frames: 0,
+    rejection: null,
+    /** The desktop width the stamp covers, so blocks scale to the video. */
+    desktopWidth: Number(query.get('width')),
+    desktopHeight: Number(query.get('height')),
+};
+let nextId = 0;
+let lastPresentation = 0;
+
+function request(method, params) {
+    const id = ++nextId;
+    return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        socket.send(JSON.stringify({ id, method, params: params ?? {} }));
+        setTimeout(() => {
+            if (pending.delete(id)) reject(new Error(`${method} timed out`));
+        }, 20_000);
+    });
+}
+
+nativeDesklink.addListener('onSessionEvent', (event) => {
+    void handle(event);
+});
+
+async function handle(event) {
+    if (event.sessionId !== state.localId) return;
+    switch (event.name) {
+        case 'answer':
+            state.answer = String(event.payload.sdp ?? '');
+            await request('session.description', {
+                session_id: state.sessionId,
+                description: { type: 'answer', sdp: state.answer },
+            });
+            return;
+        case 'candidate':
+            await request('session.candidate', {
+                session_id: state.sessionId,
+                candidate: String(event.payload.candidate ?? ''),
+                sdp_mid: event.payload.sdpMid ?? null,
+                sdp_m_line_index: event.payload.sdpMLineIndex ?? null,
+            }).catch(() => undefined);
+            return;
+        case 'presented':
+            state.presented = true;
+            countFrames();
+            return;
+        case 'control': {
+            const reply = JSON.parse(String(event.payload.message ?? '{}'));
+            if (reply.kind === 'hello' && reply.geometry) state.geometry = reply.geometry;
+            if (reply.kind === 'rejected') state.rejection = `${reply.code}: ${reply.message}`;
+            return;
+        }
+        case 'failure':
+            state.failure = event.payload;
+            return;
+        default:
+            return;
+    }
+}
+
+/** The stamp strip, read back from the presented picture. */
+const strip = document.createElement('canvas');
+function readStamp(video) {
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    if (!vw || !vh || !state.desktopWidth) return null;
+    // The strip is the top 48 desktop rows; scale it to the coded size.
+    strip.width = state.desktopWidth;
+    strip.height = 48;
+    const context = strip.getContext('2d', { willReadFrequently: true });
+    context.drawImage(video, 0, 0, vw, (48 * vh) / state.desktopHeight, 0, 0, state.desktopWidth, 48);
+    const row = context.getImageData(0, 0, state.desktopWidth, 48).data;
+    let stamp = 0;
+    for (let block = 0; block < 24; block += 1) {
+        const x = block * 48 + 24;
+        const green = row[(24 * state.desktopWidth + x) * 4 + 1];
+        stamp = (stamp << 1) | (green > 128 ? 1 : 0);
+    }
+    return stamp >>> 0;
+}
+
+/** Count decoded-and-shown frames and stamp each one with its glass time. */
+function countFrames() {
+    const video = document.querySelector('#surface video');
+    if (video === null || typeof video.requestVideoFrameCallback !== 'function') return;
+    video.requestVideoFrameCallback((_now, metadata) => {
+        state.frames += 1;
+        const presented = Math.round(performance.timeOrigin + (metadata.expectedDisplayTime ?? 0));
+        if (lastPresentation !== 0) state.intervals.push(presented - lastPresentation);
+        lastPresentation = presented;
+        const stamp = readStamp(video);
+        if (stamp === null) {
+            state.discarded += 1;
+        } else {
+            const delay = (((presented & 0xff_ffff) - stamp) & 0xff_ffff);
+            // A stamp from before the run started, or a misread block, lands
+            // far outside any honest latency; the scout's lab used 5000 ms.
+            if (delay < 5000) state.g2g.push(delay);
+            else state.discarded += 1;
+        }
+        countFrames();
+    });
+}
+
+socket.addEventListener('message', (message) => {
+    const payload = JSON.parse(message.data);
+    if (payload.id !== undefined) {
+        const waiting = pending.get(payload.id);
+        if (waiting === undefined) return;
+        pending.delete(payload.id);
+        if (payload.error) waiting.reject(new Error(`${payload.error.code}: ${payload.error.message}`));
+        else waiting.resolve(payload.result);
+        return;
+    }
+    if (payload.event === 'session.description') {
+        state.offer = payload.params.description.sdp;
+        nativeDesklink.setRemoteDescription(state.localId, 'offer', state.offer);
+        return;
+    }
+    if (payload.event === 'session.candidate') {
+        nativeDesklink.addRemoteCandidate(
+            state.localId,
+            payload.params.candidate,
+            payload.params.sdpMid ?? null,
+            payload.params.sdpMLineIndex ?? null,
+        );
+    }
+});
+
+/**
+ * Open a view session on the bridge's own source (the bridge refuses a
+ * client-chosen source) and mount its surface. Resolves on the open result;
+ * the driver waits for `state.presented` separately.
+ */
+window.__flow = {
+    state,
+    async open(maxFps) {
+        const id = nativeDesklink.createSession('[]');
+        if (id === null) throw new Error('the web session could not be created');
+        state.localId = id;
+        const opened = await request('session.open', {
+            permissions: ['view'],
+            max_fps: maxFps,
+        });
+        state.sessionId = opened.sessionId;
+        state.geometry = opened.geometry;
+        attachSurface(id, document.getElementById('surface'));
+        const video = document.querySelector('#surface video');
+        video?.play?.().catch(() => undefined);
+        return opened;
+    },
+
+    async close() {
+        if (state.sessionId !== null) {
+            await request('session.close', { session_id: state.sessionId }).catch(() => undefined);
+            state.sessionId = null;
+        }
+    },
+
+    metrics(sessionId) {
+        return request('session.metrics', sessionId ? { session_id: sessionId } : {});
+    },
+
+    /** Receiver-side WebRTC counters for the driver's JSON line. */
+    async stats() {
+        const video = document.querySelector('#surface video');
+        const quality = typeof video?.getVideoPlaybackQuality === 'function' ? video.getVideoPlaybackQuality() : {};
+        const out = {
+            decoded: quality.totalVideoFrames ?? null,
+            droppedDecoded: quality.droppedVideoFrames ?? null,
+            inbound: [],
+        };
+        if (window.__pcs.length > 0) {
+            const report = await window.__pcs[0].getStats().catch(() => null);
+            report?.forEach((s) => {
+                if (s.type === 'inbound-rtp' && (s.kind === 'video' || s.mediaType === 'video')) {
+                    out.inbound.push({
+                        framesDecoded: s.framesDecoded ?? null,
+                        framesDropped: s.framesDropped ?? null,
+                        totalDecodeTime: s.totalDecodeTime ?? null,
+                        jitterBufferDelay: s.jitterBufferDelay ?? null,
+                        jitterBufferEmittedCount: s.jitterBufferEmittedCount ?? null,
+                    });
+                }
+            });
+        }
+        return out;
+    },
+};
+socket.addEventListener('open', () => {
+    window.__flow.ready = true;
+});
+</script>
+</body>
+</html>
