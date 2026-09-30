@@ -480,10 +480,10 @@ impl InputTarget {
         Ok(())
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn unicode_text(&mut self, text: &str) -> Result<()> {
         match &mut self.applier {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             Applier::Uinput(devices) => devices.unicode_text(text),
             #[cfg(target_os = "linux")]
             Applier::Uinput(_) => anyhow::bail!("Unicode text input is unavailable on Linux"),
@@ -854,6 +854,16 @@ pub fn capabilities() -> serde_json::Value {
     })
 }
 
+#[cfg(target_os = "windows")]
+pub fn capabilities() -> serde_json::Value {
+    crate::win::capabilities()
+}
+
+#[cfg(target_os = "windows")]
+fn wayland_clipboard_available() -> bool {
+    false
+}
+
 /// `capabilities.encode`: VP9 always, H.264 when an encoder for it starts
 /// here now. `hardware` describes VP9, the default.
 fn encode_capabilities() -> serde_json::Value {
@@ -881,6 +891,13 @@ impl Session {
             return Err(SessionError::new(
                 "permission",
                 "session.open requires the view permission",
+            ));
+        }
+        #[cfg(target_os = "windows")]
+        if request.agent_indicator {
+            return Err(SessionError::new(
+                "indicator-unavailable",
+                "Windows agent indicator is not implemented in this build.",
             ));
         }
         let id = opaque_id();
@@ -1077,6 +1094,19 @@ impl Session {
                     }),
                 )
                 .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
+                #[cfg(target_os = "windows")]
+                let capture = capture::start(
+                    portal,
+                    width,
+                    height,
+                    max_fps,
+                    sink,
+                    Box::new({
+                        let status = capture_status.clone();
+                        move |running, reason| status(running, reason)
+                    }),
+                )
+                .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
                 #[cfg(target_os = "linux")]
                 let capture = capture::start(
                     portal,
@@ -1155,7 +1185,7 @@ impl Session {
                     applier: Applier::Uinput({
                         #[cfg(target_os = "linux")]
                         let devices = InputDevices::create(source_w as i32, source_h as i32);
-                        #[cfg(target_os = "macos")]
+                        #[cfg(any(target_os = "macos", target_os = "windows"))]
                         let devices = InputDevices::create_for_display(
                             source_w as i32,
                             source_h as i32,
@@ -2095,7 +2125,7 @@ impl Inner {
         if text.len() > 4096 {
             return Err(("text-too-large", String::from("text exceeds 4096 bytes")));
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let _ = seq;
             return self.with_input(|target| target.unicode_text(text));
@@ -3328,6 +3358,11 @@ mod tests {
         let (events, mut received) = tokio_mpsc::unbounded_channel();
         let (inner, recorded) = test_inner(events).await;
 
+        #[cfg(target_os = "windows")]
+        inner
+            .with_input(|target| target.chord(1, Vec::new(), true))
+            .unwrap();
+        #[cfg(not(target_os = "windows"))]
         inner.apply(ControlMessage::Key {
             name: None,
             character: Some(String::from("a")),
@@ -3381,6 +3416,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn a_held_modifier_survives_character_named_and_text_chords() {
         use crate::input::keycode;
@@ -3880,6 +3916,11 @@ mod tests {
         use webrtc::peer_connection::RTCPeerConnectionState as State;
         let (events, mut received) = tokio_mpsc::unbounded_channel();
         let (inner, recorded) = test_inner(events).await;
+        #[cfg(target_os = "windows")]
+        inner
+            .with_input(|target| target.chord(1, Vec::new(), true))
+            .unwrap();
+        #[cfg(not(target_os = "windows"))]
         inner.apply(ControlMessage::Key {
             name: Some(String::from("Control")),
             character: None,

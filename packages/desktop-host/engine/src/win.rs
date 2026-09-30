@@ -1,9 +1,9 @@
-//! Compile-only Windows host seam; no native desktop access or session serving.
+//! Windows host command entry point; native desktop access remains unavailable.
 
 use serde_json::{json, Value};
 
-fn capabilities() -> Value {
-    json!({
+pub fn capabilities() -> Value {
+    let mut value = json!({
         "protocol": 3,
         "engine": format!("desklink-host/{}", env!("CARGO_PKG_VERSION")),
         "platform": "windows",
@@ -30,6 +30,7 @@ fn capabilities() -> Value {
                 "remedy": "Use a future Windows VP9-enabled build."
             }
         },
+        "encoded": { "codecs": [] },
         "input": {
             "mechanism": "unavailable",
             "pointer": false,
@@ -53,7 +54,13 @@ fn capabilities() -> Value {
                 "remedy": "Use a future Windows clipboard-enabled build."
             }
         }
-    })
+    });
+    if cfg!(desklink_vpx) {
+        value["encode"] = json!({"codecs": ["vp9"], "hardware": false,
+            "h264": {"encoder": null, "hardware": false}});
+        value["encoded"] = json!({"codecs": ["h264"]});
+    }
+    value
 }
 
 pub fn run() -> i32 {
@@ -86,12 +93,12 @@ pub fn run() -> i32 {
             }
             #[cfg(not(desklink_vpx))]
             {
-                eprintln!("serve requires a VP9-enabled build; Windows libvpx integration is not available in this compile-seam build");
+                eprintln!("serve requires a VP9-enabled build; set DESKLINK_VPX_STATIC_DIR when building on Windows");
                 return 1;
             }
         }
         "help" | "--help" | "-h" => {
-            println!("desklink-host — Windows compile seam\n\nCommands: version, capabilities, serve\nWindows session serving requires a future VP9-enabled build.");
+            println!("desklink-host — Windows host preview\n\nCommands: version, capabilities, serve\nWindows session serving requires a static libvpx build.");
         }
         _ => {
             eprintln!("unknown command: {command}; run desklink-host --help");

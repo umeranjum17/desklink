@@ -4,7 +4,7 @@
 use std::process::Command;
 
 #[test]
-fn compile_seam_reports_its_limits_and_refuses_serving() {
+fn windows_engine_reports_available_codecs_and_desktop_limits() {
     let engine = env!("CARGO_BIN_EXE_desklink-host");
     for flag in ["version", "--version", "-V"] {
         let output = Command::new(engine).arg(flag).output().unwrap();
@@ -26,23 +26,80 @@ fn compile_seam_reports_its_limits_and_refuses_serving() {
     );
     assert_eq!(value["capture"]["backends"], serde_json::json!([]));
     assert_eq!(value["capture"]["displays"], serde_json::json!([]));
-    assert_eq!(value["encode"]["codecs"], serde_json::json!([]));
+    let codecs = if cfg!(desklink_vpx) {
+        serde_json::json!(["vp9"])
+    } else {
+        serde_json::json!([])
+    };
+    assert_eq!(value["encode"]["codecs"], codecs);
     for feature in ["pointer", "wheel", "keyboard"] {
         assert_eq!(value["input"][feature], false);
     }
     for feature in ["read", "write"] {
         assert_eq!(value["clipboard"][feature], false);
     }
-    for feature in ["capture", "encode", "input", "clipboard"] {
+    for feature in ["capture", "input", "clipboard"] {
         assert!(!value[feature]["unavailable_reason"]["reason"]
             .as_str()
             .unwrap()
             .is_empty());
     }
-    let output = Command::new(engine).arg("serve").output().unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    assert!(String::from_utf8(output.stderr)
+    #[cfg(not(desklink_vpx))]
+    {
+        let output = Command::new(engine).arg("serve").output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("serve requires a VP9-enabled build"));
+    }
+}
+
+#[cfg(desklink_vpx)]
+#[test]
+fn serving_handshakes_refuses_indicator_and_stops_on_eof() {
+    use std::io::Write;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let mut child = Command::new(env!("CARGO_BIN_EXE_desklink-host"))
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    for request in [
+        serde_json::json!({"id":1,"method":"hello","params":{"protocol":3}}),
+        serde_json::json!({"id":2,"method":"capabilities"}),
+        serde_json::json!({"id":3,"method":"session.open","params":{
+            "permissions":["view","control"],"agent_indicator":true}}),
+    ] {
+        writeln!(input, "{request}").unwrap();
+    }
+    drop(input);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("serving engine did not exit on stdin EOF");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let messages: Vec<serde_json::Value> = String::from_utf8(output.stdout)
         .unwrap()
-        .contains("serve requires a VP9-enabled build"));
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["result"]["protocol"], 3);
+    assert_eq!(messages[0]["result"], messages[1]["result"]);
+    assert_eq!(messages[2]["error"]["code"], "indicator-unavailable");
 }

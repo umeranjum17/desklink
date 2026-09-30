@@ -73,7 +73,7 @@ jobs:
         env:
           DESKLINK_AXI_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/desklink-host
 
-  # Compile seam only: no capture/input runs on a hosted Windows desktop.
+  # Hosted transport proof only: native capture/input requires a dedicated rig.
   engine-windows:
     runs-on: windows-2025
     steps:
@@ -85,8 +85,43 @@ jobs:
           rustup target add x86_64-pc-windows-msvc
       - run: cargo build --locked --target x86_64-pc-windows-msvc --manifest-path packages/desktop-host/engine/Cargo.toml
       - run: cargo test --locked --target x86_64-pc-windows-msvc --manifest-path packages/desktop-host/engine/Cargo.toml
-      - name: Windows capabilities (no desktop access)
-        run: packages/desktop-host/engine/target/x86_64-pc-windows-msvc/debug/desklink-host.exe capabilities
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Build static MSVC libvpx (/MT)
+        shell: pwsh
+        run: |
+          ./packages/desktop-host/release/build-libvpx-win.ps1 -OutDir "$env:RUNNER_TEMP/desklink-vpx"
+          "DESKLINK_VPX_STATIC_DIR=$env:RUNNER_TEMP/desklink-vpx/prefix" >> $env:GITHUB_ENV
+          "RUSTFLAGS=-Ctarget-feature=+crt-static" >> $env:GITHUB_ENV
+      - name: Build and test Windows serving engine
+        run: |
+          cargo build --locked --target x86_64-pc-windows-msvc --manifest-path packages/desktop-host/engine/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --target x86_64-pc-windows-msvc --manifest-path packages/desktop-host/engine/Cargo.toml
+      - name: Assert no libvpx or dynamic MSVC runtime DLL dependency
+        shell: pwsh
+        run: |
+          $dependencies = & dumpbin /dependents packages/desktop-host/engine/target/x86_64-pc-windows-msvc/debug/desklink-host.exe
+          if ($LASTEXITCODE -ne 0) { throw 'dumpbin failed' }
+          $dependencies
+          if ($dependencies -match '(?i)(vpx|vcruntime|msvcp|msvcr|ucrtbase)[^\s]*\.dll') {
+            throw 'Engine depends on a libvpx or dynamic CRT DLL'
+          }
+      - name: Encoded-source Chrome decode and input relay (required)
+        run: node packages/desktop-host/test/encoded-flow.mjs
+        env:
+          DESKLINK_AXI_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/x86_64-pc-windows-msvc/debug/desklink-host.exe
+          DESKLINK_REQUIRE_CHROME: '1'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-libvpx-notices
+          path: ${{ runner.temp }}/desklink-vpx/prefix/THIRD_PARTY_LICENSES.txt
 
       - uses: actions/setup-node@v4
         with:
