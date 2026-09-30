@@ -494,8 +494,9 @@ the person and observer can see the same cue. They are separate from the
 capture-excluded input activity indicator. Consumers reading frame differences
 should allow for the point's appearance/disappearance.
 
-Wayland portal and consumer-fed encoded sources return `operation`: they have
-no supported host overlay target. Other refusals are `permission`, `session`,
+Wayland portal sessions return `point_unsupported` with reason `wayland`;
+Wayland support is planned. Consumer-fed encoded sources return `operation`
+because they have no host desktop overlay target. Other refusals are `permission`, `session`,
 `coordinates`, `malformed`, and `indicator-unavailable` (including unavailable
 X Shape support). Unknown fields are refused. No control-channel or remote
 bridge forwarding is added; the consumer chooses when to request a local cue.

@@ -682,6 +682,8 @@ struct Inner {
     point_overlay: Mutex<Option<crate::indicator::Indicator>>,
     #[cfg(target_os = "linux")]
     point_display: Option<String>,
+    #[cfg(target_os = "linux")]
+    point_unsupported_reason: &'static str,
     capture: Mutex<Option<FrameSource>>,
     /// Absent for an encoded source: there is no local keyboard to translate a
     /// character through, because the client's keys are forwarded instead.
@@ -1236,6 +1238,11 @@ impl Session {
             } else {
                 None
             },
+            #[cfg(target_os = "linux")]
+            point_unsupported_reason: match &request.source {
+                None | Some(SourceRequest::Portal) => "wayland",
+                _ => "x11-unavailable",
+            },
             capture: Mutex::new(Some(capture)),
             layout: Mutex::new(Some(layout)),
             last_seq: Mutex::new(0),
@@ -1326,6 +1333,8 @@ impl Session {
             point_overlay: Mutex::new(None),
             #[cfg(target_os = "linux")]
             point_display: None,
+            #[cfg(target_os = "linux")]
+            point_unsupported_reason: "wayland",
             capture: Mutex::new(None),
             layout: Mutex::new(None),
             last_seq: Mutex::new(0),
@@ -1435,7 +1444,13 @@ impl Session {
         }
         #[cfg(target_os = "linux")]
         let display = self.inner.point_display.as_deref().ok_or_else(|| {
-            SessionError::new("operation", "point is supported only on X11 desktops")
+            SessionError::new(
+                "point_unsupported",
+                format!(
+                    "reason: {}; point overlay is unavailable",
+                    self.inner.point_unsupported_reason
+                ),
+            )
         })?;
         if params.clear {
             if params.x.is_some()
@@ -3080,6 +3095,8 @@ mod tests {
             point_overlay: Mutex::new(None),
             #[cfg(target_os = "linux")]
             point_display: None,
+            #[cfg(target_os = "linux")]
+            point_unsupported_reason: "wayland",
             capture: Mutex::new(None),
             layout: Mutex::new(None),
             last_seq: Mutex::new(0),
@@ -3267,6 +3284,8 @@ mod tests {
             point_overlay: Mutex::new(None),
             #[cfg(target_os = "linux")]
             point_display: None,
+            #[cfg(target_os = "linux")]
+            point_unsupported_reason: "wayland",
             layout: Mutex::new(Some(Layout::from_environment().expect("a keymap"))),
             last_seq: Mutex::new(0),
             control_open: AtomicBool::new(true),
