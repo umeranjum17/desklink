@@ -679,6 +679,11 @@ struct Inner {
     encoder: Mutex<Option<VideoEncoder>>,
     input: Mutex<Option<InputTarget>>,
     indicator: Mutex<Option<crate::indicator::Indicator>>,
+    point_overlay: Mutex<Option<crate::indicator::Indicator>>,
+    #[cfg(target_os = "linux")]
+    point_display: Option<String>,
+    #[cfg(target_os = "linux")]
+    point_unsupported_reason: &'static str,
     capture: Mutex<Option<FrameSource>>,
     /// Absent for an encoded source: there is no local keyboard to translate a
     /// character through, because the client's keys are forwarded instead.
@@ -1221,6 +1226,23 @@ impl Session {
             encoder: Mutex::new(Some(VideoEncoder::Vp9(encoder))),
             input: Mutex::new(input),
             indicator: Mutex::new(indicator),
+            point_overlay: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            point_display: if wants_x11 {
+                match &request.source {
+                    Some(SourceRequest::X11 { display }) => {
+                        display.clone().or_else(|| std::env::var("DISPLAY").ok())
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            },
+            #[cfg(target_os = "linux")]
+            point_unsupported_reason: match &request.source {
+                None | Some(SourceRequest::Portal) => "wayland",
+                _ => "x11-unavailable",
+            },
             capture: Mutex::new(Some(capture)),
             layout: Mutex::new(Some(layout)),
             last_seq: Mutex::new(0),
@@ -1308,6 +1330,11 @@ impl Session {
             encoder: Mutex::new(None),
             input: Mutex::new(None),
             indicator: Mutex::new(None),
+            point_overlay: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            point_display: None,
+            #[cfg(target_os = "linux")]
+            point_unsupported_reason: "wayland",
             capture: Mutex::new(None),
             layout: Mutex::new(None),
             last_seq: Mutex::new(0),
@@ -1391,6 +1418,95 @@ impl Session {
 
     pub fn source(&self) -> &SelectedSource {
         &self.inner.source
+    }
+
+    pub fn point(
+        &self,
+        params: &crate::protocol::PointParams,
+    ) -> std::result::Result<(), SessionError> {
+        // Lock through validation and drawing, so a concurrent close cannot leave
+        // a newly spawned marker alive after teardown.
+        let mut overlay = lock(&self.inner.point_overlay);
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return Err(SessionError::new("session", "the session is closed"));
+        }
+        if !self.inner.permissions.contains(&Permission::View) {
+            return Err(SessionError::new(
+                "permission",
+                "point requires view permission",
+            ));
+        }
+        if lock(&self.inner.encoded).is_some() {
+            return Err(SessionError::new(
+                "operation",
+                "an encoded source has no host desktop",
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        let display = self.inner.point_display.as_deref().ok_or_else(|| {
+            SessionError::new(
+                "point_unsupported",
+                format!(
+                    "reason: {}; point overlay is unavailable",
+                    self.inner.point_unsupported_reason
+                ),
+            )
+        })?;
+        if params.clear {
+            if params.x.is_some()
+                || params.y.is_some()
+                || params.timeout_ms.is_some()
+                || !params.label.is_empty()
+            {
+                return Err(SessionError::new(
+                    "malformed",
+                    "clear accepts no coordinates, label or timeout",
+                ));
+            }
+            if let Some(helper) = overlay.take() {
+                helper.stop();
+            }
+            return Ok(());
+        }
+        let (x, y) = params
+            .x
+            .zip(params.y)
+            .ok_or_else(|| SessionError::new("malformed", "point requires x and y"))?;
+        let source = &self.inner.source;
+        if x < 0 || y < 0 || x >= i64::from(source.width) || y >= i64::from(source.height) {
+            return Err(SessionError::new(
+                "coordinates",
+                "point is outside the selected desktop",
+            ));
+        }
+        let timeout = params.timeout_ms.unwrap_or(3000);
+        if !(1..=120_000).contains(&timeout)
+            || params.label.len() > 96
+            || !params.label.bytes().all(|b| (32..=126).contains(&b))
+        {
+            return Err(SessionError::new(
+                "malformed",
+                "timeout must be 1..120000 ms; label must be at most 96 printable ASCII bytes",
+            ));
+        }
+        if overlay.is_none() {
+            #[cfg(target_os = "linux")]
+            let helper = crate::indicator::Indicator::start_point(display);
+            #[cfg(target_os = "macos")]
+            let helper = crate::indicator::Indicator::start_point(
+                source.node_id,
+                source.width as usize,
+                source.height as usize,
+            );
+            *overlay = Some(helper.map_err(|error| {
+                SessionError::new("indicator-unavailable", format!("{error:#}"))
+            })?);
+        }
+        overlay
+            .as_mut()
+            .unwrap()
+            .point(x, y, timeout, &params.label)
+            .map_err(|error| SessionError::new("indicator-unavailable", format!("{error:#}")))
     }
 
     pub async fn wait_frame(
@@ -1629,6 +1745,9 @@ impl Inner {
         drop(lock(&self.encoder).take());
         if let Ok(mut indicator) = self.indicator.lock() {
             indicator.take();
+        }
+        if let Some(helper) = lock(&self.point_overlay).take() {
+            helper.stop();
         }
         // Release first, then tear down: a stuck modifier is the one failure the
         // user cannot undo by reconnecting.
@@ -2973,6 +3092,11 @@ mod tests {
             encoder: Mutex::new(None),
             input: Mutex::new(None),
             indicator: Mutex::new(None),
+            point_overlay: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            point_display: None,
+            #[cfg(target_os = "linux")]
+            point_unsupported_reason: "wayland",
             capture: Mutex::new(None),
             layout: Mutex::new(None),
             last_seq: Mutex::new(0),
@@ -3112,6 +3236,31 @@ mod tests {
         test_inner_with(events, peer, 64, 64)
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_wayland_portal_session_reports_typed_point_unsupported() {
+        let (events, _) = tokio_mpsc::unbounded_channel();
+        let (mut inner, _) = test_inner(events).await;
+        Arc::get_mut(&mut inner)
+            .expect("test session has one owner")
+            .permissions = vec![Permission::View];
+        let session = Session { inner };
+
+        let error = session
+            .point(&crate::protocol::PointParams {
+                session_id: String::from("test-session"),
+                x: Some(10),
+                y: Some(20),
+                label: String::new(),
+                timeout_ms: None,
+                clear: false,
+            })
+            .expect_err("Wayland portal sessions do not support point overlays");
+
+        assert_eq!(error.code, "point_unsupported");
+        assert!(error.message.contains("reason: wayland"));
+    }
+
     fn test_inner_with(
         events: tokio_mpsc::UnboundedSender<Notice>,
         peer: VideoPeer,
@@ -3157,6 +3306,11 @@ mod tests {
             })),
             capture: Mutex::new(None),
             indicator: Mutex::new(None),
+            point_overlay: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            point_display: None,
+            #[cfg(target_os = "linux")]
+            point_unsupported_reason: "wayland",
             layout: Mutex::new(Some(Layout::from_environment().expect("a keymap"))),
             last_seq: Mutex::new(0),
             control_open: AtomicBool::new(true),

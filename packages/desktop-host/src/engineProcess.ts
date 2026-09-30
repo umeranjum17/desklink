@@ -8,6 +8,7 @@ import {
     type EngineCapabilities,
     type EngineEvent,
     type OpenedSession,
+    type PointRequest,
     type OpenSessionRequest,
     type SessionMetrics,
 } from './protocol.js';
@@ -82,7 +83,7 @@ export class EngineClient {
             const missing = /error while loading shared libraries: ([^:\s]+): cannot open shared object file/.exec(probe.stderr ?? '')?.[1];
             if (missing !== undefined && [
                 'libpipewire-0.3.so.0', 'libxkbcommon.so.0', 'libevdev.so.2', 'libstdc++.so.6',
-                'libXcursor.so.1', 'libX11.so.6', 'libwayland-client.so.0',
+                'libXcursor.so.1', 'libX11.so.6', 'libXext.so.6', 'libwayland-client.so.0',
             ].includes(missing)) {
                 throw new EngineRefused('missing-system-library', `missing system library: ${missing}`);
             }
@@ -221,6 +222,18 @@ export class EngineClient {
 
     writeClipboard(sessionId: string, text: string): Promise<{ written: boolean }> {
         return this.request('session.clipboard.write', { session_id: sessionId, text });
+    }
+
+    /** Show or clear a transient cue on the host, without moving its pointer. */
+    point(sessionId: string, request: PointRequest): Promise<{ shown: boolean }> {
+        return this.request('session.point', {
+            session_id: sessionId,
+            ...(request.clear === true ? { clear: true } : {
+                x: request.x, y: request.y,
+                ...(request.label === undefined ? {} : { label: request.label }),
+                ...(request.timeoutMs === undefined ? {} : { timeout_ms: request.timeoutMs }),
+            }),
+        });
     }
 
     closeSession(sessionId: string): Promise<{ closed: boolean }> {

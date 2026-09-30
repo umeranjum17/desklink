@@ -337,6 +337,19 @@ export async function serve(args: string[]): Promise<void> {
       if (args[0] === 'read') { const result = await engine.readClipboard(opened.sessionId); return `clipboard: ${args.includes('--full') ? result.text : result.text.slice(0,1000)} (${result.text.length} chars)`; }
       if (args[0] === 'write') { await engine.writeClipboard(opened.sessionId, args[1] ?? ''); return 'clipboard: written'; }
     }
+    if (command === 'point') {
+      if (args.includes('--clear')) {
+        if (args.length !== 1) throw new Error('point: --clear accepts no other arguments');
+        await engine.point(opened.sessionId, { clear: true });
+        return 'point: cleared';
+      }
+      if (!/^\d+,\d+$/.test(args[0] ?? '')) throw new Error('point: expected x,y desktop pixels, or --clear');
+      const [x,y] = args[0]!.split(',').map(Number);
+      const timeout = args.includes('--timeout') ? Number(args[args.indexOf('--timeout')+1]) : 3000;
+      const label = args.includes('--label') ? args[args.indexOf('--label')+1]! : '';
+      await engine.point(opened.sessionId, { x:x!, y:y!, label, timeoutMs:timeout });
+      return `point: shown at=${x},${y} timeout=${timeout}ms`;
+    }
     const action = ['click','drag','type','press','scroll'].includes(command);
     const actionWait = action && args.includes('--wait') ? args[args.indexOf('--wait')+1] : 'none';
     const actionDelay = action && /^\d+$/.test(actionWait!) ? boundedDelay(actionWait!) : undefined;

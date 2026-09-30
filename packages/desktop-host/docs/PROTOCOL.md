@@ -459,6 +459,53 @@ named beside it for the per-frame mean:
 frame within measurement noise; a stage that will not reconcile is a stage
 whose accounting is wrong.
 
+## Point on the host desktop
+
+A local consumer can guide the person without taking control of their pointer
+or keyboard. `session.point` requires `view`, not `control`, and is independent
+of `agent_indicator`. It draws one blue ring centered at `x,y`, with an optional
+label. A new point replaces the previous one and restarts its timer.
+
+```jsonc
+{"id":30,"method":"session.point","params":{"session_id":"…","x":400,"y":300,"label":"Here","timeout_ms":3000}}
+{"id":30,"result":{"shown":true}}
+{"id":31,"method":"session.point","params":{"session_id":"…","clear":true}}
+{"id":31,"result":{"shown":false}}
+```
+
+Coordinates are integers in the **selected desktop's original pixels**, top-left
+origin, before video scaling (`geometry.source`, not `geometry.encoded`). On X11
+this is the root screen; on macOS it is the selected display, with native pixels
+converted to display points. Both coordinates must be within its bounds. The
+ring may clip at an edge; its label stays inside the display. `timeout_ms`
+defaults to 3000 and must be an integer from 1 to 120000. Labels are at most 96
+printable ASCII bytes, including spaces; other labels are refused rather than
+rendered incorrectly by the X server's core font. A clear request has no
+coordinates, label or timeout, and is idempotent. Invalid requests do not alter
+an existing marker. Replies acknowledge submission to the local overlay helper,
+not that a person has seen it. Timeout hides it; clear, session replacement,
+lease expiry, close and consumer disconnection remove and reap the helper.
+
+X11 uses an override-redirect, shaped window with an empty input shape. It never
+warps the pointer, changes the cursor, requests focus or injects events. macOS
+reuses the nonactivating, mouse-transparent indicator window in a separate
+helper. **Point cues intentionally appear in local frames and outgoing video**:
+the person and observer can see the same cue. They are separate from the
+capture-excluded input activity indicator. Consumers reading frame differences
+should allow for the point's appearance/disappearance.
+
+Wayland portal sessions return `point_unsupported` with reason `wayland`;
+Wayland support is planned. Consumer-fed encoded sources return `operation`
+because they have no host desktop overlay target. Other refusals are `permission`, `session`,
+`coordinates`, `malformed`, and `indicator-unavailable` (including unavailable
+X Shape support). Unknown fields are refused. No control-channel or remote
+bridge forwarding is added; the consumer chooses when to request a local cue.
+
+`@desklink/host` exposes `EngineClient.point(sessionId, {x, y, label?, timeoutMs?})`
+and `EngineClient.point(sessionId, {clear: true})`. `@desklink/axi` exposes
+`desklink-axi point 400,300 --label "Here" --timeout 3000` and
+`desklink-axi point --clear`, including for a session started without `--control`.
+
 ## Input and clipboard: the session's control channel
 
 Input does **not** travel the local protocol. It rides the WebRTC data channel

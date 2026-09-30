@@ -75,14 +75,14 @@ docker run --rm --platform linux/amd64 --volume "$tarballs:/tarballs:ro" "$image
             throw new Error(\"engine started without system runtime libraries\");
         } catch (error) {
             if (!(error instanceof EngineRefused) || error.code !== \"missing-system-library\" ||
-                ![\"libpipewire-0.3.so.0\", \"libxkbcommon.so.0\", \"libevdev.so.2\", \"libstdc++.so.6\", \"libXcursor.so.1\", \"libX11.so.6\", \"libwayland-client.so.0\"].some(
+                ![\"libpipewire-0.3.so.0\", \"libxkbcommon.so.0\", \"libevdev.so.2\", \"libstdc++.so.6\", \"libXcursor.so.1\", \"libX11.so.6\", \"libXext.so.6\", \"libwayland-client.so.0\"].some(
                     (name) => error.message === \"missing system library: \" + name)) throw error;
             console.log(error.message);
         }
     "
 
     apt-get update -qq
-    apt-get install -y -qq --no-install-recommends libpipewire-0.3-0 libxkbcommon0 libevdev2 libstdc++6 libxcursor1 libx11-6 libwayland-client0 >/dev/null
+    apt-get install -y -qq --no-install-recommends libpipewire-0.3-0 libxkbcommon0 libevdev2 libstdc++6 libxcursor1 libx11-6 libxext6 libwayland-client0 >/dev/null
 
     node --input-type=module -e "
         import { EngineClient, resolveEngine } from \"@desklink/host\";

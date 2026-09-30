@@ -126,6 +126,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
+    fn desklink_point_overlay_main(display: *const std::ffi::c_char) -> i32;
     fn desklink_agent_overlay_main(display: *const std::ffi::c_char) -> i32;
     fn desklink_agent_overlay_wayland(source_w: i32, source_h: i32) -> i32;
 }
@@ -148,6 +149,11 @@ fn main() {
         "version" | "--version" | "-V" => {
             println!("{}", env!("CARGO_PKG_VERSION"));
             0
+        }
+        "point-overlay" => {
+            let display = args.get(1).map(String::as_str).unwrap_or("");
+            let display = std::ffi::CString::new(display).expect("valid X display");
+            unsafe { desklink_point_overlay_main(display.as_ptr()) }
         }
         "agent-overlay" => {
             let display = args.get(1).map(String::as_str).unwrap_or("");
@@ -639,6 +645,16 @@ async fn dispatch(
             });
             *current = Some(session);
             Ok(result)
+        }
+        "session.point" => {
+            let session = require_session(current)?;
+            let params: protocol::PointParams = serde_json::from_value(request.params.clone())
+                .map_err(|error| ErrorBody::new("malformed", error.to_string()))?;
+            check_session(session, &params.session_id, None)?;
+            session
+                .point(&params)
+                .map_err(|error| ErrorBody::new(error.code, error.message))?;
+            Ok(serde_json::json!({"shown": !params.clear}))
         }
         "session.description" => {
             let session = require_session(current)?;

@@ -40,6 +40,50 @@ impl Indicator {
     }
 
     #[cfg(target_os = "linux")]
+    pub fn start_point(display: &str) -> Result<Self> {
+        Self::spawn(
+            Command::new(std::env::current_exe()?)
+                .arg("point-overlay")
+                .arg(display),
+            1.0,
+            1.0,
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn start_point(display_id: u32, width: usize, height: usize) -> Result<Self> {
+        let (_, _, points_w, points_h) = crate::mac::display_geometry(display_id)
+            .context("the selected display is unavailable")?;
+        Self::spawn(
+            Command::new(std::env::current_exe()?)
+                .arg("point-overlay")
+                .arg(display_id.to_string()),
+            points_w / width as f64,
+            points_h / height as f64,
+        )
+    }
+
+    pub fn point(&mut self, x: i64, y: i64, timeout_ms: u64, label: &str) -> Result<()> {
+        let input = self.input.as_mut().context("point overlay exited")?;
+        writeln!(
+            input,
+            "P {:.2} {:.2} {timeout_ms} {label}",
+            x as f64 * self.scale_x,
+            y as f64 * self.scale_y
+        )?;
+        Ok(())
+    }
+
+    /// Point markers have no fade: close/clear must remove them and reap the helper.
+    pub fn stop(mut self) {
+        self.input.take();
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn start_wayland(width: usize, height: usize) -> Result<Self> {
         let executable = std::env::current_exe()?;
         Self::spawn(
