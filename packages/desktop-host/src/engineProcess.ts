@@ -12,6 +12,17 @@ import {
     type SessionMetrics,
 } from './protocol.js';
 
+export function windowsEngineStartupError(code: number | null, error?: Error): EngineRefused | null {
+    if (process.platform !== 'win32') return null;
+    if (code !== null && (code >>> 0) === 0xc0000135) {
+        return new EngineRefused('missing-system-library', 'The Windows desktop engine could not load a required DLL (0xC0000135); use a complete Windows engine build with its required runtime libraries.');
+    }
+    if (error !== undefined) {
+        return new EngineRefused('engine-spawn-failed', `The Windows desktop engine could not start: ${error.message}. Check the engine path and Windows application-control policy.`);
+    }
+    return null;
+}
+
 interface Pending {
     resolve: (value: unknown) => void;
     reject: (error: Error) => void;
@@ -60,9 +71,7 @@ export class EngineClient {
             for (const [id, pending] of this.pending) {
                 this.pending.delete(id);
                 clearTimeout(pending.timer);
-                pending.reject(process.platform === 'win32' && code !== null && (code >>> 0) === 0xc0000135
-                    ? new EngineRefused('missing-system-library', 'The Windows desktop engine could not load a required DLL (0xC0000135); use a complete Windows engine build with its required runtime libraries.')
-                    : new Error('the desktop engine exited'));
+                pending.reject(windowsEngineStartupError(code) ?? new Error('the desktop engine exited'));
             }
             if (!this.stopping) options.onExit?.({ code, signal });
         });
@@ -73,7 +82,7 @@ export class EngineClient {
             for (const [id, pending] of this.pending) {
                 this.pending.delete(id);
                 clearTimeout(pending.timer);
-                pending.reject(new EngineRefused('engine-spawn-failed', `The Windows desktop engine could not start: ${error.message}. Check the engine path and Windows application-control policy.`));
+                pending.reject(windowsEngineStartupError(null, error) ?? error);
             }
         });
     }

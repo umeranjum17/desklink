@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { EngineClient } from './engineProcess.js';
+import { EngineClient, windowsEngineStartupError } from './engineProcess.js';
 
 vi.mock('node:child_process', async (importOriginal) => ({
     ...await importOriginal<typeof import('node:child_process')>(),
@@ -25,6 +25,18 @@ afterEach(() => {
 });
 
 describe('Windows engine startup', () => {
+    it('maps direct process exits and spawn failures to startup errors', () => {
+        expect(windowsEngineStartupError(0xc0000135)).toMatchObject({
+            code: 'missing-system-library',
+            message: expect.stringContaining('0xC0000135'),
+        });
+        expect(windowsEngineStartupError(-1073741515)).toMatchObject({ code: 'missing-system-library' });
+        expect(windowsEngineStartupError(null, new Error('spawn absent.exe ENOENT'))).toMatchObject({
+            code: 'engine-spawn-failed',
+            message: expect.stringContaining('ENOENT'),
+        });
+    });
+
     it('spawns hidden without a shell and completes hello before returning', async () => {
         const starting = EngineClient.start('host.exe', ['serve']);
         expect(spawn).toHaveBeenCalledWith('host.exe', ['serve'], {

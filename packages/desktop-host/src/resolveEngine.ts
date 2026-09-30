@@ -36,7 +36,7 @@ export function windowsEngineEnabled(platform = process.platform, flag = process
 }
 
 export function windowsBuildSupported(release = osRelease()): { supported: boolean; build: string } {
-    const match = /^10\.0\.(\d+)(?:\.|$)/.exec(release);
+    const match = /^10\.0\.(\d+)(?:\.\d+)*$/.exec(release);
     if (!match) return { supported: false, build: `unknown (${release})` };
     const build = Number(match[1]);
     return { supported: Number.isSafeInteger(build) && build >= 22621, build: match[1] };

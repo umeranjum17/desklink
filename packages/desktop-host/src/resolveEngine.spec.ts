@@ -5,6 +5,13 @@ import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { macosEngineEnabled, windowsEngineEnabled, windowsBuildSupported, windowsBuildError, platformTag, resolveEngine, explainMissingEngine } from './resolveEngine.js';
 
+const mockedWindowsRelease = vi.hoisted(() => ({ value: undefined as string | undefined }));
+
+vi.mock('node:os', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('node:os')>();
+    return { ...actual, release: () => mockedWindowsRelease.value ?? actual.release() };
+});
+
 vi.mock('node:module', async (importOriginal) => {
     const actual = await importOriginal<typeof import('node:module')>();
     return { ...actual, createRequire: vi.fn(actual.createRequire) };
@@ -93,6 +100,10 @@ describe('Windows preview resolution', () => {
         expect(windowsBuildSupported('10.0.19045')).toEqual({ supported: false, build: '19045' });
         expect(windowsBuildSupported('10.0.22621')).toEqual({ supported: true, build: '22621' });
         expect(windowsBuildSupported('Windows 11')).toEqual({ supported: false, build: 'unknown (Windows 11)' });
+        expect(windowsBuildSupported('10.0.22621.not-a-version')).toEqual({
+            supported: false,
+            build: 'unknown (10.0.22621.not-a-version)',
+        });
         expect(windowsBuildError('Windows 11')).toBe(
             'The Windows desktop engine preview requires Windows 11 22H2+ x64; detected Windows build unknown (Windows 11).',
         );
@@ -116,6 +127,7 @@ describe('Windows preview resolution', () => {
         writeFileSync(binary, 'fixture', { mode: 0o600 });
         Object.defineProperty(process, 'platform', { value: 'win32' });
         Object.defineProperty(process, 'arch', { value: 'x64' });
+        mockedWindowsRelease.value = '10.0.22621';
         try {
             vi.stubEnv('DESKLINK_WINDOWS', '');
             expect(resolveEngine(binary, root)).toBeNull();
@@ -132,6 +144,7 @@ describe('Windows preview resolution', () => {
             expect(resolveEngine(process.execPath, root)).toBeNull();
             expect(explainMissingEngine(process.execPath, root)).toContain('architecture is unsupported');
         } finally {
+            mockedWindowsRelease.value = undefined;
             Object.defineProperty(process, 'platform', platform);
             Object.defineProperty(process, 'arch', arch);
             rmSync(root, { recursive: true, force: true });

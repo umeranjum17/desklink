@@ -10,7 +10,7 @@
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { Bridge } from '../dist/bridge.js';
-import { EngineClient } from '../dist/engineProcess.js';
+import { EngineClient, windowsEngineStartupError } from '../dist/engineProcess.js';
 import { explainMissingEngine, resolveEngine } from '../dist/resolveEngine.js';
 
 const [command, ...rest] = process.argv.slice(2);
@@ -114,8 +114,12 @@ Set DESKLINK_ENGINE to use an engine built somewhere else (MUXR_DESKLINK_ENGINE 
     }
     const child = spawn(resolved.command, [command, ...rest], { stdio: 'inherit', windowsHide: true });
     return await new Promise((resolve, reject) => {
-        child.on('error', reject);
-        child.on('exit', (code) => resolve(code ?? 0));
+        child.on('error', (error) => reject(windowsEngineStartupError(null, error) ?? error));
+        child.on('exit', (code) => {
+            const startupError = windowsEngineStartupError(code);
+            if (startupError !== null) reject(startupError);
+            else resolve(code ?? 0);
+        });
     });
 }
 
