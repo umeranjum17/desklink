@@ -14,14 +14,16 @@
 
 ## Install
 
-Release: 0.3.0. Install from npm:
+Install from npm; the badge above tracks the registry version:
 
 ```sh
 npm install -g @desklink/axi
 ```
 
 Or build from the repository root with `npm install && npm run build`.
-The engine is resolved by `@desklink/host`, including its prebuilt Linux x64 and macOS arm64 packages. Set `DESKLINK_AXI_ENGINE` for a source build. macOS is enabled by default; `DESKLINK_MACOS=0` opts out.
+The engine is resolved by `@desklink/host`; see its [installation guide](../desktop-host/README.md#install-and-run)
+for supported platforms and [macOS setup](../desktop-host/README.md#macos).
+Set `DESKLINK_AXI_ENGINE` for a source build.
 
 A Linux/macOS desktop AXI. It runs a private bridge per session, captures read-only frames through `@desklink/host` protocol v3, and sends input only through a WebRTC `control` channel. The bridge's Unix socket lives in `$XDG_RUNTIME_DIR/desklink-axi` (or the OS temp directory), with `DESKLINK_AXI_SESSION` selecting an isolated socket. It opens a separate engine session; don't drive the desktop while someone else is controlling it.
 

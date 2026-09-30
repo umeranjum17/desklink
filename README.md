@@ -32,16 +32,12 @@ npm install @desklink/host               # the engine
 npx expo install @desklink/react-native  # the view and session
 ```
 
-| Package | Latest | Unpacked size | Release tag |
-| --- | --- | --- | --- |
-| `@desklink/host` (plus the Linux x64 or macOS arm64 platform package) | 0.3.0 | ~1.1 MB (platform package ~17 MB) | [`desklink-host-v0.3.0`](https://github.com/umeranjum17/desklink/releases/tag/desklink-host-v0.3.0) |
-| `@desklink/react-native` | 0.3.0 | ~266 KB | [`desklink-react-native-v0.3.0`](https://github.com/umeranjum17/desklink/releases/tag/desklink-react-native-v0.3.0) |
+The npm version badges track the registry, and npm verifies package integrity
+on install. See the [host installation guide](packages/desktop-host/README.md#install-and-run)
+for supported desktop platforms and the [receiver installation guide](packages/desktop-client/README.md#install)
+for Android, iOS and web setup. Release changes are in the [changelog](CHANGELOG.md).
 
-The npm version badges at the top of this page track the registry, so they never go stale. npm verifies each package's integrity on install, so there is no separate checksum to copy. The GitHub releases include package tarballs and SHA-256 checksums: [latest release](https://github.com/umeranjum17/desklink/releases/latest).
-
-Supported platforms: Linux x64 with glibc 2.36 or newer (prebuilt engine); macOS arm64 (prebuilt engine, enabled by default). Set `DESKLINK_MACOS=0` to opt out on macOS.
-
-Install the agent CLI with `npm install -g @desklink/axi@0.3.0`; see its [README](packages/axi/README.md#install).
+Install the agent CLI with `npm install -g @desklink/axi`; see its [README](packages/axi/README.md#install).
 
 ## Why desklink exists
 

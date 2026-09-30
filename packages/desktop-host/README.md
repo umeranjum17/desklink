@@ -72,7 +72,10 @@ a source build with a static VP9 library.
 
 ## Install and run
 
-Release: 0.3.0. npm installs the matching optional engine package: `@desklink/host-linux-x64-gnu` or `@desklink/host-darwin-arm64`. The [GitHub release](https://github.com/umeranjum17/desklink/releases/tag/desklink-host-v0.3.0) includes tarballs and SHA-256 checksums. Supported platforms: Linux x64 with glibc 2.36 or newer and macOS arm64.
+The npm badge tracks the registry version. npm installs the matching optional
+engine package: `@desklink/host-linux-x64-gnu` or `@desklink/host-darwin-arm64`.
+Supported platforms: Linux x64 with glibc 2.36 or newer and macOS arm64.
+See the [changelog](../../CHANGELOG.md) for release changes.
 
 ```sh
 npm install @desklink/host
@@ -132,7 +135,8 @@ The published engine is an **unsigned macOS arm64 CLI** in the optional
 notarization is required. The macOS engine is enabled by default; `DESKLINK_MACOS=0` explicitly disables it.
 To build and pack it, build on an Apple Silicon Mac with Rust 1.97+ and static
 Homebrew libvpx, then run `release/build-engine-macos-arm64.sh` and
-`node release/pack.mjs --engine dist-desklink/engine-darwin-arm64 --platform darwin-arm64`.
+follow [Building and packing a release](#building-and-packing-a-release)
+from the repository root.
 The app-bundled signed harness is for local TCC qualification, not npm
 installation. See the [macOS protocol](docs/PROTOCOL.md#macos).
 
@@ -269,19 +273,13 @@ authorisation for that socket, so treat it as a credential.
 
 The engine is a native executable, so the package ships a small JavaScript
 launcher and depends on one platform package per supported target, which npm
-installs only where its `os`, `cpu` and `libc` match:
+installs only where its `os`, `cpu` and, where specified, `libc` match.
 
-```text
-@desklink/host
-  optionalDependencies:
-    @desklink/host-linux-x64-gnu     # the executable, THIRD_PARTY_LICENSES.txt, provenance.json
-```
-
-The optional dependency is written into the published manifest by
-`release/pack.mjs`, pinned to the same version, and is deliberately absent from
-the source `package.json`: an optional dependency the registry does not have
-yet makes a workspace's `yarn install --frozen-lockfile` fail outright rather
-than skip it.
+The platform inventory is defined in `release/pack.mjs`. It writes both optional
+dependencies into the published manifest, pinned to the host version. The pins
+are deliberately absent from the source `package.json`: before publication,
+the registry cannot supply the entries needed for a complete frozen workspace
+install.
 
 `resolveEngine` looks for the platform package first and falls back to a source
 build, and it never searches `PATH`: a program that happens to be called
@@ -295,13 +293,17 @@ the executable bit already set in the tarball.
 
 `platformTag()` includes the libc (`-gnu` or `-musl`) because a glibc binary on a
 musl system fails in ways that read as "broken install" rather than "unsupported
-platform". Only variants that have passed their own qualification are published:
-`linux-x64-gnu` now, `linux-arm64-gnu` when a real machine has run a real
-journey on it. macOS and Windows are separate backends, not separate builds.
+platform". Only variants that have passed their own qualification are published;
+see [Install and run](#install-and-run) for current support. Another variant,
+such as Linux arm64, needs a real machine to run a real journey first. macOS
+and Windows are separate backends, not separate builds.
 
 ### Building and packing a release
 
-Needs Docker and Node, nothing else: no Rust toolchain or system libraries.
+The Linux engine build needs Docker and Node, with no local Rust toolchain or
+system libraries. The macOS engine build needs the Apple Silicon prerequisites
+in [macOS](#macos). Run the following from the repository root after installing
+workspace dependencies:
 
 ```sh
 packages/desktop-host/release/build-engine.sh     # -> dist-desklink/engine-linux-x64-gnu/
@@ -320,14 +322,19 @@ glibc newer than 2.36, or if any crate's licence is not permissive
 `provenance.json` records the source commit, the pinned inputs and the
 executable's SHA-256.
 
-Run `pack.mjs` once for each platform, using `--platform darwin-arm64` for the Mac output. Each call keeps the other platform tarball and packs the host, React Native receiver and AXI CLI at the same version. The host names both optional platform dependencies; npm selects the one matching its OS and CPU. Packing publishes nothing.
+`npm run build` compiles both the host and AXI CLI; packing rejects missing
+compiled output before producing tarballs. Run `pack.mjs` once for each platform,
+using `--engine dist-desklink/engine-darwin-arm64 --platform darwin-arm64` for the
+Mac output. Each call keeps the other platform tarball and also packs the host,
+React Native receiver and AXI CLI. All package versions must match before
+publication. Packing publishes nothing.
 The package smoke instead uses `npm pack` on this checkout's host package as a
 registry stand-in, without Docker or a native build. `check-install.sh` installs
 the current platform's host and engine tarballs into an empty project and checks both installed versions. On Linux it uses a clean container with no Rust toolchain, display or `/dev/uinput`, and checks the typed missing-library error before installing runtime libraries. On macOS it uses a temporary project. Both checks resolve the prebuilt engine, perform the protocol handshake and probe capabilities without opening a capture session.
 
 Publishing is by hand, from an `npm login` with publish rights on the scope.
 `release/publish.mjs` verifies the complete tarball set, publishes both platform packages first and waits until the
-registry serves it before publishing `@desklink/host`, so the host never points
+registry serves each before publishing `@desklink/host`, so the host never points
 at an engine npm does not have. It then publishes the React Native receiver and AXI CLI. A version already on npm with the same bytes is
 skipped; with different bytes it is refused. `--dry-run` does everything but the
 upload:

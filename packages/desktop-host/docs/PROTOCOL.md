@@ -76,9 +76,8 @@ arrives, every other request is refused the same way; `capabilities` and
 
 ## macOS
 
-The host resolver enables macOS by default. npm selects the optional
-`@desklink/host-darwin-arm64` engine on Apple Silicon; `DESKLINK_MACOS=0`
-explicitly disables resolution on macOS.
+For engine installation and the macOS resolution opt-out, see the
+[host installation guide](../README.md#macos).
 
 macOS speaks protocol 3 and shares the session lifecycle below. It captures the
 selected display with ScreenCaptureKit, encodes VP9 (and H.264 through

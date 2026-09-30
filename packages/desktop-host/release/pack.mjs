@@ -6,8 +6,8 @@
  *   node release/pack.mjs --engine dist-desklink/engine-linux-x64-gnu
  *   node release/pack.mjs --engine dist-desklink/engine-darwin-arm64 --platform darwin-arm64
  *
- * The engine comes from `release/build-engine.sh`; tarballs go to
- * `dist-desklink/` at the repository root. Compile the package (`tsc --build`) first.
+ * For engine builds, compilation prerequisites and release sequencing, see
+ * ../README.md, "Building and packing a release".
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -79,7 +79,8 @@ function pack(directory) {
     return tarball;
 }
 
-// Pack the source manifest with both platform dependencies pinned to this release.
+// Add pins only in the release stage: unpublished optional dependencies would
+// leave the workspace's frozen install without a complete locked inventory.
 const hostStage = join(stage, 'host');
 const listing = npmPack(['--dry-run'], { cwd: packageRoot });
 for (const { path } of listing.files) {
