@@ -189,6 +189,7 @@ try:
     fixture = start(["foot", "-c", "/dev/null", "-o", "cursor.blink=no", "sh", "-c",
                      "printf 'Desklink: point here\nPrivate Wayland output\n\033[?1000h\033[?1006h'; stty -echo -icanon; exec cat > "+shlex.quote(str(EVIDENCE / "click.bin"))], "fixture.log")
     wait_until(lambda: fixture_window(ipc("-t", "get_tree")) is not None)
+    ipc("[app_id=foot]", "move", "to", "output", "HEADLESS-2")
     pointer_move(pointer, 1350, 80)
     time.sleep(0.2)
     ipc("[app_id=foot]", "focus")
