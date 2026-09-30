@@ -464,14 +464,25 @@ fn indicator_demo(display_id: u32, path: &str) -> Result<(), String> {
 fn record_agent_overlay(path: &str) -> Result<(), String> {
     use std::io::Write;
     let display = unsafe { CGMainDisplayID() };
-    let (w, h) = crate::convert::fit(unsafe { CGDisplayPixelsWide(display) },
-        unsafe { CGDisplayPixelsHigh(display) }, 960, 640);
+    let (w, h) = crate::convert::fit(
+        unsafe { CGDisplayPixelsWide(display) },
+        unsafe { CGDisplayPixelsHigh(display) },
+        960,
+        640,
+    );
     let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
     for _ in 0..30 {
         let (pixels, sw, sh, stride) = capture_display(display)?;
-        let raw = crate::convert::to_bgrx(&pixels, sw, sh, stride,
-            crate::convert::PixelFormat::Bgra, w, h)
-            .ok_or_else(|| String::from("could not scale recording frame"))?;
+        let raw = crate::convert::to_bgrx(
+            &pixels,
+            sw,
+            sh,
+            stride,
+            crate::convert::PixelFormat::Bgra,
+            w,
+            h,
+        )
+        .ok_or_else(|| String::from("could not scale recording frame"))?;
         file.write_all(&raw).map_err(|error| error.to_string())?;
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -582,7 +593,12 @@ pub fn run() -> i32 {
     let command = args.next().unwrap_or_else(|| "help".into());
     if matches!(
         command.as_str(),
-        "serve" | "capabilities" | "capture-probe" | "indicator-demo" | "axi-record" | "setup-input"
+        "serve"
+            | "capabilities"
+            | "capture-probe"
+            | "indicator-demo"
+            | "axi-record"
+            | "setup-input"
     ) {
         #[cfg(not(desklink_macos_cli))]
         if let Err(error) = ensure_disclaimed() {
