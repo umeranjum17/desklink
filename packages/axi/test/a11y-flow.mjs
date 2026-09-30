@@ -236,7 +236,7 @@ try {
   remember(a11y.pid, 'dbus-daemon');
   a11yBusAddress = a11y.address;
   cageEnv.AT_SPI_BUS_ADDRESS = a11yBusAddress;
-  registryd = spawn(registrydBin, ['--use-gnome-session'], { env: { ...cageEnv, DBUS_SESSION_BUS_ADDRESS: a11yBusAddress }, stdio: ['ignore', 'pipe', 'pipe'] });
+  registryd = spawn(registrydBin, [], { env: { ...cageEnv, DBUS_SESSION_BUS_ADDRESS: a11yBusAddress }, stdio: ['ignore', 'pipe', 'pipe'] });
   remember(registryd.pid, 'at-spi2-registryd');
   await sleep(700);
   assert(registryd.exitCode === null, 'at-spi2-registryd died at startup');
