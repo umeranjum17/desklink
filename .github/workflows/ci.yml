@@ -48,7 +48,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config libclang-dev \
-            libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libevdev-dev libxcb1-dev libxcursor-dev xvfb x11-utils xauth tesseract-ocr \
+            libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libevdev-dev libxcb1-dev libxcursor-dev libxext-dev xvfb x11-utils xauth tesseract-ocr \
             dbus at-spi2-core python3-gi gir1.2-gtk-3.0
       - name: Rust (the version the release build pins)
         run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
@@ -117,7 +117,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config libclang-dev \
-            libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libevdev-dev libxcb1-dev libxcursor-dev xvfb x11-utils xauth
+            libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libevdev-dev libxcb1-dev libxcursor-dev libxext-dev xvfb x11-utils xauth
           npx -y playwright@1.62.1 install --with-deps chromium
       - name: Rust (the version the release build pins)
         run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
