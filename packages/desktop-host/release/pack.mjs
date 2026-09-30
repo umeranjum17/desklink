@@ -54,6 +54,8 @@ if (provenance.engine !== manifest.version) {
 }
 const compiled = join(packageRoot, 'dist', 'resolveEngine.js');
 if (!existsSync(compiled)) throw new Error(`${manifest.name} is not compiled: run tsc --build first`);
+const axiEntry = resolve(packageRoot, '..', 'axi', 'dist', 'index.js');
+if (!existsSync(axiEntry)) throw new Error('@desklink/axi is not compiled: run npm run build first');
 // The same tag the runtime resolver looks for, so the two cannot disagree.
 const { platformTag } = await import(pathToFileURL(compiled).href);
 if (platformTag(platform.os, platform.cpu, platform.libc !== undefined) !== platform.tag) {

@@ -305,7 +305,7 @@ Needs Docker and Node, nothing else: no Rust toolchain or system libraries.
 
 ```sh
 packages/desktop-host/release/build-engine.sh     # -> dist-desklink/engine-linux-x64-gnu/
-npx tsc --build packages/desktop-host
+npm run build
 node packages/desktop-host/release/pack.mjs --engine dist-desklink/engine-linux-x64-gnu
 packages/desktop-host/release/check-install.sh    # fresh install in a clean container
 ```
