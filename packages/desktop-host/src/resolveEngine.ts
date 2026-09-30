@@ -1,5 +1,6 @@
 import { existsSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { release as osRelease } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -32,6 +33,18 @@ export function macosEngineEnabled(platform = process.platform, flag = process.e
 
 export function windowsEngineEnabled(platform = process.platform, flag = process.env.DESKLINK_WINDOWS): boolean {
     return platform !== 'win32' || flag === '1';
+}
+
+export function windowsBuildSupported(release = osRelease()): { supported: boolean; build: string } {
+    const match = /^10\.0\.(\d+)(?:\.|$)/.exec(release);
+    if (!match) return { supported: false, build: `unknown (${release})` };
+    const build = Number(match[1]);
+    return { supported: Number.isSafeInteger(build) && build >= 22621, build: match[1] };
+}
+
+export function windowsBuildError(release = osRelease()): string | null {
+    const { supported, build } = windowsBuildSupported(release);
+    return supported ? null : `The Windows desktop engine preview requires Windows 11 22H2+ x64; detected Windows build ${build}.`;
 }
 
 export function enginePackageRoot(): string {
@@ -103,6 +116,7 @@ function configuredEnginePath(): string | undefined {
 export function resolveEngine(configured = configuredEnginePath(), root = enginePackageRoot()): ResolvedEngine | null {
     if (!macosEngineEnabled() || !windowsEngineEnabled()) return null;
     if (process.platform === 'win32' && process.arch !== 'x64') return null;
+    if (process.platform === 'win32' && windowsBuildError() !== null) return null;
     if (configured !== undefined && configured.trim() !== '') {
         if (!isExecutable(configured)) return null;
         return { command: configured, args: ['serve'], origin: 'configured' };
@@ -141,6 +155,10 @@ export function explainMissingEngine(
     }
     if (process.platform === 'win32' && process.arch !== 'x64') {
         return 'The Windows desktop engine preview requires Windows 11 22H2+ x64; this architecture is unsupported.';
+    }
+    if (process.platform === 'win32') {
+        const buildError = windowsBuildError();
+        if (buildError !== null) return buildError;
     }
     if (!macosEngineEnabled()) {
         return 'The macOS desktop engine is disabled by DESKLINK_MACOS=0; unset it to enable the engine.';

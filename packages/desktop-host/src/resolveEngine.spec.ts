@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
-import { macosEngineEnabled, windowsEngineEnabled, platformTag, resolveEngine, explainMissingEngine } from './resolveEngine.js';
+import { macosEngineEnabled, windowsEngineEnabled, windowsBuildSupported, windowsBuildError, platformTag, resolveEngine, explainMissingEngine } from './resolveEngine.js';
 
 vi.mock('node:module', async (importOriginal) => {
     const actual = await importOriginal<typeof import('node:module')>();
@@ -89,6 +89,15 @@ describe('engine path override', () => {
 
 
 describe('Windows preview resolution', () => {
+    it('requires Windows 11 22H2 or later', () => {
+        expect(windowsBuildSupported('10.0.19045')).toEqual({ supported: false, build: '19045' });
+        expect(windowsBuildSupported('10.0.22621')).toEqual({ supported: true, build: '22621' });
+        expect(windowsBuildSupported('Windows 11')).toEqual({ supported: false, build: 'unknown (Windows 11)' });
+        expect(windowsBuildError('Windows 11')).toBe(
+            'The Windows desktop engine preview requires Windows 11 22H2+ x64; detected Windows build unknown (Windows 11).',
+        );
+    });
+
     it('requires the exact opt-in only on Windows', () => {
         vi.stubEnv('DESKLINK_WINDOWS', '');
         for (const flag of [undefined, '', '0', 'true']) expect(windowsEngineEnabled('win32', flag)).toBe(false);
