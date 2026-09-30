@@ -30,10 +30,12 @@ cargo metadata --manifest-path "$engine/Cargo.toml" --locked --format-version 1 
 DESKLINK_MACOS_CLI=1 DESKLINK_VPX_STATIC_DIR="$vpx" \
   cargo build --manifest-path "$engine/Cargo.toml" --locked --release --target "$target" --bin desklink-host
 
-mkdir -p "$notices/libvpx" "$notices/inputtino"
+mkdir -p "$notices/libvpx" "$notices/inputtino" "$notices/nv-codec-headers" "$notices/libva"
 cp "$metadata" "$notices/cargo-metadata.json"
 cp "$package/LICENSE" "$notices/Apache-2.0.txt"
 cp "$package/engine/vendor/inputtino/LICENSE" "$notices/inputtino/LICENSE"
+cp "$package/engine/vendor/nv-codec-headers/LICENSE" "$notices/nv-codec-headers/LICENSE"
+cp "$package/engine/vendor/libva/COPYING" "$notices/libva/COPYING"
 cp "$vpx/LICENSE" "$notices/libvpx/LICENSE"
 [[ ! -f "$vpx/PATENTS" ]] || cp "$vpx/PATENTS" "$notices/libvpx/PATENTS"
 node "$release/notices.mjs" "$notices" > "$notices/THIRD_PARTY_LICENSES.txt"
