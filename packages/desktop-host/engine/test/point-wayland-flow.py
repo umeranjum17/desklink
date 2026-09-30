@@ -39,6 +39,8 @@ config = EVIDENCE / "sway.conf"
 config.write_text("""output HEADLESS-1 mode 1280x720 position 0 0
 output HEADLESS-2 mode 1280x720 position 1280 0
 seat seat0 fallback true
+focus_follows_mouse no
+mouse_warping none
 xwayland disable
 """)
 sway = os.environ.get("SWAY_BIN", "sway")
