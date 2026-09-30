@@ -208,7 +208,8 @@ try:
         if stage == "before":
             baseline, other = image, current_other
             # This part of the fixture is blank except for the configured cursor.
-            assert max(baseline.crop((40, 40, 120, 120)).getextrema()[0]) > 200, "pointer proof needs a visible cursor"
+            cursor_region = baseline.crop((40, 40, 120, 120))
+            assert len(cursor_region.getcolors(6400) or []) > 1, "pointer proof needs a visible cursor"
         else:
             assert equal(other, current_other), "cue/pointer appeared on the wrong output"
             # Pointer sits at (70,80) on this output. Its captured pixels never change.
