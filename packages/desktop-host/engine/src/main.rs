@@ -490,7 +490,7 @@ async fn serve() -> Result<()> {
     if let Some(session) = current.take() {
         session.close("the consumer disconnected").await;
     }
-    let _ = out_tx.send(String::new()).ok();
+    drop(events_tx);
     drop(out_tx);
     let _ = writer.await;
     Ok(())

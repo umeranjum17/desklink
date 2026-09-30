@@ -9,6 +9,9 @@ licences.
     VP9 encoding. A source build links the host system's libvpx; the prebuilt
     engine (@desklink/host-linux-x64-gnu) links libvpx v1.16.0 statically and
     carries its licence and patent grant in THIRD_PARTY_LICENSES.txt.
+    Windows source builds use libvpx 1.16.0 statically with MSVC /MT. The
+    Windows build script retains its BSD licence, WebM patent grant and the
+    x86inc assembly macros' ISC notice in THIRD_PARTY_LICENSES.txt.
     https://chromium.googlesource.com/webm/libvpx/+/refs/heads/main/LICENSE
 
   inputtino                     MIT

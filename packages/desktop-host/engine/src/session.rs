@@ -238,8 +238,8 @@ fn select_x11(
                 let interval = frame_interval(max_fps);
                 let mut sequence = 0u64;
                 let mut last_sent: Option<Instant> = None;
-                // Without XDamage there is no change signal, so an unchanged
-                // screen is recognised by its pixels exactly as before.
+                // XDamage wakes the loop, but pixels decide whether the root
+                // image actually changed; without XDamage, polling does so.
                 let hashed = !lock(&desktop).damage_armed();
                 let mut last_hash = None;
                 // The first frame is always grabbed; afterwards Damage wakes
@@ -269,7 +269,7 @@ fn select_x11(
                     let grab_micros = grabbed.elapsed().as_micros() as u64;
                     match frame {
                         Ok((frame, raw)) => {
-                            let changed = if hashed {
+                            let changed = {
                                 use std::hash::{Hash, Hasher};
                                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                                 raw.hash(&mut hasher);
@@ -280,8 +280,6 @@ fn select_x11(
                                     last_hash = Some(hash);
                                     true
                                 }
-                            } else {
-                                true
                             };
                             if changed {
                                 // Handing an unchanged frame on would keep the
@@ -480,10 +478,10 @@ impl InputTarget {
         Ok(())
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn unicode_text(&mut self, text: &str) -> Result<()> {
         match &mut self.applier {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             Applier::Uinput(devices) => devices.unicode_text(text),
             #[cfg(target_os = "linux")]
             Applier::Uinput(_) => anyhow::bail!("Unicode text input is unavailable on Linux"),
@@ -854,6 +852,16 @@ pub fn capabilities() -> serde_json::Value {
     })
 }
 
+#[cfg(target_os = "windows")]
+pub fn capabilities() -> serde_json::Value {
+    crate::win::capabilities()
+}
+
+#[cfg(target_os = "windows")]
+fn wayland_clipboard_available() -> bool {
+    false
+}
+
 /// `capabilities.encode`: VP9 always, H.264 when an encoder for it starts
 /// here now. `hardware` describes VP9, the default.
 fn encode_capabilities() -> serde_json::Value {
@@ -881,6 +889,13 @@ impl Session {
             return Err(SessionError::new(
                 "permission",
                 "session.open requires the view permission",
+            ));
+        }
+        #[cfg(target_os = "windows")]
+        if request.agent_indicator {
+            return Err(SessionError::new(
+                "indicator-unavailable",
+                "Windows agent indicator is not implemented in this build.",
             ));
         }
         let id = opaque_id();
@@ -1077,6 +1092,19 @@ impl Session {
                     }),
                 )
                 .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
+                #[cfg(target_os = "windows")]
+                let capture = capture::start(
+                    portal,
+                    width,
+                    height,
+                    max_fps,
+                    sink,
+                    Box::new({
+                        let status = capture_status.clone();
+                        move |running, reason| status(running, reason)
+                    }),
+                )
+                .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
                 #[cfg(target_os = "linux")]
                 let capture = capture::start(
                     portal,
@@ -1155,7 +1183,7 @@ impl Session {
                     applier: Applier::Uinput({
                         #[cfg(target_os = "linux")]
                         let devices = InputDevices::create(source_w as i32, source_h as i32);
-                        #[cfg(target_os = "macos")]
+                        #[cfg(any(target_os = "macos", target_os = "windows"))]
                         let devices = InputDevices::create_for_display(
                             source_w as i32,
                             source_h as i32,
@@ -1489,6 +1517,7 @@ impl Session {
                 "timeout must be 1..120000 ms; label must be at most 96 printable ASCII bytes",
             ));
         }
+        #[cfg(not(target_os = "windows"))]
         if overlay.is_none() {
             #[cfg(target_os = "linux")]
             let helper = crate::indicator::Indicator::start_point(display);
@@ -1502,11 +1531,17 @@ impl Session {
                 SessionError::new("indicator-unavailable", format!("{error:#}"))
             })?);
         }
-        overlay
+        #[cfg(not(target_os = "windows"))]
+        return overlay
             .as_mut()
             .unwrap()
             .point(x, y, timeout, &params.label)
-            .map_err(|error| SessionError::new("indicator-unavailable", format!("{error:#}")))
+            .map_err(|error| SessionError::new("indicator-unavailable", format!("{error:#}")));
+        #[cfg(target_os = "windows")]
+        return Err(SessionError::new(
+            "point_unsupported",
+            "Windows point overlays are unavailable in this build.",
+        ));
     }
 
     pub async fn wait_frame(
@@ -2095,7 +2130,7 @@ impl Inner {
         if text.len() > 4096 {
             return Err(("text-too-large", String::from("text exceeds 4096 bytes")));
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let _ = seq;
             return self.with_input(|target| target.unicode_text(text));
@@ -3328,6 +3363,11 @@ mod tests {
         let (events, mut received) = tokio_mpsc::unbounded_channel();
         let (inner, recorded) = test_inner(events).await;
 
+        #[cfg(target_os = "windows")]
+        inner
+            .with_input(|target| target.chord(1, Vec::new(), true))
+            .unwrap();
+        #[cfg(not(target_os = "windows"))]
         inner.apply(ControlMessage::Key {
             name: None,
             character: Some(String::from("a")),
@@ -3381,6 +3421,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn a_held_modifier_survives_character_named_and_text_chords() {
         use crate::input::keycode;
@@ -3880,6 +3921,11 @@ mod tests {
         use webrtc::peer_connection::RTCPeerConnectionState as State;
         let (events, mut received) = tokio_mpsc::unbounded_channel();
         let (inner, recorded) = test_inner(events).await;
+        #[cfg(target_os = "windows")]
+        inner
+            .with_input(|target| target.chord(1, Vec::new(), true))
+            .unwrap();
+        #[cfg(not(target_os = "windows"))]
         inner.apply(ControlMessage::Key {
             name: Some(String::from("Control")),
             character: None,
@@ -4096,7 +4142,10 @@ mod tests {
             1000,
         );
 
-        // 40 frames over 200 ms is 200 fps; the requested 20 fps caps what leaves.
+        // 40 frames nominally over 200 ms; Windows timers can round each 5 ms
+        // sleep upward, so its cap assertion uses the actual burst duration.
+        #[cfg(target_os = "windows")]
+        let burst_started = Instant::now();
         for _ in 0..40 {
             frame_tx.put(
                 I420 {
@@ -4109,9 +4158,13 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let motion = inner.metrics.lock().unwrap().encoded_frames;
+        #[cfg(target_os = "windows")]
+        let cap = (burst_started.elapsed().as_secs_f64() * 20.0).ceil() as u64 + 3;
+        #[cfg(not(target_os = "windows"))]
+        let cap = 7;
         assert!(
-            motion <= 7,
-            "the requested rate is a cap, got {motion} of 40"
+            motion <= cap,
+            "the requested rate is a cap, got {motion} of 40 (cap {cap})"
         );
         assert!(
             motion >= 2,

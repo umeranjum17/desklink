@@ -5,12 +5,15 @@ the user's session starts it and talks to it over an inherited private channel â
 the engine never opens a public listener, never runs as root, and never installs
 a service.
 
-This document describes the Linux and macOS engine protocol. The macOS engine
-uses the same v3 stdio/WebRTC session path, with native display capture, input
-and clipboard adapters. A Windows compile-only seam also emits a
-`capabilities` response, but does not implement this session protocol and exits
-with an error for `serve`. The protocol contains no application concepts: no
-accounts, no chat, no machine ids, no pane ids.
+This document describes the Linux, macOS, and Windows engine protocol. The
+macOS engine uses the same v3 stdio/WebRTC session path, with native display
+capture, input and clipboard adapters. A Windows build with static libvpx
+(`DESKLINK_VPX_STATIC_DIR`) also serves consumer-fed H.264 encoded sources over
+the shared session path. Native desktop capture, input and clipboard are not
+implemented on Windows, and `session.open` refuses `agent_indicator` with
+`indicator-unavailable`. Without static libvpx, the Windows compile seam
+reports encoding unavailable and refuses `serve`. The protocol contains no
+application concepts: no accounts, no chat, no machine ids, no pane ids.
 
 ## Starting the engine
 
@@ -146,7 +149,11 @@ appears in `codecs` when an H.264 encoder starts on this machine right now, and
 `encode.h264.encoder` names it: `videotoolbox` on macOS; on Linux `nvenc` or
 `vaapi` when the GPU has an H.264 encoder, else `openh264`, Cisco's prebuilt
 library. `encoder` is `null` when there is none. The answer to the offer picks
-between them (see *Codecs* below).
+between them (see *Codecs* below). Windows with static libvpx reports VP9 in
+`encode.codecs`, but has no native desktop capture; without static libvpx its
+`encode.codecs` is empty. On Windows, `encoded.codecs` reports H.264 only when
+static libvpx is linked, for consumer-fed sources; it does not mean the engine
+can encode H.264 itself.
 
 openh264 is never part of this package: the engine loads only Cisco's own
 binary, checked against its published SHA-256, from
