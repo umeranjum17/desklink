@@ -101,7 +101,17 @@ macOS arm64 also has a prebuilt engine. There is no prebuilt engine for other pl
 can [build it from source](#building-from-source). Windows has a compile-only
 engine seam for `x86_64-pc-windows-msvc`; it reports capture, encoding, input,
 and clipboard as unavailable, and `serve` exits with an error. Windows desktop
-sessions are not supported yet.
+sessions are not supported yet. Node resolution is an opt-in preview for Windows
+11 22H2+ x64: set `DESKLINK_WINDOWS=1` and point `DESKLINK_ENGINE` at a built
+`desklink-host.exe`. Windows platform packages are not published yet. The CLI
+can run `version`; inspect compile-seam capabilities by running the executable's
+`capabilities` command directly. The CLI `capabilities` and `bridge` commands
+require the full `serve` transport, pending the libvpx-enabled Windows lane.
+The Windows bridge defaults to `--source display` and handles Ctrl+Break.
+A startup exit `0xC0000135` is reported as `missing-system-library` (a required
+DLL could not load); spawn failures are reported as `engine-spawn-failed` with
+the underlying error. Elevated windows and the secure desktop remain outside
+Windows control support; qualification on the dedicated Windows rig is pending.
 
 ### macOS
 

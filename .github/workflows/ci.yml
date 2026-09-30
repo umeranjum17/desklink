@@ -88,6 +88,20 @@ jobs:
       - name: Windows capabilities (no desktop access)
         run: packages/desktop-host/engine/target/x86_64-pc-windows-msvc/debug/desklink-host.exe capabilities
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build --workspace @desklink/host
+      - name: Windows Node resolver and spawn unit specs
+        run: npx vitest run packages/desktop-host/src/resolveEngine.spec.ts packages/desktop-host/src/engineProcess.windows.spec.ts
+      - name: Windows Node resolver against the real compile seam (no desktop access)
+        run: node packages/desktop-host/test/windows-resolver.mjs
+        env:
+          DESKLINK_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/x86_64-pc-windows-msvc/debug/desklink-host.exe
+      # Full serve/hello proof is pending lane 2's libvpx-enabled transport.
+
   # Shared dependency/module changes must still compile on macOS. The release
   # build with static libvpx remains qualified by the macOS release script.
   engine-macos-seam:

@@ -60,13 +60,21 @@ export class EngineClient {
             for (const [id, pending] of this.pending) {
                 this.pending.delete(id);
                 clearTimeout(pending.timer);
-                pending.reject(new Error('the desktop engine exited'));
+                pending.reject(process.platform === 'win32' && code !== null && (code >>> 0) === 0xc0000135
+                    ? new EngineRefused('missing-system-library', 'The Windows desktop engine could not load a required DLL (0xC0000135); use a complete Windows engine build with its required runtime libraries.')
+                    : new Error('the desktop engine exited'));
             }
             if (!this.stopping) options.onExit?.({ code, signal });
         });
         child.on('error', (error) => {
             this.closed = true;
             options.onDiagnostic?.(`engine process error: ${error.message}`);
+            if (process.platform !== 'win32') return;
+            for (const [id, pending] of this.pending) {
+                this.pending.delete(id);
+                clearTimeout(pending.timer);
+                pending.reject(new EngineRefused('engine-spawn-failed', `The Windows desktop engine could not start: ${error.message}. Check the engine path and Windows application-control policy.`));
+            }
         });
     }
 
@@ -87,7 +95,7 @@ export class EngineClient {
                 throw new EngineRefused('missing-system-library', `missing system library: ${missing}`);
             }
         }
-        const child = spawn(command, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
+        const child = spawn(command, args, { env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
         if (env.DESKLINK_AXI_ENGINE_PID_FILE && child.pid) {
             try { appendFileSync(env.DESKLINK_AXI_ENGINE_PID_FILE, `${child.pid}\n`); }
             catch (error) { child.kill('SIGKILL'); throw error; }

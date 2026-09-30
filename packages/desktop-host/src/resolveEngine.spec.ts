@@ -1,13 +1,18 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
-import { macosEngineEnabled, platformTag, resolveEngine, explainMissingEngine } from './resolveEngine.js';
+import { macosEngineEnabled, windowsEngineEnabled, platformTag, resolveEngine, explainMissingEngine } from './resolveEngine.js';
 
 vi.mock('node:module', async (importOriginal) => {
     const actual = await importOriginal<typeof import('node:module')>();
     return { ...actual, createRequire: vi.fn(actual.createRequire) };
+});
+
+beforeEach(() => {
+    // Existing override specs also run on the hosted Windows runner.
+    vi.stubEnv('DESKLINK_WINDOWS', '1');
 });
 
 afterEach(() => {
@@ -79,5 +84,48 @@ describe('engine path override', () => {
         vi.stubEnv('MUXR_DESKLINK_ENGINE', '/some/legacy/engine');
         const noBuilds = mkdtempSync(join(tmpdir(), 'resolve-engine-env-'));
         expect(resolveEngine(undefined, noBuilds)).toEqual({ command: process.execPath, args: ['serve'], origin: 'configured' });
+    });
+});
+
+
+describe('Windows preview resolution', () => {
+    it('requires the exact opt-in only on Windows', () => {
+        vi.stubEnv('DESKLINK_WINDOWS', '');
+        for (const flag of [undefined, '', '0', 'true']) expect(windowsEngineEnabled('win32', flag)).toBe(false);
+        expect(windowsEngineEnabled('win32', '1')).toBe(true);
+        expect(windowsEngineEnabled('linux', '0')).toBe(true);
+        expect(windowsEngineEnabled('darwin', '0')).toBe(true);
+        expect(platformTag('win32', 'x64')).toBe('win32-x64-msvc');
+    });
+
+    it('gates explicit paths, accepts files without Unix execute bits, and finds .exe builds', () => {
+        const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+        const arch = Object.getOwnPropertyDescriptor(process, 'arch')!;
+        const root = mkdtempSync(join(tmpdir(), 'windows-engine-'));
+        const binary = join(root, 'engine', 'target', 'debug', 'desklink-host.exe');
+        mkdirSync(join(root, 'engine', 'target', 'debug'), { recursive: true });
+        writeFileSync(binary, 'fixture', { mode: 0o600 });
+        Object.defineProperty(process, 'platform', { value: 'win32' });
+        Object.defineProperty(process, 'arch', { value: 'x64' });
+        try {
+            vi.stubEnv('DESKLINK_WINDOWS', '');
+            expect(resolveEngine(binary, root)).toBeNull();
+            expect(explainMissingEngine(binary, root)).toContain('DESKLINK_WINDOWS=1');
+            vi.stubEnv('DESKLINK_WINDOWS', '1');
+            vi.stubEnv('DESKLINK_ENGINE', binary);
+            expect(resolveEngine(undefined, root)).toEqual({ command: binary, args: ['serve'], origin: 'configured' });
+            expect(explainMissingEngine(binary, root)).toBeNull();
+            expect(resolveEngine(root, root)).toBeNull();
+            expect(resolveEngine('', root)).toEqual({ command: binary, args: ['serve'], origin: 'package' });
+            rmSync(binary);
+            expect(explainMissingEngine('', root)).toContain('not published yet');
+            Object.defineProperty(process, 'arch', { value: 'arm64' });
+            expect(resolveEngine(process.execPath, root)).toBeNull();
+            expect(explainMissingEngine(process.execPath, root)).toContain('architecture is unsupported');
+        } finally {
+            Object.defineProperty(process, 'platform', platform);
+            Object.defineProperty(process, 'arch', arch);
+            rmSync(root, { recursive: true, force: true });
+        }
     });
 });
