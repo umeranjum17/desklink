@@ -4137,7 +4137,10 @@ mod tests {
             1000,
         );
 
-        // 40 frames over 200 ms is 200 fps; the requested 20 fps caps what leaves.
+        // 40 frames nominally over 200 ms; Windows timers can round each 5 ms
+        // sleep upward, so its cap assertion uses the actual burst duration.
+        #[cfg(target_os = "windows")]
+        let burst_started = Instant::now();
         for _ in 0..40 {
             frame_tx.put(
                 I420 {
@@ -4150,9 +4153,13 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let motion = inner.metrics.lock().unwrap().encoded_frames;
+        #[cfg(target_os = "windows")]
+        let cap = (burst_started.elapsed().as_secs_f64() * 20.0).ceil() as u64 + 3;
+        #[cfg(not(target_os = "windows"))]
+        let cap = 7;
         assert!(
-            motion <= 7,
-            "the requested rate is a cap, got {motion} of 40"
+            motion <= cap,
+            "the requested rate is a cap, got {motion} of 40 (cap {cap})"
         );
         assert!(
             motion >= 2,
