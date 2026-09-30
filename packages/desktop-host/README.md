@@ -121,8 +121,10 @@ On Windows with Visual Studio Build Tools and PowerShell 7, build libvpx with
 x86_64-pc-windows-msvc --manifest-path engine/Cargo.toml`. The build retains
 libvpx's licence and patent grant in `prefix/THIRD_PARTY_LICENSES.txt`.
 Without that prefix the compile seam still builds and refuses `serve`.
-Hosted Windows CI checks the handshake, indicator refusal, Chrome decode and
-input relay, and DLL dependencies. Dedicated Windows rig qualification of
+Hosted Windows CI resolves the opt-in engine through the published Node API
+and completes a `serve` hello/capabilities handshake with clean shutdown; it
+also checks indicator refusal, Chrome decode and input relay, and DLL
+dependencies. Dedicated Windows rig qualification of
 capture, input, mixed DPI, GPU encoding and elevation is pending; signing and
 packaging are later lanes.
 
