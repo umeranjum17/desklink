@@ -79,7 +79,7 @@ local gestures into that session's input".
 | Need | Already in this repository |
 |---|---|
 | Encrypted mobile → host request path, identity, grants | `packages/contract` control plane + `apps/host/src/requests` |
-| Relay stream channel (host joins as machine, client as client) | `packages/contract` `wsTickets` / preview channel pattern |
+| Relay channel, pairing and reachable addresses (the consuming app's kits, handed in through `Signaling`) | [@byokit/relay](https://www.npmjs.com/package/@byokit/relay) for the relay channel, [@byokit/link](https://www.npmjs.com/package/@byokit/link) for pairing, [@byokit/reach](https://www.npmjs.com/package/@byokit/reach) for reachable addresses |
 | A reference for a "live surface inside a conversation" | `apps/mobile/sources/desktop` |
 | Flow-test style for the packages | `apps/mobile/sources/catalog/application/sessionSync.integration.spec.ts` |
 

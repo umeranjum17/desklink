@@ -739,7 +739,11 @@ anything to show.
 
 - It does not decide *who* the user is. It trusts the consumer's local
   permission decision and enforces the resulting scope; there is no second
-  account, token or pairing ceremony.
+  account, token or pairing ceremony. A consumer that needs those adds them
+  through the BYOKit kits ([@byokit/link](https://www.npmjs.com/package/@byokit/link)
+  for pairing, [@byokit/relay](https://www.npmjs.com/package/@byokit/relay) for the
+  relay, [@byokit/reach](https://www.npmjs.com/package/@byokit/reach) for reachable
+  addresses).
 - It does not open ports, register a service, install udev rules, join groups or
   raise capabilities. Kernel input access is a separate, explicit, guided step
   (`desklink-host setup-input` reports what is missing; it does not change it).

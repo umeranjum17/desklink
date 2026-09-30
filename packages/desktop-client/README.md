@@ -246,6 +246,7 @@ What the consuming app — not this package — must get right before review.
   the user answers; the session's restart/reopen path recovers from that.
   `NSBonjourServices` is only needed if the app adds its own Bonjour
   discovery — desklink discovers no hosts. Relay-only sessions never prompt.
+  Apps supply that relay route with [@byokit/relay](https://www.npmjs.com/package/@byokit/relay).
   See [TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy).
 - **Export compliance.** The viewer's DTLS-SRTP comes from libwebrtc bundled
   with `react-native-webrtc`, not from the OS, so the app must check the

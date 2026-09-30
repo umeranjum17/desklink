@@ -47,7 +47,7 @@ Supported platforms: Linux x64 with glibc 2.36 or newer (prebuilt engine); macOS
 
 Reaching your own computer from somewhere else usually means handing it to someone else's service: an account, a relay, a pairing flow, and a second identity system beside the one your application already has. desklink turns that inside out. The engine runs as you, starts when asked and stops when told, and trusts the application that started it to decide who may see the desktop.
 
-What it does own is the hard middle: capture with the compositor's consent, a real-time encoder tuned for text that has to stay readable on a phone, WebRTC transport, and input and clipboard that reach only the session they were granted to.
+What it does own is the hard middle: capture with the compositor's consent, a real-time encoder tuned for text that has to stay readable on a phone, WebRTC transport, and input and clipboard that reach only the session they were granted to. An application that needs an account, a relay or a pairing flow adds those through the BYOKit kits — [@byokit/link](https://www.npmjs.com/package/@byokit/link) for pairing, [@byokit/relay](https://www.npmjs.com/package/@byokit/relay) for the relay, [@byokit/reach](https://www.npmjs.com/package/@byokit/reach) for reachable addresses — desklink itself implements none of them.
 
 ## See it in action
 

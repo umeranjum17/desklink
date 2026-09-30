@@ -240,6 +240,10 @@ await client.addCandidate(session.sessionId, session.generation, candidate, sdpM
 `myChannel` is the application's own authenticated connection, whatever that is.
 There is no second identity system, no pairing ceremony and no account: the
 engine trusts the consumer's decision and enforces the scope it was given.
+An application that needs pairing, a relay or reachable addresses adds those
+through the BYOKit kits — [@byokit/link](https://www.npmjs.com/package/@byokit/link),
+[@byokit/relay](https://www.npmjs.com/package/@byokit/relay),
+[@byokit/reach](https://www.npmjs.com/package/@byokit/reach).
 
 ### If you have no channel of your own
 

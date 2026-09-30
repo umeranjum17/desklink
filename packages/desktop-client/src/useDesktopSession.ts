@@ -113,7 +113,7 @@ export function connectionStatusFor(
  * rather than left on a spinner.
  */
 const UNREACHABLE_DESKTOP =
-    'The phone must reach the desktop directly, on the same network or its tailnet. Other networks need a relay, which is not available yet.';
+    'The phone must reach the desktop directly, on the same network or its tailnet. Other networks need a relay route supplied by the app.';
 
 /**
  * The engine's and host's own refusal tokens, mapped to this package's failure
