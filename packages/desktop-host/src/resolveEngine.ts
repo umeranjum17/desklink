@@ -38,8 +38,10 @@ export function windowsEngineEnabled(platform = process.platform, flag = process
 export function windowsBuildSupported(release = osRelease()): { supported: boolean; build: string } {
     const match = /^10\.0\.(\d+)(?:\.\d+)*$/.exec(release);
     if (!match) return { supported: false, build: `unknown (${release})` };
-    const build = Number(match[1]);
-    return { supported: Number.isSafeInteger(build) && build >= 22621, build: match[1] };
+    const buildText = match[1];
+    if (buildText === undefined) return { supported: false, build: `unknown (${release})` };
+    const build = Number(buildText);
+    return { supported: Number.isSafeInteger(build) && build >= 22621, build: buildText };
 }
 
 export function windowsBuildError(release = osRelease()): string | null {
