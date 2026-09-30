@@ -187,11 +187,11 @@ try:
     fixture = start(["foot", "-c", "/dev/null", "-o", "cursor.blink=no", "sh", "-c",
                      "printf 'Desklink: point here\nPrivate Wayland output\n\033[?1000h\033[?1006h'; stty -echo -icanon; exec cat > "+shlex.quote(str(EVIDENCE / "click.bin"))], "fixture.log")
     wait_until(lambda: fixture_window(ipc("-t", "get_tree")) is not None)
+    pointer_move(pointer, 1350, 80)
+    time.sleep(0.2)
     ipc("[app_id=foot]", "focus")
     wait_until(lambda: focus(ipc("-t", "get_tree")) == fixture_window(ipc("-t", "get_tree")))
     time.sleep(1)
-    pointer_move(pointer, 1350, 80)
-    time.sleep(0.2)
     baseline_focus = focus(ipc("-t", "get_tree"))
     assert baseline_focus == fixture_window(ipc("-t", "get_tree"))
     env.update(DESKLINK_POINT_UNSUPPORTED_SOCKET=str(unavailable_path), DESKLINK_POINT_TEST_DIR=str(EVIDENCE), DESKLINK_POINT_TEST_ENGINE=str(TARGET / "debug/desklink-host"))
