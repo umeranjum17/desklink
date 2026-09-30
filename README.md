@@ -4,7 +4,7 @@
   <a href="https://www.npmjs.com/package/@desklink/host"><img alt="npm" src="https://img.shields.io/npm/v/@desklink/host?style=flat&label=npm" /></a>
   <a href="https://github.com/umeranjum17/desklink/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/umeranjum17/desklink/ci.yml?style=flat&branch=main" /></a>
   <a href="LICENSE"><img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-666?style=flat" /></a>
-  <img alt="Linux; macOS behind DESKLINK_MACOS" src="https://img.shields.io/badge/Linux%20%7C%20macOS%20behind%20DESKLINK__MACOS-111?style=flat" />
+  <img alt="Linux and macOS" src="https://img.shields.io/badge/Linux%20%7C%20macOS-111?style=flat" />
 </p>
 
 <p align="center">
@@ -32,16 +32,12 @@ npm install @desklink/host               # the engine
 npx expo install @desklink/react-native  # the view and session
 ```
 
-| Package | Latest | Unpacked size | Release tag |
-| --- | --- | --- | --- |
-| `@desklink/host` (plus the `@desklink/host-linux-x64-gnu` platform package) | 0.2.0 | ~1.1 MB (platform package ~17 MB) | [`desklink-host-v0.2.0`](https://github.com/umeranjum17/desklink/releases/tag/desklink-host-v0.2.0) |
-| `@desklink/react-native` | 0.2.0 | ~266 KB | [`desklink-react-native-v0.2.0`](https://github.com/umeranjum17/desklink/releases/tag/desklink-react-native-v0.2.0) |
+The npm version badges track the registry, and npm verifies package integrity
+on install. See the [host installation guide](packages/desktop-host/README.md#install-and-run)
+for supported desktop platforms and the [receiver installation guide](packages/desktop-client/README.md#install)
+for Android, iOS and web setup. Release changes are in the [changelog](CHANGELOG.md).
 
-The npm version badges at the top of this page track the registry, so they never go stale. npm verifies each package's integrity on install, so there is no separate checksum to copy. The GitHub releases carry no attached assets — npm is the distribution channel: [latest release](https://github.com/umeranjum17/desklink/releases/latest).
-
-Supported platforms: Linux x64 with glibc 2.36 or newer (prebuilt engine); macOS stays behind `DESKLINK_MACOS=1` with a source build and has no published platform package yet.
-
-`@desklink/axi` is not published yet — build it from source as its [README](packages/axi/README.md#install) describes.
+Install the agent CLI with `npm install -g @desklink/axi`; see its [README](packages/axi/README.md#install).
 
 ## Why desklink exists
 

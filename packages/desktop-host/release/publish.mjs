@@ -33,6 +33,17 @@ const order = platforms.map(([platform, pinned]) => {
     return { spec: `${platform}@${version}`, tarball: join(out, `${platform.replace(/^@/, '').replace('/', '-')}-${version}.tgz`) };
 });
 order.push({ spec: `${name}@${version}`, tarball: host });
+for (const sibling of ['desktop-client', 'axi']) {
+    const manifest = JSON.parse(readFileSync(resolve(packageRoot, '..', sibling, 'package.json'), 'utf8'));
+    if (manifest.version !== version) throw new Error(`${manifest.name} is not version ${version}`);
+    order.push({ spec: `${manifest.name}@${version}`, tarball: join(out, `${manifest.name.replace(/^@/, '').replace('/', '-')}-${version}.tgz`) });
+}
+// Refuse an incomplete set before publishing any package.
+for (const { spec, tarball } of order) {
+    if (!existsSync(tarball)) throw new Error(`missing ${tarball}: run release/pack.mjs first`);
+    const manifest = manifestOf(tarball);
+    if (`${manifest.name}@${manifest.version}` !== spec) throw new Error(`${tarball} does not hold ${spec}`);
+}
 
 function npm(args, { allowMissing = false, timeout = 20000 } = {}) {
     const result = spawnSync('npm', args, { encoding: 'utf8', timeout });

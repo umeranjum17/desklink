@@ -4,7 +4,7 @@
   <a href="https://www.npmjs.com/package/@desklink/host"><img alt="npm" src="https://img.shields.io/npm/v/@desklink/host?style=flat&label=npm" /></a>
   <a href="https://github.com/umeranjum17/desklink/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/umeranjum17/desklink/ci.yml?style=flat&branch=main" /></a>
   <a href="LICENSE"><img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-666?style=flat" /></a>
-  <img alt="Linux; macOS behind DESKLINK_MACOS" src="https://img.shields.io/badge/Linux%20%7C%20macOS%20behind%20DESKLINK__MACOS-111?style=flat" />
+  <img alt="Linux and macOS" src="https://img.shields.io/badge/Linux%20%7C%20macOS-111?style=flat" />
 </p>
 
 <p align="center">
@@ -72,7 +72,10 @@ a source build with a static VP9 library.
 
 ## Install and run
 
-Latest: 0.2.0 — ~1.1 MB unpacked, plus the `@desklink/host-linux-x64-gnu` 0.2.0 platform package (~17 MB) that carries the prebuilt engine. The npm badge at the top of this page tracks the registry, so it never goes stale, and npm verifies each package's integrity on install, so there is no separate checksum to copy. The GitHub release ([latest](https://github.com/umeranjum17/desklink/releases/latest), tag [`desklink-host-v0.2.0`](https://github.com/umeranjum17/desklink/releases/tag/desklink-host-v0.2.0)) carries no attached assets — npm is the distribution channel. Supported platforms: Linux x64 with glibc 2.36 or newer (prebuilt); macOS stays behind `DESKLINK_MACOS=1` with a source build and has no published platform package yet.
+The npm badge tracks the registry version. npm installs the matching optional
+engine package: `@desklink/host-linux-x64-gnu` or `@desklink/host-darwin-arm64`.
+Supported platforms: Linux x64 with glibc 2.36 or newer and macOS arm64.
+See the [changelog](../../CHANGELOG.md) for release changes.
 
 ```sh
 npm install @desklink/host
@@ -94,7 +97,7 @@ bundle these system libraries. libvpx and inputtino are linked into the engine.
 The one step no install does for you is [kernel input access](#kernel-input-access),
 and only the portal backend needs it.
 
-There is no prebuilt engine for any other platform. Another Linux (arm64, musl)
+macOS arm64 also has a prebuilt engine. There is no prebuilt engine for other platforms. Another Linux (arm64, musl)
 can [build it from source](#building-from-source). Windows remains unsupported.
 
 ### macOS
@@ -129,10 +132,10 @@ current input layout is diagnostic); free-form text uses Unicode key events.
 
 The published engine is an **unsigned macOS arm64 CLI** in the optional
 `@desklink/host-darwin-arm64` platform package; no Developer ID identity or
-notarization is required. The macOS engine remains opt-in (`DESKLINK_MACOS=1`).
+notarization is required. The macOS engine is enabled by default; `DESKLINK_MACOS=0` explicitly disables it.
 To build and pack it, build on an Apple Silicon Mac with Rust 1.97+ and static
-Homebrew libvpx, then run `release/build-engine-macos-arm64.sh` and
-`node release/pack.mjs --engine dist-desklink/engine-darwin-arm64 --platform darwin-arm64`.
+Homebrew libvpx, then follow
+[Building and packing a release](#building-and-packing-a-release).
 The app-bundled signed harness is for local TCC qualification, not npm
 installation. See the [macOS protocol](docs/PROTOCOL.md#macos).
 
@@ -150,8 +153,7 @@ cargo build --release --manifest-path engine/Cargo.toml
 ./bin/desklink-host.mjs capabilities
 ```
 
-On macOS, prefix the launcher commands with `DESKLINK_MACOS=1` to resolve the
-local candidate. The app-bundled dev harness is not the npm package; a source
+On macOS, the launcher resolves the local candidate by default. The app-bundled dev harness is not the npm package; a source
 build is an unsigned CLI and its TCC permissions are attributed to the
 responsible launching app.
 
@@ -270,19 +272,13 @@ authorisation for that socket, so treat it as a credential.
 
 The engine is a native executable, so the package ships a small JavaScript
 launcher and depends on one platform package per supported target, which npm
-installs only where its `os`, `cpu` and `libc` match:
+installs only where its `os`, `cpu` and, where specified, `libc` match.
 
-```text
-@desklink/host
-  optionalDependencies:
-    @desklink/host-linux-x64-gnu     # the executable, THIRD_PARTY_LICENSES.txt, provenance.json
-```
-
-The optional dependency is written into the published manifest by
-`release/pack.mjs`, pinned to the same version, and is deliberately absent from
-the source `package.json`: an optional dependency the registry does not have
-yet makes a workspace's `yarn install --frozen-lockfile` fail outright rather
-than skip it.
+The platform inventory is defined in `release/pack.mjs`. It writes both optional
+dependencies into the published manifest, pinned to the host version. The pins
+are deliberately absent from the source `package.json`: before publication,
+the registry cannot supply the entries needed for a complete frozen workspace
+install.
 
 `resolveEngine` looks for the platform package first and falls back to a source
 build, and it never searches `PATH`: a program that happens to be called
@@ -296,17 +292,21 @@ the executable bit already set in the tarball.
 
 `platformTag()` includes the libc (`-gnu` or `-musl`) because a glibc binary on a
 musl system fails in ways that read as "broken install" rather than "unsupported
-platform". Only variants that have passed their own qualification are published:
-`linux-x64-gnu` now, `linux-arm64-gnu` when a real machine has run a real
-journey on it. macOS and Windows are separate backends, not separate builds.
+platform". Only variants that have passed their own qualification are published;
+see [Install and run](#install-and-run) for current support. Another variant,
+such as Linux arm64, needs a real machine to run a real journey first. macOS
+and Windows are separate backends, not separate builds.
 
 ### Building and packing a release
 
-Needs Docker and Node, nothing else: no Rust toolchain or system libraries.
+The Linux engine build needs Docker and Node, with no local Rust toolchain or
+system libraries. The macOS engine build needs the Apple Silicon prerequisites
+in [macOS](#macos). Run the following from the repository root after installing
+workspace dependencies:
 
 ```sh
 packages/desktop-host/release/build-engine.sh     # -> dist-desklink/engine-linux-x64-gnu/
-npx tsc --build packages/desktop-host
+npm run build
 node packages/desktop-host/release/pack.mjs --engine dist-desklink/engine-linux-x64-gnu
 packages/desktop-host/release/check-install.sh    # fresh install in a clean container
 ```
@@ -321,24 +321,28 @@ glibc newer than 2.36, or if any crate's licence is not permissive
 `provenance.json` records the source commit, the pinned inputs and the
 executable's SHA-256.
 
-The scripts use only the repository's `dist-desklink/` paths shown above; none
-accepts an alternate output or tarball directory. `pack.mjs` requires the
-verified engine output and replaces older desklink tarballs with the current
-`desklink-host-<version>.tgz` and `desklink-host-linux-x64-gnu-<version>.tgz`.
-It cannot pack a host-only release and publishes nothing.
+`npm run build` compiles both the host and AXI CLI; packing rejects missing
+compiled output before producing tarballs. Run `pack.mjs` once for each platform,
+building and packing the Mac output from the repository root on Apple Silicon:
+
+```sh
+packages/desktop-host/release/build-engine-macos-arm64.sh
+npm run build
+node packages/desktop-host/release/pack.mjs --engine dist-desklink/engine-darwin-arm64 --platform darwin-arm64
+packages/desktop-host/release/check-install.sh
+```
+
+Each call keeps the other platform tarball and also packs the host,
+React Native receiver and AXI CLI. All package versions must match before
+publication. Packing publishes nothing.
 The package smoke instead uses `npm pack` on this checkout's host package as a
 registry stand-in, without Docker or a native build. `check-install.sh` installs
-only the current version's two tarballs into an empty project in a container
-with no Rust toolchain, no display and no `/dev/uinput`, and checks both
-installed versions. It checks the typed
-missing-library error before installing the system runtime libraries, then has
-the host package resolve the prebuilt engine, start it and answer the protocol
-handshake and a capabilities probe.
+the current platform's host and engine tarballs into an empty project and checks both installed versions. On Linux it uses a clean container with no Rust toolchain, display or `/dev/uinput`, and checks the typed missing-library error before installing runtime libraries. On macOS it uses a temporary project. Both checks resolve the prebuilt engine, perform the protocol handshake and probe capabilities without opening a capture session.
 
 Publishing is by hand, from an `npm login` with publish rights on the scope.
-`release/publish.mjs` publishes the platform package first and waits until the
-registry serves it before publishing `@desklink/host`, so the host never points
-at an engine npm does not have. A version already on npm with the same bytes is
+`release/publish.mjs` verifies the complete tarball set, publishes both platform packages first and waits until the
+registry serves each before publishing `@desklink/host`, so the host never points
+at an engine npm does not have. It then publishes the React Native receiver and AXI CLI. A version already on npm with the same bytes is
 skipped; with different bytes it is refused. `--dry-run` does everything but the
 upload:
 

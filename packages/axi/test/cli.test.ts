@@ -2,6 +2,7 @@
 // runs it automatically via `npm test`).
 
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -12,6 +13,14 @@ function run(...args: string[]) {
 }
 
 describe("desklink-axi AXI contract", () => {
+  it("--version reports the installed package version", () => {
+    const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    const r = run('--version');
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe(`desklink-axi: ${manifest.version}`);
+    expect(r.stderr).toBe('');
+  });
+
   it("no-args shows content and exits 0 (principle 8)", () => {
     const r = run();
     expect(r.status).toBe(0);

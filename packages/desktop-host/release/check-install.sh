@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
-# Install the packed tarballs into a fresh project in a clean container — no
-# Rust toolchain, no display, no D-Bus session, no /dev/uinput — and have the
-# installed host package report a missing runtime library, then find the
-# prebuilt engine, start it, and answer the protocol handshake and a
-# capabilities probe once runtime libraries are present. Opens no portal,
-# captures nothing and creates no input device.
+# Check the current platform's packed installation without capture or input.
+# For platform-specific checks and release sequencing, see ../README.md,
+# "Building and packing a release".
 #
 #   release/check-install.sh
 #
-# Reads the current version's two tarballs from dist-desklink/ at the
+# Reads the current platform's host and engine tarballs from dist-desklink/ at the
 # repository root.
 set -euo pipefail
 if [ "$#" -ne 0 ]; then echo 'usage: release/check-install.sh' >&2; exit 2; fi
@@ -17,6 +14,36 @@ release="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(git -C "$release" rev-parse --show-toplevel)"
 tarballs="$root/dist-desklink"
 version="$(node -p 'require(process.argv[1]).version' "$root/packages/desktop-host/package.json")"
+if [[ "$(uname -s)" == Darwin ]]; then
+    [[ "$(uname -m)" == arm64 ]] || { echo 'macOS install check requires arm64' >&2; exit 2; }
+    for tarball in "desklink-host-$version.tgz" "desklink-host-darwin-arm64-$version.tgz"; do
+        [[ -f "$tarballs/$tarball" ]] || { echo "missing release tarball: $tarballs/$tarball" >&2; exit 1; }
+    done
+    project="$(mktemp -d -t desklink-install)"
+    trap 'rm -rf "$project"' EXIT
+    cd "$project"
+    npm init -y >/dev/null
+    npm install --ignore-scripts --no-audit --no-fund "$tarballs/desklink-host-$version.tgz" "$tarballs/desklink-host-darwin-arm64-$version.tgz"
+    env -u DESKLINK_ENGINE -u MUXR_DESKLINK_ENGINE -u DESKLINK_MACOS node --input-type=module - "$version" <<'NODE'
+import { createRequire } from 'node:module';
+import { EngineClient, resolveEngine } from '@desklink/host';
+const require = createRequire(import.meta.url);
+for (const name of ['@desklink/host', '@desklink/host-darwin-arm64']) {
+    if (require(`${name}/package.json`).version !== process.argv[2]) throw new Error(`wrong version: ${name}`);
+}
+const engine = resolveEngine();
+if (engine?.origin !== 'prebuilt') throw new Error(`no prebuilt engine: ${JSON.stringify(engine)}`);
+const client = await EngineClient.start(engine.command, engine.args);
+try {
+    // Non-prompting: no session.open, capture, input or TCC changes.
+    console.log(JSON.stringify({ resolved: engine, capabilities: await client.capabilities() }, null, 2));
+} finally {
+    await client.stop();
+}
+NODE
+    exit 0
+fi
+
 for tarball in "desklink-host-$version.tgz" "desklink-host-linux-x64-gnu-$version.tgz"; do
     if [ ! -f "$tarballs/$tarball" ]; then echo "missing release tarball: $tarballs/$tarball" >&2; exit 1; fi
 done

@@ -2,17 +2,23 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
 import { macosEngineEnabled, platformTag, resolveEngine, explainMissingEngine } from './resolveEngine.js';
+
+vi.mock('node:module', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('node:module')>();
+    return { ...actual, createRequire: vi.fn(actual.createRequire) };
+});
 
 afterEach(() => {
     vi.unstubAllEnvs();
 });
 
 describe('macOS engine flag', () => {
-    it('keeps macOS disabled unless explicitly enabled', () => {
-        expect(macosEngineEnabled('darwin', undefined)).toBe(false);
+    it('enables macOS by default with an explicit opt-out', () => {
+        expect(macosEngineEnabled('darwin', undefined)).toBe(true);
         expect(macosEngineEnabled('darwin', '0')).toBe(false);
-        expect(macosEngineEnabled('darwin', 'true')).toBe(false);
+        expect(macosEngineEnabled('darwin', 'true')).toBe(true);
         expect(macosEngineEnabled('darwin', '1')).toBe(true);
         expect(macosEngineEnabled('linux', undefined)).toBe(true);
     });
@@ -27,13 +33,13 @@ describe('macOS engine flag', () => {
             vi.stubEnv('DESKLINK_MACOS', '0');
             expect(resolveEngine('/some/configured/engine')).toBeNull();
             expect(explainMissingEngine('/some/configured/engine')).toBe(
-                'The macOS desktop engine is experimental and off; set DESKLINK_MACOS=1 to try it.',
+                'The macOS desktop engine is disabled by DESKLINK_MACOS=0; unset it to enable the engine.',
             );
 
-            vi.stubEnv('DESKLINK_MACOS', '1');
-            // An empty root stands in for "no source build here", so the check
-            // does not depend on whether this machine has built the engine.
+            vi.stubEnv('DESKLINK_MACOS', '');
             const noBuilds = mkdtempSync(join(tmpdir(), 'resolve-engine-'));
+            const noPrebuilt = vi.fn(() => { throw new Error('No prebuilt package'); }) as unknown as NodeRequire;
+            vi.mocked(createRequire).mockReturnValueOnce(noPrebuilt).mockReturnValueOnce(noPrebuilt);
             expect(resolveEngine('', noBuilds)).toBeNull();
             expect(explainMissingEngine('', noBuilds)).toBe(
                 `The prebuilt desktop engine for darwin-${process.arch} is missing. It arrives as the optional dependency @desklink/host-darwin-${process.arch}: reinstall without omitting optional dependencies, or point DESKLINK_ENGINE at an engine built from source.`,
@@ -52,7 +58,7 @@ describe('macOS engine flag', () => {
 
 describe('engine path override', () => {
     it('reads the override from DESKLINK_ENGINE', () => {
-        vi.stubEnv('DESKLINK_MACOS', '1');
+        vi.stubEnv('DESKLINK_MACOS', '');
         vi.stubEnv('DESKLINK_ENGINE', process.execPath);
         vi.stubEnv('MUXR_DESKLINK_ENGINE', '');
         const noBuilds = mkdtempSync(join(tmpdir(), 'resolve-engine-env-'));
@@ -60,7 +66,7 @@ describe('engine path override', () => {
     });
 
     it('falls back to the legacy name when DESKLINK_ENGINE is unset', () => {
-        vi.stubEnv('DESKLINK_MACOS', '1');
+        vi.stubEnv('DESKLINK_MACOS', '');
         vi.stubEnv('DESKLINK_ENGINE', '');
         vi.stubEnv('MUXR_DESKLINK_ENGINE', process.execPath);
         const noBuilds = mkdtempSync(join(tmpdir(), 'resolve-engine-env-'));
@@ -68,7 +74,7 @@ describe('engine path override', () => {
     });
 
     it('prefers DESKLINK_ENGINE when both names are set', () => {
-        vi.stubEnv('DESKLINK_MACOS', '1');
+        vi.stubEnv('DESKLINK_MACOS', '');
         vi.stubEnv('DESKLINK_ENGINE', process.execPath);
         vi.stubEnv('MUXR_DESKLINK_ENGINE', '/some/legacy/engine');
         const noBuilds = mkdtempSync(join(tmpdir(), 'resolve-engine-env-'));

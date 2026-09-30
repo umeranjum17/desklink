@@ -32,6 +32,9 @@ apply authenticated input to the same desktop".
 - Never: decides identity, installs rules, grants capabilities, carries audio,
   arbitrates two controllers, remembers a session across a restart.
 
+For prebuilt platform support and macOS installation, see the
+[host installation guide](../README.md#install-and-run).
+
 The public surface carries no consumer concepts. A machine id, a chat, a pane or
 an account never appears in the protocol or in the engine's state.
 

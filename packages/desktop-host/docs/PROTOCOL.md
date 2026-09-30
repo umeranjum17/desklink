@@ -66,7 +66,7 @@ Request parameters use the engine's own snake_case names (`session_id`,
 Result:
 
 ```jsonc
-{"protocol":3,"engine":"desklink-host/0.2.0","platform":"linux", /* the rest of Capabilities */ }
+{"protocol":3,"engine":"desklink-host/0.3.0","platform":"linux", /* the rest of Capabilities */ }
 ```
 
 The consumer must send `hello` first, and a version the engine does not speak is
@@ -75,6 +75,9 @@ arrives, every other request is refused the same way; `capabilities` and
 `shutdown` are the two that answer without a handshake.
 
 ## macOS
+
+For engine installation and the macOS resolution opt-out, see the
+[host installation guide](../README.md#macos).
 
 macOS speaks protocol 3 and shares the session lifecycle below. It captures the
 selected display with ScreenCaptureKit, encodes VP9 (and H.264 through
@@ -109,7 +112,7 @@ session may require fresh consent. The macOS engine requires a VP9-enabled build
 ```jsonc
 {
   "protocol": 3,
-  "engine": "desklink-host/0.2.0",
+  "engine": "desklink-host/0.3.0",
   "platform": "linux",
   "session": {"kind": "wayland"},
   "x11": {"available": true, "size": [2560, 1440]},
