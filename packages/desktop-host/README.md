@@ -134,9 +134,8 @@ The published engine is an **unsigned macOS arm64 CLI** in the optional
 `@desklink/host-darwin-arm64` platform package; no Developer ID identity or
 notarization is required. The macOS engine is enabled by default; `DESKLINK_MACOS=0` explicitly disables it.
 To build and pack it, build on an Apple Silicon Mac with Rust 1.97+ and static
-Homebrew libvpx, then run `release/build-engine-macos-arm64.sh` and
-follow [Building and packing a release](#building-and-packing-a-release)
-from the repository root.
+Homebrew libvpx, then follow
+[Building and packing a release](#building-and-packing-a-release).
 The app-bundled signed harness is for local TCC qualification, not npm
 installation. See the [macOS protocol](docs/PROTOCOL.md#macos).
 
@@ -324,8 +323,16 @@ executable's SHA-256.
 
 `npm run build` compiles both the host and AXI CLI; packing rejects missing
 compiled output before producing tarballs. Run `pack.mjs` once for each platform,
-using `--engine dist-desklink/engine-darwin-arm64 --platform darwin-arm64` for the
-Mac output. Each call keeps the other platform tarball and also packs the host,
+building and packing the Mac output from the repository root on Apple Silicon:
+
+```sh
+packages/desktop-host/release/build-engine-macos-arm64.sh
+npm run build
+node packages/desktop-host/release/pack.mjs --engine dist-desklink/engine-darwin-arm64 --platform darwin-arm64
+packages/desktop-host/release/check-install.sh
+```
+
+Each call keeps the other platform tarball and also packs the host,
 React Native receiver and AXI CLI. All package versions must match before
 publication. Packing publishes nothing.
 The package smoke instead uses `npm pack` on this checkout's host package as a

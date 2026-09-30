@@ -1,10 +1,6 @@
 #!/usr/bin/env node
 /**
- * Pack this package's publishable tarballs. Publishes nothing: `release/publish.mjs`
- * does that, platform package first.
- *
- *   node release/pack.mjs --engine dist-desklink/engine-linux-x64-gnu
- *   node release/pack.mjs --engine dist-desklink/engine-darwin-arm64 --platform darwin-arm64
+ * Pack the host, platform engine, receiver and CLI tarballs. Publishes nothing.
  *
  * For engine builds, compilation prerequisites and release sequencing, see
  * ../README.md, "Building and packing a release".

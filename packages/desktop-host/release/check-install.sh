@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-# Install the packed tarballs into a fresh project in a clean container — no
-# Rust toolchain, no display, no D-Bus session, no /dev/uinput — and have the
-# installed host package report a missing runtime library, then find the
-# prebuilt engine, start it, and answer the protocol handshake and a
-# capabilities probe once runtime libraries are present. Opens no portal,
-# captures nothing and creates no input device.
+# Check the current platform's packed installation without capture or input.
+# For platform-specific checks and release sequencing, see ../README.md,
+# "Building and packing a release".
 #
 #   release/check-install.sh
 #
