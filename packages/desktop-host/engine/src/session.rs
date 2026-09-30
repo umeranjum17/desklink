@@ -2512,9 +2512,14 @@ impl MotionSize {
     }
 }
 
-/// The rate cap as a deadline for the next frame. `due` is the earliest time
-/// another frame may be sent, so frames captured faster than the requested
-/// rate wait here instead of leaking through in a burst.
+/// The rate cap as a deadline rather than a minimum gap. `due` is where the
+/// next frame falls on the `max_fps` cadence the stream has kept so far, and a
+/// frame may go up to one interval before it, so a late frame's lost time is
+/// made up by the next. A capture clock that jitters around the cap is then
+/// coded the moment each frame arrives, instead of beating against a second
+/// clock that delays a frame or lets the next one supersede it; the sustained
+/// rate still never exceeds the cap, and no window holds more than one frame
+/// over it.
 struct Cadence {
     interval: Duration,
     due: Instant,
@@ -2527,11 +2532,11 @@ impl Cadence {
 
     /// How long until a frame may go; zero when it may go now.
     fn wait(&self, now: Instant) -> Duration {
-        self.due.saturating_duration_since(now)
+        self.due.saturating_duration_since(now + self.interval)
     }
 
     fn sent(&mut self, now: Instant) {
-        self.due = now + self.interval;
+        self.due = self.due.max(now) + self.interval;
     }
 }
 
@@ -3170,8 +3175,8 @@ mod tests {
         let interval = Duration::from_millis(20);
         let start = Instant::now();
         let mut cadence = Cadence::new(interval, start);
-        // Captured at the cap, each a few ms early or late: the cadence keeps
-        // the next send at least one interval after the previous send.
+        // Captured at the cap, each a few ms early or late: none waits, so
+        // none is delayed or superseded by the next.
         for (n, jitter) in [0i64, -6, 5, -8, 7, -3, 0, -9, 9, -5].iter().enumerate() {
             let at = start + interval * n as u32 + Duration::from_millis(9);
             let at = if *jitter < 0 {
@@ -3179,9 +3184,8 @@ mod tests {
             } else {
                 at + Duration::from_millis(*jitter as u64)
             };
-            if cadence.wait(at).is_zero() {
-                cadence.sent(at);
-            }
+            assert_eq!(cadence.wait(at), Duration::ZERO, "frame {n} waited");
+            cadence.sent(at);
         }
 
         // A source far above the cap: one second of 1 ms frames sends at most
