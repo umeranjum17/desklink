@@ -38,6 +38,9 @@ describe('macOS engine flag', () => {
     it('gates resolution and explains missing engines on Darwin', () => {
         const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
         const arch = Object.getOwnPropertyDescriptor(process, 'arch')!;
+        const root = mkdtempSync(join(tmpdir(), 'resolve-engine-darwin-'));
+        const executable = join(root, 'desklink-host');
+        writeFileSync(executable, 'fixture', { mode: 0o755 });
         Object.defineProperty(process, 'platform', { value: 'darwin' });
         Object.defineProperty(process, 'arch', { value: 'arm64' });
         try {
@@ -56,14 +59,15 @@ describe('macOS engine flag', () => {
             expect(explainMissingEngine('', noBuilds)).toBe(
                 `The prebuilt desktop engine for darwin-${process.arch} is missing. It arrives as the optional dependency @desklink/host-darwin-${process.arch}: reinstall without omitting optional dependencies, or point DESKLINK_ENGINE at an engine built from source.`,
             );
-            expect(resolveEngine(process.execPath)).toEqual({ command: process.execPath, args: ['serve'], origin: 'configured' });
-            expect(explainMissingEngine(process.execPath)).toBeNull();
+            expect(resolveEngine(executable)).toEqual({ command: executable, args: ['serve'], origin: 'configured' });
+            expect(explainMissingEngine(executable)).toBeNull();
             expect(explainMissingEngine('/some/configured/engine')).toBe(
                 'The desktop engine is not at the configured path (/some/configured/engine).',
             );
         } finally {
             Object.defineProperty(process, 'platform', platform);
             Object.defineProperty(process, 'arch', arch);
+            rmSync(root, { recursive: true, force: true });
         }
     });
 });
