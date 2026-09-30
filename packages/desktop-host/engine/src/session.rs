@@ -1475,73 +1475,74 @@ impl Session {
             "point_unsupported",
             "Windows point overlays are unavailable in this build.",
         ));
-        #[cfg(target_os = "linux")]
-        let display = self.inner.point_display.as_deref().ok_or_else(|| {
-            SessionError::new(
-                "point_unsupported",
-                format!(
-                    "reason: {}; point overlay is unavailable",
-                    self.inner.point_unsupported_reason
-                ),
-            )
-        })?;
-        if params.clear {
-            if params.x.is_some()
-                || params.y.is_some()
-                || params.timeout_ms.is_some()
-                || !params.label.is_empty()
+        #[cfg(not(target_os = "windows"))]
+        {
+            #[cfg(target_os = "linux")]
+            let display = self.inner.point_display.as_deref().ok_or_else(|| {
+                SessionError::new(
+                    "point_unsupported",
+                    format!(
+                        "reason: {}; point overlay is unavailable",
+                        self.inner.point_unsupported_reason
+                    ),
+                )
+            })?;
+            if params.clear {
+                if params.x.is_some()
+                    || params.y.is_some()
+                    || params.timeout_ms.is_some()
+                    || !params.label.is_empty()
+                {
+                    return Err(SessionError::new(
+                        "malformed",
+                        "clear accepts no coordinates, label or timeout",
+                    ));
+                }
+                if let Some(helper) = overlay.take() {
+                    helper.stop();
+                }
+                return Ok(());
+            }
+            let (x, y) = params
+                .x
+                .zip(params.y)
+                .ok_or_else(|| SessionError::new("malformed", "point requires x and y"))?;
+            let source = &self.inner.source;
+            if x < 0 || y < 0 || x >= i64::from(source.width) || y >= i64::from(source.height) {
+                return Err(SessionError::new(
+                    "coordinates",
+                    "point is outside the selected desktop",
+                ));
+            }
+            let timeout = params.timeout_ms.unwrap_or(3000);
+            if !(1..=120_000).contains(&timeout)
+                || params.label.len() > 96
+                || !params.label.bytes().all(|b| (32..=126).contains(&b))
             {
                 return Err(SessionError::new(
                     "malformed",
-                    "clear accepts no coordinates, label or timeout",
+                    "timeout must be 1..120000 ms; label must be at most 96 printable ASCII bytes",
                 ));
             }
-            if let Some(helper) = overlay.take() {
-                helper.stop();
+            if overlay.is_none() {
+                #[cfg(target_os = "linux")]
+                let helper = crate::indicator::Indicator::start_point(display);
+                #[cfg(target_os = "macos")]
+                let helper = crate::indicator::Indicator::start_point(
+                    source.node_id,
+                    source.width as usize,
+                    source.height as usize,
+                );
+                *overlay = Some(helper.map_err(|error| {
+                    SessionError::new("indicator-unavailable", format!("{error:#}"))
+                })?);
             }
-            return Ok(());
+            overlay
+                .as_mut()
+                .unwrap()
+                .point(x, y, timeout, &params.label)
+                .map_err(|error| SessionError::new("indicator-unavailable", format!("{error:#}")))
         }
-        let (x, y) = params
-            .x
-            .zip(params.y)
-            .ok_or_else(|| SessionError::new("malformed", "point requires x and y"))?;
-        let source = &self.inner.source;
-        if x < 0 || y < 0 || x >= i64::from(source.width) || y >= i64::from(source.height) {
-            return Err(SessionError::new(
-                "coordinates",
-                "point is outside the selected desktop",
-            ));
-        }
-        let timeout = params.timeout_ms.unwrap_or(3000);
-        if !(1..=120_000).contains(&timeout)
-            || params.label.len() > 96
-            || !params.label.bytes().all(|b| (32..=126).contains(&b))
-        {
-            return Err(SessionError::new(
-                "malformed",
-                "timeout must be 1..120000 ms; label must be at most 96 printable ASCII bytes",
-            ));
-        }
-        #[cfg(not(target_os = "windows"))]
-        if overlay.is_none() {
-            #[cfg(target_os = "linux")]
-            let helper = crate::indicator::Indicator::start_point(display);
-            #[cfg(target_os = "macos")]
-            let helper = crate::indicator::Indicator::start_point(
-                source.node_id,
-                source.width as usize,
-                source.height as usize,
-            );
-            *overlay = Some(helper.map_err(|error| {
-                SessionError::new("indicator-unavailable", format!("{error:#}"))
-            })?);
-        }
-        #[cfg(not(target_os = "windows"))]
-        return overlay
-            .as_mut()
-            .unwrap()
-            .point(x, y, timeout, &params.label)
-            .map_err(|error| SessionError::new("indicator-unavailable", format!("{error:#}")));
     }
 
     pub async fn wait_frame(
