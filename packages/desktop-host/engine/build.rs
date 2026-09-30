@@ -1,8 +1,8 @@
 //! Native dependencies of the engine.
 //!
-//! The Linux build uses two permissive C libraries, both built or linked from
-//! this machine's own sources — no prebuilt binary is fetched at build time, and
-//! nothing is installed:
+//! The Linux build compiles its native adapters from local sources and links
+//! system libraries for desktop overlays — no prebuilt binary is fetched at
+//! build time, and nothing is installed:
 //!
 //! * libvpx (BSD-3-Clause) — VP9 encode, through `native/vpx_shim.c` so the
 //!   versioned encoder config struct is laid out by a C compiler.
