@@ -33,6 +33,6 @@ const missingCliEngine = spawnSync(process.execPath, [cli, 'version'], {
     env: { ...process.env, DESKLINK_ENGINE: `${binary}.absent.exe` },
 });
 assert.equal(missingCliEngine.status, 1);
-assert.match(missingCliEngine.stderr, /The Windows desktop engine could not start:.*absent\.exe/i);
-console.log('PASS: opt-in, real .exe resolution, CLI version spawn, native capabilities, failed-spawn mapping through EngineClient and CLI.');
+assert.match(missingCliEngine.stderr, /The desktop engine is not at the configured path .*absent\.exe/i);
+console.log('PASS: opt-in, real .exe resolution, CLI version spawn, native capabilities, EngineClient spawn failure, and CLI missing-path reporting.');
 console.log('PENDING lane 2: full serve hello handshake; this proof does not claim session transport or desktop qualification.');
