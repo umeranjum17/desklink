@@ -238,8 +238,8 @@ fn select_x11(
                 let interval = frame_interval(max_fps);
                 let mut sequence = 0u64;
                 let mut last_sent: Option<Instant> = None;
-                // Without XDamage there is no change signal, so an unchanged
-                // screen is recognised by its pixels exactly as before.
+                // XDamage wakes the loop, but pixels decide whether the root
+                // image actually changed; without XDamage, polling does so.
                 let hashed = !lock(&desktop).damage_armed();
                 let mut last_hash = None;
                 // The first frame is always grabbed; afterwards Damage wakes
@@ -269,7 +269,7 @@ fn select_x11(
                     let grab_micros = grabbed.elapsed().as_micros() as u64;
                     match frame {
                         Ok((frame, raw)) => {
-                            let changed = if hashed {
+                            let changed = {
                                 use std::hash::{Hash, Hasher};
                                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                                 raw.hash(&mut hasher);
@@ -280,8 +280,6 @@ fn select_x11(
                                     last_hash = Some(hash);
                                     true
                                 }
-                            } else {
-                                true
                             };
                             if changed {
                                 // Handing an unchanged frame on would keep the
@@ -1472,6 +1470,11 @@ impl Session {
                 "an encoded source has no host desktop",
             ));
         }
+        #[cfg(target_os = "windows")]
+        return Err(SessionError::new(
+            "point_unsupported",
+            "Windows point overlays are unavailable in this build.",
+        ));
         #[cfg(target_os = "linux")]
         let display = self.inner.point_display.as_deref().ok_or_else(|| {
             SessionError::new(
@@ -1519,6 +1522,7 @@ impl Session {
                 "timeout must be 1..120000 ms; label must be at most 96 printable ASCII bytes",
             ));
         }
+        #[cfg(not(target_os = "windows"))]
         if overlay.is_none() {
             #[cfg(target_os = "linux")]
             let helper = crate::indicator::Indicator::start_point(display);
@@ -1532,11 +1536,12 @@ impl Session {
                 SessionError::new("indicator-unavailable", format!("{error:#}"))
             })?);
         }
-        overlay
+        #[cfg(not(target_os = "windows"))]
+        return overlay
             .as_mut()
             .unwrap()
             .point(x, y, timeout, &params.label)
-            .map_err(|error| SessionError::new("indicator-unavailable", format!("{error:#}")))
+            .map_err(|error| SessionError::new("indicator-unavailable", format!("{error:#}")));
     }
 
     pub async fn wait_frame(
