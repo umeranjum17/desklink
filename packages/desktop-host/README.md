@@ -102,7 +102,7 @@ macOS arm64 also has a prebuilt engine. There is no prebuilt engine for other pl
 can [build it from source](#building-from-source). Windows has a source-built transport preview for
 `x86_64-pc-windows-msvc`: static libvpx enables `serve` and consumer-fed H.264
 encoded sources. Native capture, input, clipboard and the agent indicator are
-unavailable. Windows desktop sessions are not supported yet. The intended
+unavailable. Native Windows desktop capture sessions are not supported yet. The intended
 preview platform is Windows 11 22H2+ x64, with opt-in `DESKLINK_WINDOWS=1`
 resolver support arriving in a later lane. Elevated windows and the secure
 desktop remain outside input support.
