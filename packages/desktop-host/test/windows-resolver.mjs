@@ -27,5 +27,12 @@ const caps = JSON.parse(capabilities.stdout);
 assert.equal(caps.platform, 'windows');
 assert.equal(caps.protocol, 3);
 await assert.rejects(EngineClient.start(`${binary}.absent.exe`, ['serve']), { code: 'engine-spawn-failed' });
-console.log('PASS: opt-in, real .exe resolution, CLI version spawn, native capabilities, failed-spawn mapping.');
+const missingCliEngine = spawnSync(process.execPath, [cli, 'version'], {
+    encoding: 'utf8',
+    windowsHide: true,
+    env: { ...process.env, DESKLINK_ENGINE: `${binary}.absent.exe` },
+});
+assert.equal(missingCliEngine.status, 1);
+assert.match(missingCliEngine.stderr, /The Windows desktop engine could not start:.*absent\.exe/i);
+console.log('PASS: opt-in, real .exe resolution, CLI version spawn, native capabilities, failed-spawn mapping through EngineClient and CLI.');
 console.log('PENDING lane 2: full serve hello handshake; this proof does not claim session transport or desktop qualification.');

@@ -98,6 +98,7 @@ describe('engine path override', () => {
 describe('Windows preview resolution', () => {
     it('requires Windows 11 22H2 or later', () => {
         expect(windowsBuildSupported('10.0.19045')).toEqual({ supported: false, build: '19045' });
+        expect(windowsBuildSupported('10.0.20348')).toEqual({ supported: false, build: '20348' });
         expect(windowsBuildSupported('10.0.22621')).toEqual({ supported: true, build: '22621' });
         expect(windowsBuildSupported('Windows 11')).toEqual({ supported: false, build: 'unknown (Windows 11)' });
         expect(windowsBuildSupported('10.0.22621.not-a-version')).toEqual({
