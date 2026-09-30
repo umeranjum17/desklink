@@ -76,10 +76,9 @@ local gestures into that session's input".
 
 ## Reused, not rebuilt `[decided]`
 
-| Need | Already in this repository |
+| Need | Integration owner or consumer reference |
 |---|---|
-| Encrypted mobile → host request path, identity, grants | `packages/contract` control plane + `apps/host/src/requests` |
-| Relay stream channel (host joins as machine, client as client) | `packages/contract` `wsTickets` / preview channel pattern |
+| Authenticated request channel, identity, pairing, relay and reachable addresses | The consuming app's kits; see the [BYOKit integration guidance](../../../README.md#why-desklink-exists) |
 | A reference for a "live surface inside a conversation" | `apps/mobile/sources/desktop` |
 | Flow-test style for the packages | `apps/mobile/sources/catalog/application/sessionSync.integration.spec.ts` |
 

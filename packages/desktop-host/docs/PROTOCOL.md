@@ -739,7 +739,8 @@ anything to show.
 
 - It does not decide *who* the user is. It trusts the consumer's local
   permission decision and enforces the resulting scope; there is no second
-  account, token or pairing ceremony.
+  account, token or pairing ceremony. For consumer integration, see the
+  [BYOKit guidance](../../../README.md#why-desklink-exists).
 - It does not open ports, register a service, install udev rules, join groups or
   raise capabilities. Kernel input access is a separate, explicit, guided step
   (`desklink-host setup-input` reports what is missing; it does not change it).

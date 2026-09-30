@@ -49,6 +49,8 @@ Reaching your own computer from somewhere else usually means handing it to someo
 
 What it does own is the hard middle: capture with the compositor's consent, a real-time encoder tuned for text that has to stay readable on a phone, WebRTC transport, and input and clipboard that reach only the session they were granted to.
 
+An application supplies pairing, identity and signaling transport through the BYOKit kits — [@byokit/link](https://www.npmjs.com/package/@byokit/link) for pairing, [@byokit/relay](https://www.npmjs.com/package/@byokit/relay) for the relay, [@byokit/reach](https://www.npmjs.com/package/@byokit/reach) for reachable addresses, and [@byokit/accounts](https://www.npmjs.com/package/@byokit/accounts) for accounts. desklink implements none of those pieces; the app adapts its authenticated channel to the client's [`Signaling` interface](packages/desktop-client/README.md#signaling). WebRTC media and input use a separate session, with app-supplied `iceServers` when needed; a signaling relay alone does not relay that traffic.
+
 ## See it in action
 
 ### A desktop in a browser tab

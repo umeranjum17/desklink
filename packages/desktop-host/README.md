@@ -240,6 +240,8 @@ await client.addCandidate(session.sessionId, session.generation, candidate, sdpM
 `myChannel` is the application's own authenticated connection, whatever that is.
 There is no second identity system, no pairing ceremony and no account: the
 engine trusts the consumer's decision and enforces the scope it was given.
+For the application's pairing, identity and signaling transport, see the
+[BYOKit integration guidance](../../README.md#why-desklink-exists).
 
 ### If you have no channel of your own
 

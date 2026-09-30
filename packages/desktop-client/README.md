@@ -222,7 +222,10 @@ heat and battery.
 ### `Signaling`
 
 The one thing the app must supply. It carries the engine's local protocol over
-whatever authenticated channel the app already has:
+whatever authenticated channel the app already has.
+
+See the [BYOKit integration guidance](../../README.md#why-desklink-exists)
+for the application's pairing, identity and signaling transport.
 
 ```ts
 interface Signaling {
@@ -246,6 +249,8 @@ What the consuming app — not this package — must get right before review.
   the user answers; the session's restart/reopen path recovers from that.
   `NSBonjourServices` is only needed if the app adds its own Bonjour
   discovery — desklink discovers no hosts. Relay-only sessions never prompt.
+  For app-supplied routes, see the
+  [BYOKit integration guidance](../../README.md#why-desklink-exists).
   See [TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy).
 - **Export compliance.** The viewer's DTLS-SRTP comes from libwebrtc bundled
   with `react-native-webrtc`, not from the OS, so the app must check the
