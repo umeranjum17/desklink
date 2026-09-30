@@ -5,12 +5,15 @@ the user's session starts it and talks to it over an inherited private channel â
 the engine never opens a public listener, never runs as root, and never installs
 a service.
 
-This document describes the Linux and macOS engine protocol. The macOS engine
-uses the same v3 stdio/WebRTC session path, with native display capture, input
-and clipboard adapters. A Windows compile-only seam also emits a
-`capabilities` response, but does not implement this session protocol and exits
-with an error for `serve`. The protocol contains no application concepts: no
-accounts, no chat, no machine ids, no pane ids.
+This document describes the Linux, macOS, and Windows engine protocol. The
+macOS engine uses the same v3 stdio/WebRTC session path, with native display
+capture, input and clipboard adapters. A Windows build with static libvpx
+(`DESKLINK_VPX_STATIC_DIR`) also serves consumer-fed H.264 encoded sources over
+the shared session path. Native desktop capture, input and clipboard are not
+implemented on Windows, and `session.open` refuses `agent_indicator` with
+`indicator-unavailable`. Without static libvpx, the Windows compile seam
+reports encoding unavailable and refuses `serve`. The protocol contains no
+application concepts: no accounts, no chat, no machine ids, no pane ids.
 
 ## Starting the engine
 
