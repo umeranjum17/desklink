@@ -108,9 +108,9 @@ export function connectionStatusFor(
 }
 
 /**
- * Without a relay there is no route between two networks: ICE only ever finds
- * host candidates. A client that cannot reach the desktop is told that plainly
- * rather than left on a spinner.
+ * With no app-supplied ICE servers, ICE only finds host candidates, which need
+ * a directly reachable desktop. A client with no usable route is told that
+ * plainly rather than left on a spinner.
  */
 const UNREACHABLE_DESKTOP =
     'The phone must reach the desktop directly, on the same network or its tailnet. Other networks need a relay route supplied by the app.';
