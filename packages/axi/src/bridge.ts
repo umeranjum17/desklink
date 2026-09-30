@@ -92,8 +92,8 @@ export async function serve(args: string[]): Promise<void> {
   if (process.platform !== 'linux' && process.platform !== 'darwin') throw new Error('Linux or macOS only');
   if (process.platform === 'darwin' ? !['auto','display'].includes(source ?? '') || (display !== undefined && !/^\d+$/.test(display)) : source === 'display') throw new Error('source: use display and a numeric --display on macOS, portal/x11 on Linux');
   const executable = resolveEngine(process.env.DESKLINK_AXI_ENGINE);
-  if (!executable) throw new Error(process.platform === 'darwin' && process.env.DESKLINK_MACOS !== '1'
-    ? 'macOS engine disabled; set DESKLINK_MACOS=1 (and DESKLINK_AXI_ENGINE for a source build)'
+  if (!executable) throw new Error(process.platform === 'darwin' && process.env.DESKLINK_MACOS === '0'
+    ? 'macOS engine disabled by DESKLINK_MACOS=0; unset it to enable the engine'
     : 'desktop engine unavailable; set DESKLINK_AXI_ENGINE');
   mkdirSync(join(socketPath, '..'), { recursive: true, mode: 0o700 });
   const events: EngineEvent[] = [];

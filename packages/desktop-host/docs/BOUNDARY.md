@@ -32,6 +32,11 @@ apply authenticated input to the same desktop".
 - Never: decides identity, installs rules, grants capabilities, carries audio,
   arbitrates two controllers, remembers a session across a restart.
 
+The host ships optional prebuilt engines for Linux x64 glibc and macOS arm64.
+macOS resolution is enabled by default, with `DESKLINK_MACOS=0` as an explicit
+opt-out. The unsigned macOS CLI uses the responsible launching app's TCC grants;
+the signed app harness remains a separate local qualification tool.
+
 The public surface carries no consumer concepts. A machine id, a chat, a pane or
 an account never appears in the protocol or in the engine's state.
 

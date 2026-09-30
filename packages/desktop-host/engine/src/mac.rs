@@ -595,7 +595,7 @@ pub fn run() -> i32 {
             let engine = match std::env::current_exe() { Ok(path) => path, Err(error) => { eprintln!("engine path: {error}"); return 1; } };
             let result = std::process::Command::new("/opt/homebrew/bin/node")
                 .arg(cli).arg("--bridge").args(args)
-                .env("DESKLINK_AXI_ENGINE", engine).env("DESKLINK_MACOS", "1")
+                .env("DESKLINK_AXI_ENGINE", engine)
                 .status();
             return match result { Ok(status) => status.code().unwrap_or(1), Err(error) => { eprintln!("axi bridge: {error}"); 1 } };
         }

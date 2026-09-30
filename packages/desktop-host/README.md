@@ -4,7 +4,7 @@
   <a href="https://www.npmjs.com/package/@desklink/host"><img alt="npm" src="https://img.shields.io/npm/v/@desklink/host?style=flat&label=npm" /></a>
   <a href="https://github.com/umeranjum17/desklink/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/umeranjum17/desklink/ci.yml?style=flat&branch=main" /></a>
   <a href="LICENSE"><img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-666?style=flat" /></a>
-  <img alt="Linux; macOS behind DESKLINK_MACOS" src="https://img.shields.io/badge/Linux%20%7C%20macOS%20behind%20DESKLINK__MACOS-111?style=flat" />
+  <img alt="Linux and macOS" src="https://img.shields.io/badge/Linux%20%7C%20macOS-111?style=flat" />
 </p>
 
 <p align="center">
@@ -72,7 +72,7 @@ a source build with a static VP9 library.
 
 ## Install and run
 
-Latest: 0.2.0 — ~1.1 MB unpacked, plus the `@desklink/host-linux-x64-gnu` 0.2.0 platform package (~17 MB) that carries the prebuilt engine. The npm badge at the top of this page tracks the registry, so it never goes stale, and npm verifies each package's integrity on install, so there is no separate checksum to copy. The GitHub release ([latest](https://github.com/umeranjum17/desklink/releases/latest), tag [`desklink-host-v0.2.0`](https://github.com/umeranjum17/desklink/releases/tag/desklink-host-v0.2.0)) carries no attached assets — npm is the distribution channel. Supported platforms: Linux x64 with glibc 2.36 or newer (prebuilt); macOS stays behind `DESKLINK_MACOS=1` with a source build and has no published platform package yet.
+Release: 0.3.0. npm installs the matching optional engine package: `@desklink/host-linux-x64-gnu` or `@desklink/host-darwin-arm64`. The [GitHub release](https://github.com/umeranjum17/desklink/releases/tag/desklink-host-v0.3.0) includes tarballs and SHA-256 checksums. Supported platforms: Linux x64 with glibc 2.36 or newer and macOS arm64.
 
 ```sh
 npm install @desklink/host
@@ -94,7 +94,7 @@ bundle these system libraries. libvpx and inputtino are linked into the engine.
 The one step no install does for you is [kernel input access](#kernel-input-access),
 and only the portal backend needs it.
 
-There is no prebuilt engine for any other platform. Another Linux (arm64, musl)
+macOS arm64 also has a prebuilt engine. There is no prebuilt engine for other platforms. Another Linux (arm64, musl)
 can [build it from source](#building-from-source). Windows remains unsupported.
 
 ### macOS
@@ -129,7 +129,7 @@ current input layout is diagnostic); free-form text uses Unicode key events.
 
 The published engine is an **unsigned macOS arm64 CLI** in the optional
 `@desklink/host-darwin-arm64` platform package; no Developer ID identity or
-notarization is required. The macOS engine remains opt-in (`DESKLINK_MACOS=1`).
+notarization is required. The macOS engine is enabled by default; `DESKLINK_MACOS=0` explicitly disables it.
 To build and pack it, build on an Apple Silicon Mac with Rust 1.97+ and static
 Homebrew libvpx, then run `release/build-engine-macos-arm64.sh` and
 `node release/pack.mjs --engine dist-desklink/engine-darwin-arm64 --platform darwin-arm64`.
@@ -150,8 +150,7 @@ cargo build --release --manifest-path engine/Cargo.toml
 ./bin/desklink-host.mjs capabilities
 ```
 
-On macOS, prefix the launcher commands with `DESKLINK_MACOS=1` to resolve the
-local candidate. The app-bundled dev harness is not the npm package; a source
+On macOS, the launcher resolves the local candidate by default. The app-bundled dev harness is not the npm package; a source
 build is an unsigned CLI and its TCC permissions are attributed to the
 responsible launching app.
 
@@ -321,24 +320,15 @@ glibc newer than 2.36, or if any crate's licence is not permissive
 `provenance.json` records the source commit, the pinned inputs and the
 executable's SHA-256.
 
-The scripts use only the repository's `dist-desklink/` paths shown above; none
-accepts an alternate output or tarball directory. `pack.mjs` requires the
-verified engine output and replaces older desklink tarballs with the current
-`desklink-host-<version>.tgz` and `desklink-host-linux-x64-gnu-<version>.tgz`.
-It cannot pack a host-only release and publishes nothing.
+Run `pack.mjs` once for each platform, using `--platform darwin-arm64` for the Mac output. Each call keeps the other platform tarball and packs the host, React Native receiver and AXI CLI at the same version. The host names both optional platform dependencies; npm selects the one matching its OS and CPU. Packing publishes nothing.
 The package smoke instead uses `npm pack` on this checkout's host package as a
 registry stand-in, without Docker or a native build. `check-install.sh` installs
-only the current version's two tarballs into an empty project in a container
-with no Rust toolchain, no display and no `/dev/uinput`, and checks both
-installed versions. It checks the typed
-missing-library error before installing the system runtime libraries, then has
-the host package resolve the prebuilt engine, start it and answer the protocol
-handshake and a capabilities probe.
+the current platform's host and engine tarballs into an empty project and checks both installed versions. On Linux it uses a clean container with no Rust toolchain, display or `/dev/uinput`, and checks the typed missing-library error before installing runtime libraries. On macOS it uses a temporary project. Both checks resolve the prebuilt engine, perform the protocol handshake and probe capabilities without opening a capture session.
 
 Publishing is by hand, from an `npm login` with publish rights on the scope.
-`release/publish.mjs` publishes the platform package first and waits until the
+`release/publish.mjs` verifies the complete tarball set, publishes both platform packages first and waits until the
 registry serves it before publishing `@desklink/host`, so the host never points
-at an engine npm does not have. A version already on npm with the same bytes is
+at an engine npm does not have. It then publishes the React Native receiver and AXI CLI. A version already on npm with the same bytes is
 skipped; with different bytes it is refused. `--dry-run` does everything but the
 upload:
 

@@ -1,10 +1,10 @@
 <h1 align="center">@desklink/axi</h1>
 
 <p align="center">
-  <img alt="npm: not yet published" src="https://img.shields.io/badge/npm-not%20yet%20published-lightgrey?style=flat" />
+  <a href="https://www.npmjs.com/package/@desklink/axi"><img alt="npm" src="https://img.shields.io/npm/v/@desklink/axi?style=flat" /></a>
   <a href="https://github.com/umeranjum17/desklink/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/umeranjum17/desklink/ci.yml?style=flat&branch=main" /></a>
   <a href="https://github.com/umeranjum17/desklink/blob/main/LICENSE"><img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-666?style=flat" /></a>
-  <img alt="Linux; macOS behind DESKLINK_MACOS" src="https://img.shields.io/badge/Linux%20%7C%20macOS%20behind%20DESKLINK__MACOS-111?style=flat" />
+  <img alt="Linux and macOS" src="https://img.shields.io/badge/Linux%20%7C%20macOS-111?style=flat" />
 </p>
 
 <p align="center">
@@ -14,13 +14,14 @@
 
 ## Install
 
-Not on npm yet — build it from source. The npm badge above will track the registry once it is published. Until then, from the repository root:
+Release: 0.3.0. Install from npm:
 
 ```sh
-npm install && npm run build
+npm install -g @desklink/axi
 ```
 
-The engine is resolved by `@desklink/host` (install it from npm, or set `DESKLINK_AXI_ENGINE` to an executable built from source); on macOS use `DESKLINK_MACOS=1` as that package describes. There is no `@desklink/axi` release yet — watch the [releases page](https://github.com/umeranjum17/desklink/releases/latest) for one.
+Or build from the repository root with `npm install && npm run build`.
+The engine is resolved by `@desklink/host`, including its prebuilt Linux x64 and macOS arm64 packages. Set `DESKLINK_AXI_ENGINE` for a source build. macOS is enabled by default; `DESKLINK_MACOS=0` opts out.
 
 A Linux/macOS desktop AXI. It runs a private bridge per session, captures read-only frames through `@desklink/host` protocol v3, and sends input only through a WebRTC `control` channel. The bridge's Unix socket lives in `$XDG_RUNTIME_DIR/desklink-axi` (or the OS temp directory), with `DESKLINK_AXI_SESSION` selecting an isolated socket. It opens a separate engine session; don't drive the desktop while someone else is controlling it.
 

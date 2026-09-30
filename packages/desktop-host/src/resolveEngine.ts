@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
  *
  *  1. an explicit path, when a consumer or an operator names one;
  *  2. this package's platform package, which npm installs as an optional
- *     dependency on a platform that has a prebuilt engine (Linux x64 glibc);
+ *     dependency on a platform that has a prebuilt engine (Linux x64 glibc and macOS arm64);
  *  3. this package's own build output, for a source build.
  *
  * Deliberately not searched: `PATH`. "A program called desklink-host" is not
@@ -27,7 +27,7 @@ export interface ResolvedEngine {
 const PREBUILT_PLATFORMS = ['linux-x64-gnu', 'darwin-arm64'];
 
 export function macosEngineEnabled(platform = process.platform, flag = process.env.DESKLINK_MACOS): boolean {
-    return platform !== 'darwin' || flag === '1';
+    return platform !== 'darwin' || flag !== '0';
 }
 
 export function enginePackageRoot(): string {
@@ -130,7 +130,7 @@ export function explainMissingEngine(
     root = enginePackageRoot(),
 ): string | null {
     if (!macosEngineEnabled()) {
-        return 'The macOS desktop engine is experimental and off; set DESKLINK_MACOS=1 to try it.';
+        return 'The macOS desktop engine is disabled by DESKLINK_MACOS=0; unset it to enable the engine.';
     }
     const resolved = resolveEngine(configured, root);
     if (resolved !== null) return null;
@@ -148,7 +148,7 @@ export function explainMissingEngine(
         return `There is no prebuilt desktop engine for ${tag}. Build it from source (see the @desklink/host README) and point DESKLINK_ENGINE at the binary.`;
     }
     if (process.platform !== 'linux') {
-        return `The desktop engine runs on Linux only; ${process.platform} is not supported yet.`;
+        return `The desktop engine runs on Linux and macOS; ${process.platform} is not supported yet.`;
     }
     const tag = platformTag();
     if (PREBUILT_PLATFORMS.includes(tag)) {

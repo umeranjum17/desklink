@@ -1,6 +1,6 @@
 {
     "name": "@desklink/host",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "license": "Apache-2.0",
     "description": "Per-user, on-demand desktop capture, encode and input engine with a versioned local control protocol",
     "type": "module",
@@ -31,5 +31,9 @@
     },
     "dependencies": {
         "ws": "^8.18.0"
+    },
+    "optionalDependencies": {
+        "@desklink/host-linux-x64-gnu": "0.3.0",
+        "@desklink/host-darwin-arm64": "0.3.0"
     }
 }

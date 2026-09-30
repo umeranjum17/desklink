@@ -11,7 +11,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -27,7 +27,7 @@ const platforms = {
     'darwin-arm64': {
         os: 'darwin', cpu: 'arm64', tag: 'darwin-arm64',
         description: 'macOS arm64',
-        readme: 'This is an unsigned CLI binary. Screen Recording and Accessibility permissions belong to the responsible app that launches it (for example Terminal, iTerm, or a Node.js host), not to a DesklinkHost.app bundle. Enable the macOS engine with DESKLINK_MACOS=1. libvpx is linked statically; notices are included.',
+        readme: 'This is an unsigned CLI binary. Screen Recording and Accessibility permissions belong to the responsible app that launches it (for example Terminal, iTerm, or a Node.js host), not to a DesklinkHost.app bundle. The macOS engine is enabled by default; DESKLINK_MACOS=0 opts out. libvpx is linked statically; notices are included.',
     },
 };
 const platformTagValue = values.platform ?? 'linux-x64-gnu';
@@ -77,10 +77,7 @@ function pack(directory) {
     return tarball;
 }
 
-// The host package is exactly what npm would pack from the source, plus the
-// platform package as an optional dependency pinned to this version. The pin is
-// added here rather than in the source manifest because an optional dependency
-// the registry does not have yet fails a workspace's frozen install outright.
+// Pack the source manifest with both platform dependencies pinned to this release.
 const hostStage = join(stage, 'host');
 const listing = npmPack(['--dry-run'], { cwd: packageRoot });
 for (const { path } of listing.files) {
@@ -89,12 +86,8 @@ for (const { path } of listing.files) {
 }
 writeJson(join(hostStage, 'package.json'), {
     ...manifest,
-    optionalDependencies: { ...manifest.optionalDependencies, [platformName]: manifest.version },
+    optionalDependencies: { ...manifest.optionalDependencies, ...Object.fromEntries(Object.keys(platforms).map((tag) => [`${manifest.name}-${tag}`, manifest.version])) },
 });
-for (const name of readdirSync(out)) {
-    if (name.startsWith('desklink-host-') && name.endsWith('.tgz')) rmSync(join(out, name));
-}
-
 const platformStage = join(stage, 'platform');
 mkdirSync(platformStage);
 for (const file of ['desklink-host', ...notices, 'provenance.json']) {
@@ -127,3 +120,8 @@ writeJson(join(platformStage, 'package.json'), {
 pack(platformStage);
 pack(hostStage);
 rmSync(stage, { recursive: true, force: true });
+
+// Pack the receivers and CLI from the same release checkout.
+for (const sibling of ['desktop-client', 'axi']) {
+    pack(resolve(packageRoot, '..', sibling));
+}
