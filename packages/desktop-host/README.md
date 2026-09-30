@@ -102,7 +102,7 @@ macOS arm64 also has a prebuilt engine. There is no prebuilt engine for other pl
 can [build it from source](#building-from-source). Windows has a source-built transport preview for
 `x86_64-pc-windows-msvc`: static libvpx enables `serve` and consumer-fed H.264
 encoded sources. Native capture, input, clipboard and the agent indicator are
-unavailable. Windows desktop sessions are not supported yet. Node resolution
+unavailable. Native Windows desktop capture sessions are not supported yet. Node resolution
 is an opt-in preview for Windows 11 22H2+ x64: set `DESKLINK_WINDOWS=1` and
 point `DESKLINK_ENGINE` at a built `desklink-host.exe`. Windows platform packages
 are not published yet. Without static libvpx, the executable's `capabilities`
@@ -125,7 +125,6 @@ Hosted Windows CI checks the handshake, indicator refusal, Chrome decode and
 input relay, and DLL dependencies. Dedicated Windows rig qualification of
 capture, input, mixed DPI, GPU encoding and elevation is pending; signing and
 packaging are later lanes.
-
 
 ### macOS
 

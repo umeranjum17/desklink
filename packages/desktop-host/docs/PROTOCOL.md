@@ -149,7 +149,11 @@ appears in `codecs` when an H.264 encoder starts on this machine right now, and
 `encode.h264.encoder` names it: `videotoolbox` on macOS; on Linux `nvenc` or
 `vaapi` when the GPU has an H.264 encoder, else `openh264`, Cisco's prebuilt
 library. `encoder` is `null` when there is none. The answer to the offer picks
-between them (see *Codecs* below).
+between them (see *Codecs* below). Windows with static libvpx reports VP9 in
+`encode.codecs`, but has no native desktop capture; without static libvpx its
+`encode.codecs` is empty. On Windows, `encoded.codecs` reports H.264 only when
+static libvpx is linked, for consumer-fed sources; it does not mean the engine
+can encode H.264 itself.
 
 openh264 is never part of this package: the engine loads only Cisco's own
 binary, checked against its published SHA-256, from
