@@ -168,6 +168,20 @@ fn default_fps() -> u32 {
     60
 }
 
+/// A host-only visual cue; never an input message.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PointParams {
+    pub session_id: String,
+    pub x: Option<i64>,
+    pub y: Option<i64>,
+    #[serde(default)]
+    pub label: String,
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub clear: bool,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct FrameParams {
     pub session_id: String,

@@ -101,3 +101,75 @@ int desklink_agent_overlay_main(const char *display_name) {
     XcursorImageDestroy(image); XCloseDisplay(d);
     return 0;
 }
+
+// Point cues are independent of the real cursor. A shaped override-redirect
+// window works without a compositor; an empty input shape passes every event
+// through and mapping it never asks for keyboard focus. It intentionally appears
+// in GetImage(root), so the local person and the video observer share the cue.
+#include <X11/extensions/shape.h>
+#include <stdlib.h>
+
+int desklink_point_overlay_main(const char *display_name) {
+    Display *d = XOpenDisplay(display_name);
+    if (!d) return 2;
+    int event_base, error_base;
+    if (!XShapeQueryExtension(d, &event_base, &error_base)) { XCloseDisplay(d); return 2; }
+    int screen = DefaultScreen(d), width = DisplayWidth(d, screen), height = DisplayHeight(d, screen);
+    Window root = RootWindow(d, screen);
+    XSetWindowAttributes attrs = {0};
+    attrs.override_redirect = True;
+    attrs.background_pixel = 0x4c9ed0;
+    Window window = XCreateWindow(d, root, 0, 0, width, height, 0,
+        CopyFromParent, InputOutput, CopyFromParent, CWOverrideRedirect | CWBackPixel, &attrs);
+    XStoreName(d, window, "Desklink point");
+    XShapeCombineRectangles(d, window, ShapeInput, 0, 0, NULL, 0, ShapeSet, Unsorted);
+    Pixmap mask = XCreatePixmap(d, root, width, height, 1);
+    GC shape = XCreateGC(d, mask, 0, NULL), ink = XCreateGC(d, window, 0, NULL);
+    XFontStruct *font = XLoadQueryFont(d, "fixed");
+    if (font) XSetFont(d, ink, font->fid);
+    XSetLineAttributes(d, shape, 4, LineSolid, CapRound, JoinRound);
+    fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL) | O_NONBLOCK);
+    puts("READY"); fflush(stdout);
+    char pending[512]; size_t used = 0;
+    double deadline = 0;
+    for (;;) {
+        char bytes[512]; ssize_t n = read(STDIN_FILENO, bytes, sizeof(bytes));
+        if (n == 0) break;
+        for (ssize_t i = 0; i < n; i++) {
+            if (bytes[i] != '\n') { if (used < sizeof(pending)-1) pending[used++] = bytes[i]; continue; }
+            pending[used] = 0; used = 0;
+            double px, py; unsigned timeout; int offset = 0;
+            if (sscanf(pending, "P %lf %lf %u %n", &px, &py, &timeout, &offset) != 3 || !offset) continue;
+            const char *label = pending + offset;
+            int x = (int)px, y = (int)py, len = (int)strlen(label);
+            int badge_w = font ? XTextWidth(font, label, len) + 16 : len * 6 + 16;
+            if (badge_w > width) badge_w = width;
+            int badge_x = x + 30, badge_y = y - 14;
+            if (badge_x + badge_w > width) badge_x = width - badge_w;
+            if (badge_y < 0) badge_y = 0;
+            if (badge_y + 28 > height) badge_y = height - 28;
+            XUnmapWindow(d, window);
+            XSetForeground(d, shape, 0); XFillRectangle(d, mask, shape, 0, 0, width, height);
+            XSetForeground(d, shape, 1);
+            XDrawArc(d, mask, shape, x-18, y-18, 36, 36, 0, 360*64);
+            XFillArc(d, mask, shape, x-3, y-3, 6, 6, 0, 360*64);
+            if (len) XFillRectangle(d, mask, shape, badge_x, badge_y, badge_w, 28);
+            XShapeCombineMask(d, window, ShapeBounding, 0, 0, mask, ShapeSet);
+            XMapRaised(d, window);
+            XClearWindow(d, window);
+            if (len) {
+                XSetForeground(d, ink, 0x123047);
+                XFillRectangle(d, window, ink, badge_x, badge_y, badge_w, 28);
+                XSetForeground(d, ink, 0xffffff);
+                XDrawString(d, window, ink, badge_x+8, badge_y+18, label, len);
+            }
+            XSync(d, False);
+            deadline = now() + timeout/1000.0;
+        }
+        if (deadline && now() >= deadline) { XUnmapWindow(d, window); XFlush(d); deadline = 0; }
+        usleep(5000);
+    }
+    XDestroyWindow(d, window); XFreeGC(d, shape); XFreeGC(d, ink);
+    XFreePixmap(d, mask); if (font) XFreeFont(d, font); XCloseDisplay(d);
+    return 0;
+}

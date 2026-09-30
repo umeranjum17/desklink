@@ -161,3 +161,12 @@ export class EngineRefused extends Error {
         this.code = code;
     }
 }
+
+/** A visual cue in selected-desktop pixels, independent of input permissions. */
+export type PointRequest = {
+    x: number;
+    y: number;
+    label?: string;
+    timeoutMs?: number;
+    clear?: false;
+} | { clear: true };

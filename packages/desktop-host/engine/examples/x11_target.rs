@@ -47,6 +47,34 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--desktop-state") {
+        let pointer = connection.query_pointer(screen.root)?.reply()?;
+        let focus = connection.get_input_focus()?.reply()?;
+        println!(
+            "{{\"x\":{},\"y\":{},\"focus\":{}}}",
+            pointer.root_x, pointer.root_y, focus.focus
+        );
+        if let Some(path) = args
+            .iter()
+            .position(|arg| arg == "--desktop-frame")
+            .and_then(|i| args.get(i + 1))
+        {
+            let frame = connection
+                .get_image(
+                    x11rb::protocol::xproto::ImageFormat::Z_PIXMAP,
+                    screen.root,
+                    0,
+                    0,
+                    screen.width_in_pixels,
+                    screen.height_in_pixels,
+                    u32::MAX,
+                )?
+                .reply()?;
+            std::fs::write(path, frame.data)?;
+        }
+        return Ok(());
+    }
     let window = connection.generate_id()?;
     connection
         .create_window(

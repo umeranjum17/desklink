@@ -26,6 +26,7 @@ struct CGRect {
 type DisplayId = u32;
 
 unsafe extern "C" {
+    fn desklink_point_overlay_main(display_id: i32) -> i32;
     fn desklink_agent_overlay_main(display_id: i32) -> i32;
     fn desklink_image_bgra(image: *const c_void, length: *mut usize, stride: *mut usize)
         -> *mut u8;
@@ -598,6 +599,10 @@ pub fn run() -> i32 {
                 .env("DESKLINK_AXI_ENGINE", engine)
                 .status();
             return match result { Ok(status) => status.code().unwrap_or(1), Err(error) => { eprintln!("axi bridge: {error}"); 1 } };
+        }
+        "point-overlay" => {
+            let display = args.next().and_then(|value| value.parse().ok()).unwrap_or(0);
+            return unsafe { desklink_point_overlay_main(display) };
         }
         "agent-overlay" => {
             let display = args.next().and_then(|value| value.parse().ok()).unwrap_or(0);

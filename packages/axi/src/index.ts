@@ -17,6 +17,7 @@ if (process.argv[2] === '--bridge') {
     ['start', [], ['control','source','display','timeout']], ['stop', [], []], ['health', [], []],
     ['screen', [], ['query','region','full','fields']], ['diff', [], ['include-animating','fields']],
     ['tree', [], ['query','full','fields']], ['marks', [], ['region','out']],
+    ['point', [], ['label','timeout','clear']],
     ['look', [], ['region','out']], ['click', ['target'], ['button','double','wait']],
     ['type', ['text'], ['into','submit','wait']], ['press', ['key'], ['wait']],
     ['scroll', ['direction'], ['at','amount','wait']], ['drag', ['from','to'], ['wait']],
@@ -27,7 +28,7 @@ if (process.argv[2] === '--bridge') {
   const commands: Record<string, CommandModule> = {};
   Object.assign(commands, browserCommands());
   for (const [name, required, flags] of definitions) commands[name] = {
-    spec: { name, summary: `${name} on the live desktop`, args: required.map(arg => ({name:arg,required:true,description:arg})), flags: flags.map(flag => ({name:flag,type: ['control','full','double','submit','include-animating'].includes(flag) ? 'boolean' : 'string', values: flag === 'source' ? ['auto','portal','x11','display'] : flag === 'button' ? ['left','right'] : undefined, description:flag})), examples: [`desklink-axi ${name} ${required.map(arg=>`<${arg}>`).join(' ')}`] },
+    spec: { name, summary: `${name} on the live desktop`, args: name === 'point' ? [{name:'x,y',required:false,description:'selected desktop pixels; omit for --clear'}] : required.map(arg => ({name:arg,required:true,description:arg})), flags: flags.map(flag => ({name:flag,type: ['control','full','double','submit','include-animating','clear'].includes(flag) ? 'boolean' : 'string', values: flag === 'source' ? ['auto','portal','x11','display'] : flag === 'button' ? ['left','right'] : undefined, description:flag})), examples: name === 'point' ? ['desklink-axi point 400,300 --label "Here" --timeout 3000', 'desklink-axi point --clear'] : [`desklink-axi ${name} ${required.map(arg=>`<${arg}>`).join(' ')}`] },
     async run(parsed) {
       if (name === 'scroll' && !['up','down'].includes(parsed.positionals[0]!)) throw new UsageError('scroll direction must be up or down');
       if (name === 'marks' && parsed.flags.region && !/^-?\d+,-?\d+,-?\d+,-?\d+$/.test(String(parsed.flags.region))) throw new UsageError('--region must be x,y,w,h integers');

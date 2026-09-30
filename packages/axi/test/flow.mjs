@@ -25,7 +25,7 @@ const xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', '1280x7
 const pidFile = join(dir, 'bridges.pid');
 const enginePidFile = join(dir, 'engines.pid');
 const owned = new Map(); // PID -> /proc start time; never signal a reused PID.
-const env = { ...process.env, DISPLAY: display, XAUTHORITY: authority, DESKLINK_AXI_SESSION: `flow-${process.pid}`, DESKLINK_AXI_ENGINE: enginePath, DESKLINK_AXI_PID_FILE: pidFile, DESKLINK_AXI_ENGINE_PID_FILE: enginePidFile };
+const env = { ...process.env, DISPLAY: display, WAYLAND_DISPLAY: '', XAUTHORITY: authority, DESKLINK_AXI_SESSION: `flow-${process.pid}`, DESKLINK_AXI_ENGINE: enginePath, DESKLINK_AXI_PID_FILE: pidFile, DESKLINK_AXI_ENGINE_PID_FILE: enginePidFile };
 function proc(pid) {
   try {
     const fields = readFileSync(`/proc/${pid}/stat`,'utf8').split(') ')[1].split(' ');
@@ -50,7 +50,7 @@ function recordProcesses() {
   for (const pid of [process.pid, ...owned.keys()]) for (const child of childrenOf(pid)) {
     try {
       const cmd = readFileSync(`/proc/${child}/cmdline`,'utf8').replaceAll('\0',' ');
-      if (cmd.includes(enginePath) && (cmd.includes('serve') || cmd.includes('agent-overlay'))) remember(child,enginePath);
+      if (cmd.includes(enginePath) && (cmd.includes('serve') || cmd.includes('agent-overlay') || cmd.includes('point-overlay'))) remember(child,enginePath);
     } catch { /* Child already exited. */ }
   }
 }
@@ -153,7 +153,7 @@ async function run(...args) {
   const started = performance.now();
   const child = spawn(process.execPath, [cli, ...args], { env });
   let out = ''; for await (const part of child.stdout) out += part;
-  const code = await new Promise(r => child.on('exit', r));
+  const code = child.exitCode ?? await new Promise(r => child.once('exit', r));
   assert.equal(code, 0, `${args.join(' ')}: ${out}`);
   recordProcesses();
   observations.push({ command: args.join(' '), ms: Math.round(performance.now()-started), output: out }); return out;
@@ -179,6 +179,58 @@ try {
   assert(changed.still_ms>=150 && changed.damage.length > 0);
   assert.notDeepEqual(readFileSync(path),original);
   const cleanFrame = readFileSync(path);
+  // The cue is visible in the root screenshot, independent of pointer/focus,
+  // and included in the session frame. Only this verified private display is read.
+  const desktop = async () => {
+    await verifyXvfb();
+    const rootPath = join(dir, 'root.raw');
+    const result = spawnSync(example, ['--desktop-state','--desktop-frame',rootPath], { env, encoding:'utf8', timeout:3000 });
+    assert.equal(result.status,0,result.stderr);
+    return { state:JSON.parse(result.stdout), raw:readFileSync(rootPath) };
+  };
+  const savePointShot = async (raw, name) => {
+    if (!process.env.DESKLINK_POINT_EVIDENCE_DIR) return;
+    const { PNG } = await import('pngjs');
+    const png = new PNG({width:1280,height:720});
+    for (let i=0;i<1280*720;i++) {
+      png.data[i*4]=raw[i*4+2]; png.data[i*4+1]=raw[i*4+1]; png.data[i*4+2]=raw[i*4]; png.data[i*4+3]=255;
+    }
+    writeFileSync(join(process.env.DESKLINK_POINT_EVIDENCE_DIR, `desklink-point-overlay-${name}.png`),PNG.sync.write(png));
+  };
+  const beforePoint = await desktop();
+  await savePointShot(beforePoint.raw, 'before');
+  assert.deepEqual(await client.point(session.sessionId,{x:400,y:300,label:'Here',timeoutMs:3000}),{shown:true});
+  recordProcesses();
+  await new Promise(r=>setTimeout(r,100));
+  const pointed = await desktop();
+  assert.deepEqual(pointed.state,beforePoint.state,'point must not move the pointer or change focus');
+  assert.deepEqual([...pointed.raw.subarray((300*1280+400)*4,(300*1280+400)*4+3)],[0xd0,0x9e,0x4c],'ring center is at requested desktop coordinates');
+  assert.deepEqual([...pointed.raw.subarray((300*1280+418)*4,(300*1280+418)*4+3)],[0xd0,0x9e,0x4c],'ring edge is 18 pixels from center');
+  assert.notDeepEqual(pointed.raw,beforePoint.raw);
+  await savePointShot(pointed.raw,'after');
+  const withPoint = await client.request('session.frame',{session_id:session.sessionId,path,after_seq:changed.seq,still_ms:100,timeout_ms:2000});
+  assert.deepEqual(readFileSync(path),pointed.raw,'the cue is intentionally included in captured frames');
+  await assert.rejects(client.point(session.sessionId,{x:1280,y:300}),{code:'coordinates'});
+  await assert.rejects(client.point(session.sessionId,{x:400,y:300,label:'invalid\nlabel'}),{code:'malformed'});
+  await assert.rejects(client.point(session.sessionId,{x:400,y:300,timeoutMs:120001}),{code:'malformed'});
+  await assert.rejects(client.request('session.point',{session_id:session.sessionId,clear:true,x:4}),{code:'malformed'});
+  assert.deepEqual((await desktop()).raw,pointed.raw,'invalid calls preserve the existing marker');
+  await client.point(session.sessionId,{x:700,y:500,timeoutMs:150});
+  await new Promise(r=>setTimeout(r,50));
+  const replaced = await desktop();
+  assert.notDeepEqual(replaced.raw,pointed.raw,'new points replace old points');
+  assert.deepEqual(replaced.state,beforePoint.state);
+  await new Promise(r=>setTimeout(r,250));
+  assert.deepEqual((await desktop()).raw,beforePoint.raw,'timeout removes the cue');
+  await client.point(session.sessionId,{x:400,y:300,timeoutMs:10000});
+  await new Promise(r=>setTimeout(r,50));
+  assert.notDeepEqual((await desktop()).raw,beforePoint.raw);
+  await client.point(session.sessionId,{clear:true});
+  await client.point(session.sessionId,{clear:true});
+  assert.deepEqual((await desktop()).raw,beforePoint.raw,'clear removes the cue and is idempotent');
+  assert.deepEqual((await desktop()).state,beforePoint.state);
+  await client.request('session.frame',{session_id:session.sessionId,path,after_seq:withPoint.seq,still_ms:100,timeout_ms:2000});
+  const cleanSeq = (await client.request('session.frame',{session_id:session.sessionId})).seq;
   // Xcursor sprites live outside GetImage(root): motion and ripple must not
   // create a different frame or damage region from an indicator-off session.
   await verifyXvfb();
@@ -187,8 +239,8 @@ try {
   await new Promise((resolve,reject) => {overlay.stdout.once('data',resolve);overlay.once('error',reject);});
   overlay.stdin.write('M 100 100\nC 100 100\n');
   await new Promise(r=>setTimeout(r,600));
-  const cursorOnly = await client.request('session.frame',{session_id:session.sessionId,path,since:changed.seq});
-  assert.equal(cursorOnly.seq,changed.seq, 'cursor motion and ripple add no frame damage');
+  const cursorOnly = await client.request('session.frame',{session_id:session.sessionId,path,since:cleanSeq});
+  assert.equal(cursorOnly.seq,cleanSeq, 'cursor motion and ripple add no frame damage');
   assert.deepEqual(readFileSync(path),cleanFrame, 'indicator-on and indicator-off captures match');
   overlay.stdin.end();
   await new Promise(r=>overlay.once('exit',r)); overlay = undefined;
@@ -199,22 +251,26 @@ try {
     await verifyXvfb();
     const invalid = spawn(process.execPath,[cli,...args],{env});
     let output = ''; for await (const part of invalid.stdout) output += part;
-    assert.equal(await new Promise(r=>invalid.on('exit',r)),1,output);
+    assert.equal(invalid.exitCode ?? await new Promise(r=>invalid.once('exit',r)),1,output);
     assert.match(output,/error: wait-duration: milliseconds must be an integer from 0 to 120000/);
   }
   assert.doesNotMatch(events, /"kind":"button"/, 'rejected delay must not send input');
   const before = await run('diff'); assert.match(before,/changed:/);
-  const clicked = await run('click','100,100'); assert.match(clicked,/input: applied/, events);
+  assert.match(await run('point','100,100','--label','Here','--timeout','10000'),/point: shown/);
+  const clicked = await run('click','100,100');
+  assert.match(clicked,/input: applied/, events);
   assert.match(await run('wait','change','--timeout','5000'),/wait: change met/);
   assert.match(await run('diff'),/changed: [1-9]/, events);
   assert.match(events, /"kind":"button".*"phase":"up"/, 'the click reached the app beneath the indicator');
   const looked = await run('look','@r1'); assert.match(looked,/image: .*\.png/);
   const imagePath = /image: (.*\.png)/.exec(looked)?.[1];
   assert(imagePath && readFileSync(imagePath).subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])));
+  assert.match(await run('point','--clear'),/point: cleared/);
+  await new Promise(r=>setTimeout(r,200));
   await verifyXvfb();
   const unchanged = spawn(process.execPath,[cli,'click','100,100'],{env});
   let noChange = ''; for await (const part of unchanged.stdout) noChange += part;
-  assert.equal(await new Promise(r=>unchanged.on('exit',r)),0,noChange);
+  assert.equal(unchanged.exitCode ?? await new Promise(r=>unchanged.once('exit',r)),0,noChange);
   assert.match(noChange,/input: applied/);
   const waited = await run('click','100,100','--wait','change');
   assert.match(waited,/input: applied; frame: timed out/);
@@ -222,7 +278,7 @@ try {
   const expectedText = 'AXI_SYNTHETIC_726';
   const typing = spawn(process.execPath,[cli,'type',expectedText],{env});
   let typed = ''; for await (const part of typing.stdout) typed += part;
-  assert.equal(await new Promise(r=>typing.on('exit',r)),0,typed);
+  assert.equal(typing.exitCode ?? await new Promise(r=>typing.once('exit',r)),0,typed);
   assert.match(typed,/input: applied/);
   // The X client saves asynchronously; on slow runners the file can lag the
   // applied input by a moment. Bounded settle — the text must still land.
@@ -250,7 +306,7 @@ try {
   await verifyXvfb();
   const failedBatch = spawn(process.execPath,[cli,'batch',JSON.stringify([['press','a'],['assert','XYZZY_NEVER_ON_SCREEN']])],{env});
   let failOut=''; for await (const part of failedBatch.stdout) failOut += part;
-  assert.equal(await new Promise(r=>failedBatch.on('exit',r)),1,failOut);
+  assert.equal(failedBatch.exitCode ?? await new Promise(r=>failedBatch.once('exit',r)),1,failOut);
   assert.match(failOut,/assert-failed: "XYZZY_NEVER_ON_SCREEN" not on screen/);
   assert.match(failOut,/effects: unverified/, 'a failed assert must not read as task success');
   assert.doesNotMatch(failOut, /^batch: 2\/2 steps/m, 'a failed assert must not produce a success summary');
@@ -290,7 +346,7 @@ try {
     await verifyXvfb();
     const child = spawn(process.execPath,[cli,'clipboard',...operation],{env});
     let output=''; for await (const part of child.stdout) output+=part;
-    assert.equal(await new Promise(r=>child.on('exit',r)),1);
+    assert.equal(child.exitCode ?? await new Promise(r=>child.once('exit',r)),1);
     assert.match(output,/clipboard requires start --control/);
   }
   assert.match(await run('screen','--query','zebra'),/0 items match "zebra"/);
@@ -299,7 +355,7 @@ try {
   assert(!existsSync(`/tmp/.X11-unix/X${number+1000}`) && !existsSync(`/tmp/.X${number+1000}-lock`));
   const failed = spawn(process.execPath,[cli,'start','--source','x11','--display',badDisplay,'--timeout','3000'],{env:{...env,DESKLINK_AXI_SESSION:`failed-${process.pid}`}});
   let failure=''; for await (const part of failed.stdout) failure += part;
-  assert.equal(await new Promise(r=>failed.on('exit',r)),1,failure);
+  assert.equal(failed.exitCode ?? await new Promise(r=>failed.once('exit',r)),1,failure);
   recordProcesses();
   await goneOwned(Number(readFileSync(pidFile,'utf8').trim().split(/\s+/).at(-1)));
   await goneOwned(Number(readFileSync(enginePidFile,'utf8').trim().split(/\s+/).at(-1)));

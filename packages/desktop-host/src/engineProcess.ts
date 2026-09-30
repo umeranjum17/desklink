@@ -8,6 +8,7 @@ import {
     type EngineCapabilities,
     type EngineEvent,
     type OpenedSession,
+    type PointRequest,
     type OpenSessionRequest,
     type SessionMetrics,
 } from './protocol.js';
@@ -221,6 +222,18 @@ export class EngineClient {
 
     writeClipboard(sessionId: string, text: string): Promise<{ written: boolean }> {
         return this.request('session.clipboard.write', { session_id: sessionId, text });
+    }
+
+    /** Show or clear a transient cue on the host, without moving its pointer. */
+    point(sessionId: string, request: PointRequest): Promise<{ shown: boolean }> {
+        return this.request('session.point', {
+            session_id: sessionId,
+            ...(request.clear === true ? { clear: true } : {
+                x: request.x, y: request.y,
+                ...(request.label === undefined ? {} : { label: request.label }),
+                ...(request.timeoutMs === undefined ? {} : { timeout_ms: request.timeoutMs }),
+            }),
+        });
     }
 
     closeSession(sessionId: string): Promise<{ closed: boolean }> {

@@ -102,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .file("native/agent_overlay_x11.c")
             .file("native/agent_overlay_wayland.c")
             .compile("dlagentoverlay");
-        for lib in ["X11", "Xcursor", "wayland-client", "m"] {
+        for lib in ["X11", "Xext", "Xcursor", "wayland-client", "m"] {
             println!("cargo:rustc-link-lib={lib}");
         }
         cc::Build::new()
