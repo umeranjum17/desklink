@@ -16,15 +16,21 @@
 //! quit                                          -> bye
 //! ```
 
+#[cfg(target_os = "linux")]
 use anyhow::{bail, Context, Result};
+#[cfg(target_os = "linux")]
 use std::io::{BufRead, Write};
+#[cfg(target_os = "linux")]
 use x11rb::connection::Connection;
+#[cfg(target_os = "linux")]
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, PropMode,
     WindowClass,
 };
+#[cfg(target_os = "linux")]
 use x11rb::rust_connection::RustConnection;
 
+#[cfg(target_os = "linux")]
 fn main() -> Result<()> {
     let (conn, screen_number) = RustConnection::connect(None)?;
     let screen = &conn.setup().roots[screen_number as usize];
@@ -58,12 +64,14 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn say(out: &mut dyn Write, line: &str) -> std::io::Result<()> {
     out.write_all(line.as_bytes())?;
     out.write_all(b"\n")?;
     out.flush()
 }
 
+#[cfg(target_os = "linux")]
 fn drive(
     conn: &RustConnection,
     root: x11rb::protocol::xproto::Window,
@@ -143,10 +151,12 @@ fn drive(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn parse_id(text: &str) -> Result<x11rb::protocol::xproto::Window> {
     Ok(text.parse().context("bad window id")?)
 }
 
+#[cfg(target_os = "linux")]
 fn create(
     conn: &RustConnection,
     root: x11rb::protocol::xproto::Window,
@@ -248,7 +258,13 @@ fn create(
     Ok(format!("created {window}"))
 }
 
+#[cfg(target_os = "linux")]
 fn size_pair(text: &str) -> Result<(u16, u16)> {
     let (width, height) = text.split_once('x').context("size must be WxH")?;
     Ok((width.parse()?, height.parse()?))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("this example is only available on Linux");
 }

@@ -16,9 +16,13 @@
 //! WAYLAND_DISPLAY=wayland-1 cargo run --example wl_stamp_target -- --mode scroll
 //! ```
 
+#[cfg(target_os = "linux")]
 use anyhow::{bail, Context, Result};
+#[cfg(target_os = "linux")]
 use std::fs::File;
+#[cfg(target_os = "linux")]
 use std::os::fd::AsFd;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(target_os = "linux")]
 use wayland_client::protocol::{
@@ -29,14 +33,20 @@ use wayland_client::{Connection, Dispatch, QueueHandle};
 #[cfg(target_os = "linux")]
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
+#[cfg(target_os = "linux")]
 const BLOCK: usize = 48;
+#[cfg(target_os = "linux")]
 const BITS: usize = 24;
+#[cfg(target_os = "linux")]
 const WHITE: u32 = 0x00ff_ffff;
+#[cfg(target_os = "linux")]
 const BLACK: u32 = 0;
 /// Enough buffers that one is nearly always released by the next repaint.
+#[cfg(target_os = "linux")]
 const BUFFERS: usize = 4;
 
 #[derive(PartialEq)]
+#[cfg(target_os = "linux")]
 enum Mode {
     Typing,
     Scroll,
@@ -246,6 +256,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -253,6 +264,7 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(target_os = "linux")]
 fn fill(pixels: &mut [u32], stride: usize, x: usize, y: usize, w: usize, h: usize, colour: u32) {
     let height = pixels.len() / stride;
     for row in y..(y + h).min(height) {
@@ -262,6 +274,7 @@ fn fill(pixels: &mut [u32], stride: usize, x: usize, y: usize, w: usize, h: usiz
     }
 }
 
+#[cfg(target_os = "linux")]
 fn bytemuck(bytes: &mut [u8]) -> &mut [u32] {
     assert_eq!(bytes.as_ptr() as usize % 4, 0);
     // SAFETY: aligned (checked), and every bit pattern is a valid u32.

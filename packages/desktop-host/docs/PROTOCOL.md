@@ -5,10 +5,12 @@ the user's session starts it and talks to it over an inherited private channel â
 the engine never opens a public listener, never runs as root, and never installs
 a service.
 
-This document describes the shared Linux and macOS engine protocol. The macOS
-engine uses the same v3 stdio/WebRTC session path, with native display capture,
-input and clipboard adapters. The protocol contains no application concepts:
-no accounts, no chat, no machine ids, no pane ids.
+This document describes the Linux and macOS engine protocol. The macOS engine
+uses the same v3 stdio/WebRTC session path, with native display capture, input
+and clipboard adapters. A Windows compile-only seam also emits a
+`capabilities` response, but does not implement this session protocol and exits
+with an error for `serve`. The protocol contains no application concepts: no
+accounts, no chat, no machine ids, no pane ids.
 
 ## Starting the engine
 

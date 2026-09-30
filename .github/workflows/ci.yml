@@ -73,6 +73,33 @@ jobs:
         env:
           DESKLINK_AXI_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/desklink-host
 
+  # Compile seam only: no capture/input runs on a hosted Windows desktop.
+  engine-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust (the version the release build pins)
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
+          rustup target add x86_64-pc-windows-msvc
+      - run: cargo build --locked --target x86_64-pc-windows-msvc --manifest-path packages/desktop-host/engine/Cargo.toml
+      - run: cargo test --locked --target x86_64-pc-windows-msvc --manifest-path packages/desktop-host/engine/Cargo.toml
+      - name: Windows capabilities (no desktop access)
+        run: packages/desktop-host/engine/target/x86_64-pc-windows-msvc/debug/desklink-host.exe capabilities
+
+  # Shared dependency/module changes must still compile on macOS. The release
+  # build with static libvpx remains qualified by the macOS release script.
+  engine-macos-seam:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust (the version the release build pins)
+        run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
+      - run: cargo build --locked --manifest-path packages/desktop-host/engine/Cargo.toml
+      - run: cargo test --locked --manifest-path packages/desktop-host/engine/Cargo.toml
+      - run: packages/desktop-host/engine/target/debug/desklink-host capabilities
+
   # The glass-to-glass latency/fps lab: a stamp target on a private Xvfb, read
   # back in headless Chromium. Report-only (continue-on-error): CI runners are
   # small and contended, so their numbers are a floor, not a gate.
