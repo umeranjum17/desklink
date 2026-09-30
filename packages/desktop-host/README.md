@@ -98,7 +98,10 @@ The one step no install does for you is [kernel input access](#kernel-input-acce
 and only the portal backend needs it.
 
 macOS arm64 also has a prebuilt engine. There is no prebuilt engine for other platforms. Another Linux (arm64, musl)
-can [build it from source](#building-from-source). Windows remains unsupported.
+can [build it from source](#building-from-source). Windows has a compile-only
+engine seam for `x86_64-pc-windows-msvc`; it reports capture, encoding, input,
+and clipboard as unavailable, and `serve` exits with an error. Windows desktop
+sessions are not supported yet.
 
 ### macOS
 

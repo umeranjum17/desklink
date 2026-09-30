@@ -66,8 +66,6 @@ mod keymap;
 mod keymap;
 #[cfg(target_os = "macos")]
 mod mac;
-#[cfg(target_os = "windows")]
-mod win;
 #[cfg(any(
     target_os = "linux",
     all(any(target_os = "macos", target_os = "windows"), desklink_vpx)
@@ -90,6 +88,8 @@ mod protocol;
 mod session;
 #[cfg(all(any(target_os = "macos", target_os = "windows"), desklink_vpx))]
 mod session;
+#[cfg(target_os = "windows")]
+mod win;
 #[cfg(target_os = "linux")]
 mod x11;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
