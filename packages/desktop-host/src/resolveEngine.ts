@@ -1,5 +1,6 @@
 import { existsSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { release as osRelease } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -30,6 +31,24 @@ export function macosEngineEnabled(platform = process.platform, flag = process.e
     return platform !== 'darwin' || flag !== '0';
 }
 
+export function windowsEngineEnabled(platform = process.platform, flag = process.env.DESKLINK_WINDOWS): boolean {
+    return platform !== 'win32' || flag === '1';
+}
+
+export function windowsBuildSupported(release = osRelease()): { supported: boolean; build: string } {
+    const match = /^10\.0\.(\d+)(?:\.\d+)*$/.exec(release);
+    if (!match) return { supported: false, build: `unknown (${release})` };
+    const buildText = match[1];
+    if (buildText === undefined) return { supported: false, build: `unknown (${release})` };
+    const build = Number(buildText);
+    return { supported: Number.isSafeInteger(build) && build >= 22621, build: buildText };
+}
+
+export function windowsBuildError(release = osRelease()): string | null {
+    const { supported, build } = windowsBuildSupported(release);
+    return supported ? null : `The Windows desktop engine preview requires Windows 11 22H2+ x64; detected Windows build ${build}.`;
+}
+
 export function enginePackageRoot(): string {
     return resolve(dirname(fileURLToPath(import.meta.url)), '..');
 }
@@ -46,6 +65,7 @@ export function platformTag(
     arch: string = process.arch,
     glibc: boolean | undefined = hasGlibc(),
 ): string {
+    if (platform === 'win32') return `win32-${arch}-msvc`;
     if (platform === 'linux') return `linux-${arch}-${glibc === false ? 'musl' : 'gnu'}`;
     return `${platform}-${arch}`;
 }
@@ -74,10 +94,11 @@ function prebuiltBinary(): string | null {
 }
 
 function buildCandidates(root: string): string[] {
+    const binary = process.platform === 'win32' ? 'desklink-host.exe' : 'desklink-host';
     return [
-        join(root, 'engine', 'target', 'release', 'desklink-host'),
-        join(root, 'engine', 'target', 'debug', 'desklink-host'),
-        join(root, 'bin', 'desklink-host'),
+        join(root, 'engine', 'target', 'release', binary),
+        join(root, 'engine', 'target', 'debug', binary),
+        join(root, 'bin', binary),
     ];
 }
 
@@ -95,7 +116,9 @@ function configuredEnginePath(): string | undefined {
 }
 
 export function resolveEngine(configured = configuredEnginePath(), root = enginePackageRoot()): ResolvedEngine | null {
-    if (!macosEngineEnabled()) return null;
+    if (!macosEngineEnabled() || !windowsEngineEnabled()) return null;
+    if (process.platform === 'win32' && process.arch !== 'x64') return null;
+    if (process.platform === 'win32' && windowsBuildError() !== null) return null;
     if (configured !== undefined && configured.trim() !== '') {
         if (!isExecutable(configured)) return null;
         return { command: configured, args: ['serve'], origin: 'configured' };
@@ -118,7 +141,7 @@ function isExecutable(path: string): boolean {
     if (!stat.isFile()) return false;
     // A file that is not executable is an install that went wrong, and saying so
     // is more useful than an EACCES three calls later.
-    return (stat.mode & 0o111) !== 0;
+    return process.platform === 'win32' || (stat.mode & 0o111) !== 0;
 }
 
 /**
@@ -129,6 +152,16 @@ export function explainMissingEngine(
     configured = configuredEnginePath(),
     root = enginePackageRoot(),
 ): string | null {
+    if (!windowsEngineEnabled()) {
+        return 'The Windows desktop engine preview is disabled; set DESKLINK_WINDOWS=1 to opt in (Windows 11 22H2+ x64 only).';
+    }
+    if (process.platform === 'win32' && process.arch !== 'x64') {
+        return 'The Windows desktop engine preview requires Windows 11 22H2+ x64; this architecture is unsupported.';
+    }
+    if (process.platform === 'win32') {
+        const buildError = windowsBuildError();
+        if (buildError !== null) return buildError;
+    }
     if (!macosEngineEnabled()) {
         return 'The macOS desktop engine is disabled by DESKLINK_MACOS=0; unset it to enable the engine.';
     }
@@ -139,6 +172,9 @@ export function explainMissingEngine(
             return `The desktop engine is not at the configured path (${configured}).`;
         }
         return `The desktop engine at ${configured} is not an executable file.`;
+    }
+    if (process.platform === 'win32') {
+        return 'No Windows preview engine was found. Build desklink-host.exe from source and set DESKLINK_ENGINE to its path; Windows platform packages are not published yet.';
     }
     if (process.platform === 'darwin') {
         const tag = platformTag();
