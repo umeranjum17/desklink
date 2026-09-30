@@ -48,6 +48,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=DESKLINK_MACOS_CLI");
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "windows" {
+        // Lane 1 has no native adapters or libvpx. Do not accidentally link a
+        // Unix library or enable session serving when a prefix is inherited.
+        if std::env::var_os("DESKLINK_VPX_STATIC_DIR").is_some() {
+            return Err("Windows static libvpx integration is not available in this compile-seam build; unset DESKLINK_VPX_STATIC_DIR".into());
+        }
+        return Ok(());
+    }
     if let Some(prefix) = std::env::var_os("DESKLINK_VPX_STATIC_DIR").map(PathBuf::from) {
         if !prefix.join("include/vpx/vp8cx.h").exists() || !prefix.join("lib/libvpx.a").exists() {
             return Err(format!("DESKLINK_VPX_STATIC_DIR must be the libvpx install prefix containing include/vpx/vp8cx.h and lib/libvpx.a, not its lib directory: {}", prefix.display()).into());

@@ -13,18 +13,27 @@
 //! DISPLAY=:99 cargo run --example x11_target
 //! ```
 
+#[cfg(target_os = "linux")]
 use anyhow::{Context, Result};
+#[cfg(target_os = "linux")]
 use std::io::Write;
+#[cfg(target_os = "linux")]
 use x11rb::connection::Connection;
+#[cfg(target_os = "linux")]
 use x11rb::protocol::xproto::{
     ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask, Rectangle, WindowClass,
 };
+#[cfg(target_os = "linux")]
 use x11rb::protocol::Event;
+#[cfg(target_os = "linux")]
 use x11rb::rust_connection::RustConnection;
 
+#[cfg(target_os = "linux")]
 const WIDTH: u16 = 1280;
+#[cfg(target_os = "linux")]
 const HEIGHT: u16 = 720;
 
+#[cfg(target_os = "linux")]
 fn main() -> Result<()> {
     let (connection, screen_number) =
         RustConnection::connect(None).context("cannot open the X display in DISPLAY")?;
@@ -257,6 +266,7 @@ fn main() -> Result<()> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn paint(
     connection: &RustConnection,
     window: u32,
@@ -342,6 +352,7 @@ fn paint(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn emit(out: &mut impl Write, kind: &str, fields: &[(&str, String)]) {
     let mut line = format!("{{\"kind\":\"{kind}\"");
     for (name, value) in fields {
@@ -354,4 +365,9 @@ fn emit(out: &mut impl Write, kind: &str, fields: &[(&str, String)]) {
     line.push('}');
     let _ = writeln!(out, "{line}");
     let _ = out.flush();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("this example is only available on Linux");
 }
