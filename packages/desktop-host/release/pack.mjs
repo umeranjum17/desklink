@@ -18,7 +18,7 @@ const platforms = {
     'linux-x64-gnu': {
         os: 'linux', cpu: 'x64', libc: 'glibc', tag: 'linux-x64-gnu',
         description: 'Linux x64 (glibc 2.36 or newer)',
-        readme: 'At run time the engine loads libpipewire-0.3, libxkbcommon, libevdev, libXcursor, libX11, libwayland-client and libstdc++ from the system. libvpx and inputtino are linked into it; their licences are in the included notices.',
+        readme: 'At run time the engine loads libpipewire-0.3, libxkbcommon, libevdev, libXcursor, libX11, libXext, libwayland-client and libstdc++ from the system. libvpx and inputtino are linked into it; their licences are in the included notices.',
     },
     'darwin-arm64': {
         os: 'darwin', cpu: 'arm64', tag: 'darwin-arm64',

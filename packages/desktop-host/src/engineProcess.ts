@@ -83,7 +83,7 @@ export class EngineClient {
             const missing = /error while loading shared libraries: ([^:\s]+): cannot open shared object file/.exec(probe.stderr ?? '')?.[1];
             if (missing !== undefined && [
                 'libpipewire-0.3.so.0', 'libxkbcommon.so.0', 'libevdev.so.2', 'libstdc++.so.6',
-                'libXcursor.so.1', 'libX11.so.6', 'libwayland-client.so.0',
+                'libXcursor.so.1', 'libX11.so.6', 'libXext.so.6', 'libwayland-client.so.0',
             ].includes(missing)) {
                 throw new EngineRefused('missing-system-library', `missing system library: ${missing}`);
             }

@@ -136,7 +136,7 @@ let out = `Third-party notices for the desklink-host executable
 The executable is licensed Apache-2.0. It links the components below into
 itself; each keeps its own licence, reproduced here as that licence requires.
 Libraries it loads from the system at run time (glibc, libstdc++, libpipewire,
-libxkbcommon, libevdev, libXcursor, libX11, libwayland-client) are not part of it and are not reproduced.
+libxkbcommon, libevdev, libXcursor, libX11, libXext, libwayland-client) are not part of it and are not reproduced.
 Neither are the H.264 encoders it loads at run time only when present: the
 NVIDIA driver's NVENC and CUDA libraries, libva with its driver, and Cisco's
 prebuilt openh264 library, which the engine downloads from Cisco and never
