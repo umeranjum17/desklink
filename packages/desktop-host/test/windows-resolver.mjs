@@ -34,5 +34,28 @@ const missingCliEngine = spawnSync(process.execPath, [cli, 'version'], {
 });
 assert.equal(missingCliEngine.status, 1);
 assert.match(missingCliEngine.stderr, /The desktop engine is not at the configured path .*absent\.exe/i);
-console.log('PASS: opt-in, real .exe resolution, CLI version spawn, native capabilities, EngineClient spawn failure, and CLI missing-path reporting.');
-console.log('PENDING lane 2: full serve hello handshake; this proof does not claim session transport or desktop qualification.');
+// Serve handshake through the published Node API: the resolver above names the
+// command, EngineClient spawns it and completes hello, and capabilities runs
+// over the real serve transport. No session is opened: hosted runners have no
+// desktop to capture and no input to apply.
+const resolved = resolveEngine();
+assert.ok(resolved !== null, 'the opt-in engine resolves for the serve handshake');
+let exitDetail = null;
+const client = await EngineClient.start(resolved.command, resolved.args, {
+    onExit: (detail) => { exitDetail = detail; },
+});
+const served = await client.capabilities();
+assert.equal(served.platform, 'windows');
+assert.equal(served.protocol, 3);
+assert.ok(served.encode.codecs.includes('vp9'), 'the static-libvpx build serves VP9');
+assert.deepEqual(served.encoded.codecs, ['h264']);
+// The graceful stop: the engine exits 0 without answering, so the request
+// itself is not the verdict; the observed exit detail is.
+await client.request('shutdown', {}, 15_000).then(() => undefined, () => undefined);
+const exitDeadline = Date.now() + 5_000;
+while (exitDetail === null && Date.now() < exitDeadline) {
+    await new Promise((done) => setTimeout(done, 50));
+}
+assert.deepEqual(exitDetail, { code: 0, signal: null });
+await client.stop();
+console.log('PASS: opt-in, real .exe resolution, CLI version spawn, native capabilities, EngineClient spawn failure, CLI missing-path reporting, and serve hello/capabilities with clean exit.');
