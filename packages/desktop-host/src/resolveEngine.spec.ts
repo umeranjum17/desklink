@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -15,6 +16,11 @@ vi.mock('node:os', async (importOriginal) => {
 vi.mock('node:module', async (importOriginal) => {
     const actual = await importOriginal<typeof import('node:module')>();
     return { ...actual, createRequire: vi.fn(actual.createRequire) };
+});
+
+vi.mock('node:fs', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('node:fs')>();
+    return { ...actual, statSync: vi.fn(actual.statSync) };
 });
 
 beforeEach(() => {
@@ -41,6 +47,18 @@ describe('macOS engine flag', () => {
         const root = mkdtempSync(join(tmpdir(), 'resolve-engine-darwin-'));
         const executable = join(root, 'desklink-host');
         writeFileSync(executable, 'fixture', { mode: 0o755 });
+        const realStatSync = vi.mocked(fs.statSync).getMockImplementation()!;
+        vi.mocked(fs.statSync).mockImplementation((path => {
+            if (String(path) === executable) {
+                const stat = realStatSync(path);
+                return new Proxy(stat, {
+                    get(target, property, receiver) {
+                        return property === 'mode' ? 0o100755 : Reflect.get(target, property, receiver);
+                    },
+                });
+            }
+            return realStatSync(path);
+        }));
         Object.defineProperty(process, 'platform', { value: 'darwin' });
         Object.defineProperty(process, 'arch', { value: 'arm64' });
         try {
