@@ -49,10 +49,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "windows" {
-        // Lane 1 has no native adapters or libvpx. Do not accidentally link a
-        // Unix library or enable session serving when a prefix is inherited.
-        if std::env::var_os("DESKLINK_VPX_STATIC_DIR").is_some() {
-            return Err("Windows static libvpx integration is not available in this compile-seam build; unset DESKLINK_VPX_STATIC_DIR".into());
+        if let Some(prefix) = std::env::var_os("DESKLINK_VPX_STATIC_DIR").map(PathBuf::from) {
+            if std::env::var("CARGO_CFG_TARGET_ENV")? != "msvc"
+                || std::env::var("CARGO_CFG_TARGET_ARCH")? != "x86_64"
+            {
+                return Err("Windows libvpx requires x86_64-pc-windows-msvc".into());
+            }
+            if !std::env::var("CARGO_CFG_TARGET_FEATURE")?
+                .split(',')
+                .any(|f| f == "crt-static")
+            {
+                return Err(
+                    "Windows static libvpx requires RUSTFLAGS=-Ctarget-feature=+crt-static (/MT)"
+                        .into(),
+                );
+            }
+            if !prefix.join("include/vpx/vp8cx.h").is_file()
+                || !prefix.join("lib/vpx.lib").is_file()
+            {
+                return Err(
+                    "DESKLINK_VPX_STATIC_DIR must contain include/vpx/vp8cx.h and lib/vpx.lib"
+                        .into(),
+                );
+            }
+            cc::Build::new()
+                .file("native/vpx_shim.c")
+                .include(prefix.join("include"))
+                .static_crt(true)
+                .compile("dlvpx");
+            println!(
+                "cargo:rustc-link-search=native={}",
+                prefix.join("lib").display()
+            );
+            println!("cargo:rustc-link-lib=static=vpx");
+            println!("cargo:rustc-cfg=desklink_vpx");
         }
         return Ok(());
     }

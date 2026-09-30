@@ -27,16 +27,18 @@
  *   DESKLINK_CHROME          browser binary (default: the first of
  *                            google-chrome-stable, google-chrome, chromium)
  *
+ *   DESKLINK_REQUIRE_CHROME  1 makes a missing browser fail instead of skip
+ *
  * A machine with no Chrome skips the browser half with a printed reason and a
  * passing exit: the fixture is still parsed, but no session opens and nothing
  * decodes.
  */
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 
@@ -51,16 +53,21 @@ const DEADLINE_MS = 90_000;
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 function which(name) {
-    const found = spawnSync('sh', ['-c', `command -v ${name}`], { encoding: 'utf8' });
-    const path = found.status === 0 ? found.stdout.trim() : '';
-    return path === '' ? null : path;
+    const names = process.platform === 'win32' ? [name, `${name}.exe`] : [name];
+    for (const directory of (process.env.PATH ?? '').split(delimiter)) {
+        for (const binary of names) {
+            const path = join(directory, binary);
+            if (existsSync(path)) return path;
+        }
+    }
+    return null;
 }
 
 function findEngine() {
     const candidates = [
         process.env.DESKLINK_ENCODED_ENGINE,
         process.env.DESKLINK_AXI_ENGINE,
-        join(repo, 'packages/desktop-host/engine/target/debug/desklink-host'),
+        join(repo, `packages/desktop-host/engine/target/debug/desklink-host${process.platform === 'win32' ? '.exe' : ''}`),
     ].filter((candidate) => typeof candidate === 'string' && candidate !== '');
     const binary = candidates.find((candidate) => existsSync(candidate));
     if (binary === undefined) {
@@ -72,11 +79,19 @@ function findEngine() {
 }
 
 function findChrome() {
-    const candidates = [process.env.DESKLINK_CHROME, 'google-chrome-stable', 'google-chrome', 'chromium'].filter(
+    const candidates = [
+        process.env.DESKLINK_CHROME, 'google-chrome-stable', 'google-chrome', 'chromium',
+        ...(process.platform === 'win32' ? [
+            join(process.env.PROGRAMFILES ?? 'C:/Program Files', 'Google/Chrome/Application/chrome.exe'),
+            join(process.env['PROGRAMFILES(X86)'] ?? 'C:/Program Files (x86)', 'Google/Chrome/Application/chrome.exe'),
+            join(process.env.LOCALAPPDATA ?? '', 'Google/Chrome/Application/chrome.exe'),
+        ] : []),
+    ].filter(
         (candidate) => typeof candidate === 'string' && candidate !== '',
     );
     for (const candidate of candidates) {
-        const path = candidate.includes('/') ? (existsSync(candidate) ? candidate : null) : which(candidate);
+        const isPath = isAbsolute(candidate) || candidate.includes('/') || candidate.includes('\\');
+        const path = isPath ? (existsSync(candidate) ? candidate : null) : which(candidate);
         if (path !== null) return path;
     }
     return null;
@@ -271,6 +286,7 @@ async function startChrome(binary, pageUrl) {
         binary,
         [
             '--headless=new',
+            ...(process.platform === 'linux' && process.env.DISPLAY ? ['--ozone-platform=x11'] : []),
             `--user-data-dir=${profile}`,
             '--remote-debugging-port=0',
             '--no-first-run',
@@ -381,7 +397,15 @@ async function startChrome(binary, pageUrl) {
 
 async function main() {
     const engine = new Engine(findEngine());
-    await engine.opened;
+    const capabilities = await engine.opened;
+    assert.deepEqual(capabilities.encoded.codecs, ['h264']);
+    assert.deepEqual(await engine.request('capabilities'), capabilities);
+    if (process.platform === 'win32') {
+        await assert.rejects(engine.request('session.open', {
+            permissions: ['view', 'control'], agent_indicator: true,
+            source: { kind: 'encoded', codec: 'h264', ...SIZE },
+        }), /indicator-unavailable/);
+    }
     const units = accessUnits(readFileSync(fixture));
     const keyframes = units.filter((unit) => unit.keyframe).length;
 
@@ -400,6 +424,7 @@ async function main() {
 
     try {
         if (chromeBinary === null) {
+            if (process.env.DESKLINK_REQUIRE_CHROME === '1') throw new Error('Chrome is required for this proof (set DESKLINK_CHROME).');
             console.log('SKIPPED the browser half: no Chrome found (set DESKLINK_CHROME).');
             console.log(`the ${units.length}-unit fixture parses (${keyframes} keyframe units)`);
             return;

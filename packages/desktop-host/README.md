@@ -99,10 +99,25 @@ The one step no install does for you is [kernel input access](#kernel-input-acce
 and only the portal backend needs it.
 
 macOS arm64 also has a prebuilt engine. There is no prebuilt engine for other platforms. Another Linux (arm64, musl)
-can [build it from source](#building-from-source). Windows has a compile-only
-engine seam for `x86_64-pc-windows-msvc`; it reports capture, encoding, input,
-and clipboard as unavailable, and `serve` exits with an error. Windows desktop
-sessions are not supported yet.
+can [build it from source](#building-from-source). Windows has a source-built transport preview for
+`x86_64-pc-windows-msvc`: static libvpx enables `serve` and consumer-fed H.264
+encoded sources. Native capture, input, clipboard and the agent indicator are
+unavailable. Windows desktop sessions are not supported yet. The intended
+preview platform is Windows 11 22H2+ x64, with opt-in `DESKLINK_WINDOWS=1`
+resolver support arriving in a later lane. Elevated windows and the secure
+desktop remain outside input support.
+
+On Windows with Visual Studio Build Tools and PowerShell 7, build libvpx with
+`release/build-libvpx-win.ps1 -OutDir <new-build-directory>`, set
+`DESKLINK_VPX_STATIC_DIR` to its `prefix` directory and
+`RUSTFLAGS=-Ctarget-feature=+crt-static`, then run `cargo build --locked --target
+x86_64-pc-windows-msvc --manifest-path engine/Cargo.toml`. The build retains
+libvpx's licence and patent grant in `prefix/THIRD_PARTY_LICENSES.txt`.
+Without that prefix the compile seam still builds and refuses `serve`.
+Hosted Windows CI checks the handshake, indicator refusal, Chrome decode and
+input relay, and DLL dependencies. Dedicated Windows rig qualification of
+capture, input, mixed DPI, GPU encoding and elevation is pending; signing and
+packaging are later lanes.
 
 ### macOS
 
