@@ -3236,6 +3236,31 @@ mod tests {
         test_inner_with(events, peer, 64, 64)
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_wayland_portal_session_reports_typed_point_unsupported() {
+        let (events, _) = tokio_mpsc::unbounded_channel();
+        let (mut inner, _) = test_inner(events).await;
+        Arc::get_mut(&mut inner)
+            .expect("test session has one owner")
+            .permissions = vec![Permission::View];
+        let session = Session { inner };
+
+        let error = session
+            .point(&crate::protocol::PointParams {
+                session_id: String::from("test-session"),
+                x: Some(10),
+                y: Some(20),
+                label: String::new(),
+                timeout_ms: None,
+                clear: false,
+            })
+            .expect_err("Wayland portal sessions do not support point overlays");
+
+        assert_eq!(error.code, "point_unsupported");
+        assert!(error.message.contains("reason: wayland"));
+    }
+
     fn test_inner_with(
         events: tokio_mpsc::UnboundedSender<Notice>,
         peer: VideoPeer,
