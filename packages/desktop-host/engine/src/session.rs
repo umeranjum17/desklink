@@ -659,6 +659,13 @@ type FrameSnapshot = (u64, Instant, usize, usize, Vec<u8>, Vec<u64>, Vec<u64>);
 
 /// Everything a session's background tasks need, shared rather than borrowed so
 /// the consumer can own the `Session` handle while the pipeline runs.
+#[cfg(target_os = "linux")]
+enum PointDesktop {
+    X11(String),
+    Wayland,
+    Unavailable(&'static str),
+}
+
 struct Inner {
     id: String,
     generation: u64,
@@ -679,9 +686,7 @@ struct Inner {
     indicator: Mutex<Option<crate::indicator::Indicator>>,
     point_overlay: Mutex<Option<crate::indicator::Indicator>>,
     #[cfg(target_os = "linux")]
-    point_display: Option<String>,
-    #[cfg(target_os = "linux")]
-    point_unsupported_reason: &'static str,
+    point_desktop: PointDesktop,
     capture: Mutex<Option<FrameSource>>,
     /// Absent for an encoded source: there is no local keyboard to translate a
     /// character through, because the client's keys are forwarded instead.
@@ -1256,20 +1261,17 @@ impl Session {
             indicator: Mutex::new(indicator),
             point_overlay: Mutex::new(None),
             #[cfg(target_os = "linux")]
-            point_display: if wants_x11 {
+            point_desktop: if wants_x11 {
                 match &request.source {
-                    Some(SourceRequest::X11 { display }) => {
-                        display.clone().or_else(|| std::env::var("DISPLAY").ok())
-                    }
-                    _ => None,
+                    Some(SourceRequest::X11 { display }) => display
+                        .clone()
+                        .or_else(|| std::env::var("DISPLAY").ok())
+                        .map(PointDesktop::X11)
+                        .unwrap_or(PointDesktop::Unavailable("x11-unavailable")),
+                    _ => PointDesktop::Unavailable("x11-unavailable"),
                 }
             } else {
-                None
-            },
-            #[cfg(target_os = "linux")]
-            point_unsupported_reason: match &request.source {
-                None | Some(SourceRequest::Portal) => "wayland",
-                _ => "x11-unavailable",
+                PointDesktop::Wayland
             },
             capture: Mutex::new(Some(capture)),
             layout: Mutex::new(Some(layout)),
@@ -1360,9 +1362,7 @@ impl Session {
             indicator: Mutex::new(None),
             point_overlay: Mutex::new(None),
             #[cfg(target_os = "linux")]
-            point_display: None,
-            #[cfg(target_os = "linux")]
-            point_unsupported_reason: "wayland",
+            point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
             capture: Mutex::new(None),
             layout: Mutex::new(None),
             last_seq: Mutex::new(0),
@@ -1471,15 +1471,12 @@ impl Session {
             ));
         }
         #[cfg(target_os = "linux")]
-        let display = self.inner.point_display.as_deref().ok_or_else(|| {
-            SessionError::new(
+        if let PointDesktop::Unavailable(reason) = &self.inner.point_desktop {
+            return Err(SessionError::new(
                 "point_unsupported",
-                format!(
-                    "reason: {}; point overlay is unavailable",
-                    self.inner.point_unsupported_reason
-                ),
-            )
-        })?;
+                format!("reason: {reason}; point overlay is unavailable"),
+            ));
+        }
         if params.clear {
             if params.x.is_some()
                 || params.y.is_some()
@@ -1490,6 +1487,19 @@ impl Session {
                     "malformed",
                     "clear accepts no coordinates, label or timeout",
                 ));
+            }
+            #[cfg(target_os = "linux")]
+            if overlay.is_none() && matches!(self.inner.point_desktop, PointDesktop::Wayland) {
+                let available = crate::indicator::Indicator::wayland_layer_shell_available()
+                    .map_err(|error| {
+                        SessionError::new("indicator-unavailable", format!("{error:#}"))
+                    })?;
+                if !available {
+                    return Err(SessionError::new(
+                        "point_unsupported",
+                        "reason: layer_shell_unavailable; compositor has no layer-shell",
+                    ));
+                }
             }
             if let Some(helper) = overlay.take() {
                 helper.stop();
@@ -1520,7 +1530,15 @@ impl Session {
         #[cfg(not(target_os = "windows"))]
         if overlay.is_none() {
             #[cfg(target_os = "linux")]
-            let helper = crate::indicator::Indicator::start_point(display);
+            let helper = match &self.inner.point_desktop {
+                PointDesktop::X11(display) => crate::indicator::Indicator::start_point(display),
+                PointDesktop::Wayland => crate::indicator::Indicator::start_point_wayland(
+                    source.width,
+                    source.height,
+                    source.position,
+                ),
+                PointDesktop::Unavailable(_) => unreachable!("validated point target"),
+            };
             #[cfg(target_os = "macos")]
             let helper = crate::indicator::Indicator::start_point(
                 source.node_id,
@@ -1528,7 +1546,15 @@ impl Session {
                 source.height as usize,
             );
             *overlay = Some(helper.map_err(|error| {
-                SessionError::new("indicator-unavailable", format!("{error:#}"))
+                let message = format!("{error:#}");
+                if message.contains("layer_shell_unavailable") {
+                    SessionError::new(
+                        "point_unsupported",
+                        "reason: layer_shell_unavailable; compositor has no layer-shell",
+                    )
+                } else {
+                    SessionError::new("indicator-unavailable", message)
+                }
             })?);
         }
         #[cfg(not(target_os = "windows"))]
@@ -3129,9 +3155,7 @@ mod tests {
             indicator: Mutex::new(None),
             point_overlay: Mutex::new(None),
             #[cfg(target_os = "linux")]
-            point_display: None,
-            #[cfg(target_os = "linux")]
-            point_unsupported_reason: "wayland",
+            point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
             capture: Mutex::new(None),
             layout: Mutex::new(None),
             last_seq: Mutex::new(0),
@@ -3290,10 +3314,119 @@ mod tests {
                 timeout_ms: None,
                 clear: false,
             })
-            .expect_err("Wayland portal sessions do not support point overlays");
+            .expect_err("compositors without layer-shell do not support point overlays");
 
         assert_eq!(error.code, "point_unsupported");
-        assert!(error.message.contains("reason: wayland"));
+        assert!(error.message.contains("reason: layer_shell_unavailable"));
+    }
+
+    // Driven only on the private headless compositor created by point-wayland-flow.py.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires the task-owned compositor and screenshot driver"]
+    async fn point_wayland_private_flow() {
+        let evidence = std::path::PathBuf::from(
+            std::env::var_os("DESKLINK_POINT_TEST_DIR").expect("private evidence"),
+        );
+        let socket =
+            std::path::PathBuf::from(std::env::var_os("WAYLAND_DISPLAY").expect("private socket"));
+        assert!(
+            socket.is_absolute() && socket.starts_with(evidence.join("runtime")),
+            "never use an ambient desktop"
+        );
+        fn checkpoint(dir: &std::path::Path, name: &str) {
+            std::fs::write(dir.join(format!("{name}.ready")), b"").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while !dir.join(format!("{name}.continue")).exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "screenshot driver timed out at {name}"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        let (events, _) = tokio_mpsc::unbounded_channel();
+        let (mut inner, _) = test_inner(events).await;
+        let state = Arc::get_mut(&mut inner).unwrap();
+        state.permissions = vec![Permission::View];
+        state.point_desktop = PointDesktop::Wayland;
+        state.source.width = 1280;
+        state.source.height = 720;
+        state.source.position = Some((1280, 0));
+        let mut session = Session { inner };
+        let mut params = crate::protocol::PointParams {
+            session_id: String::from("test-session"),
+            x: Some(400),
+            y: Some(300),
+            label: String::from("Here"),
+            timeout_ms: Some(3000),
+            clear: false,
+        };
+        let unsupported_socket = std::env::var_os("DESKLINK_POINT_UNSUPPORTED_SOCKET").unwrap();
+        assert!(std::path::Path::new(&unsupported_socket).starts_with(evidence.join("runtime")));
+        // This test runs alone, in a separate process. Only child helper startup
+        // and the read-only clear probe read this private socket environment.
+        std::env::set_var("WAYLAND_DISPLAY", &unsupported_socket);
+        let refusal = session.point(&params).unwrap_err();
+        assert_eq!(refusal.code, "point_unsupported");
+        assert!(refusal.message.contains("reason: layer_shell_unavailable"));
+        let clear = crate::protocol::PointParams {
+            session_id: params.session_id.clone(),
+            clear: true,
+            x: None,
+            y: None,
+            label: String::new(),
+            timeout_ms: None,
+        };
+        let refusal = session.point(&clear).unwrap_err();
+        assert_eq!(refusal.code, "point_unsupported");
+        std::env::set_var("WAYLAND_DISPLAY", &socket);
+        Arc::get_mut(&mut session.inner).unwrap().source.position = None;
+        let ambiguous = session.point(&params).unwrap_err();
+        assert_eq!(ambiguous.code, "indicator-unavailable");
+        assert!(ambiguous.message.contains("selected_output_unavailable"));
+        Arc::get_mut(&mut session.inner).unwrap().source.position = Some((1280, 0));
+        checkpoint(&evidence, "before");
+        session.point(&params).unwrap();
+        checkpoint(&evidence, "after");
+        params.x = Some(1280);
+        assert_eq!(session.point(&params).unwrap_err().code, "coordinates");
+        params.x = Some(400);
+        params.label = String::from("bad\nlabel");
+        assert_eq!(session.point(&params).unwrap_err().code, "malformed");
+        checkpoint(&evidence, "invalid");
+        tokio::time::sleep(Duration::from_millis(3100)).await;
+        checkpoint(&evidence, "expired");
+        params.x = Some(700);
+        params.y = Some(500);
+        params.label.clear();
+        params.timeout_ms = Some(10000);
+        session.point(&params).unwrap();
+        checkpoint(&evidence, "replaced");
+        params.clear = true;
+        params.x = None;
+        params.y = None;
+        params.timeout_ms = None;
+        session.point(&params).unwrap();
+        session.point(&params).unwrap();
+        assert!(lock(&session.inner.point_overlay).is_none());
+        checkpoint(&evidence, "cleared");
+        params.clear = false;
+        params.x = Some(400);
+        params.y = Some(300);
+        session.point(&params).unwrap();
+        let pid = lock(&session.inner.point_overlay)
+            .as_ref()
+            .unwrap()
+            .test_pid();
+        checkpoint(&evidence, "clickthrough");
+        session.close("test complete").await;
+        assert_eq!(
+            unsafe { libc::kill(pid as i32, 0) },
+            -1,
+            "helper reaped on session close"
+        );
+        checkpoint(&evidence, "closed");
     }
 
     fn test_inner_with(
@@ -3343,9 +3476,7 @@ mod tests {
             indicator: Mutex::new(None),
             point_overlay: Mutex::new(None),
             #[cfg(target_os = "linux")]
-            point_display: None,
-            #[cfg(target_os = "linux")]
-            point_unsupported_reason: "wayland",
+            point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
             layout: Mutex::new(Some(Layout::from_environment().expect("a keymap"))),
             last_seq: Mutex::new(0),
             control_open: AtomicBool::new(true),

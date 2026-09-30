@@ -1,8 +1,8 @@
 //! Native dependencies of the engine.
 //!
-//! The Linux build uses two permissive C libraries, both built or linked from
-//! this machine's own sources — no prebuilt binary is fetched at build time, and
-//! nothing is installed:
+//! The Linux build compiles its native adapters from local sources and links
+//! system libraries for desktop overlays — no prebuilt binary is fetched at
+//! build time, and nothing is installed:
 //!
 //! * libvpx (BSD-3-Clause) — VP9 encode, through `native/vpx_shim.c` so the
 //!   versioned encoder config struct is laid out by a C compiler.
@@ -128,11 +128,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .include("vendor/libva")
             .compile("dlvaapi");
         println!("cargo:rustc-link-lib=dl");
-        cc::Build::new()
+        let mut overlay = cc::Build::new();
+        let includes = std::process::Command::new("pkg-config")
+            .args(["--cflags", "freetype2", "fontconfig"])
+            .output()?;
+        if !includes.status.success() {
+            return Err("FreeType and Fontconfig development headers are required".into());
+        }
+        for flag in String::from_utf8(includes.stdout)?.split_whitespace() {
+            overlay.flag(flag);
+        }
+        overlay
             .file("native/agent_overlay_x11.c")
             .file("native/agent_overlay_wayland.c")
             .compile("dlagentoverlay");
-        for lib in ["X11", "Xext", "Xcursor", "wayland-client", "m"] {
+        for lib in [
+            "X11",
+            "Xext",
+            "Xcursor",
+            "wayland-client",
+            "fontconfig",
+            "freetype",
+            "m",
+        ] {
             println!("cargo:rustc-link-lib={lib}");
         }
         cc::Build::new()

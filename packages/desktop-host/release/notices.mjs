@@ -136,7 +136,9 @@ let out = `Third-party notices for the desklink-host executable
 The executable is licensed Apache-2.0. It links the components below into
 itself; each keeps its own licence, reproduced here as that licence requires.
 Libraries it loads from the system at run time (glibc, libstdc++, libpipewire,
-libxkbcommon, libevdev, libXcursor, libX11, libXext, libwayland-client) are not part of it and are not reproduced.
+libxkbcommon, libevdev, libXcursor, libX11, libXext, libwayland-client,
+Fontconfig (MIT), FreeType (FTL)) are not part of it and are not reproduced.
+This software is based in part on the work of the FreeType Team.
 Neither are the H.264 encoders it loads at run time only when present: the
 NVIDIA driver's NVENC and CUDA libraries, libva with its driver, and Cisco's
 prebuilt openh264 library, which the engine downloads from Cisco and never
@@ -145,6 +147,7 @@ out += rule('libvpx (BSD-3-Clause), linked statically') + licenceTexts(join(inpu
 out += rule('inputtino (MIT), vendored and linked statically') + licenceTexts(join(inputs, 'inputtino')).join('\n\n');
 out += rule('NVENC API header from nv-codec-headers (MIT), vendored and compiled in') + licenceTexts(join(inputs, 'nv-codec-headers')).join('\n\n');
 out += rule('libva public headers (MIT), vendored and compiled in') + licenceTexts(join(inputs, 'libva')).join('\n\n');
+out += rule('xdg-output protocol wire signatures (MIT), compiled in') + mitText(['2017 Red Hat Inc.']);
 out += rule('The Rust standard library (MIT OR Apache-2.0), linked statically')
     + 'Its copyright and licence notices, and those of its own dependencies, are in\nCOPYRIGHT-rust-library.html beside this file, as the Rust project ships them.';
 out += rule(`Rust crates (${linked.length})`) + linked.map((pkg) => `${pkg.name} ${pkg.version}  ${pkg.license}`).join('\n');

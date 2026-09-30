@@ -48,8 +48,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config libclang-dev \
-            libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libevdev-dev libxcb1-dev libxcursor-dev libxext-dev xvfb x11-utils xauth tesseract-ocr \
-            dbus at-spi2-core python3-gi gir1.2-gtk-3.0
+            libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libfreetype6-dev libfontconfig1-dev libevdev-dev libxcb1-dev libxcursor-dev libxext-dev xvfb x11-utils xauth tesseract-ocr \
+            dbus at-spi2-core python3-gi gir1.2-gtk-3.0 sway foot grim python3-pil fonts-dejavu-core
       - name: Rust (the version the release build pins)
         run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
       - uses: actions/cache@v4
@@ -60,6 +60,11 @@ jobs:
           key: engine-${{ hashFiles('packages/desktop-host/engine/Cargo.lock') }}
       - run: cargo test --manifest-path packages/desktop-host/engine/Cargo.toml
       - run: cargo build --manifest-path packages/desktop-host/engine/Cargo.toml
+      - name: Point cue on a private headless Wayland compositor
+        run: python3 packages/desktop-host/engine/test/point-wayland-flow.py
+        env:
+          DESKLINK_POINT_EVIDENCE_DIR: ${{ runner.temp }}/desklink-point-wayland
+          CARGO_TARGET_DIR: ${{ github.workspace }}/packages/desktop-host/engine/target
       - run: npm ci && npm run build
       - run: node packages/axi/test/flow.mjs
         env:
@@ -165,7 +170,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config libclang-dev \
-            libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libevdev-dev libxcb1-dev libxcursor-dev libxext-dev xvfb x11-utils xauth
+            libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libfreetype6-dev libfontconfig1-dev libevdev-dev libxcb1-dev libxcursor-dev libxext-dev xvfb x11-utils xauth
           npx -y playwright@1.62.1 install --with-deps chromium
       - name: Rust (the version the release build pins)
         run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
