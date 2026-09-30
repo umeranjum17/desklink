@@ -494,8 +494,13 @@ the person and observer can see the same cue. They are separate from the
 capture-excluded input activity indicator. Consumers reading frame differences
 should allow for the point's appearance/disappearance.
 
-Wayland portal sessions return `point_unsupported` with reason `wayland`;
-Wayland support is planned. Consumer-fed encoded sources return `operation`
+Wayland portal sessions use a wlr-layer-shell overlay with no keyboard
+interactivity and an empty input region. The selected monitor is matched by its
+portal origin against compositor logical output geometry (xdg-output); with one
+output, no origin is needed. Points map from the selected source to that output.
+An ambiguous or missing selected output returns `indicator-unavailable`.
+Compositors without layer-shell return `point_unsupported` with reason
+`layer_shell_unavailable` (including GNOME Mutter). Consumer-fed encoded sources return `operation`
 because they have no host desktop overlay target. Other refusals are `permission`, `session`,
 `coordinates`, `malformed`, and `indicator-unavailable` (including unavailable
 X Shape support). Unknown fields are refused. No control-channel or remote

@@ -129,6 +129,8 @@ unsafe extern "C" {
     fn desklink_point_overlay_main(display: *const std::ffi::c_char) -> i32;
     fn desklink_agent_overlay_main(display: *const std::ffi::c_char) -> i32;
     fn desklink_agent_overlay_wayland(source_w: i32, source_h: i32) -> i32;
+    fn desklink_wayland_layer_shell_available() -> i32;
+    fn desklink_point_overlay_wayland(w: i32, h: i32, known: i32, x: i32, y: i32) -> i32;
 }
 
 #[cfg(target_os = "linux")]
@@ -159,6 +161,29 @@ fn main() {
             let display = args.get(1).map(String::as_str).unwrap_or("");
             let display = std::ffi::CString::new(display).expect("valid X display");
             unsafe { desklink_agent_overlay_main(display.as_ptr()) }
+        }
+        "point-layer-shell-probe" => match unsafe { desklink_wayland_layer_shell_available() } {
+            1 => {
+                println!("READY");
+                0
+            }
+            0 => {
+                println!("layer_shell_unavailable");
+                2
+            }
+            _ => 2,
+        },
+        "point-overlay-wayland" => {
+            let values: Vec<i32> = args.iter().skip(1).filter_map(|v| v.parse().ok()).collect();
+            if values.len() != 5 || values[0] <= 0 || values[1] <= 0 {
+                2
+            } else {
+                unsafe {
+                    desklink_point_overlay_wayland(
+                        values[0], values[1], values[2], values[3], values[4],
+                    )
+                }
+            }
         }
         "agent-overlay-wayland" => {
             let width = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);

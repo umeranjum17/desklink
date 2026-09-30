@@ -98,11 +98,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .include("vendor/libva")
             .compile("dlvaapi");
         println!("cargo:rustc-link-lib=dl");
-        cc::Build::new()
+        let mut overlay = cc::Build::new();
+        let includes = std::process::Command::new("pkg-config")
+            .args(["--cflags", "freetype2", "fontconfig"])
+            .output()?;
+        if !includes.status.success() {
+            return Err("FreeType and Fontconfig development headers are required".into());
+        }
+        for flag in String::from_utf8(includes.stdout)?.split_whitespace() {
+            overlay.flag(flag);
+        }
+        overlay
             .file("native/agent_overlay_x11.c")
             .file("native/agent_overlay_wayland.c")
             .compile("dlagentoverlay");
-        for lib in ["X11", "Xext", "Xcursor", "wayland-client", "m"] {
+        for lib in [
+            "X11",
+            "Xext",
+            "Xcursor",
+            "wayland-client",
+            "fontconfig",
+            "freetype",
+            "m",
+        ] {
             println!("cargo:rustc-link-lib={lib}");
         }
         cc::Build::new()

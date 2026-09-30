@@ -13,7 +13,30 @@ pub struct Indicator {
     position: std::sync::Arc<std::sync::Mutex<Option<(i64, i64)>>>,
 }
 
+#[cfg(target_os = "linux")]
+fn point_wayland_executable() -> Result<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = std::env::var_os("DESKLINK_POINT_TEST_ENGINE") {
+        return Ok(path.into());
+    }
+    Ok(std::env::current_exe()?)
+}
+
 impl Indicator {
+    #[cfg(target_os = "linux")]
+    pub fn wayland_layer_shell_available() -> Result<bool> {
+        let mut command = Command::new(point_wayland_executable()?);
+        command.arg("point-layer-shell-probe");
+        match Self::spawn(&mut command, 1.0, 1.0) {
+            Ok(helper) => {
+                helper.stop();
+                Ok(true)
+            }
+            Err(error) if error.to_string().contains("layer_shell_unavailable") => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     #[cfg(target_os = "macos")]
     pub fn start(display_id: u32, width: usize, height: usize) -> Result<Self> {
         let executable = std::env::current_exe()?;
@@ -50,6 +73,28 @@ impl Indicator {
         )
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn start_point_wayland(
+        width: i32,
+        height: i32,
+        position: Option<(i32, i32)>,
+    ) -> Result<Self> {
+        let (x, y) = position.unwrap_or_default();
+        Self::spawn(
+            Command::new(point_wayland_executable()?)
+                .arg("point-overlay-wayland")
+                .args([
+                    width.to_string(),
+                    height.to_string(),
+                    i32::from(position.is_some()).to_string(),
+                    x.to_string(),
+                    y.to_string(),
+                ]),
+            1.0,
+            1.0,
+        )
+    }
+
     #[cfg(target_os = "macos")]
     pub fn start_point(display_id: u32, width: usize, height: usize) -> Result<Self> {
         let (_, _, points_w, points_h) = crate::mac::display_geometry(display_id)
@@ -61,6 +106,11 @@ impl Indicator {
             points_w / width as f64,
             points_h / height as f64,
         )
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub fn test_pid(&self) -> u32 {
+        self.child.as_ref().unwrap().id()
     }
 
     pub fn point(&mut self, x: i64, y: i64, timeout_ms: u64, label: &str) -> Result<()> {
@@ -113,13 +163,20 @@ impl Indicator {
         let reader = std::thread::spawn(move || {
             let mut ready = String::new();
             let result = BufReader::new(stdout).read_line(&mut ready);
-            let _ = ready_tx.send(result.is_ok() && ready.trim() == "READY");
+            let _ = ready_tx.send(if result.is_ok() {
+                ready.trim().to_owned()
+            } else {
+                String::new()
+            });
         });
-        if ready_rx.recv_timeout(std::time::Duration::from_secs(5)) != Ok(true) {
+        let ready = ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_default();
+        if ready != "READY" {
             let _ = child.kill();
             let _ = child.wait();
             let _ = reader.join();
-            anyhow::bail!("agent indicator did not open its overlay within 5s");
+            anyhow::bail!("agent indicator did not open its overlay within 5s: {ready}");
         }
         let _ = reader.join();
         Ok(Self {
