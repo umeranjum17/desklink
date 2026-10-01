@@ -18,6 +18,7 @@ vi.mock('react-native', () => ({
     Keyboard: { addListener: () => ({ remove: () => undefined }), dismiss: () => undefined },
     StyleSheet: { create: (styles: unknown) => styles },
     TextInput: 'TextInput',
+    Image: 'Image',
     View: 'View',
 }));
 
@@ -204,15 +205,24 @@ describe('DesktopView.ios parity with DesktopView.kt', () => {
     });
 
     it('puts the cursor mark tip on the pointer with a hotspot', async () => {
-        const { renderer, grant, move } = await openView();
+        const { renderer, sent, grant, move, release } = await openView();
         grant([touch(195, 420)]);
         move([touch(250, 430)]);
-        const cursor = renderer.root.findAllByType('View')[1].props.style as unknown[];
+        const image = renderer.root.findByType('Image');
+        const cursor = image.props.style as unknown[];
         const mark = cursor[1] as { left: number; top: number };
         const desktop = { x: Math.floor(250 / SCALE), y: Math.floor((430 - ORIGIN_Y) / SCALE) };
         expect(mark.left).toBeCloseTo((desktop.x + 0.5) * SCALE - 3, 1);
         expect(mark.top).toBeCloseTo(ORIGIN_Y + (desktop.y + 0.5) * SCALE - 3, 1);
-        expect(renderer.root.findAllByType('View')[1].props.accessible).toBe(false);
+        expect(image.props.accessible).toBe(false);
+        expect(image.props.pointerEvents).toBe('none');
+        release();
+        grant([touch(mark.left + 3, mark.top + 3)]);
+        release();
+        expect(sent.filter((message) => message.kind === 'pointer').slice(-2)).toMatchObject([
+            { kind: 'pointer', phase: 'down', ...desktop, button: 1 },
+            { kind: 'pointer', phase: 'up', ...desktop, button: 1 },
+        ]);
     });
 
     it('exposes the surface to VoiceOver only with a label', async () => {

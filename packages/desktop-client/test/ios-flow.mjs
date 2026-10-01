@@ -54,6 +54,9 @@
  *   DESKLINK_IOS_OUT        where the descriptions and the screenshot go
  *                           (default: a fresh temporary directory)
  *   DESKLINK_IOS_SKIP_BUILD 1 reuses the app the last run built
+ *   DESKLINK_IOS_APP        saved app path relative to DESKLINK_IOS_DIR
+ *   DESKLINK_IOS_POINTER_PROOF before/after saves a 4x pointer crop and a
+ *                           host click log proving a tap at the arrow tip
  *   DESKLINK_ENGINE         engine binary (default: this checkout's debug build)
  *   DESKLINK_CHROME         browser for the desktop's page (default: the first of
  *                           chromium, google-chrome-stable, google-chrome)
@@ -73,9 +76,13 @@ const repo = resolve(here, '../../..');
 const MAC = process.env.DESKLINK_IOS_MAC ?? '';
 const DIR = process.env.DESKLINK_IOS_DIR ?? 'desklink-ios';
 const BUILD = process.env.DESKLINK_IOS_SKIP_BUILD !== '1';
+const APP = process.env.DESKLINK_IOS_APP ?? 'DerivedData/Build/Products/Release-iphonesimulator/desklinkexample.app';
+assert.match(APP, /^[\w.-]+(\/[\w.-]+)*$/, 'DESKLINK_IOS_APP is a plain path under the task directory');
 const BUNDLE = 'dev.desklink.example';
 const RUNTIME = process.env.DESKLINK_IOS_RUNTIME ?? '';
 const IPAD = process.env.DESKLINK_IOS_IPAD === '1';
+const POINTER_PROOF = process.env.DESKLINK_IOS_POINTER_PROOF;
+if (POINTER_PROOF) assert(['before', 'after'].includes(POINTER_PROOF));
 const DEVICE = ['desklink-ios-flow', IPAD ? 'ipad' : '', RUNTIME].filter(Boolean).join('-');
 const DEVICE_TYPE = IPAD ? 'iPad-Pro-11-inch-M4-8GB' : 'iPhone-16';
 const DESKTOP = { width: 1280, height: 800 };
@@ -317,6 +324,13 @@ async function cleanup() {
     if (bridgePid) await stopProcess(bridgePid, 'bridge');
     if (enginePid) await stopProcess(enginePid, 'engine');
     if (xvfbPid) await stopProcess(xvfbPid, 'Xvfb');
+    // Chromium's crash handlers can outlive the browser. Only reap processes
+    // carrying this run's private environment marker, never another browser.
+    for (const stray of strays()) {
+        const pid = Number(stray.split(' ')[0]);
+        remember(pid);
+        await stopProcess(pid, 'task helper');
+    }
     // The page's browser profile is about 100 MB; nothing here outlives the run.
     rmSync(work, { recursive: true, force: true });
     await sleep(200);
@@ -336,7 +350,7 @@ async function main() {
     // ---- simulator app (built first: the host needs nothing from it) ------------
     udid = simulator();
     if (BUILD) buildApp(udid);
-    const app = mac(`echo "$D/DerivedData/Build/Products/Release-iphonesimulator/desklinkexample.app"`).trim();
+    const app = mac(`echo "$D/${APP}"`).trim();
     mac(`test -d "${app}"`);
     // The example opts in to the package's config plugin, so the trackpad's presses carry their buttons.
     assert.equal(mac(`plutil -extract UIApplicationSupportsIndirectInputEvents raw "${app}/Info.plist"`).trim(), 'true',
@@ -534,6 +548,44 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     assert(lit > 0.5, `the simulator shows the desktop, not a black picture: ${(100 * lit).toFixed(1)}% lit`);
     log(`screenshot ${shot}: ${(100 * lit).toFixed(1)}% of the picture lit`);
     assert(follows, 'the simulator shows both clicks: its picture follows the desktop, not a frame from before the taps');
+
+    if (POINTER_PROOF) {
+        // Aim at the displayed tip, then record the actual desktop page events.
+        // This checks the user surface and host together, including UIKit's
+        // coordinate rounding, rather than accepting the broader flow slack.
+        const previous = (await page.evaluate('clicks')).filter((click) => click.type === 'mousedown').at(-1);
+        const tip = { x: origin.x + (previous.x + 0.5) * scale, y: origin.y + (previous.y + 0.5) * scale };
+        const count = await page.evaluate('clicks.length');
+        mac(`axe tap -x ${tip.x.toFixed(1)} -y ${tip.y.toFixed(1)} --udid ${udid}`);
+        let received = [];
+        for (let i = 0; i < 50 && received.length < 2; i++) {
+            await sleep(100);
+            received = (await page.evaluate('clicks')).slice(count);
+        }
+        assert.deepEqual(received.map((click) => click.type), ['mousedown', 'mouseup']);
+        const error = Math.hypot(received[0].x - previous.x, received[0].y - previous.y);
+        assert(error <= 2, `tap at pointer tip differs by ${error} desktop pixels`);
+        const lines = received.map((click) => `host ${click.type} x=${click.x} y=${click.y} button=${click.button}; tip desktop=(${previous.x},${previous.y}); error=${error}px`);
+        writeFileSync(join(out, 'host-click.log'), lines.join('\n') + '\n');
+        for (const line of lines) log(line);
+        await sleep(500);
+        const frame = capture(join(out, 'desklink-ios-pointer-frame.png'));
+        const density = frame.width / screenWidth;
+        const mark = received[0];
+        const x = Math.round((origin.x + (mark.x + 0.5) * scale - 10) * density);
+        const y = Math.round((origin.y + (mark.y + 0.5) * scale - 10) * density);
+        const side = Math.round(48 * density);
+        const crop = new PNG({ width: side * 4, height: side * 4 });
+        for (let cy = 0; cy < crop.height; cy++) {
+            for (let cx = 0; cx < crop.width; cx++) {
+                const source = ((y + Math.floor(cy / 4)) * frame.width + x + Math.floor(cx / 4)) * 4;
+                frame.data.copy(crop.data, (cy * crop.width + cx) * 4, source, source + 4);
+            }
+        }
+        writeFileSync(join(out, `desklink-ios-pointer-${POINTER_PROOF}.png`), PNG.sync.write(crop));
+        writeFileSync(join(out, 'pointer-proof.json'), JSON.stringify({ device: IPAD ? 'iPad' : 'iPhone', udid, density, screen: seen.frame, desktop: geometry, scale, origin, tip, received, error, crop: { x, y, side, magnification: 4 } }, null, 2));
+        log(`pointer ${POINTER_PROOF}: ${density}x display, 4x crop, host tip error ${error}px`);
+    }
     // The page's background changes hue every frame, so a live picture is
     // another colour moments later, away from the text and the dots. A few
     // tries, so a whole turn of the hue between two screenshots cannot fool it.
