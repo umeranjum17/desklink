@@ -37,6 +37,8 @@
  *                         google-chrome, chromium). With no Chrome the browser
  *                         half is skipped with a printed reason, like
  *                         `encoded-flow.mjs`.
+ *   DESKLINK_G2G_STAMP    prebuilt stamp_target example, to reuse a release
+ *                         fixture across interleaved measurements.
  *   G2G_TASKSET_ENGINE / G2G_TASKSET_CHROME
  *                         optional `taskset` CPU lists pinning the engine and
  *                         the browser on a loaded host (the plan's load gate
@@ -388,11 +390,11 @@ const engineBinary = findEngine();
 const chromeBinary = findChrome();
 
 // The stamp example, built once; every scenario spawns it with its own MODE.
-assert.equal(
+if (!process.env.DESKLINK_G2G_STAMP) assert.equal(
     spawnSync('cargo', ['build', '-q', '--manifest-path', 'packages/desktop-host/engine/Cargo.toml', '--example', 'stamp_target'], { cwd: repo, stdio: 'ignore' }).status,
     0, 'stamp_target does not build',
 );
-const stampBinary = join(process.env.CARGO_TARGET_DIR ?? 'packages/desktop-host/engine/target', 'debug', 'examples', 'stamp_target');
+const stampBinary = process.env.DESKLINK_G2G_STAMP ?? join(process.env.CARGO_TARGET_DIR ?? 'packages/desktop-host/engine/target', 'debug', 'examples', 'stamp_target');
 
 async function verifyXvfb() {
     await verifyOwnedXvfb(xvfb);
