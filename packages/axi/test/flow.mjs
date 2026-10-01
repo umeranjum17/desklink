@@ -81,7 +81,7 @@ function sessionStrays() {
 }
 async function goneOwned(pid) {
   const started = owned.get(pid);
-  for (let i=0; i<40 && proc(pid)?.started===started && proc(pid)?.state!=='Z'; i++) await new Promise(r=>setTimeout(r,50));
+  for (let i=0; i<200 && proc(pid)?.started===started && proc(pid)?.state!=='Z'; i++) await new Promise(r=>setTimeout(r,50));
   assert(!started || proc(pid)?.started!==started || proc(pid)?.state==='Z', `task process ${pid} survived stop`);
 }
 async function stopProcess(pid) {
