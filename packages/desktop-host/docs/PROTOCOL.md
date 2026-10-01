@@ -126,6 +126,8 @@ session may require fresh consent. The macOS engine requires a VP9-enabled build
     "backends": ["portal-screencast+pipewire", "x11-root"],
     "formats": ["bgrx", "bgra", "rgbx", "rgba"],
     "cursor": "embedded",
+    "cursor_modes": ["embedded", "hidden"],
+    "cursor_positions": {"x11": true, "portal": "negotiated"},
     "audio": false
   },
   "encode": {"codecs": ["vp9", "h264"], "hardware": false,
@@ -465,6 +467,56 @@ named beside it for the per-frame mean:
 `encode + send` per encoded frame reconciles against engine-side wall time per
 frame within measurement noise; a stage that will not reconcile is a stage
 whose accounting is wrong.
+
+## Cursor-free capture
+
+`session.open` accepts `cursor: "hidden"` (default `"embedded"`). Existing
+callers keep their capture behavior. Linux hidden capture requires portal
+**Metadata** so cursor positions remain available while cursor pixels are
+omitted. A portal without Metadata returns the typed
+`cursor_positions_unavailable` refusal. Successful open returns
+`cursor: {"mode":"metadata"|"hidden"|"embedded"|"unavailable",
+"positions":true|false}`; `mode` names the portal mode accepted by the portal,
+not just the requested option.
+
+Linux capabilities advertise `capture.cursor_modes: ["embedded","hidden"]`
+and `capture.cursor_positions: {"x11":true,"portal":"negotiated"}`. Portal
+support is resolved at open: hidden capture requires Metadata and an observed
+SPA cursor metadata buffer. A portal that offers only Hidden refuses open with
+`cursor_positions_unavailable`; accepted hidden sessions report `positions:true`.
+Metadata-mode buffers that contain no new cursor data do not fabricate a move
+or a visibility change.
+
+Hidden sessions with positions emit local protocol events independently of
+pixel damage, including on a still X11 desktop:
+
+```json
+{"event":"session.cursor","params":{"sessionId":"…","x":400,"y":300,"visible":true,"timestamp_us":123456}}
+```
+
+`x,y` name the pointer hotspot in the selected source's coordinates
+(`geometry.source`), before video scaling, without the desktop origin added.
+Portal buffer coordinates are mapped to that geometry. `visible` is false
+outside the source or when SPA supplies an invisible cursor bitmap.
+`timestamp_us` is a monotonic engine-process clock in microseconds, sampled
+when the capture thread observes the pointer. The same clock stamps
+`session.frame.changed` and `session.frame` metadata, so local recording
+consumers can compare cursor samples to frame handoff times. These are not
+wall-clock or RTP timestamps. SPA cursor updates accompany PipeWire buffers;
+X11 pointer queries run at the session frame cap even with no pixel damage.
+Repeated identical positions/visibility are suppressed.
+
+X11 root GetImage/MIT-SHM never contains the server cursor and this engine
+never composites it, including for existing embedded-default callers. Its
+open reply therefore reports `mode:"hidden"`; positions are enabled only by
+an explicit `cursor:"hidden"`. macOS and Windows refuse hidden capture with
+`cursor-unavailable` in this build. Consumer-fed encoded sources refuse it too:
+the engine cannot remove pixels the consumer already encoded. Unknown cursor
+options are `malformed`.
+
+`@desklink/host` exposes `openSession({permissions:['view'], cursor:'hidden'})`
+and typed `session.cursor` events through `onEvent`/`drainEvents`. The client
+capture request also accepts `cursor`, and AXI accepts `start --cursor hidden`.
 
 ## Point on the host desktop
 

@@ -26,6 +26,8 @@ export interface EngineCapabilities {
         backends: string[];
         formats: string[];
         cursor: string;
+        cursor_modes?: Array<'embedded' | 'hidden'>;
+        cursor_positions?: { x11: boolean; portal: 'negotiated' };
         audio: boolean;
         displays?: Array<{
             id: number;
@@ -68,7 +70,14 @@ export type SourceRequest =
     | { kind: 'display'; display_id?: number }
     | { kind: 'x11'; display?: string };
 
+export interface CursorInfo {
+    mode: 'embedded' | 'hidden' | 'metadata' | 'unavailable';
+    positions: boolean;
+}
+
 export interface OpenSessionRequest {
+    /** Cursor-free frames with independent source-coordinate position events. */
+    cursor?: 'embedded' | 'hidden';
     source?: SourceRequest;
     /** `view` alone is capture-only; `control` needs a working input backend. */
     permissions: Array<'view' | 'control' | 'clipboard'>;
@@ -93,6 +102,7 @@ export interface OpenSessionRequest {
 }
 
 export interface OpenedSession {
+    cursor?: CursorInfo;
     sessionId: string;
     generation: number;
     source: {
@@ -105,6 +115,7 @@ export interface OpenedSession {
 }
 
 export type EngineEvent =
+    | { event: 'session.cursor'; params: { sessionId: string; x: number; y: number; visible: boolean; timestamp_us: number } }
     | { event: 'session.description'; params: { sessionId: string; generation: number; description: { type: 'offer'; sdp: string } } }
     | {
           event: 'session.candidate';
@@ -116,7 +127,7 @@ export type EngineEvent =
               sdpMLineIndex: number | null;
           };
       }
-    | { event: 'session.frame.changed'; params: { sessionId: string; seq: number; damage: number[][] } }
+    | { event: 'session.frame.changed'; params: { sessionId: string; seq: number; damage: number[][]; timestamp_us?: number } }
     | { event: 'session.state'; params: { sessionId: string; capture: string; transport: string; firstFrame: boolean } }
     | { event: 'session.restoreToken'; params: { sessionId: string; token: string } }
     | { event: 'session.capture.stopped'; params: { sessionId: string; reason: string } }

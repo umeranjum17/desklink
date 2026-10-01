@@ -161,8 +161,96 @@ async function run(...args) {
 try {
   remember(xvfb.pid,'Xvfb');
   await verifyXvfb(); // Never open a session or send input before ownership is proven.
-  client = await EngineClient.start(enginePath, ['serve'], {}, env);
+  const cursorEvents = [];
+  client = await EngineClient.start(enginePath, ['serve'], { onEvent: event => cursorEvents.push(event) }, env);
   recordProcesses();
+  const capabilities = await client.capabilities();
+  assert.deepEqual(capabilities.capture.cursor_modes, ['embedded', 'hidden']);
+  assert.equal(capabilities.capture.cursor_positions.x11, true);
+  let cursorTarget;
+  const cursorEvidence = process.env.DESKLINK_CURSOR_EVIDENCE_DIR;
+  if (cursorEvidence) {
+    cursorTarget = spawn(example, [], {env,stdio:['ignore','pipe','pipe']});
+    remember(cursorTarget.pid,example);
+    await new Promise(r=>setTimeout(r,300));
+  }
+  const hidden = await client.openSession({ source: {kind:'x11',display}, permissions:['view'], cursor:'hidden' });
+  assert.deepEqual(hidden.cursor, {mode:'hidden',positions:true});
+  const hiddenPath = join(dir, 'hidden.raw');
+  const hiddenFrame = await client.request('session.frame',{session_id:hidden.sessionId,path:hiddenPath,after_seq:0,still_ms:100,timeout_ms:3000});
+  const hiddenPixels = readFileSync(hiddenPath);
+  for (const [x,y] of [[50,60],[420,310],[1000,600]]) {
+    await verifyXvfb();
+    const moved = spawnSync(example, ['--warp-pointer', String(x), String(y)], { env, encoding:'utf8', timeout:3000 });
+    assert.equal(moved.status,0,moved.stderr);
+    for(let i=0;i<100 && !cursorEvents.some(e=>e.event==='session.cursor' && e.params.sessionId===hidden.sessionId && e.params.x===x && e.params.y===y);i++) await new Promise(r=>setTimeout(r,10));
+    const event = cursorEvents.find(e=>e.event==='session.cursor' && e.params.sessionId===hidden.sessionId && e.params.x===x && e.params.y===y);
+    assert(event, `pointer ${x},${y} was not reported on a still screen`);
+    assert(event.params.visible);
+    assert(event.params.timestamp_us >= hiddenFrame.timestamp_us);
+    const frame = await client.request('session.frame',{session_id:hidden.sessionId,path:hiddenPath});
+    assert.equal(frame.seq, hiddenFrame.seq, 'cursor motion must not damage cursor-free video');
+    assert.deepEqual(readFileSync(hiddenPath),hiddenPixels, 'cursor motion changed pixels');
+  }
+  if (cursorEvidence) {
+    const { PNG } = await import('pngjs');
+    const samples = [];
+    const polygon = [[0,0],[0,24],[6,18],[11,29],[16,27],[11,16],[21,16]];
+    const inside = (x,y) => {
+      let yes=false;
+      for(let i=0,j=polygon.length-1;i<polygon.length;j=i++) {
+        const a=polygon[i],b=polygon[j];
+        if((a[1]>y)!==(b[1]>y) && x<(b[0]-a[0])*(y-a[1])/(b[1]-a[1])+a[0]) yes=!yes;
+      }
+      return yes;
+    };
+    for(let i=0;i<75;i++) {
+      const started = performance.now();
+      const x=Math.round(100+i*12), y=Math.round(270+120*Math.sin(i/14));
+      await verifyXvfb();
+      const moved=spawnSync(example,['--warp-pointer',String(x),String(y)],{env,encoding:'utf8',timeout:3000});
+      assert.equal(moved.status,0,moved.stderr);
+      const latest=()=>cursorEvents.findLast(e=>e.event==='session.cursor' && e.params.sessionId===hidden.sessionId);
+      for(let n=0;n<100 && (latest()?.params.x!==x || latest()?.params.y!==y);n++) await new Promise(r=>setTimeout(r,5));
+      const cursor=latest()?.params;
+      assert(cursor && cursor.x===x && cursor.y===y && cursor.visible,'delivered cursor must match the real pointer');
+      const frame=await client.request('session.frame',{session_id:hidden.sessionId,path:hiddenPath});
+      assert.equal(frame.seq,hiddenFrame.seq,'recording must contain no cursor damage');
+      const raw=readFileSync(hiddenPath);
+      assert.deepEqual(raw,hiddenPixels);
+      const png=new PNG({width:frame.width,height:frame.height});
+      for(let p=0;p<frame.width*frame.height;p++) {
+        png.data[p*4]=raw[p*4+2];png.data[p*4+1]=raw[p*4+1];png.data[p*4+2]=raw[p*4];png.data[p*4+3]=255;
+      }
+      const leaf=String(i).padStart(3,'0');
+      writeFileSync(join(cursorEvidence,`hidden-${leaf}.png`),PNG.sync.write(png));
+      // This consumer draws a vector arrow solely from the delivered sample.
+      for(let dy=0;dy<30;dy++) for(let dx=0;dx<22;dx++) if(inside(dx+.5,dy+.5)) {
+        const edge=!inside(dx-1,dy)||!inside(dx+1,dy)||!inside(dx,dy-1)||!inside(dx,dy+1);
+        const at=((cursor.y+dy)*frame.width+cursor.x+dx)*4;
+        png.data[at]=png.data[at+1]=png.data[at+2]=edge?0:255;
+      }
+      writeFileSync(join(cursorEvidence,`redrawn-${leaf}.png`),PNG.sync.write(png));
+      samples.push({frame:i,frame_timestamp_us:frame.timestamp_us,cursor,verified_pointer:{x,y}});
+      const delay=40-(performance.now()-started);if(delay>0) await new Promise(r=>setTimeout(r,delay));
+    }
+    writeFileSync(join(cursorEvidence,'cursor-recording.json'),JSON.stringify({source:'task-owned Xvfb',display,engine:enginePath,cursor:hidden.cursor,samples,events:cursorEvents.filter(e=>e.event==='session.cursor' && e.params.sessionId===hidden.sessionId)},null,2));
+  }
+  await client.closeSession(hidden.sessionId,hidden.generation);
+  if(cursorTarget) {
+    const comparison = await client.openSession({source:{kind:'x11',display},permissions:['view'],cursor:'embedded'});
+    const frame = await client.request('session.frame',{session_id:comparison.sessionId,path:hiddenPath,after_seq:0,timeout_ms:3000});
+    const raw=readFileSync(hiddenPath);
+    assert.deepEqual(raw,hiddenPixels,'existing X11 root capture never composites the cursor');
+    const {PNG}=await import('pngjs');
+    const png=new PNG({width:frame.width,height:frame.height});
+    for(let i=0;i<frame.width*frame.height;i++) {png.data[i*4]=raw[i*4+2];png.data[i*4+1]=raw[i*4+1];png.data[i*4+2]=raw[i*4];png.data[i*4+3]=255;}
+    writeFileSync(join(cursorEvidence,'x11-embedded.png'),PNG.sync.write(png));
+    writeFileSync(join(cursorEvidence,'x11-embedded.json'),JSON.stringify({requested_cursor:'embedded',granted_cursor:comparison.cursor,frame,pointer:cursorEvents.findLast(e=>e.event==='session.cursor' && e.params.sessionId===hidden.sessionId)?.params},null,2));
+    await client.closeSession(comparison.sessionId,comparison.generation);
+  }
+  if(cursorTarget) { cursorTarget.kill('SIGTERM'); await goneOwned(cursorTarget.pid); }
+
   const session = await client.openSession({ source: {kind:'x11',display}, permissions:['view'] });
   const path = join(dir, 'frame.raw');
   const first = await client.request('session.frame',{session_id:session.sessionId,path,after_seq:0,timeout_ms:3000});
@@ -230,14 +318,18 @@ try {
   assert.deepEqual((await desktop()).raw,beforePoint.raw,'clear removes the cue and is idempotent');
   assert.deepEqual((await desktop()).state,beforePoint.state);
   await client.request('session.frame',{session_id:session.sessionId,path,after_seq:withPoint.seq,still_ms:100,timeout_ms:2000});
-  const cleanSeq = (await client.request('session.frame',{session_id:session.sessionId})).seq;
   // Xcursor sprites live outside GetImage(root): motion and ripple must not
   // create a different frame or damage region from an indicator-off session.
   await verifyXvfb();
   overlay = spawn(enginePath, ['agent-overlay', display], { env, stdio: ['pipe','pipe','pipe'] });
   remember(overlay.pid,enginePath);
   await new Promise((resolve,reject) => {overlay.stdout.once('data',resolve);overlay.once('error',reject);});
-  overlay.stdin.write('M 100 100\nC 100 100\n');
+  // Install the Xcursor override before taking the baseline. Its first
+  // definition can wake the capture loop independently of later cursor motion.
+  overlay.stdin.write('M 100 100\n');
+  await new Promise(r=>setTimeout(r,100));
+  const cleanSeq = (await client.request('session.frame',{session_id:session.sessionId,still_ms:100})).seq;
+  overlay.stdin.write('M 300 300\nC 300 300\n');
   await new Promise(r=>setTimeout(r,600));
   const cursorOnly = await client.request('session.frame',{session_id:session.sessionId,path,since:cleanSeq});
   assert.equal(cursorOnly.seq,cleanSeq, 'cursor motion and ripple add no frame damage');

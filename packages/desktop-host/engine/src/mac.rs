@@ -183,6 +183,7 @@ fn capabilities() -> Value {
             "backends": ["screencapturekit"],
             "formats": ["bgra"],
             "cursor": "embedded",
+            "cursor_modes": ["embedded"],
             "audio": false,
             "displays": displays(),
             "grant": if capture_granted { "granted" } else { "missing-screen-recording" },

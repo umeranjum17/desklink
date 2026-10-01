@@ -4,6 +4,7 @@ import { AppState } from 'react-native';
 import type { NativeDesklinkModule } from './native';
 import type {
     ControlMessage,
+    CursorSample,
     IceServerConfig,
     Permission,
     SessionFailure,
@@ -178,6 +179,7 @@ export interface DesktopSessionOptions {
      */
     authorize: () => Promise<{ signaling: Signaling; session: SessionOpenRequest }>;
     onStateChange?: (snapshot: SessionSnapshot) => void;
+    onCursor?: (sample: CursorSample) => void;
     onError?: (failure: SessionFailure) => void;
     /**
      * The engine refused one input message and the session carries on, such as
@@ -253,6 +255,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
      * before the native session exists waits here and is replayed into it.
      */
     const pendingOffer = useRef<{ sdp: string; sessionId?: string } | null>(null);
+    const pendingCursorEvents = useRef<CursorSample[]>([]);
     const pendingCandidates = useRef<Array<{ candidate: string; sdpMid: string | null; sdpMLineIndex: number | null; sessionId?: string }>>([]);
     const attempts = useRef(0);
     /**
@@ -572,6 +575,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         pendingClipboard.current.clear();
         pendingOffer.current = null;
         pendingCandidates.current = [];
+        pendingCursorEvents.current = [];
         restartGraceUntil.current = 0;
         restartCycles.current = 0;
         opened.current = null;
@@ -615,6 +619,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const establish = useCallback(async () => {
         if (nativeRef.current != null) return;
         const token = ++generationToken.current;
+        pendingCursorEvents.current = [];
         if (!(await loadPlatform())) {
             if (token === generationToken.current) refuse('this build cannot show a desktop surface');
             return;
@@ -672,6 +677,13 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                         event.candidate.sdpMLineIndex ?? null,
                     );
                     return;
+                case 'cursor':
+                    if (held == null) {
+                        pendingCursorEvents.current.push(event);
+                        return;
+                    }
+                    if (current) optionsRef.current.onCursor?.(event);
+                    return;
                 case 'state':
                     if (!current) return;
                     diagnostics.current.transport = event.transport;
@@ -707,6 +719,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             openedResult = await authorization.signaling.request<SessionOpenResult>('session.open', {
                 permissions: authorization.session.permissions,
                 max_width: authorization.session.maxWidth,
+                ...(authorization.session.cursor === undefined ? {} : { cursor: authorization.session.cursor }),
                 max_height: authorization.session.maxHeight,
                 bitrate_kbps: authorization.session.bitrateKbps,
                 max_fps: authorization.session.maxFps,
@@ -725,6 +738,9 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         try {
             if (token !== generationToken.current) return;
             opened.current = openedResult;
+            for (const sample of pendingCursorEvents.current.splice(0)) {
+                if (sample.sessionId === openedResult.sessionId) optionsRef.current.onCursor?.(sample);
+            }
             update({ geometry: openedResult.geometry, status: 'connecting' });
             if (token !== generationToken.current) return;
 

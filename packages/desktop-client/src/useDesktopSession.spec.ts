@@ -10,6 +10,7 @@ import {
     connectionStatusFor,
     useDesktopSession,
     type DesktopSession,
+    type DesktopSessionOptions,
 } from './useDesktopSession';
 
 /** `act` refuses to flush state updates unless React is told this is a test. */
@@ -131,11 +132,12 @@ function signaling(): Signaling {
     };
 }
 
-async function connectedSession(): Promise<{ current: DesktopSession }> {
+async function connectedSession(onCursor?: DesktopSessionOptions['onCursor']): Promise<{ current: DesktopSession }> {
     const held: { current: DesktopSession | null } = { current: null };
     function Harness() {
         held.current = useDesktopSession({
             authorize: async () => ({ signaling: signaling(), session: { permissions: ['view', 'control'] } }),
+            onCursor,
         });
         return null;
     }
@@ -780,6 +782,19 @@ describe('events naming another session', () => {
         expect(remoteDescriptions).toContainEqual({ id, type: 'offer', sdp: 'fresh-offer' });
         emitSignaling({ kind: 'revoked', reason: 'done', sessionId: 'engine-1' });
         expect(session.current.snapshot.status).toBe('ended');
+    }, 20_000);
+
+    it('delivers cursor samples for the live session and ignores stale samples', async () => {
+        const onCursor = vi.fn();
+        const session = await connectedSession(onCursor);
+        const sample = { kind: 'cursor' as const, sessionId: 'engine-1', x: 31, y: 47, visible: true, timestamp_us: 1234 };
+
+        emitSignaling({ ...sample, sessionId: 'dead-session' });
+        emitSignaling(sample);
+
+        expect(onCursor).toHaveBeenCalledTimes(1);
+        expect(onCursor).toHaveBeenCalledWith(sample);
+        expect(session.current.nativeId).not.toBeNull();
     }, 20_000);
 
     it('still ends on a revocation without an id', async () => {

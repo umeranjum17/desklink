@@ -25,6 +25,8 @@ mod clipboard;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod convert;
 #[cfg(target_os = "linux")]
+mod cursor;
+#[cfg(target_os = "linux")]
 mod encoder;
 #[cfg(all(any(target_os = "macos", target_os = "windows"), desklink_vpx))]
 mod encoder;
@@ -373,7 +375,7 @@ fn frame_shape(frame: &crate::convert::I420) -> u64 {
 
 #[cfg(target_os = "linux")]
 async fn probe_portal(seconds: u64) -> Result<()> {
-    let portal = portal::open(None).await?;
+    let portal = portal::open(None, protocol::CursorMode::Embedded).await?;
     eprintln!("portal source: {:?}", portal.source);
     // The source's own size: a zero box converts nothing and reports no frames.
     let (width, height) = crate::convert::fit(
@@ -389,6 +391,7 @@ async fn probe_portal(seconds: u64) -> Result<()> {
         width,
         height,
         30,
+        None,
         Box::new(move |frame, seq, _raw| {
             let _ = tx.send((frame.width, frame.height, seq));
         }),
@@ -555,9 +558,17 @@ fn render_event(notice: session::Notice) -> Option<String> {
             "session.state",
             serde_json::json!({ "sessionId": session_id, "capture": capture, "transport": transport, "firstFrame": first_frame }),
         ),
-        session::SessionEvent::Frame { seq, damage } => (
+        session::SessionEvent::Cursor { position } => (
+            "session.cursor",
+            serde_json::json!({ "sessionId": session_id, "x": position.x, "y": position.y, "visible": position.visible, "timestamp_us": position.timestamp_us }),
+        ),
+        session::SessionEvent::Frame {
+            seq,
+            damage,
+            timestamp_us,
+        } => (
             "session.frame.changed",
-            serde_json::json!({ "sessionId": session_id, "seq": seq, "damage": damage }),
+            serde_json::json!({ "sessionId": session_id, "seq": seq, "damage": damage, "timestamp_us": timestamp_us }),
         ),
         session::SessionEvent::Input { input } => (
             "session.input",
@@ -633,6 +644,7 @@ async fn dispatch(
                 .map_err(|error| ErrorBody::new("malformed", error.to_string()))?;
             let open = session::OpenRequest {
                 source: params.source,
+                cursor: params.cursor,
                 permissions: params.permissions,
                 max_width: params.max_width,
                 max_height: params.max_height,
@@ -667,6 +679,7 @@ async fn dispatch(
                     "origin": { "x": session.source().origin_x, "y": session.source().origin_y },
                 },
                 "geometry": session.geometry(),
+                "cursor": session.cursor_info(),
             });
             *current = Some(session);
             Ok(result)
@@ -868,6 +881,27 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "unsupported-protocol");
         assert!(!hello_seen, "a refused handshake must not open the gate");
+    }
+
+    #[test]
+    fn cursor_notice_preserves_source_coordinates_visibility_and_clock() {
+        let line = render_event(session::Notice {
+            session_id: String::from("cursor-session"),
+            event: session::SessionEvent::Cursor {
+                position: protocol::CursorPosition {
+                    x: 32,
+                    y: 64,
+                    visible: false,
+                    timestamp_us: 123456,
+                },
+            },
+        })
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({"event":"session.cursor","params":{"sessionId":"cursor-session","x":32,"y":64,"visible":false,"timestamp_us":123456}})
+        );
     }
 
     #[tokio::test]

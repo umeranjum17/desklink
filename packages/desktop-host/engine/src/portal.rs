@@ -33,6 +33,7 @@ pub struct SelectedSource {
 
 pub struct PortalSession {
     pub fd: OwnedFd,
+    pub cursor_mode: &'static str,
     pub source: SelectedSource,
     pub restore_token: Option<String>,
 }
@@ -46,7 +47,10 @@ pub async fn open_display(_: Option<u32>) -> Result<PortalSession> {
     anyhow::bail!("display selection is only supported on macOS")
 }
 
-pub async fn open(restore_token: Option<&str>) -> Result<PortalSession> {
+pub async fn open(
+    restore_token: Option<&str>,
+    cursor: crate::protocol::CursorMode,
+) -> Result<PortalSession> {
     let proxy = Screencast::new()
         .await
         .context("compositor has no ScreenCast portal")?;
@@ -59,6 +63,15 @@ pub async fn open(restore_token: Option<&str>) -> Result<PortalSession> {
         anyhow::bail!("ScreenCast portal advertises no monitor source");
     }
 
+    let cursor_mode = if cursor == crate::protocol::CursorMode::Hidden {
+        let available = proxy
+            .available_cursor_modes()
+            .await
+            .context("portal did not advertise cursor modes")?;
+        choose_cursor_mode(available)?
+    } else {
+        CursorMode::Embedded
+    };
     let session = proxy
         .create_session()
         .await
@@ -67,9 +80,7 @@ pub async fn open(restore_token: Option<&str>) -> Result<PortalSession> {
     proxy
         .select_sources(
             &session,
-            // The cursor is part of the picture the user drives; hiding it would
-            // make precise placement impossible.
-            CursorMode::Embedded,
+            cursor_mode,
             BitFlags::from(SourceType::Monitor),
             false,
             restore_token,
@@ -104,6 +115,11 @@ pub async fn open(restore_token: Option<&str>) -> Result<PortalSession> {
         .context("OpenPipeWireRemote failed")?;
 
     Ok(PortalSession {
+        cursor_mode: match cursor_mode {
+            CursorMode::Metadata => "metadata",
+            CursorMode::Hidden => "hidden",
+            _ => "embedded",
+        },
         fd,
         source: SelectedSource {
             node_id: stream.pipe_wire_node_id(),
@@ -116,4 +132,26 @@ pub async fn open(restore_token: Option<&str>) -> Result<PortalSession> {
         },
         restore_token: streams.restore_token().map(str::to_owned),
     })
+}
+
+fn choose_cursor_mode(available: BitFlags<CursorMode>) -> Result<CursorMode> {
+    if available.contains(CursorMode::Metadata) {
+        return Ok(CursorMode::Metadata);
+    }
+    anyhow::bail!("cursor_positions_unavailable: portal does not provide cursor metadata")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn hidden_requires_metadata_and_refuses_hidden_only_portals() {
+        assert_eq!(
+            choose_cursor_mode(CursorMode::Metadata | CursorMode::Hidden).unwrap(),
+            CursorMode::Metadata
+        );
+        let error = choose_cursor_mode(CursorMode::Hidden.into()).unwrap_err();
+        assert!(error.to_string().contains("cursor_positions_unavailable:"));
+        assert!(choose_cursor_mode(CursorMode::Embedded.into()).is_err());
+    }
 }

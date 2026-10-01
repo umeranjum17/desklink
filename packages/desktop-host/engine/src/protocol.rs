@@ -111,8 +111,18 @@ pub enum EncodedCodec {
     H264,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorMode {
+    #[default]
+    Embedded,
+    Hidden,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct OpenParams {
+    #[serde(default)]
+    pub cursor: CursorMode,
     /// Absent means "the portal, with the user's consent".
     #[serde(default)]
     pub source: Option<SourceRequest>,
@@ -400,6 +410,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cursor_option_defaults_and_refuses_unknown_modes() {
+        let default: OpenParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(default.cursor, CursorMode::Embedded);
+        let hidden: OpenParams = serde_json::from_str(r#"{"cursor":"hidden"}"#).unwrap();
+        assert_eq!(hidden.cursor, CursorMode::Hidden);
+        assert!(serde_json::from_str::<OpenParams>(r#"{"cursor":"metadata"}"#).is_err());
+        assert!(serde_json::from_str::<OpenParams>(r#"{"cursor":false}"#).is_err());
+    }
+
+    #[test]
     fn a_pointer_message_round_trips_with_its_sequence() {
         let parsed: ControlMessage =
             serde_json::from_str(r#"{"kind":"pointer","phase":"down","x":10,"y":20,"seq":3}"#)
@@ -538,4 +558,19 @@ mod tests {
                 .unwrap();
         assert!(agent.agent_indicator);
     }
+}
+
+/// Monotonic engine-process clock shared by local frame and cursor notices.
+pub fn timestamp_us(at: std::time::Instant) -> u64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    at.saturating_duration_since(*EPOCH.get_or_init(|| at))
+        .as_micros() as u64
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CursorPosition {
+    pub x: i32,
+    pub y: i32,
+    pub visible: bool,
+    pub timestamp_us: u64,
 }

@@ -41,6 +41,7 @@ export interface SurfaceGeometry {
 }
 
 export interface SessionOpenRequest {
+    cursor?: 'embedded' | 'hidden';
     permissions: Permission[];
     maxWidth?: number;
     maxHeight?: number;
@@ -52,6 +53,7 @@ export interface SessionOpenRequest {
 }
 
 export interface SessionOpenResult {
+    cursor?: { mode: 'embedded' | 'hidden' | 'metadata' | 'unavailable'; positions: boolean };
     sessionId: string;
     generation: number;
     source: { kind: string; width: number; height: number; origin: { x: number; y: number } };
@@ -69,6 +71,14 @@ export interface RtcCandidate {
     sdpMLineIndex?: number | null;
 }
 
+export interface CursorSample {
+    sessionId: string;
+    x: number;
+    y: number;
+    visible: boolean;
+    timestamp_us: number;
+}
+
 /**
  * Engine → client lifecycle events, already unwrapped from the local protocol.
  *
@@ -81,6 +91,7 @@ export interface RtcCandidate {
 export type SessionEvent =
     | { kind: 'description'; description: RtcDescription; sessionId?: string }
     | { kind: 'candidate'; candidate: RtcCandidate; sessionId?: string }
+    | ({ kind: 'cursor' } & CursorSample)
     | { kind: 'state'; capture: string; transport: string; firstFrame: boolean; sessionId?: string }
     | { kind: 'restoreToken'; token: string; sessionId?: string }
     /**

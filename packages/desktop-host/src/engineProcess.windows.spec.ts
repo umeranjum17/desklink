@@ -50,6 +50,26 @@ describe('Windows engine startup', () => {
         await client.stop();
     });
 
+    it('passes the capture cursor option and delivers position events unchanged', async () => {
+        const onEvent = vi.fn();
+        const starting = EngineClient.start('host.exe', ['serve'], { onEvent });
+        const hello = JSON.parse(child.stdin.read().toString());
+        child.stdout.write(JSON.stringify({ id: hello.id, result: { protocol: 3 } }) + '\n');
+        const client = await starting;
+        const opening = client.openSession({permissions:['view'],cursor:'hidden'});
+        const request = JSON.parse(child.stdin.read().toString());
+        expect(request.params).toEqual({permissions:['view'],cursor:'hidden'});
+        const result = {sessionId:'s',generation:1,cursor:{mode:'metadata',positions:true}};
+        child.stdout.write(JSON.stringify({id:request.id,result}) + '\n');
+        expect(await opening).toEqual(result);
+        const event = {event:'session.cursor',params:{sessionId:'s',x:40,y:60,visible:true,timestamp_us:123}};
+        child.stdout.write(JSON.stringify(event) + '\n');
+        expect(onEvent).toHaveBeenCalledWith(event);
+        expect(client.drainEvents()).toEqual([]); // streamed cursor samples do not accumulate
+        child.emit('exit',0,null);
+        await client.stop();
+    });
+
     it.each([0xc0000135, -1073741515])('maps missing-DLL exit %s', async (code) => {
         const starting = EngineClient.start('host.exe', ['serve']);
         const rejected = expect(starting).rejects.toMatchObject({ code: 'missing-system-library', message: expect.stringContaining('0xC0000135') });
