@@ -469,12 +469,13 @@ whose accounting is wrong.
 ## Cursor-free capture
 
 `session.open` accepts `cursor: "hidden"` (default `"embedded"`). Existing
-callers keep their capture behavior. Linux portals select **Metadata** when
-advertised, otherwise **Hidden**. Neither includes cursor pixels. Successful
-open returns `cursor: {"mode":"metadata"|"hidden"|"embedded"|"unavailable",
+callers keep their capture behavior. Linux hidden capture requires portal
+**Metadata** so cursor positions remain available while cursor pixels are
+omitted. A portal without Metadata returns the typed
+`cursor_positions_unavailable` refusal. Successful open returns
+`cursor: {"mode":"metadata"|"hidden"|"embedded"|"unavailable",
 "positions":true|false}`; `mode` names the portal mode accepted by the portal,
-not just the requested option. An embedded-only portal returns the typed
-`cursor-unavailable` refusal rather than silently embedding a cursor.
+not just the requested option.
 
 Linux capabilities advertise `capture.cursor_modes: ["embedded","hidden"]`
 and `capture.cursor_positions: {"x11":true,"portal":"negotiated"}`. Portal

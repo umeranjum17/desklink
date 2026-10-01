@@ -252,7 +252,8 @@ export async function serve(args: string[]): Promise<void> {
     routeNote = undefined;
     if (command === 'start') return `session: open source=${source} ${display ?? ''} size=${opened.geometry.encoded.width}x${opened.geometry.encoded.height} permissions=view${control ? ',control' : ''}`;
     if (command === 'cursor') {
-      return formatCursorSamples(cursorSamples.take(opened.sessionId));
+      const batch = cursorSamples.take(opened.sessionId);
+      return formatCursorSamples(batch.samples, batch.dropped);
     }
     if (command === 'health') {
       const state = events.filter(event=>event.event === 'session.state' || event.event === 'session.capture.stopped').at(-1);
