@@ -4,7 +4,7 @@
   <a href="https://www.npmjs.com/package/@desklink/host"><img alt="npm" src="https://img.shields.io/npm/v/@desklink/host?style=flat&label=npm" /></a>
   <a href="https://github.com/umeranjum17/desklink/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/umeranjum17/desklink/ci.yml?style=flat&branch=main" /></a>
   <a href="LICENSE"><img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-666?style=flat" /></a>
-  <img alt="Linux and macOS" src="https://img.shields.io/badge/Linux%20%7C%20macOS-111?style=flat" />
+  <img alt="Linux and macOS (preview)" src="https://img.shields.io/badge/Linux%20%7C%20macOS%20%28preview%29-111?style=flat" />
 </p>
 
 <p align="center">
@@ -19,8 +19,7 @@ particular application.
 
 ## What it does
 
-The engine supports Linux and macOS desktop sessions; macOS currently requires
-a source build with a static VP9 library.
+The engine supports Linux desktop sessions, and macOS (preview) desktop sessions.
 
 - **Capture** through the XDG Desktop Portal (`ScreenCast`) and PipeWire, with
   compositor consent, from an explicitly selected X display's root window, or
@@ -74,7 +73,7 @@ a source build with a static VP9 library.
 
 The npm badge tracks the registry version. npm installs the matching optional
 engine package: `@desklink/host-linux-x64-gnu` or `@desklink/host-darwin-arm64`.
-Supported platforms: Linux x64 with glibc 2.36 or newer and macOS arm64.
+Supported platforms: Linux x64 with glibc 2.36 or newer and macOS arm64 (preview).
 See the [changelog](../../CHANGELOG.md) for release changes.
 
 ```sh
@@ -100,7 +99,7 @@ this software is based in part on the work of the FreeType Team.
 The one step no install does for you is [kernel input access](#kernel-input-access),
 and only the portal backend needs it.
 
-macOS arm64 also has a prebuilt engine. There is no prebuilt engine for other platforms. Another Linux (arm64, musl)
+macOS arm64 (preview) also has a prebuilt engine. There is no prebuilt engine for other platforms. Another Linux (arm64, musl)
 can [build it from source](#building-from-source). Windows has a source-built transport preview for
 `x86_64-pc-windows-msvc`: static libvpx enables `serve` and consumer-fed H.264
 encoded sources. Native capture, input, clipboard and the agent indicator are
@@ -130,7 +129,7 @@ dependencies. Dedicated Windows rig qualification of
 capture, input, mixed DPI, GPU encoding and elevation is pending; signing and
 packaging are later lanes.
 
-### macOS
+### macOS (preview)
 
 The macOS engine shares protocol v3's WebRTC session path: selected-display
 ScreenCaptureKit capture, VP9 encoding (H.264 through VideoToolbox for a receiver
@@ -162,7 +161,7 @@ current input layout is diagnostic); free-form text uses Unicode key events.
 
 The published engine is an **unsigned macOS arm64 CLI** in the optional
 `@desklink/host-darwin-arm64` platform package; no Developer ID identity or
-notarization is required. The macOS engine is enabled by default; `DESKLINK_MACOS=0` explicitly disables it.
+notarization is required. The macOS (preview) engine is enabled by default; `DESKLINK_MACOS=0` explicitly disables it.
 To build and pack it, build on an Apple Silicon Mac with Rust 1.97+ and static
 Homebrew libvpx, then follow
 [Building and packing a release](#building-and-packing-a-release).
@@ -334,7 +333,7 @@ and Windows are separate backends, not separate builds.
 
 The Linux engine build needs Docker and Node, with no local Rust toolchain or
 system libraries. The macOS engine build needs the Apple Silicon prerequisites
-in [macOS](#macos). Run the following from the repository root after installing
+in [macOS (preview)](#macos-preview). Run the following from the repository root after installing
 workspace dependencies:
 
 ```sh
