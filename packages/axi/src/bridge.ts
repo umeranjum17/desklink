@@ -483,6 +483,13 @@ export async function serve(args: string[]): Promise<void> {
     const fields = args.includes('--fields') ? args[args.indexOf('--fields')+1]!.split(',') : ['ref','text','x','y'];
     if (fields.some(field=>!['ref','text','x','y','w','h','conf','line'].includes(field))) throw new Error('fields: valid fields are ref,text,x,y,w,h,conf,line');
     const frame = await capture(pendingDamage ? waitSeen : baseline);
+    // A frame reply can already be older than the latest change notice. Its
+    // stillness must not erase motion from a newer frame. Classify at capture
+    // time too: synchronous OCR can outlast the motion freshness window.
+    const moving = [...motion].filter(([,state]) => state.count>=3 && Date.now()-state.at<600 && (frame.still_ms<150 || state.seq>frame.seq));
+    if (frame.still_ms>=150) for (const [region,state] of motion) {
+      if (state.seq<=frame.seq) motion.delete(region);
+    }
     if (pendingDamage) frame.damage = [...new Set([...pendingDamage,...frame.damage])];
     if (command === 'look') {
       const item = text.find(t=>t.ref === args[0]);
@@ -584,10 +591,8 @@ export async function serve(args: string[]): Promise<void> {
         return false;
       });
       const gone=unmatched.length;
-      if (frame.still_ms>=150) motion.clear();
       const animating: string[] = [];
       const visible: string[] = [];
-      const moving = [...motion].filter(([,state]) => state.count>=3 && Date.now()-state.at<600);
       for (const region of [...frame.damage, ...moving.map(([key])=>key).filter(key=>!frame.damage.some(region=>overlaps(key,region)))]) {
         const state=moving.find(([key])=>overlaps(key,region))?.[1];
         const [x,y,w,h] = region.split(',').map(Number);
@@ -599,7 +604,6 @@ export async function serve(args: string[]): Promise<void> {
       if (observed) observed.damage=visible;
       const changed = visible.length ? `${visible.length} region since frame ${frame.previous}` : `none since frame ${frame.previous}`;
       return `changed: ${changed}\nregions[${visible.length}]{ref,box}:\n${visible.map((d,i)=>`  @r${i+1},"${d}"`).join('\n')}\nappeared[${Math.min(appeared.length,20)} of ${appeared.length}]{${fields.join(',')}}:\n${appeared.slice(0,20).map(t=>`  ${fields.map(field=>JSON.stringify(field === 'w' ? t.words.at(-1)!.x+t.words.at(-1)!.w-t.x : field === 'h' ? Math.max(...t.words.map(w=>w.y+w.h))-t.y : t[field as keyof Item])).join(',')}`).join('\n')}\ngone: ${gone} text items${animating.length ? `\nanimating[${animating.length}]{box}:\n${animating.map(box=>`  "${box}"`).join('\n')}\nanimating: ${animating.join('; ')}` : ''}\nhelp[2]:\n  desklink-axi look @r1\n  desklink-axi screen --query "<words>"`; }
-    if (frame.still_ms>=150) motion.clear();
     return `changed: none since frame ${frame.seq} (still ${frame.still_ms}ms)\nhelp[1]:\n  desklink-axi screen --query "<words>"`;
   };
   let commands = Promise.resolve();
