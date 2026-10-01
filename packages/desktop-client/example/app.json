@@ -1,13 +1,17 @@
 {
     "expo": {
-        "name": "desklink example",
+        "name": "Desklink",
         "slug": "desklink-example",
-        "version": "0.0.0",
+        "version": "0.3.0",
         "orientation": "default",
+        "scheme": "desklink-example",
+        "android": {
+            "package": "dev.desklink.example"
+        },
         "ios": {
             "bundleIdentifier": "dev.desklink.example",
             "supportsTablet": true
         },
-        "plugins": ["@config-plugins/react-native-webrtc", "@desklink/react-native"]
+        "plugins": ["@config-plugins/react-native-webrtc", "@desklink/react-native", "./withLocalBridge"]
     }
 }

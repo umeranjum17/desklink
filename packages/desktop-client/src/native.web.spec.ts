@@ -65,3 +65,20 @@ it('emits ICE connection states as they happen', async () => {
     listener.remove();
     nativeDesklink.closeSession(id);
 });
+
+it('returns receiver and codec diagnostics without ICE addresses or credentials', async () => {
+    const { nativeDesklink } = await import('./native.web');
+    const id = nativeDesklink.createSession('[]')!;
+    const peer = peers.at(-1)!;
+    peer.getStats = vi.fn(async () => new Map([
+        ['video', { id: 'video', type: 'inbound-rtp', framesDecoded: 42, codecId: 'codec', decoderImplementation: 'hardware', token: 'private' }],
+        ['codec', { id: 'codec', type: 'codec', mimeType: 'video/VP9', payloadType: 96 }],
+        ['candidate', { id: 'candidate', type: 'local-candidate', address: '192.0.2.1' }],
+    ]));
+    expect(JSON.parse(await nativeDesklink.getStats!(id))).toEqual([
+        { id: 'video', type: 'inbound-rtp', framesDecoded: 42, codecId: 'codec', decoderImplementation: 'hardware' },
+        { id: 'codec', type: 'codec', mimeType: 'video/VP9', payloadType: 96 },
+    ]);
+    nativeDesklink.closeSession(id);
+    expect(await nativeDesklink.getStats!(id)).toBe('[]');
+});

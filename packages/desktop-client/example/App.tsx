@@ -1,22 +1,30 @@
 /**
  * The smallest app that shows a desktop served by `desklink-host bridge`.
  *
- * It takes the bridge URL, token included, from a launch argument, which iOS
- * places in the app's user defaults:
+ * It takes the bridge URL, token included, from a launch argument on iOS,
+ * which iOS places in the app's user defaults, or from a connection link on
+ * Android (`desklink-example://connect?url=…&report=…`):
  *
  *   xcrun simctl launch <device> dev.desklink.example -desklinkUrl 'ws://HOST:PORT/desktop?token=…'
  *
  * Control is enabled as soon as the picture is live, so a tap on the picture
  * clicks the desktop. The picture fills the screen inside its safe area. The
- * status line carries `testID="desklink-status"` for test/ios-flow.mjs to read
- * through the simulator's accessibility tree.
+ * hidden accessibility status carries `testID="desklink-status"` for
+ * test/ios-flow.mjs to read through the simulator's accessibility tree.
  */
 import * as React from 'react';
-import { Settings, StatusBar, StyleSheet, Text, View } from 'react-native';
+import { Linking, Platform, Settings, StatusBar, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { DesktopView, useDesktopSession, type SessionEvent, type SessionSnapshot, type Signaling } from '@desklink/react-native';
 
-const url: unknown = Settings.get('desklinkUrl');
+function connectionLink(link: string | null): { url: string; report: string | null; key: string } | null {
+    if (!link) return null;
+    try {
+        const parsed = new URL(link);
+        const url = parsed.searchParams.get('url');
+        return url ? { url, report: parsed.searchParams.get('report'), key: link } : null;
+    } catch { return null; }
+}
 
 /** The bridge re-serves the engine's local protocol; this unwraps its events for the hook. */
 function bridgeSignaling(address: string): Signaling & { close: () => void } {
@@ -68,7 +76,7 @@ function bridgeSignaling(address: string): Signaling & { close: () => void } {
 }
 
 /**
- * What the status line tells the person. It uses status, frame readiness and
+ * What the status message tells the person. It uses status, frame readiness and
  * failure code; see SessionSnapshot.failure for why raw messages stay hidden.
  */
 export function statusText({ status, presented, failure }: SessionSnapshot): string {
@@ -110,21 +118,34 @@ export function statusText({ status, presented, failure }: SessionSnapshot): str
 }
 
 export default function App() {
+    const [connection, setConnection] = React.useState(() => {
+        const url: unknown = Platform.OS === 'ios' ? Settings.get('desklinkUrl') : null;
+        return typeof url === 'string' ? { url, report: null as string | null, key: url } : null;
+    });
+    React.useEffect(() => {
+        if (Platform.OS === 'ios') return;
+        let active = true;
+        void Linking.getInitialURL().then((link) => { if (active) setConnection(connectionLink(link)); });
+        const subscription = Linking.addEventListener('url', ({ url }) => setConnection(connectionLink(url)));
+        return () => { active = false; subscription.remove(); };
+    }, []);
+    if (!connection) return <View style={[styles.root, styles.idle]}><StatusBar hidden /><Text style={styles.messageText}>Open a desktop connection link to connect.</Text></View>;
     return (
         <SafeAreaProvider>
-            <Desktop />
+            <ConnectedDesktop key={connection.key} url={connection.url} report={connection.report} />
         </SafeAreaProvider>
     );
 }
 
-function Desktop() {
+function ConnectedDesktop({ url, report }: { url: string; report: string | null }) {
+    const startedAt = React.useRef(Date.now());
+    const presentedAt = React.useRef<number | null>(null);
     // The picture fills the screen but starts and pans inside the status bar,
     // camera cutout and home indicator, so none of them covers the desktop's corner.
     const insets = useSafeAreaInsets();
     const signaling = React.useRef<ReturnType<typeof bridgeSignaling> | null>(null);
     const desktop = useDesktopSession({
         authorize: async () => {
-            if (typeof url !== 'string') throw new Error('launch with -desklinkUrl set to the bridge URL');
             // A reconnect gets a fresh socket: the bridge ends a session whose socket closed.
             signaling.current?.close();
             signaling.current = bridgeSignaling(url);
@@ -135,26 +156,49 @@ function Desktop() {
 
     React.useEffect(() => {
         void desktop.connect();
+        return () => signaling.current?.close();
     }, []);
     React.useEffect(() => {
         desktop.setInputEnabled(status === 'live');
     }, [status]);
+    React.useEffect(() => {
+        if (status !== 'live') return;
+        presentedAt.current ??= Date.now();
+        if (!report) return;
+        let stopped = false;
+        // Optional evidence collection stays off the visible desktop surface.
+        const sample = async () => {
+            try {
+                const stats = await desktop.getStats();
+                if (!stopped) await fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), startedAt: startedAt.current, presentedAt: presentedAt.current, stats }) });
+            } catch { /* Evidence collection never interrupts a desktop session. */ }
+        };
+        void sample();
+        const timer = setInterval(() => { void sample(); }, 1000);
+        return () => { stopped = true; clearInterval(timer); };
+    }, [status, desktop.getStats, report]);
 
     return (
         <View style={styles.root}>
-            <StatusBar barStyle="light-content" />
+            <StatusBar hidden />
             <DesktopView sessionId={desktop.nativeId} style={StyleSheet.absoluteFill} insets={insets} accessibilityLabel="desktop" />
             <View pointerEvents="none" style={styles.bar}>
                 <Text testID="desklink-status" style={styles.status}>
                     {statusText(desktop.snapshot)}
                 </Text>
             </View>
+            {status !== 'live' && <View pointerEvents="none" style={styles.message}>
+                <Text style={styles.messageText}>{statusText(desktop.snapshot)}</Text>
+            </View>}
         </View>
     );
 }
 
 const styles = StyleSheet.create({
     root: { flex: 1, backgroundColor: '#000' },
-    bar: { position: 'absolute', left: 16, right: 16, bottom: 64, minHeight: 24, alignItems: 'center' },
-    status: { color: '#fff', fontSize: 15, textAlign: 'center' },
+    idle: { alignItems: 'center', justifyContent: 'center' },
+    bar: { position: 'absolute', width: 1, height: 1, overflow: 'hidden' },
+    status: { color: 'transparent', fontSize: 1 },
+    message: { position: 'absolute', left: 0, right: 0, bottom: 48, alignItems: 'center' },
+    messageText: { color: '#fff', fontSize: 16 },
 });

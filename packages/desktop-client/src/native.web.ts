@@ -1,4 +1,5 @@
 import type { NativeDesklinkModule, NativeEventName, NativeSessionEvent } from './native';
+import { videoStats } from './videoStats';
 import type { GestureProfile } from './protocol';
 import { observeWebKeyboardMotion } from './webKeyboardMotion';
 
@@ -898,6 +899,10 @@ const sequence = new Map<string, number>();
 export const desktopAvailable = true;
 
 export const nativeDesklink: NativeDesklinkModule = {
+    async getStats(id) {
+        const session = sessions.get(id);
+        return session ? videoStats(await session.peer.getStats()) : '[]';
+    },
     isAvailable: () => true,
 
     createSession(iceServersJson: string): string | null {

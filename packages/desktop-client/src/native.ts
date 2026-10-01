@@ -45,6 +45,8 @@ export interface NativeDesklinkModule {
     /** Hold the screen in landscape while the desktop is shown, or follow the phone again. */
     setOrientation(mode: 'landscape' | 'auto'): boolean;
     closeSession(id: string): boolean;
+    /** Video reception and codec statistics, excluding network addresses and credentials. */
+    getStats?(id: string): Promise<string>;
     isAvailable(): boolean;
     addListener?(name: 'onSessionEvent', handler: (event: NativeSessionEvent) => void): { remove: () => void };
 }
@@ -57,4 +59,3 @@ export const nativeDesklink: NativeDesklinkModule | null = native;
 
 /** True when this build can show a live desktop surface at all. */
 export const desktopAvailable = native !== null;
-

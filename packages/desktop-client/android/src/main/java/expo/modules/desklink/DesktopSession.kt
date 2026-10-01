@@ -370,6 +370,33 @@ class DesktopSession(
     return servers
   }
 
+  /** A bounded diagnostics snapshot; never expose ICE addresses or control content. */
+  @Synchronized
+  fun getStats(done: (String) -> Unit) {
+    if (closed) {
+      done("[]")
+      return
+    }
+    io.execute {
+      val connection = peer
+      if (closed || connection == null) {
+        done("[]")
+        return@execute
+      }
+      connection.getStats { report ->
+        val fields = setOf("kind", "mediaType", "codecId", "mimeType", "clockRate", "payloadType",
+          "packetsReceived", "packetsLost", "bytesReceived", "framesReceived", "framesDecoded",
+          "keyFramesDecoded", "framesDropped", "framesPerSecond", "frameWidth", "frameHeight",
+          "nackCount", "pliCount", "firCount", "totalDecodeTime", "decoderImplementation", "jitterBufferDelay")
+        val stats = report.statsMap.values.filter { it.type == "inbound-rtp" || it.type == "codec" }
+          .map { stat -> JSONObject(stat.members.filterKeys { it in fields }).apply {
+            put("id", stat.id); put("type", stat.type); put("timestampUs", stat.timestampUs)
+          } }
+        done(org.json.JSONArray(stats).toString())
+      }
+    }
+  }
+
   private fun observer(target: Long) = object : PeerConnection.Observer {
     override fun onSignalingChange(state: PeerConnection.SignalingState?) = Unit
 

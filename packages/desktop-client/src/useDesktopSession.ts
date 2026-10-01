@@ -191,6 +191,8 @@ export interface DesktopSessionOptions {
 
 export interface DesktopSession {
     snapshot: SessionSnapshot;
+    /** Video reception and codec diagnostics, without network addresses. */
+    getStats: () => Promise<Array<Record<string, unknown>>>;
     /** The native session handle, or null when nothing is open. */
     nativeId: string | null;
     connect: () => Promise<void>;
@@ -554,6 +556,12 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const hideKeyboard = useCallback(() => {
         const id = nativeRef.current;
         if (id != null) nativeDesklink?.hideKeyboard(id);
+    }, []);
+
+    const getStats = useCallback(async (): Promise<Array<Record<string, unknown>>> => {
+        const id = nativeRef.current;
+        if (id == null || !nativeDesklink?.getStats) return [];
+        return JSON.parse(await nativeDesklink.getStats(id));
     }, []);
 
     const fitToView = useCallback(() => {
@@ -1072,6 +1080,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         releaseHeld,
         setInputEnabled,
         fitToView,
+        getStats,
         setOrientation,
         send,
         modifiers,
@@ -1089,6 +1098,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         releaseHeld,
         setInputEnabled,
         fitToView,
+        getStats,
         setOrientation,
         send,
         modifiers,
