@@ -14,7 +14,7 @@ if (process.argv[2] === '--bridge') {
   print('desklink-axi: desktop session available on request; run desklink-axi to check status');
 } else {
   const definitions: [string, string[], string[]][] = [
-    ['start', [], ['control','source','display','timeout','cursor']], ['stop', [], []], ['health', [], []],
+    ['start', [], ['control','source','display','timeout','cursor']], ['stop', [], []], ['health', [], []], ['cursor', [], []],
     ['screen', [], ['query','region','full','fields']], ['diff', [], ['include-animating','fields']],
     ['tree', [], ['query','full','fields']], ['marks', [], ['region','out']],
     ['point', [], ['label','timeout','clear']],

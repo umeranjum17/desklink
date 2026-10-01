@@ -8,6 +8,7 @@ import { PeerConnection, type DataChannel } from 'node-datachannel';
 import { saveToken, takeToken, tokenPath } from './token.js';
 import { A11yClient, A11yError, axRefPattern, isActionable, type A11yNode } from './atspi.js';
 import { dedupeCandidates, drawMarks, estimateMarksCost, type MarkBox } from './marks.js';
+import { CursorEventBuffer, formatCursorSamples } from './cursor-events.js';
 
 export const socketPath = join(process.env.XDG_RUNTIME_DIR ?? join(tmpdir(), `desklink-axi-${process.getuid?.() ?? 'user'}`), 'desklink-axi', `${process.env.DESKLINK_AXI_SESSION ?? 'default'}.sock`);
 
@@ -99,6 +100,7 @@ export async function serve(args: string[]): Promise<void> {
     : 'desktop engine unavailable; set DESKLINK_AXI_ENGINE');
   mkdirSync(join(socketPath, '..'), { recursive: true, mode: 0o700 });
   const events: EngineEvent[] = [];
+  const cursorSamples = new CursorEventBuffer();
   const tokenFailure: { current?: Error } = {};
   const checkToken = () => { if (tokenFailure.current) throw new Error(`cannot persist portal restore token: ${tokenFailure.current.message}`); };
   const portal = process.platform === 'linux' && source !== 'x11' && !(source === 'auto' && display);
@@ -107,7 +109,8 @@ export async function serve(args: string[]): Promise<void> {
   let peer: PeerConnection | undefined;
   let offerReady = false;
   const engine = await EngineClient.start(executable.command, executable.args, { requestTimeoutMs: 125000, onEvent: event => {
-    if (event.event !== 'session.frame.changed' && event.event !== 'session.cursor') events.push(event);
+    if (event.event === 'session.cursor') cursorSamples.push(event);
+    else if (event.event !== 'session.frame.changed') events.push(event);
     if (event.event === 'session.restoreToken' && tokenFile) {
       try { saveToken(tokenFile, event.params.token); }
       catch (error) { tokenFailure.current = error as Error; }
@@ -248,6 +251,9 @@ export async function serve(args: string[]): Promise<void> {
     let waitSeen = baseline;
     routeNote = undefined;
     if (command === 'start') return `session: open source=${source} ${display ?? ''} size=${opened.geometry.encoded.width}x${opened.geometry.encoded.height} permissions=view${control ? ',control' : ''}`;
+    if (command === 'cursor') {
+      return formatCursorSamples(cursorSamples.take(opened.sessionId));
+    }
     if (command === 'health') {
       const state = events.filter(event=>event.event === 'session.state' || event.event === 'session.capture.stopped').at(-1);
       if (state?.event === 'session.capture.stopped') return `capture: stopped; reason: ${state.params.reason}`;
