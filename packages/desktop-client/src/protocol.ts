@@ -41,6 +41,7 @@ export interface SurfaceGeometry {
 }
 
 export interface SessionOpenRequest {
+    cursor?: 'embedded' | 'hidden';
     permissions: Permission[];
     maxWidth?: number;
     maxHeight?: number;
@@ -52,6 +53,7 @@ export interface SessionOpenRequest {
 }
 
 export interface SessionOpenResult {
+    cursor?: { mode: 'embedded' | 'hidden' | 'metadata' | 'unavailable'; positions: boolean };
     sessionId: string;
     generation: number;
     source: { kind: string; width: number; height: number; origin: { x: number; y: number } };

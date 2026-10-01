@@ -14,6 +14,7 @@ pub fn capabilities() -> Value {
             "backends": [],
             "formats": [],
             "cursor": "unavailable",
+            "cursor_modes": [],
             "audio": false,
             "displays": crate::portal::displays(),
             "grant": "unavailable",

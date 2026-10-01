@@ -202,12 +202,14 @@ struct Selected {
 
 /// Open an X display, start reading its root window, and hand back the same
 /// shape the portal path produces.
+#[allow(clippy::too_many_arguments)]
 fn select_x11(
     display: Option<&str>,
     max_width: usize,
     max_height: usize,
     max_fps: u32,
     metrics: Arc<Mutex<Metrics>>,
+    #[cfg(target_os = "linux")] cursor_sink: Option<crate::cursor::CursorSink>,
     sink: capture::FrameSink,
     on_stop: Box<dyn Fn(String) + Send>,
 ) -> Result<Selected> {
@@ -246,7 +248,15 @@ fn select_x11(
                 // the loop, so a still screen costs no grab, no conversion
                 // and no hash. The fps cap stays a minimum spacing.
                 let mut first = true;
+                #[cfg(target_os = "linux")]
+                let mut cursor = cursor_sink.map(crate::cursor::Reporter::new);
                 while !stop.load(Ordering::SeqCst) {
+                    #[cfg(target_os = "linux")]
+                    if let Some(cursor) = cursor.as_mut() {
+                        if let Ok((x, y, visible)) = lock(&desktop).cursor_position() {
+                            cursor.update(x, y, visible);
+                        }
+                    }
                     if !first {
                         let changed = lock(&desktop).take_damage();
                         if !changed {
@@ -580,6 +590,7 @@ impl SessionError {
 }
 
 pub struct OpenRequest {
+    pub cursor: crate::protocol::CursorMode,
     /** Which desktop to capture; absent means the portal. */
     pub source: Option<SourceRequest>,
     pub permissions: Vec<Permission>,
@@ -601,6 +612,9 @@ pub struct OpenRequest {
 /// Events a session raises for its consumer.
 #[derive(Debug)]
 pub enum SessionEvent {
+    Cursor {
+        position: crate::protocol::CursorPosition,
+    },
     Description {
         generation: u64,
         sdp: String,
@@ -617,6 +631,7 @@ pub enum SessionEvent {
         first_frame: bool,
     },
     Frame {
+        timestamp_us: u64,
         seq: u64,
         damage: Vec<[usize; 4]>,
     },
@@ -702,6 +717,7 @@ struct Inner {
     encoded: Mutex<Option<Encoded>>,
     /// `OpenRequest::local_frames`: whether `latest` is kept at all.
     local_frames: bool,
+    cursor_info: serde_json::Value,
 }
 
 /// A source whose video arrives already encoded.
@@ -780,6 +796,8 @@ pub fn capabilities() -> serde_json::Value {
             "backends": ["portal-screencast+pipewire", "x11-root"],
             "formats": ["bgrx", "bgra", "rgbx", "rgba"],
             "cursor": "embedded",
+            "cursor_modes": ["embedded", "hidden"],
+            "cursor_positions": {"x11": true, "portal": "negotiated"},
             "audio": false,
         },
         "encode": encode_capabilities(),
@@ -832,6 +850,7 @@ pub fn capabilities() -> serde_json::Value {
             "backends": ["screencapturekit"],
             "formats": ["bgra"],
             "cursor": "embedded",
+            "cursor_modes": ["embedded"],
             "audio": false,
             "displays": crate::mac::displays(),
             "grant": if capture_granted { "granted" } else { "missing-screen-recording" },
@@ -902,6 +921,19 @@ impl Session {
                 "indicator-unavailable",
                 "Windows agent indicator is not implemented in this build.",
             ));
+        }
+        if request.cursor == crate::protocol::CursorMode::Hidden {
+            #[cfg(not(target_os = "linux"))]
+            return Err(SessionError::new(
+                "cursor-unavailable",
+                "hidden cursor capture is not implemented on this platform",
+            ));
+            if matches!(request.source, Some(SourceRequest::Encoded { .. })) {
+                return Err(SessionError::new(
+                    "cursor-unavailable",
+                    "the engine cannot remove cursor pixels from consumer-encoded video",
+                ));
+            }
         }
         let id = opaque_id();
         let wants_control = request.permissions.contains(&Permission::Control);
@@ -1000,7 +1032,7 @@ impl Session {
                     let damage = dirty_regions(&hashes, &previous, frame.width, frame.height);
                     *held = Some((
                         seq,
-                        Instant::now(),
+                        captured_at,
                         frame.width,
                         frame.height,
                         raw,
@@ -1010,7 +1042,11 @@ impl Session {
                     frame_tx_signal.send_replace(seq);
                     let _ = frame_events.send(Notice {
                         session_id: frame_session_id.clone(),
-                        event: SessionEvent::Frame { seq, damage },
+                        event: SessionEvent::Frame {
+                            seq,
+                            damage,
+                            timestamp_us: crate::protocol::timestamp_us(captured_at),
+                        },
                     });
                 }
             }
@@ -1027,6 +1063,21 @@ impl Session {
             }
         });
 
+        #[cfg(target_os = "linux")]
+        let cursor_sink: Option<crate::cursor::CursorSink> =
+            if request.cursor == crate::protocol::CursorMode::Hidden {
+                let events = events.clone();
+                let id = id.clone();
+                Some(Box::new(move |position| {
+                    let _ = events.send(Notice {
+                        session_id: id.clone(),
+                        event: SessionEvent::Cursor { position },
+                    });
+                }))
+            } else {
+                None
+            };
+        let mut cursor_info = serde_json::json!({"mode":"embedded", "positions":false});
         let Selected {
             source,
             capture,
@@ -1038,6 +1089,8 @@ impl Session {
                 request.max_height,
                 max_fps,
                 metrics.clone(),
+                #[cfg(target_os = "linux")]
+                cursor_sink,
                 sink,
                 Box::new({
                     let status = capture_status.clone();
@@ -1050,9 +1103,31 @@ impl Session {
                     Some(SourceRequest::Display { display_id }) => {
                         portal::open_display(*display_id).await
                     }
-                    _ => portal::open(request.restore_token.as_deref()).await,
+                    _ => {
+                        #[cfg(target_os = "linux")]
+                        {
+                            portal::open(request.restore_token.as_deref(), request.cursor).await
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            portal::open(request.restore_token.as_deref()).await
+                        }
+                    }
                 }
-                .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
+                .map_err(|error| {
+                    SessionError::new(
+                        if request.cursor == crate::protocol::CursorMode::Hidden {
+                            "cursor-unavailable"
+                        } else {
+                            "source"
+                        },
+                        format!("{error:#}"),
+                    )
+                })?;
+                #[cfg(target_os = "linux")]
+                {
+                    cursor_info = serde_json::json!({"mode":portal.cursor_mode, "positions":false});
+                }
                 if let Some(token) = &portal.restore_token {
                     let _ = events.send(Notice {
                         session_id: id.clone(),
@@ -1116,6 +1191,7 @@ impl Session {
                     width,
                     height,
                     max_fps,
+                    cursor_sink,
                     sink,
                     indicator
                         .as_ref()
@@ -1127,6 +1203,10 @@ impl Session {
                 )
                 .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
                 #[cfg(target_os = "linux")]
+                {
+                    cursor_info["positions"] = serde_json::json!(capture.cursor_positions());
+                }
+                #[cfg(target_os = "linux")]
                 if let Some(indicator) = indicator.as_mut() {
                     indicator.event('A', -1, -1);
                 }
@@ -1137,6 +1217,9 @@ impl Session {
                 }
             }
         };
+        if wants_x11 {
+            cursor_info = serde_json::json!({"mode":"hidden", "positions": request.cursor == crate::protocol::CursorMode::Hidden});
+        }
 
         let source_w = source.width.max(1) as usize;
         let source_h = source.height.max(1) as usize;
@@ -1282,6 +1365,7 @@ impl Session {
             events: events.clone(),
             encoded: Mutex::new(None),
             local_frames: request.local_frames,
+            cursor_info,
         });
 
         inner.notify(SessionEvent::Description {
@@ -1383,6 +1467,7 @@ impl Session {
                 feed,
             })),
             local_frames: false,
+            cursor_info: serde_json::json!({"mode":"unavailable", "positions":false}),
         });
         inner.notify(SessionEvent::State {
             capture: "consented",
@@ -1438,6 +1523,10 @@ impl Session {
 
     pub fn generation(&self) -> u64 {
         self.inner.generation
+    }
+
+    pub fn cursor_info(&self) -> &serde_json::Value {
+        &self.inner.cursor_info
     }
 
     pub fn geometry(&self) -> &serde_json::Value {
@@ -1684,7 +1773,7 @@ impl Session {
             }
             Some(pixels)
         };
-        let result = serde_json::json!({ "seq": seq, "still_ms": at.elapsed().as_millis() as u64,
+        let result = serde_json::json!({ "seq": seq, "timestamp_us": crate::protocol::timestamp_us(*at), "still_ms": at.elapsed().as_millis() as u64,
             "width": w, "height": h, "format": "bgrx", "damage": damage, "written": !path.is_empty() });
         drop(held);
         if let Some(pixels) = pixels {
@@ -3174,6 +3263,7 @@ mod tests {
                 feed,
             })),
             local_frames: false,
+            cursor_info: serde_json::json!({"mode":"unavailable", "positions":false}),
         });
         spawn_peer_events(&inner, peer_events_rx);
         spawn_encoded(&inner, feed_rx);
@@ -3485,6 +3575,7 @@ mod tests {
             events,
             encoded: Mutex::new(None),
             local_frames: true,
+            cursor_info: serde_json::json!({"mode":"embedded", "positions":false}),
         });
         (inner, recorded)
     }
@@ -3852,6 +3943,7 @@ mod tests {
 
     fn encoded_open() -> OpenRequest {
         OpenRequest {
+            cursor: crate::protocol::CursorMode::Embedded,
             source: Some(SourceRequest::Encoded {
                 codec: EncodedCodec::H264,
                 width: 486,
@@ -3876,6 +3968,18 @@ mod tests {
             .await
             .expect("a notification arrives")
             .expect("the channel stays open")
+    }
+
+    #[tokio::test]
+    async fn hidden_cursor_is_refused_for_consumer_encoded_pixels() {
+        let (events, _) = tokio_mpsc::unbounded_channel();
+        let mut request = encoded_open();
+        request.cursor = crate::protocol::CursorMode::Hidden;
+        let error = Session::open(request, events)
+            .await
+            .err()
+            .expect("cannot alter encoded pixels");
+        assert_eq!(error.code, "cursor-unavailable");
     }
 
     #[tokio::test]
@@ -4024,6 +4128,7 @@ mod tests {
         let (events, _received) = tokio_mpsc::unbounded_channel();
         let result = Session::open(
             OpenRequest {
+                cursor: crate::protocol::CursorMode::Embedded,
                 source: None,
                 permissions: vec![Permission::Control],
                 max_width: 640,

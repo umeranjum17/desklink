@@ -707,6 +707,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             openedResult = await authorization.signaling.request<SessionOpenResult>('session.open', {
                 permissions: authorization.session.permissions,
                 max_width: authorization.session.maxWidth,
+                ...(authorization.session.cursor === undefined ? {} : { cursor: authorization.session.cursor }),
                 max_height: authorization.session.maxHeight,
                 bitrate_kbps: authorization.session.bitrateKbps,
                 max_fps: authorization.session.maxFps,

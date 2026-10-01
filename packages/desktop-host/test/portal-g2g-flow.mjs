@@ -151,7 +151,18 @@ async function cage(dir) {
         return wayland !== null;
     });
     const client = { ...env, WAYLAND_DISPLAY: wayland };
-    const stamp = spawn(config.stamp, ['--mode', config.scenario, '--freeze-file', join(dir, 'freeze')], {
+    if (config.cursorProof) {
+        client.SWAYSOCK = join(runtime, readdirSync(runtime).find(n => n.startsWith('sway-ipc.') && n.endsWith('.sock')));
+        setInterval(() => {
+            const command = join(dir, 'pointer-command');
+            if (!existsSync(command)) return;
+            const [x,y] = JSON.parse(readFileSync(command,'utf8'));
+            const moved = spawnSync(config.swaymsg, ['-s', client.SWAYSOCK, 'seat', 'seat0', 'cursor', 'set', String(x), String(y)], { env:client,encoding:'utf8' });
+            writeFileSync(join(dir,'pointer-result'), JSON.stringify({status:moved.status,out:moved.stdout,err:moved.stderr}));
+            rmSync(command);
+        }, 20);
+    }
+    const stamp = spawn(config.stamp, ['--mode', config.scenario, '--freeze-file', join(dir, 'freeze'), ...(config.cursorProof ? ['--cursor-fixture'] : [])], {
         stdio: ['ignore', 'pipe', 'ignore'], env: client,
     });
     children.push(stamp);
@@ -217,7 +228,7 @@ async function main() {
     const maxFps = Number(option('fps', '60'));
     const seconds = Number(option('seconds', '15'));
     const freezeAfter = Number(option('freeze-after', '2'));
-    const scenarios = option('scenario', 'typing,scroll').split(',');
+    const scenarios = (process.argv.includes('--cursor-proof') ? 'still' : option('scenario', 'typing,scroll')).split(',');
     const gate = process.argv.includes('--gate');
     assert(width > 0 && height > 0 && maxFps > 0 && seconds > 0, 'bad --size, --fps or --seconds');
     assert(Number.isInteger(freezeAfter) && freezeAfter > 0, 'bad --freeze-after');
@@ -274,6 +285,8 @@ async function main() {
         const before = loadavg()[0];
         const result = await measure({
             engine, stamp, sway, portal, xdph, portalFile, chrome, renderNode, width, height, maxFps, seconds, scenario, freezeAfter,
+            embeddedControl: process.argv.includes('--embedded-control'),
+            cursorProof: process.argv.includes('--cursor-proof'), swaymsg: process.env.DESKLINK_PORTAL_SWAYMSG || which('swaymsg'),
         });
         const after = loadavg()[0];
         result.load = {
@@ -284,6 +297,7 @@ async function main() {
             console.error(`FAIL ${scenario}: load ${result.load.before}/${result.load.after} is over ${limit}`);
             failed = true;
         }
+        if (process.argv.includes('--cursor-proof')) continue;
         const measured = result.g2g_ms.n > 0 && Number.isFinite(result.g2g_ms.p50);
         if (gate && scenario === 'typing' && !(measured && result.presented_fps >= 50 && result.g2g_ms.p50 <= 50)) {
             console.error(`FAIL typing: ${result.presented_fps} fps presented, p50 ${result.g2g_ms.p50} ms over ${result.g2g_ms.n} decoded stamps`);
@@ -354,6 +368,7 @@ async function measure(run) {
         });
         const engine = new Engine(child, lines);
         await engine.request('hello', { protocol: 3 });
+        if (run.cursorProof) return {...await cursorProof(engine, dir, run), isolation:first.isolation};
 
         const browser = await startChrome(run.chrome);
         cleanup.unshift(() => browser.close());
@@ -437,7 +452,7 @@ function writeCage(dir, run) {
     }
     writeFileSync(join(dir, 'cage.json'), JSON.stringify({
         scenario: run.scenario, engine: realpathSync(run.engine), stamp: realpathSync(run.stamp), sway: run.sway,
-        portal: run.portal, xdph: run.xdph,
+        portal: run.portal, xdph: run.xdph, cursorProof: run.cursorProof, swaymsg: run.swaymsg,
         ambient: ambient.filter((path) => path && existsSync(path)).map((path) => {
             const { dev, ino } = statSync(path);
             return { path, dev, ino };
@@ -456,6 +471,7 @@ function writeCage(dir, run) {
     writeFileSync(join(dir, 'sway.conf'), [
         `output HEADLESS-1 mode ${run.width}x${run.height}@60Hz position 0 0`,
         'default_border none',
+        ...(run.cursorProof ? ['seat seat0 fallback true'] : []),
         'swaybg_command -',
         '',
     ].join('\n'));
@@ -680,3 +696,55 @@ async function startChrome(binary) {
 // Last, so every class and constant above is initialised.
 if (process.argv[2] === '--cage') await cage(process.argv[3]);
 else await main();
+
+// Run only inside the namespace cage above; no ambient Wayland socket or input.
+async function cursorProof(engine, dir, run) {
+    const events = [];
+    engine.on(event => events.push(event));
+    const move = async (x,y) => {
+        const result = join(dir,'pointer-result');
+        rmSync(result,{force:true});
+        writeFileSync(join(dir,'pointer-command'), JSON.stringify([x,y]));
+        for(let i=0;i<200 && !existsSync(result);i++) await sleep(20);
+        assert(existsSync(result),'private compositor did not move pointer');
+        const moved = JSON.parse(readFileSync(result,'utf8'));
+        assert.equal(moved.status,0,JSON.stringify(moved));
+        await sleep(300);
+    };
+    if (run.embeddedControl) {
+        const embedded = await engine.request('session.open', {source:{kind:'portal'},permissions:['view'],max_width:run.width,max_height:run.height},60000);
+        writeFileSync(join(dir,'freeze'),'');
+        await sleep(500);
+        await move(100,100);
+        const before = await engine.request('session.frame',{session_id:embedded.sessionId,path:join(dir,'embedded-before.raw')});
+        await move(400,300);
+        const after = await engine.request('session.frame',{session_id:embedded.sessionId,path:join(dir,'embedded-after.raw')});
+        const equal = readFileSync(join(dir,'embedded-before.raw')).equals(readFileSync(join(dir,'embedded-after.raw')));
+        console.error(JSON.stringify({embedded_control:true,engine:run.engine,before_seq:before.seq,after_seq:after.seq,pixels_equal:equal}));
+        await engine.request('session.close',{session_id:embedded.sessionId});
+        assert(after.seq>before.seq && !equal,'positive control: embedded cursor did not damage frames');
+        return {source:'portal',embedded_pixels:'changed on pointer motion'};
+    }
+    const hidden = await engine.request('session.open', {source:{kind:'portal'},permissions:['view'],cursor:'hidden',max_width:run.width,max_height:run.height}, 60000);
+    assert(['hidden','metadata'].includes(hidden.cursor.mode));
+    writeFileSync(join(dir,'freeze'),'');
+    await sleep(500);
+    await move(100,100);
+    const frame = await engine.request('session.frame',{session_id:hidden.sessionId,path:join(dir,'hidden-before.raw')});
+    for(const [x,y] of [[400,300],[700,500]]) {
+        await move(x,y);
+        const after = await engine.request('session.frame',{session_id:hidden.sessionId,path:join(dir,'hidden-after.raw')});
+        assert.equal(after.seq,frame.seq,'pointer motion damaged hidden frames');
+        assert.deepEqual(readFileSync(join(dir,'hidden-before.raw')),readFileSync(join(dir,'hidden-after.raw')));
+        if(hidden.cursor.positions) assert(events.some(e=>e.event==='session.cursor' && e.params.sessionId===hidden.sessionId && e.params.x===x && e.params.y===y && e.params.visible),'SPA cursor metadata did not follow pointer');
+    }
+    if(process.env.DESKLINK_CURSOR_EVIDENCE_DIR) {
+        const {PNG}=await import('pngjs');
+        const raw=readFileSync(join(dir,'hidden-before.raw'));
+        const png=new PNG({width:frame.width,height:frame.height});
+        for(let i=0;i<frame.width*frame.height;i++) {png.data[i*4]=raw[i*4+2];png.data[i*4+1]=raw[i*4+1];png.data[i*4+2]=raw[i*4];png.data[i*4+3]=255;}
+        writeFileSync(join(process.env.DESKLINK_CURSOR_EVIDENCE_DIR,'portal-hidden.png'),PNG.sync.write(png));
+    }
+    await engine.request('session.close',{session_id:hidden.sessionId});
+    return {source:'portal',cursor:hidden.cursor,cursor_events:events.filter(e=>e.event==='session.cursor').length,hidden_pixels:'unchanged on pointer motion'};
+}

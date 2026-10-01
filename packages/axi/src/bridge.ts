@@ -88,6 +88,8 @@ export async function serve(args: string[]): Promise<void> {
   const source = args.includes('--source') ? args[args.indexOf('--source') + 1] : 'auto';
   const display = args.includes('--display') ? args[args.indexOf('--display') + 1] : undefined;
   const control = args.includes('--control');
+  const cursor = args.includes('--cursor') ? args[args.indexOf('--cursor') + 1] : 'embedded';
+  if (cursor !== 'embedded' && cursor !== 'hidden') throw new Error('cursor: use embedded or hidden');
   const timeout = args.includes('--timeout') ? Number(args[args.indexOf('--timeout')+1]) : 120000;
   if (process.platform !== 'linux' && process.platform !== 'darwin') throw new Error('Linux or macOS only');
   if (process.platform === 'darwin' ? !['auto','display'].includes(source ?? '') || (display !== undefined && !/^\d+$/.test(display)) : source === 'display') throw new Error('source: use display and a numeric --display on macOS, portal/x11 on Linux');
@@ -105,7 +107,7 @@ export async function serve(args: string[]): Promise<void> {
   let peer: PeerConnection | undefined;
   let offerReady = false;
   const engine = await EngineClient.start(executable.command, executable.args, { requestTimeoutMs: 125000, onEvent: event => {
-    if (event.event !== 'session.frame.changed') events.push(event);
+    if (event.event !== 'session.frame.changed' && event.event !== 'session.cursor') events.push(event);
     if (event.event === 'session.restoreToken' && tokenFile) {
       try { saveToken(tokenFile, event.params.token); }
       catch (error) { tokenFailure.current = error as Error; }
@@ -130,6 +132,7 @@ export async function serve(args: string[]): Promise<void> {
       : source === 'x11' || (source === 'auto' && display) ? { kind: 'x11', display } : { kind: 'portal' },
     permissions: control ? ['view', 'control', 'clipboard'] : ['view'], loopbackTcp: true,
     agentIndicator: control,
+    cursor,
     ...(tokenFile ? { restoreToken: takeToken(tokenFile) } : {}),
   }, timeout);
   checkToken();

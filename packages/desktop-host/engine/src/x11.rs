@@ -349,6 +349,21 @@ impl X11Desktop {
             .context("the X11 connection dropped")
     }
 
+    /// Query the root pointer independently of pixel damage. GetImage and
+    /// MIT-SHM do not contain the server cursor and we never composite it.
+    pub fn cursor_position(&self) -> Result<(i32, i32, bool)> {
+        let pointer = self.connection.query_pointer(self.root)?.reply()?;
+        Ok((
+            i32::from(pointer.root_x),
+            i32::from(pointer.root_y),
+            pointer.same_screen
+                && pointer.root_x >= 0
+                && pointer.root_y >= 0
+                && (pointer.root_x as usize) < self.width
+                && (pointer.root_y as usize) < self.height,
+        ))
+    }
+
     pub fn move_pointer(&self, x: i64, y: i64) -> Result<()> {
         let (x, y) = self.clamp(x, y);
         self.connection

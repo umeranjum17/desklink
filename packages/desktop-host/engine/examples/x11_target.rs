@@ -48,6 +48,14 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|arg| arg == "--warp-pointer") {
+        let x: i16 = args.get(i + 1).context("missing x")?.parse()?;
+        let y: i16 = args.get(i + 2).context("missing y")?.parse()?;
+        connection.warp_pointer(x11rb::NONE, screen.root, 0, 0, 0, 0, x, y)?;
+        connection.flush()?;
+        connection.get_input_focus()?.reply()?; // round trip before disconnect
+        return Ok(());
+    }
     if args.iter().any(|arg| arg == "--desktop-state") {
         let pointer = connection.query_pointer(screen.root)?.reply()?;
         let focus = connection.get_input_focus()?.reply()?;

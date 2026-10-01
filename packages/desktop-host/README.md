@@ -272,6 +272,16 @@ await client.acceptAnswer(session.sessionId, session.generation, answerSdp);
 await client.addCandidate(session.sessionId, session.generation, candidate, sdpMid, sdpMLineIndex);
 ```
 
+For cursor-free recordings, open with `cursor: 'hidden'` and inspect
+`session.cursor`: Linux portals prefer Metadata and fall back to Hidden;
+`positions` states whether cursor reconstruction is possible. Subscribe to
+`session.cursor` events for source-coordinate `x`, `y`, `visible`, and monotonic
+`timestamp_us` (the same clock as local frame metadata). Hidden-only portals
+provide no positions. X11 reports positions even on still frames and already
+captures root pixels without a cursor. macOS, Windows, and consumer-encoded
+sources return `cursor-unavailable` for hidden requests. Omitting the option
+preserves existing behavior. See [the cursor protocol](docs/PROTOCOL.md#cursor-free-capture).
+
 `myChannel` is the application's own authenticated connection, whatever that is.
 There is no second identity system, no pairing ceremony and no account: the
 engine trusts the consumer's decision and enforces the scope it was given.

@@ -136,7 +136,7 @@ export class EngineClient {
             const event = parsed as unknown as EngineEvent;
             // Setup notifications are drained by the consumer; queue them so a
             // slow reader cannot lose an offer or a candidate.
-            if (event.event !== 'session.frame.changed' || options.onEvent === undefined) this.queue.push(event);
+            if ((event.event !== 'session.frame.changed' && event.event !== 'session.cursor') || options.onEvent === undefined) this.queue.push(event);
             options.onEvent?.(event);
             return;
         }
@@ -192,6 +192,7 @@ export class EngineClient {
         return this.request<OpenedSession>('session.open', {
             ...(request.source === undefined ? {} : { source: request.source }),
             permissions: request.permissions,
+            ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
             ...(request.maxWidth === undefined ? {} : { max_width: request.maxWidth }),
             ...(request.maxHeight === undefined ? {} : { max_height: request.maxHeight }),
             ...(request.bitrateKbps === undefined ? {} : { bitrate_kbps: request.bitrateKbps }),

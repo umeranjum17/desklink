@@ -26,7 +26,8 @@ use std::os::fd::AsFd;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(target_os = "linux")]
 use wayland_client::protocol::{
-    wl_buffer, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+    wl_buffer, wl_compositor, wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool,
+    wl_surface,
 };
 #[cfg(target_os = "linux")]
 use wayland_client::{Connection, Dispatch, QueueHandle};
@@ -56,6 +57,8 @@ enum Mode {
 #[cfg(target_os = "linux")]
 #[derive(Default)]
 struct State {
+    cursor_enabled: bool,
+    cursor_surface: Option<wl_surface::WlSurface>,
     compositor: Option<wl_compositor::WlCompositor>,
     shm: Option<wl_shm::WlShm>,
     wm_base: Option<xdg_wm_base::XdgWmBase>,
@@ -83,6 +86,7 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--cursor-fixture" => {}
             "--mode" => {
                 mode = match args.next().as_deref() {
                     Some("typing") => Mode::Typing,
@@ -111,7 +115,10 @@ fn main() -> Result<()> {
     let mut queue = connection.new_event_queue();
     let qh = queue.handle();
     connection.display().get_registry(&qh, ());
-    let mut state = State::default();
+    let mut state = State {
+        cursor_enabled: std::env::args().any(|a| a == "--cursor-fixture"),
+        ..State::default()
+    };
     // Two round trips: the globals, then the output's mode events.
     queue.roundtrip(&mut state)?;
     queue.roundtrip(&mut state)?;
@@ -119,6 +126,22 @@ fn main() -> Result<()> {
     let shm = state.shm.clone().context("no wl_shm")?;
     let wm_base = state.wm_base.clone().context("no xdg_wm_base")?;
 
+    let cursor_file = memfd(16 * 16 * 4)?;
+    if state.cursor_enabled {
+        // Task-owned fixture: an unmistakable opaque magenta cursor.
+        let cursor_pixels = unsafe { memmap(&cursor_file, 16 * 16 * 4)? };
+        for pixel in cursor_pixels.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&0xffff00ffu32.to_le_bytes());
+        }
+        let cursor_pool = shm.create_pool(cursor_file.as_fd(), 16 * 16 * 4, &qh, ());
+        let cursor_buffer =
+            cursor_pool.create_buffer(0, 16, 16, 64, wl_shm::Format::Argb8888, &qh, ());
+        let cursor_surface = compositor.create_surface(&qh, ());
+        cursor_surface.attach(Some(&cursor_buffer), 0, 0);
+        cursor_surface.damage(0, 0, 16, 16);
+        cursor_surface.commit();
+        state.cursor_surface = Some(cursor_surface);
+    }
     let surface = compositor.create_surface(&qh, ());
     let xdg = wm_base.get_xdg_surface(&surface, &qh, ());
     let toplevel = xdg.get_toplevel(&qh, ());
@@ -188,6 +211,12 @@ fn main() -> Result<()> {
         }
         // A still screen is one that stops committing: once the frozen stamp
         // is shown, the compositor has nothing new to capture.
+        if freeze_file
+            .as_deref()
+            .is_some_and(|path| !std::path::Path::new(path).exists())
+        {
+            frozen_ms = None;
+        }
         if frozen_ms.is_some() && frame > frozen_at {
             continue;
         }
@@ -332,6 +361,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 "wl_compositor" => {
                     state.compositor = Some(registry.bind(name, version.min(4), qh, ()))
                 }
+                "wl_seat" if state.cursor_enabled => {
+                    registry.bind::<wl_seat::WlSeat, _, _>(name, version.min(5), qh, ());
+                }
                 "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
                 "xdg_wm_base" => state.wm_base = Some(registry.bind(name, 1, qh, ())),
                 "wl_output" => {
@@ -456,3 +488,51 @@ wayland_client::delegate_noop!(State: ignore wl_surface::WlSurface);
 wayland_client::delegate_noop!(State: ignore wl_shm::WlShm);
 #[cfg(target_os = "linux")]
 wayland_client::delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
+
+#[cfg(target_os = "linux")]
+impl Dispatch<wl_seat::WlSeat, ()> for State {
+    fn event(
+        _: &mut Self,
+        seat: &wl_seat::WlSeat,
+        event: wl_seat::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_seat::Event::Capabilities {
+            capabilities: wayland_client::WEnum::Value(capabilities),
+        } = event
+        {
+            if capabilities.contains(wl_seat::Capability::Pointer) {
+                seat.get_pointer(qh, ());
+            }
+        }
+    }
+}
+#[cfg(target_os = "linux")]
+impl Dispatch<wl_pointer::WlPointer, ()> for State {
+    fn event(
+        state: &mut Self,
+        pointer: &wl_pointer::WlPointer,
+        event: wl_pointer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_pointer::Event::Enter { serial, .. } = event {
+            pointer.set_cursor(serial, state.cursor_surface.as_ref(), 0, 0);
+        }
+    }
+}
+#[cfg(target_os = "linux")]
+impl Dispatch<wl_buffer::WlBuffer, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &wl_buffer::WlBuffer,
+        _: wl_buffer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
