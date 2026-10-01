@@ -353,7 +353,7 @@ try {
   await client.point(session.sessionId,{clear:true});
   assert.deepEqual((await desktop()).raw,beforePoint.raw,'clear removes the cue and is idempotent');
   assert.deepEqual((await desktop()).state,beforePoint.state);
-  const cleanSeq = (await capturedPixels(cleanFrame,finalPointFrame.seq)).seq;
+  await capturedPixels(cleanFrame,finalPointFrame.seq);
   // Xcursor sprites live outside GetImage(root): motion and ripple must not
   // create a different frame or damage region from an indicator-off session.
   await verifyXvfb();
@@ -364,6 +364,7 @@ try {
   // definition can wake the capture loop independently of later cursor motion.
   overlay.stdin.write('M 100 100\n');
   await new Promise(r=>setTimeout(r,100));
+  const cleanSeq = (await capturedPixels(cleanFrame,0)).seq;
   overlay.stdin.write('M 300 300\nC 300 300\n');
   await new Promise(r=>setTimeout(r,600));
   const cursorOnly = await client.request('session.frame',{session_id:session.sessionId,path,since:cleanSeq});
