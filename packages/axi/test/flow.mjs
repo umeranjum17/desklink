@@ -177,7 +177,7 @@ try {
   const hidden = await client.openSession({ source: {kind:'x11',display}, permissions:['view'], cursor:'hidden' });
   assert.deepEqual(hidden.cursor, {mode:'hidden',positions:true});
   const hiddenPath = join(dir, 'hidden.raw');
-  const hiddenFrame = await client.request('session.frame',{session_id:hidden.sessionId,path:hiddenPath,after_seq:0,timeout_ms:3000});
+  const hiddenFrame = await client.request('session.frame',{session_id:hidden.sessionId,path:hiddenPath,after_seq:0,still_ms:100,timeout_ms:3000});
   const hiddenPixels = readFileSync(hiddenPath);
   for (const [x,y] of [[50,60],[420,310],[1000,600]]) {
     await verifyXvfb();
@@ -318,7 +318,7 @@ try {
   assert.deepEqual((await desktop()).raw,beforePoint.raw,'clear removes the cue and is idempotent');
   assert.deepEqual((await desktop()).state,beforePoint.state);
   await client.request('session.frame',{session_id:session.sessionId,path,after_seq:withPoint.seq,still_ms:100,timeout_ms:2000});
-  const cleanSeq = (await client.request('session.frame',{session_id:session.sessionId})).seq;
+  const cleanSeq = (await client.request('session.frame',{session_id:session.sessionId,still_ms:100})).seq;
   // Xcursor sprites live outside GetImage(root): motion and ripple must not
   // create a different frame or damage region from an indicator-off session.
   await verifyXvfb();
