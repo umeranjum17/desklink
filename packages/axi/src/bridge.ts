@@ -234,10 +234,46 @@ export async function serve(args: string[]): Promise<void> {
       child.once('close',code => { if (code === 0) resolve(result); else unavailable(); });
     });
     const lines = new Map<string, Item>();
-    for (const cols of output.split('\n').slice(1).map(line => line.split('\t'))) {
+    const rows = output.split('\n').slice(1).map(line => line.split('\t'));
+    let blinkFrame: Buffer | undefined;
+    const blinkingCaret = async (cols: string[]) => {
+      if (!blinkFrame) {
+        const path = join(dir, `caret-${frame.seq}.raw`);
+        blinkFrame = await engine.request<{written:boolean}>('session.frame', { session_id: opened.sessionId, after_seq: frame.seq, path, timeout_ms: 1200 })
+          .then(result => result.written ? readFileSync(path) : undefined)
+          .catch(() => undefined);
+      }
+      if (!blinkFrame) return false;
+      const x = box[0]! + Math.floor(Number(cols[6]) / scale);
+      const y = box[1]! + Math.floor(Number(cols[7]) / scale);
+      const width = Math.ceil(Number(cols[8]) / scale);
+      const height = Math.ceil(Number(cols[9]) / scale);
+      const firstX = x + Math.floor(width * 0.75);
+      const lastX = x + width;
+      const minimumRows = Math.ceil(height * 0.5);
+      const changingColumns: number[] = [];
+      for (let px = firstX; px < lastX; px++) {
+        let changingRows = 0;
+        for (let py = y; py < y + height; py++) {
+          const offset = (py * frame.width + px) * 4;
+          if (Math.abs(frame.raw[offset]! - blinkFrame[offset]!) + Math.abs(frame.raw[offset+1]! - blinkFrame[offset+1]!) + Math.abs(frame.raw[offset+2]! - blinkFrame[offset+2]!) > 80) changingRows++;
+        }
+        if (changingRows >= minimumRows) changingColumns.push(px);
+      }
+      const maxStroke = Math.max(2, Math.ceil(height * 0.18));
+      let stroke = 0, widestStroke = 0;
+      for (let i = 0; i < changingColumns.length; i++) {
+        stroke = i === 0 || changingColumns[i] === changingColumns[i-1]! + 1 ? stroke + 1 : 1;
+        widestStroke = Math.max(widestStroke, stroke);
+      }
+      return widestStroke > 0 && widestStroke <= maxStroke;
+    };
+    for (const cols of rows) {
       if (cols.length < 12 || Number(cols[10]) < 0 || !cols[11]?.trim()) continue;
-      const token = cols[11]!.trim();
-      if (!token || token === '|') continue; // A text insertion caret is not item content.
+      let token = cols[11]!.trim();
+      if (!token) continue;
+      if (token.endsWith('|') && await blinkingCaret(cols)) token = token.slice(0,-1);
+      if (!token) continue;
       const key = cols.slice(1,5).join(':');
       if (!lines.has(key)) lines.set(key,{ref:`@${frame.seq}.${lines.size+1}`,text:'',x:Number(cols[6]),y:Number(cols[7]),conf:Number(cols[10]),line:key,words:[]});
       const item = lines.get(key)!;

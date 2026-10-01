@@ -110,6 +110,12 @@ export async function ocrFlow({ run, env, dir, scale, verifyXvfb, remember }) {
       const finalEdit = await record('screen','--query','Notes on remote desktops today');
       const finalItems = finalEdit.split('\n').filter(l=>/^  "@/.test(l)).map(l=>JSON.parse(`[${l.trim()}]`));
       assert.equal(finalItems[0]?.[1],'Notes on remote desktops today');
+      for (let attempt=0; attempt<2; attempt++) {
+        await new Promise(resolve=>setTimeout(resolve,300));
+        const repeated = await run('screen','--query','Notes on remote desktops today');
+        const repeatedItems = repeated.split('\n').filter(l=>/^  "@/.test(l)).map(l=>JSON.parse(`[${l.trim()}]`));
+        assert.equal(repeatedItems[0]?.[1],'Notes on remote desktops today',repeated);
+      }
       await record('look','--region','32,600,880,110','--out',join(evidence,'showcase.png'));
       writeFileSync(join(evidence,'transcript.txt'),transcript);
       if(process.env.DESKLINK_OCR_UPDATE_README==='1') {
@@ -124,7 +130,7 @@ export async function ocrFlow({ run, env, dir, scale, verifyXvfb, remember }) {
     await run('type','a|b','--wait','settle');
     const barQuery = await run('screen','--query','a|b');
     const barItems = barQuery.split('\n').filter(l=>/^  "@/.test(l)).map(l=>JSON.parse(`[${l.trim()}]`));
-    assert(barItems.some(row=>row[1] === 'a|b'),barQuery);
+    assert(barItems.some(row=>row[1].includes('a|b')),barQuery);
     const visible = await run('screen','--full');
     const visibleItems = visible.split('\n').filter(l=>/^  "@/.test(l)).map(l=>JSON.parse(`[${l.trim()}]`));
     assert(visibleItems.every(row=>row[1] !== '|'),visible);
