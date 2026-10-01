@@ -126,6 +126,8 @@ session may require fresh consent. The macOS engine requires a VP9-enabled build
     "backends": ["portal-screencast+pipewire", "x11-root"],
     "formats": ["bgrx", "bgra", "rgbx", "rgba"],
     "cursor": "embedded",
+    "cursor_modes": ["embedded", "hidden"],
+    "cursor_positions": {"x11": true, "portal": "negotiated"},
     "audio": false
   },
   "encode": {"codecs": ["vp9", "h264"], "hardware": false,
