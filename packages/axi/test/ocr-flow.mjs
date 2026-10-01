@@ -120,6 +120,14 @@ export async function ocrFlow({ run, env, dir, scale, verifyXvfb, remember }) {
         writeFileSync(path,readme.slice(0,start)+'```text\n'+transcript.trimEnd()+readme.slice(end));
       }
     }
+    await run('click',`${Math.round(200*scale)},${Math.round(625*scale)}`);
+    await run('type','a|b','--wait','settle');
+    const barQuery = await run('screen','--query','a|b');
+    const barItems = barQuery.split('\n').filter(l=>/^  "@/.test(l)).map(l=>JSON.parse(`[${l.trim()}]`));
+    assert(barItems.some(row=>row[1] === 'a|b'),barQuery);
+    const visible = await run('screen','--full');
+    const visibleItems = visible.split('\n').filter(l=>/^  "@/.test(l)).map(l=>JSON.parse(`[${l.trim()}]`));
+    assert(visibleItems.every(row=>row[1] !== '|'),visible);
     await run('stop');
   } finally { browser.kill('SIGTERM'); keeper.kill('SIGTERM'); }
 }

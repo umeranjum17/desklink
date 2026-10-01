@@ -236,8 +236,8 @@ export async function serve(args: string[]): Promise<void> {
     const lines = new Map<string, Item>();
     for (const cols of output.split('\n').slice(1).map(line => line.split('\t'))) {
       if (cols.length < 12 || Number(cols[10]) < 0 || !cols[11]?.trim()) continue;
-      const token = cols[11]!.replaceAll('|', '').trim();
-      if (!token) continue; // A text insertion caret is not item content.
+      const token = cols[11]!.trim();
+      if (!token || token === '|') continue; // A text insertion caret is not item content.
       const key = cols.slice(1,5).join(':');
       if (!lines.has(key)) lines.set(key,{ref:`@${frame.seq}.${lines.size+1}`,text:'',x:Number(cols[6]),y:Number(cols[7]),conf:Number(cols[10]),line:key,words:[]});
       const item = lines.get(key)!;
