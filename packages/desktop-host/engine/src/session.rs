@@ -1115,14 +1115,13 @@ impl Session {
                     }
                 }
                 .map_err(|error| {
-                    SessionError::new(
-                        if request.cursor == crate::protocol::CursorMode::Hidden {
-                            "cursor-unavailable"
-                        } else {
-                            "source"
-                        },
-                        format!("{error:#}"),
-                    )
+                    let message = format!("{error:#}");
+                    let code = if message.contains("cursor_positions_unavailable:") {
+                        "cursor_positions_unavailable"
+                    } else {
+                        "source"
+                    };
+                    SessionError::new(code, message)
                 })?;
                 #[cfg(target_os = "linux")]
                 {
@@ -1204,6 +1203,14 @@ impl Session {
                 .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
                 #[cfg(target_os = "linux")]
                 {
+                    if request.cursor == crate::protocol::CursorMode::Hidden
+                        && !capture.cursor_positions()
+                    {
+                        return Err(SessionError::new(
+                            "cursor_positions_unavailable",
+                            "portal stream did not provide SPA cursor metadata",
+                        ));
+                    }
                     cursor_info["positions"] = serde_json::json!(capture.cursor_positions());
                 }
                 #[cfg(target_os = "linux")]

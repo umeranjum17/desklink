@@ -273,12 +273,12 @@ await client.addCandidate(session.sessionId, session.generation, candidate, sdpM
 ```
 
 For cursor-free recordings, open with `cursor: 'hidden'` and inspect
-`session.cursor`: Linux portals prefer Metadata and fall back to Hidden;
-`positions` states whether cursor reconstruction is possible. Subscribe to
+`session.cursor`: Linux portals require Metadata for hidden capture;
+`positions` is true for accepted hidden sessions. Subscribe to
 `session.cursor` events for source-coordinate `x`, `y`, `visible`, and monotonic
 `timestamp_us` (the same clock as local frame metadata). Hidden-only portals
-provide no positions. X11 reports positions even on still frames and already
-captures root pixels without a cursor. macOS, Windows, and consumer-encoded
+return `cursor_positions_unavailable`. X11 reports positions even on still
+frames and already captures root pixels without a cursor. macOS, Windows, and consumer-encoded
 sources return `cursor-unavailable` for hidden requests. Omitting the option
 preserves existing behavior. See [the cursor protocol](docs/PROTOCOL.md#cursor-free-capture).
 

@@ -478,11 +478,11 @@ not just the requested option. An embedded-only portal returns the typed
 
 Linux capabilities advertise `capture.cursor_modes: ["embedded","hidden"]`
 and `capture.cursor_positions: {"x11":true,"portal":"negotiated"}`. Portal
-support is resolved at open: `positions` is true when a cursor metadata buffer
-was negotiated. A Hidden-only portal grants cursor-free video with
-`positions:false` and emits no positions; the consumer must check this flag
-before offering cursor reconstruction. Metadata-mode buffers that contain no
-new cursor data do not fabricate a move or a visibility change.
+support is resolved at open: hidden capture requires Metadata and an observed
+SPA cursor metadata buffer. A portal that offers only Hidden refuses open with
+`cursor_positions_unavailable`; accepted hidden sessions report `positions:true`.
+Metadata-mode buffers that contain no new cursor data do not fabricate a move
+or a visibility change.
 
 Hidden sessions with positions emit local protocol events independently of
 pixel damage, including on a still X11 desktop:

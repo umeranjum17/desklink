@@ -725,8 +725,15 @@ async function cursorProof(engine, dir, run) {
         assert(after.seq>before.seq && !equal,'positive control: embedded cursor did not damage frames');
         return {source:'portal',embedded_pixels:'changed on pointer motion'};
     }
-    const hidden = await engine.request('session.open', {source:{kind:'portal'},permissions:['view'],cursor:'hidden',max_width:run.width,max_height:run.height}, 60000);
+    let hidden;
+    try {
+        hidden = await engine.request('session.open', {source:{kind:'portal'},permissions:['view'],cursor:'hidden',max_width:run.width,max_height:run.height}, 60000);
+    } catch (error) {
+        assert.match(error.message, /^cursor_positions_unavailable:/, 'portal without SPA cursor metadata must refuse hidden capture');
+        return {source:'portal',hidden_refused:'cursor_positions_unavailable'};
+    }
     assert(['hidden','metadata'].includes(hidden.cursor.mode));
+    assert.equal(hidden.cursor.positions, true);
     writeFileSync(join(dir,'freeze'),'');
     await sleep(500);
     await move(100,100);
@@ -736,7 +743,7 @@ async function cursorProof(engine, dir, run) {
         const after = await engine.request('session.frame',{session_id:hidden.sessionId,path:join(dir,'hidden-after.raw')});
         assert.equal(after.seq,frame.seq,'pointer motion damaged hidden frames');
         assert.deepEqual(readFileSync(join(dir,'hidden-before.raw')),readFileSync(join(dir,'hidden-after.raw')));
-        if(hidden.cursor.positions) assert(events.some(e=>e.event==='session.cursor' && e.params.sessionId===hidden.sessionId && e.params.x===x && e.params.y===y && e.params.visible),'SPA cursor metadata did not follow pointer');
+        assert(events.some(e=>e.event==='session.cursor' && e.params.sessionId===hidden.sessionId && e.params.x===x && e.params.y===y && e.params.visible),'SPA cursor metadata did not follow pointer');
     }
     if(process.env.DESKLINK_CURSOR_EVIDENCE_DIR) {
         const {PNG}=await import('pngjs');

@@ -138,25 +138,20 @@ fn choose_cursor_mode(available: BitFlags<CursorMode>) -> Result<CursorMode> {
     if available.contains(CursorMode::Metadata) {
         return Ok(CursorMode::Metadata);
     }
-    if available.contains(CursorMode::Hidden) {
-        return Ok(CursorMode::Hidden);
-    }
-    anyhow::bail!("portal cannot honour hidden cursor capture")
+    anyhow::bail!("cursor_positions_unavailable: portal does not provide cursor metadata")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn hidden_prefers_metadata_then_hidden_and_never_embedded() {
+    fn hidden_requires_metadata_and_refuses_hidden_only_portals() {
         assert_eq!(
             choose_cursor_mode(CursorMode::Metadata | CursorMode::Hidden).unwrap(),
             CursorMode::Metadata
         );
-        assert_eq!(
-            choose_cursor_mode(CursorMode::Hidden.into()).unwrap(),
-            CursorMode::Hidden
-        );
+        let error = choose_cursor_mode(CursorMode::Hidden.into()).unwrap_err();
+        assert!(error.to_string().contains("cursor_positions_unavailable:"));
         assert!(choose_cursor_mode(CursorMode::Embedded.into()).is_err());
     }
 }
