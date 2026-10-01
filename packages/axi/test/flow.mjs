@@ -318,14 +318,18 @@ try {
   assert.deepEqual((await desktop()).raw,beforePoint.raw,'clear removes the cue and is idempotent');
   assert.deepEqual((await desktop()).state,beforePoint.state);
   await client.request('session.frame',{session_id:session.sessionId,path,after_seq:withPoint.seq,still_ms:100,timeout_ms:2000});
-  const cleanSeq = (await client.request('session.frame',{session_id:session.sessionId,still_ms:100})).seq;
   // Xcursor sprites live outside GetImage(root): motion and ripple must not
   // create a different frame or damage region from an indicator-off session.
   await verifyXvfb();
   overlay = spawn(enginePath, ['agent-overlay', display], { env, stdio: ['pipe','pipe','pipe'] });
   remember(overlay.pid,enginePath);
   await new Promise((resolve,reject) => {overlay.stdout.once('data',resolve);overlay.once('error',reject);});
-  overlay.stdin.write('M 100 100\nC 100 100\n');
+  // Install the Xcursor override before taking the baseline. Its first
+  // definition can wake the capture loop independently of later cursor motion.
+  overlay.stdin.write('M 100 100\n');
+  await new Promise(r=>setTimeout(r,100));
+  const cleanSeq = (await client.request('session.frame',{session_id:session.sessionId,still_ms:100})).seq;
+  overlay.stdin.write('M 300 300\nC 300 300\n');
   await new Promise(r=>setTimeout(r,600));
   const cursorOnly = await client.request('session.frame',{session_id:session.sessionId,path,since:cleanSeq});
   assert.equal(cursorOnly.seq,cleanSeq, 'cursor motion and ripple add no frame damage');
