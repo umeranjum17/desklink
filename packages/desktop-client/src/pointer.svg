@@ -1,0 +1,7 @@
+<!-- Same outline and (3, 3) tip hotspot as web and Android. Generate the
+     iOS density assets with rsvg-convert -w SIZE -h SIZE pointer.svg -o FILE:
+     SIZE=28/56/84, FILE=pointer.png/pointer@2x.png/pointer@3x.png. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">
+  <path d="M3 3 L3 22.25 L7.73 17.96 L10.92 25.22 L14 23.9 L10.92 16.86 L17.08 16.86 Z" fill="none" stroke="#fff" stroke-width="2.2" stroke-linejoin="round"/>
+  <path d="M3 3 L3 22.25 L7.73 17.96 L10.92 25.22 L14 23.9 L10.92 16.86 L17.08 16.86 Z" fill="#000"/>
+</svg>

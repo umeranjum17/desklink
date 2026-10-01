@@ -1,5 +1,6 @@
 import * as React from 'react';
-import { Keyboard, StyleSheet, TextInput, View, type GestureResponderEvent, type LayoutChangeEvent, type ViewProps } from 'react-native';
+import { Image, Keyboard, StyleSheet, TextInput, View, type GestureResponderEvent, type LayoutChangeEvent, type ViewProps } from 'react-native';
+import pointerArrow from './pointer.png';
 import { requireNativeViewManager, requireOptionalNativeModule } from 'expo-modules-core';
 import type { DesktopViewProps } from './DesktopView';
 import { hardwareKey, type HardwareKey } from './hardwareKeys';
@@ -391,7 +392,7 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         {sessionId && stream && RTCView && size.width > 0 && size.height > 0 ?
             <RTCView pointerEvents="none" streamURL={stream.toURL()} objectFit="contain" style={{ position: 'absolute', left: originX, top: originY, width: pictureWidth, height: pictureHeight }}
                 onDimensionsChange={(event) => { if (event.nativeEvent.width > 0 && event.nativeEvent.height > 0) markDesktopPresented(sessionId); }} /> : placeholder}
-        {cursor && <View pointerEvents="none" accessible={false} style={[styles.cursor, { left: originX + (cursor.x + 0.5) * scale - CURSOR_HOTSPOT, top: originY + (cursor.y + 0.5) * scale - CURSOR_HOTSPOT }]} />}
+        {cursor && <Image source={pointerArrow} pointerEvents="none" accessible={false} style={[styles.cursor, { left: originX + (cursor.x + 0.5) * scale - CURSOR_HOTSPOT, top: originY + (cursor.y + 0.5) * scale - CURSOR_HOTSPOT }]} />}
         <TextInput ref={input} style={styles.input} value={keyboardText} onChangeText={changeText} autoCorrect={false} autoCapitalize="none" submitBehavior="submit" accessible={false}
             onSubmitEditing={() => {
                 // While the app holds a sticky modifier, Enter is the app's to
@@ -408,6 +409,6 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
 
 const styles = StyleSheet.create({
     surface: { backgroundColor: '#000', overflow: 'hidden' },
-    cursor: { position: 'absolute', width: 12, height: 18, backgroundColor: '#fff', borderWidth: 2, borderColor: '#000', transform: [{ rotate: '-30deg' }] },
+    cursor: { position: 'absolute', width: 28, height: 28 },
     input: { position: 'absolute', width: 1, height: 1, opacity: 0, left: 0, bottom: 0 },
 });

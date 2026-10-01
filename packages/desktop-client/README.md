@@ -130,11 +130,12 @@ heat and battery.
   stamps every frame alike, so the iOS peer declines that hint and keeps the
   receiver's usual jitter buffer. `fitToView()` shows the whole desktop again.
 - **A pointer a phone can see.** Once a touch has sent the desktop's pointer
-  somewhere, the view draws it there at a readable size, over a picture whose
-  own cursor is a few pixels tall or not captured at all. Android hides the
-  extra mark when a mouse is attached, iOS when an iPad trackpad or mouse
-  drives it, and the `device` profile draws no mark on any platform — the
-  screen being touched shows the finger itself.
+  somewhere, the view draws an outlined arrow there at a readable size, over a
+  picture whose own cursor is a few pixels tall or not captured at all. On iOS,
+  the arrow tip marks the desktop pointer position. Android hides the extra
+  mark when a mouse is attached, iOS when an iPad trackpad or mouse drives it,
+  and the `device` profile draws no mark on any platform — the screen being
+  touched shows the finger itself.
 - **The picture above the keyboard.** While the phone's keyboard is up, the
   picture sits above it and above the room the app keeps for its own controls
   (`keyboardClearance`). Android follows the keyboard animation and keeps the
@@ -298,7 +299,14 @@ The Mac needs Xcode with an iOS simulator runtime, CocoaPods, node and
 the run builds or caches stays in `~/desklink-ios` there. When the selected
 Xcode has no simulator platform, point `DESKLINK_IOS_XCODE` at one that does;
 `DESKLINK_IOS_RUNTIME` picks the iOS version (for example `18.6`); the
-script's header lists the other settings. To try the example by hand against any bridge:
+script's header lists the other settings. To capture the cursor tip proof, set
+`DESKLINK_IOS_POINTER_PROOF=before` or `after`; the run writes a 4x crop, device
+frame, proof metadata, and host click log under `DESKLINK_IOS_OUT`. Set
+`DESKLINK_IOS_APP` to reuse an app bundle under `DESKLINK_IOS_DIR` when running
+with `DESKLINK_IOS_SKIP_BUILD=1`. Run once with `before` before the change and
+once with `after` after it, on both iPhone and iPad simulators, to compare the
+pointer crop and verify the host click is within two desktop pixels of the tip.
+To try the example by hand against any bridge:
 
 ```sh
 xcrun simctl launch <device> dev.desklink.example -desklinkUrl 'ws://HOST:PORT/desktop?token=TOKEN'
