@@ -34,7 +34,7 @@ writeFileSync(join(fixture, 'index.html'), `<!doctype html><title>Research Index
 <a href="cobalt.html" target="_blank">cobalt</a>
 <a href="heron.html" target="_blank">heron</a>
 <form onsubmit="event.preventDefault();document.getElementById('saved').textContent='Saved '+document.getElementById('name').value">
-  <label>Name <input id="name"></label>
+  <label>Name <input id="name" autofocus></label>
   <button id="save">Save</button>
 </form>
 <span id="saved"></span>`);
@@ -205,7 +205,7 @@ const tasks = {
       return { ok, ms, calls, chars, retries };
     }
     let retries = 0, calls = 0, chars = 0, ms = 0;
-    let batch = await call('batch', JSON.stringify([['press', 'Meta+l'], ['type', indexUrl], ['press', 'Return'], ['wait', 'change']])); calls++; chars += batch.chars; ms += batch.ms;
+    let batch = await call('batch', JSON.stringify([['press', 'ctrl+l'], ['type', indexUrl], ['press', 'Return'], ['wait', 'change']])); calls++; chars += batch.chars; ms += batch.ms;
     let verify = await call('screen', '--query', 'Research Index'); calls++; chars += verify.chars; ms += verify.ms;
     let ok = !verify.out.includes('text: 0 items match');
     if (!ok) { retries++; verify = await call('screen', '--query', 'Research Index'); calls++; chars += verify.chars; ms += verify.ms; ok = !verify.out.includes('text: 0 items match'); }
@@ -230,13 +230,11 @@ const tasks = {
       return { ok, ms, calls, chars, retries };
     }
     let retries = 0, calls = 0, chars = 0, ms = 0;
-    let reload = await call('batch', JSON.stringify([['press', 'Meta+l'], ['type', indexUrl], ['press', 'Return'], ['wait', 'change']])); calls++; chars += reload.chars; ms += reload.ms;
-    // AXI target() clicks the word inside the OCR line, so the merged
-    // "Name | Save" row needs no coordinate calibration.
+    let reload = await call('batch', JSON.stringify([['press', 'ctrl+r'], ['wait', 'settle']])); calls++; chars += reload.chars; ms += reload.ms;
+    // The fixture focuses its input on reload; Enter submits the form.
+    // OCR can return overlapping rows for the inline labels.
     let act = await call('batch', JSON.stringify([
-      ['snapshot'],
-      ['type', name, '--into', 'Name'],
-      ['click', 'Save'],
+      ['type', name, '--submit'],
       ['wait', '300'],
     ])); calls++; chars += act.chars; ms += act.ms;
     let verify = await call('screen', '--query', `Saved ${name}`); calls++; chars += verify.chars; ms += verify.ms;
@@ -287,9 +285,7 @@ const tasks = {
     let retries = 0, calls = 0, chars = 0, ms = 0;
     // Popups from earlier runs are closed with ctrl+w, so exactly one popup is open at a time.
     let snap = await call('screen', '--query', 'cobalt'); calls++; chars += snap.chars; ms += snap.ms;
-    let cobaltRef = /^  (@\d+\.\d+),"cobalt"/m.exec(snap.out)?.[1];
-    if (!cobaltRef) { retries++; snap = await call('screen', '--query', 'cobalt'); calls++; chars += snap.chars; ms += snap.ms; cobaltRef = /^  (@\d+\.\d+),"cobalt"/m.exec(snap.out)?.[1]; }
-    let click1 = await call('click', cobaltRef, '--wait', 'change'); calls++; chars += click1.chars; ms += click1.ms;
+    let click1 = await call('click', 'cobalt', '--wait', 'change'); calls++; chars += click1.chars; ms += click1.ms;
     let verify1 = await call('screen', '--query', 'cobalt answer'); calls++; chars += verify1.chars; ms += verify1.ms;
     let okCobalt = !verify1.out.includes('text: 0 items match');
     if (!okCobalt) { retries++; await new Promise(r => setTimeout(r, 400)); verify1 = await call('screen', '--query', 'cobalt answer'); calls++; chars += verify1.chars; ms += verify1.ms; okCobalt = !verify1.out.includes('text: 0 items match'); }
@@ -297,9 +293,7 @@ const tasks = {
     let close1 = await call('press', 'ctrl+w'); calls++; chars += close1.chars; ms += close1.ms;
     await new Promise(r => setTimeout(r, 300));
     snap = await call('screen', '--query', 'heron'); calls++; chars += snap.chars; ms += snap.ms;
-    let heronRef = /^  (@\d+\.\d+),"heron"/m.exec(snap.out)?.[1];
-    if (!heronRef) { retries++; snap = await call('screen', '--query', 'heron'); calls++; chars += snap.chars; ms += snap.ms; heronRef = /^  (@\d+\.\d+),"heron"/m.exec(snap.out)?.[1]; }
-    let click2 = await call('click', heronRef, '--wait', 'change'); calls++; chars += click2.chars; ms += click2.ms;
+    let click2 = await call('click', 'heron', '--wait', 'change'); calls++; chars += click2.chars; ms += click2.ms;
     let verify2 = await call('screen', '--query', 'heron answer'); calls++; chars += verify2.chars; ms += verify2.ms;
     let okHeron = !verify2.out.includes('text: 0 items match');
     if (!okHeron) { retries++; await new Promise(r => setTimeout(r, 400)); verify2 = await call('screen', '--query', 'heron answer'); calls++; chars += verify2.chars; ms += verify2.ms; okHeron = !verify2.out.includes('text: 0 items match'); }

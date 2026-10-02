@@ -122,15 +122,20 @@ try {
   assert.match(batched, /batch: 3\/3 steps/);
   assert.match(batched, /1: input: applied/);
   assert.match(await run('click', '100,100'), /input: applied/);
-  await run('stop');
   // The engine spawns agent-overlay children; remember them before the
   // engine is stopped, they can outlive it.
+  const overlays = new Set();
   for (const pid of [...owned.keys()]) for (const child of childrenOf(pid)) {
     try {
       const cmdline = readFileSync(`/proc/${child}/cmdline`,'utf8').replaceAll('\0',' ');
-      if (cmdline.includes(enginePath)) remember(child, enginePath);
+      if (cmdline.includes(enginePath) && cmdline.includes('agent-overlay')) {
+        remember(child, enginePath);
+        overlays.add(child);
+      }
     } catch { /* Already exited. */ }
   }
+  await run('stop');
+  for (const pid of overlays) await stopProcess(pid);
   for (const pid of [...owned.keys()]) if (pid !== xvfb.pid) await goneOwned(pid);
   assert.equal(sessionStrays().length, 0, `stray session members: ${JSON.stringify(sessionStrays())}`);
   await stopXvfb();
