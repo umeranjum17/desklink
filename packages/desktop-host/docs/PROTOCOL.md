@@ -96,16 +96,16 @@ dimensions, origin and scale), the current keyboard layout, console state, and
 Screen Recording/Accessibility grant states. A `display` source accepts an
 optional `display_id` from `capture.displays`; an absent ID selects the main
 display. Screen Recording consent is requested by `session.open` when capture
-is needed. Control may request Accessibility consent; if it remains unavailable,
-open fails with `input-unavailable`. TCC permissions attach to the responsible
-launching app (for example Terminal, iTerm, or the Node.js host), not to a
+is needed. Input may request Accessibility consent; if it remains unavailable,
+the session still opens and input actions are refused with `input-unavailable`.
+TCC permissions attach to the responsible launching app (for example Terminal, iTerm, or the Node.js host), not to a
 separate DesklinkHost.app bundle. Enable that app in **System Settings → Privacy
 & Security → Screen & System Audio Recording** and **Accessibility**, then
 reconnect. No TCC state is pre-seeded or bypassed.
 
-macOS clipboard read/write is plain text and requires the session's `clipboard`
-permission. `restore_token` is not supported by this native backend; a new
-session may require fresh consent. The macOS engine requires a VP9-enabled build
+macOS clipboard read/write is plain text and available to paired consumers.
+`restore_token` is not supported by this native backend; a new session may
+require fresh consent. The macOS engine requires a VP9-enabled build
 (`DESKLINK_VPX_STATIC_DIR`) for `serve`.
 
 ## Capabilities
@@ -186,12 +186,12 @@ desktop is visible here rather than silent. `capture.backends` lists what this
 build has, not what this machine can necessarily use.
 
 `input.unavailable_reason` and `input.grant` describe the portal/uinput path:
-without kernel input access a portal session may request `view`, but an open
-requesting `control` is refused. X display capture uses XTest instead and does
-not require that grant. The muxr host and WebSocket bridge report clipboard
-unavailable for an X display, regardless of the engine's Wayland clipboard
-probe. On Linux the engine never asks for privileges on its own; macOS may
-request Screen Recording or Accessibility consent at `session.open`.
+without kernel input access a portal session opens and captures, but input
+messages are refused with `input-unavailable`. X display capture uses XTest
+instead and does not require that grant. X11 clipboard uses CLIPBOARD on the
+session's named display; the WebSocket bridge reports it independently of the
+engine's ambient Wayland clipboard probe. On Linux the engine never asks for
+privileges on its own; macOS may request Screen Recording or Accessibility consent at `session.open`.
 
 `capabilities` is safe to call before any consent has been given and must not
 trigger a capture request.
@@ -203,7 +203,6 @@ trigger a capture request.
   "source": {"kind":"portal"},          // or {"kind":"x11","display":":99"}
                                            // macOS: {"kind":"display","display_id":123}
                                            // or {"kind":"encoded","codec":"h264","width":486,"height":1080}
-  "permissions": ["view","control","clipboard"],
   "max_width": 3840, "max_height": 2160, // encode box (default); never upscales
   "bitrate_kbps": 0,                    // 0 (default): sized to the encoded surface
   "max_fps": 60,
@@ -234,11 +233,11 @@ main display when omitted); `encoded` carries video the consumer encoded itself.
 The choice is normally the *consumer's* decision, because a client is not in a
 position to know which backend a machine can offer.
 
-`permissions` are the engine's authority for this session. `view` is required
-to open a session. The engine enforces the remaining scopes on every input and
-clipboard action and never infers them from a source, a peer or an SDP.
-`control` without a working input backend is refused at `session.open` with
-`error.code = "input-unavailable"` — the consumer must ask for `view` explicitly instead.
+There are no per-session permissions: whoever holds the channel is paired and
+gets all available view, input and clipboard access. The `permissions` field
+from 0.3 clients is accepted and ignored, including unknown scope names.
+Missing OS backends fail per action, not at open. The `permission` refusal code
+is reserved for 0.3 peers and is no longer emitted by this engine.
 
 `max_fps` defaults to 60 and is bounded to 1–60. It caps the encoded frame
 rate and X11 capture loop; portal capture offers it as the preferred PipeWire
@@ -246,7 +245,7 @@ frame rate, and macOS sets its ScreenCaptureKit stream minimum frame interval.
 A source may still supply fewer frames.
 
 `agent_indicator` is opt-in local feedback for an agent controller; desklink-axi
-sets it for control sessions, never for view-only or human phone control. On
+sets it for sessions it drives (except Windows); human phone control omits it. On
 Linux it adds an eased arrow inside a halo that brightens on clicks and keys,
 animating in and out, with light and dark keylines so it reads on any content.
 On Wayland it uses a click-through layer-shell surface with an edge glow, drawn
@@ -526,14 +525,14 @@ an explicit `cursor:"hidden"`. macOS and Windows refuse hidden capture with
 the engine cannot remove pixels the consumer already encoded. Unknown cursor
 options are `malformed`.
 
-`@desklink/host` exposes `openSession({permissions:['view'], cursor:'hidden'})`
+`@desklink/host` exposes `openSession({cursor:'hidden'})`
 and typed `session.cursor` events through `onEvent`/`drainEvents`. The client
 capture request also accepts `cursor`, and AXI accepts `start --cursor hidden`.
 
 ## Point on the host desktop
 
 A local consumer can guide the person without taking control of their pointer
-or keyboard. `session.point` requires `view`, not `control`, and is independent
+or keyboard. `session.point` requires an open session and is independent
 of `agent_indicator`. It draws one blue ring centered at `x,y`, with an optional
 label. A new point replaces the previous one and restarts its timer.
 
@@ -572,7 +571,7 @@ output, no origin is needed. Points map from the selected source to that output.
 An ambiguous or missing selected output returns `indicator-unavailable`.
 Compositors without layer-shell return `point_unsupported` with reason
 `layer_shell_unavailable` (including GNOME Mutter). Consumer-fed encoded sources return `operation`
-because they have no host desktop overlay target. Other refusals are `permission`, `session`,
+because they have no host desktop overlay target. Other refusals are `session`,
 `coordinates`, `malformed`, and `indicator-unavailable` (including unavailable
 X Shape support). Unknown fields are refused. No control-channel or remote
 bridge forwarding is added; the consumer chooses when to request a local cue.
@@ -580,7 +579,7 @@ bridge forwarding is added; the consumer chooses when to request a local cue.
 `@desklink/host` exposes `EngineClient.point(sessionId, {x, y, label?, timeoutMs?})`
 and `EngineClient.point(sessionId, {clear: true})`. `@desklink/axi` exposes
 `desklink-axi point 400,300 --label "Here" --timeout 3000` and
-`desklink-axi point --clear`, including for a session started without `--control`.
+`desklink-axi point --clear`.
 
 ## Input and clipboard: the session's control channel
 
@@ -623,12 +622,12 @@ The engine answers on the same channel, and sends two things unprompted:
 {"kind":"revoked","reason":"…","code":"closed"}  // closed, or a session.revoked code
 ```
 
-Refusal codes: `permission`, `session`, `input-replay`, `coordinates`,
-`text-too-large`, `text-unsupported`, `input-unavailable`, `operation`.
+Refusal codes: `session`, `input-replay`, `coordinates`, `text-too-large`,
+`text-unsupported`, `input-unavailable`, `clipboard-unsupported`, `operation`.
 
 `seq` is monotonic per session. A repeat or a lower value is refused with
 `input-replay` and **no side effect**, so a replayed message cannot move the
-pointer twice. Validation, permission and ordering checks all run before any
+pointer twice. Validation and ordering checks all run before any
 physical effect.
 
 The engine holds its own pressed-key/button state. `close`, `release_all`,
@@ -659,8 +658,7 @@ WebRTC, congestion and teardown logic that is already proven on this path.
 it is the only party that knows them (`1..7680` by `1..4320`). Nothing is scaled:
 `geometry.source` and `geometry.encoded` are both that size, the client aims at
 those pixels, and the consumer maps them to its device. `max_width`/
-`max_height`/`bitrate_kbps` are ignored for this source, and `permissions` works
-as it does anywhere else — with one difference: `control` needs no local input
+`max_height`/`bitrate_kbps` are ignored for this source. Input needs no local
 backend, because nothing is applied locally.
 
 `session.open` returns before any offer exists. The offer must name the profile
@@ -731,7 +729,7 @@ pixels, exactly as a client sends them.
 ```
 
 The event carries the control message as it arrived. The engine still validates
-permission, ordering and replay before forwarding, so the client keeps the same
+ordering and replay before forwarding, so the client keeps the same
 `ack`/`rejected` behaviour and a replayed gesture still cannot be delivered
 twice. `ack` means "accepted for this session", not "applied to a desktop" —
 `session.metrics.input_forwarded` counts what was handed on, and `input_applied`
@@ -750,7 +748,7 @@ because packetization is the only stage the engine itself runs.
 
 ## Latest frame over the local protocol
 
-`session.frame` requires `view` permission. It writes the latest pre-encode frame as
+`session.frame` writes the latest pre-encode frame as
 packed BGRX bytes to the caller's path, with optional `[x,y,w,h]` `region`.
 The directory must already exist and be private to the caller; pixels never
 travel through JSON. `seq` advances only when capture changes, `still_ms` is
@@ -787,9 +785,16 @@ instead; both reach the same clipboard:
 {"id":10,"result":{"written":true}}
 ```
 
-Refused with `error.code = "clipboard"` when the session lacks `clipboard`, or
-when the desktop's clipboard has no text. A read is bounded by
-`capabilities.clipboard.maxBytes`; when the desktop's text is longer, `truncated`
+Refused with `error.code = "clipboard"` when the desktop has no text or a
+clipboard operation fails. Encoded sources have no desktop clipboard; their
+control channel answers with an empty clipboard reply and an explanatory error.
+X11 owns CLIPBOARD on the session's selected display, serving TARGETS,
+UTF8_STRING and TEXT. Writes are limited to 256 KiB and the server's single
+request limit; the text lives until another client takes ownership, the engine
+exits, or the display dies. Reads wait at most 2.5 seconds for the owner.
+INCR transfers are refused explicitly as unsupported, not reported as success;
+STRING, PRIMARY and persistence after engine exit are not implemented.
+A read is bounded by `capabilities.clipboard.maxBytes`; when the desktop's text is longer, `truncated`
 is true and the text is cut on a character boundary, so the returned text is
 still valid.
 
@@ -865,8 +870,9 @@ anything to show.
 
 ## What the engine deliberately does not do
 
-- It does not decide *who* the user is. It trusts the consumer's local
-  permission decision and enforces the resulting scope; there is no second
+- It does not decide *who* the user is. Whoever holds stdio (or an authenticated
+  bridge socket) is paired; pairing, identity and revocation are the consumer's.
+  Revocation must end both live sessions and future access. There is no second
   account, token or pairing ceremony. For consumer integration, see the
   [BYOKit guidance](../../../README.md#why-desklink-exists).
 - It does not open ports, register a service, install udev rules, join groups or

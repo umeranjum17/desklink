@@ -43,9 +43,9 @@ Install the agent CLI with `npm install -g @desklink/axi`; see its [README](pack
 
 Reaching your own computer from somewhere else usually means handing it to someone else's service: an account, a relay, a pairing flow, and a second identity system beside the one your application already has. desklink turns that inside out. The engine runs as you, starts when asked and stops when told, and trusts the application that started it to decide who may see the desktop.
 
-What it does own is the hard middle: capture with the compositor's consent, a real-time encoder tuned for text that has to stay readable on a phone, WebRTC transport, and input and clipboard that reach only the session they were granted to.
+What it does own is the hard middle: capture with the compositor's consent, a real-time encoder tuned for text that has to stay readable on a phone, WebRTC transport, and input and clipboard that reach only the session a paired client opened.
 
-An application supplies pairing, identity and signaling transport through the BYOKit kits — [@byokit/link](https://www.npmjs.com/package/@byokit/link) for pairing, [@byokit/relay](https://www.npmjs.com/package/@byokit/relay) for the relay, [@byokit/reach](https://www.npmjs.com/package/@byokit/reach) for reachable addresses, and [@byokit/accounts](https://www.npmjs.com/package/@byokit/accounts) for accounts. desklink implements none of those pieces; the app adapts its authenticated channel to the client's [`Signaling` interface](packages/desktop-client/README.md#signaling). WebRTC media and input use a separate session, with app-supplied `iceServers` when needed; a signaling relay alone does not relay that traffic.
+An application supplies pairing, identity and signaling transport through the BYOKit kits — [@byokit/link](https://www.npmjs.com/package/@byokit/link) for pairing and revocation, [@byokit/relay](https://www.npmjs.com/package/@byokit/relay) for the relay, [@byokit/reach](https://www.npmjs.com/package/@byokit/reach) for reachable addresses. desklink implements none of those pieces; the app adapts its authenticated channel to the client's [`Signaling` interface](packages/desktop-client/README.md#signaling). WebRTC media and input use a separate session, with app-supplied `iceServers` when needed; a signaling relay alone does not relay that traffic.
 
 ## See it in action
 

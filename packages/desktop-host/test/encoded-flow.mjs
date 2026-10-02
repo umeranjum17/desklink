@@ -150,6 +150,7 @@ class Engine {
     }
 
     request(method, params) {
+        if (method === 'session.open') this.openPermissions = params?.permissions;
         const id = ++this.next;
         if (this.exited) return Promise.reject(new Error('the engine exited'));
         return new Promise((resolve, reject) => {
@@ -405,7 +406,7 @@ async function main() {
     assert.deepEqual(await engine.request('capabilities'), capabilities);
     if (process.platform === 'win32') {
         await assert.rejects(engine.request('session.open', {
-            permissions: ['view', 'control'], agent_indicator: true,
+            agent_indicator: true,
             source: { kind: 'encoded', codec: 'h264', ...SIZE },
         }), /indicator-unavailable/);
     }
@@ -568,7 +569,8 @@ async function main() {
             null,
             'the engine acknowledged the forwarded messages instead of refusing them',
         );
-        console.log(`session.input → pointer ${pressed.phase} at (${pressed.x}, ${pressed.y}), up at (${released.x}, ${released.y})`);
+        assert.deepEqual(engine.openPermissions, ['view'], 'the real click came from a legacy view-only open');
+        console.log(`legacy permissions=[view] session.input → pointer ${pressed.phase} at (${pressed.x}, ${pressed.y}), up at (${released.x}, ${released.y})`);
 
         feeding = false;
         await feeder;

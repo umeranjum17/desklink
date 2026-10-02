@@ -88,7 +88,6 @@ export async function serve(args: string[]): Promise<void> {
   if (existsSync(socketPath)) throw new Error('session already running');
   const source = args.includes('--source') ? args[args.indexOf('--source') + 1] : 'auto';
   const display = args.includes('--display') ? args[args.indexOf('--display') + 1] : undefined;
-  const control = args.includes('--control');
   const cursor = args.includes('--cursor') ? args[args.indexOf('--cursor') + 1] : 'embedded';
   if (cursor !== 'embedded' && cursor !== 'hidden') throw new Error('cursor: use embedded or hidden');
   const timeout = args.includes('--timeout') ? Number(args[args.indexOf('--timeout')+1]) : 120000;
@@ -133,13 +132,13 @@ export async function serve(args: string[]): Promise<void> {
     source: process.platform === 'darwin'
       ? { kind: 'display', ...(display === undefined ? {} : { display_id: Number(display) }) }
       : source === 'x11' || (source === 'auto' && display) ? { kind: 'x11', display } : { kind: 'portal' },
-    permissions: control ? ['view', 'control', 'clipboard'] : ['view'], loopbackTcp: true,
-    agentIndicator: control,
+    loopbackTcp: true,
+    agentIndicator: true, // serve rejects platforms other than Linux/macOS above.
     cursor,
     ...(tokenFile ? { restoreToken: takeToken(tokenFile) } : {}),
   }, timeout);
   checkToken();
-  peer = control ? new PeerConnection('desklink-axi', { iceServers: [], bindAddress: '127.0.0.1', enableIceTcp: true }) : undefined;
+  peer = new PeerConnection('desklink-axi', { iceServers: [], bindAddress: '127.0.0.1', enableIceTcp: true });
   let channel: DataChannel | undefined;
   let open = false;
   let nextSeq = 1;
@@ -217,7 +216,6 @@ export async function serve(args: string[]): Promise<void> {
     return [...lines.values()];
   };
   const act = async (message: Record<string, unknown>) => {
-    if (!control) throw new Error('input-unavailable: start --control');
     for (let i = 0; i < 100 && !open; i++) await new Promise(r => setTimeout(r, 50));
     if (!open || !channel) throw new Error('transport: control channel not connected');
     const seq = nextSeq++;
@@ -250,7 +248,7 @@ export async function serve(args: string[]): Promise<void> {
     let pendingDamage: string[] | undefined;
     let waitSeen = baseline;
     routeNote = undefined;
-    if (command === 'start') return `session: open source=${source} ${display ?? ''} size=${opened.geometry.encoded.width}x${opened.geometry.encoded.height} permissions=view${control ? ',control' : ''}`;
+    if (command === 'start') return `session: open source=${source} ${display ?? ''} size=${opened.geometry.encoded.width}x${opened.geometry.encoded.height}`;
     if (command === 'cursor') {
       const batch = cursorSamples.take(opened.sessionId);
       return formatCursorSamples(batch.samples, batch.dropped);
@@ -343,7 +341,6 @@ export async function serve(args: string[]): Promise<void> {
       return 'session: stopped';
     }
     if (command === 'clipboard') {
-      if (!control) throw new Error('input-unavailable: clipboard requires start --control');
       if (args[0] === 'read') { const result = await engine.readClipboard(opened.sessionId); return `clipboard: ${args.includes('--full') ? result.text : result.text.slice(0,1000)} (${result.text.length} chars)`; }
       if (args[0] === 'write') { await engine.writeClipboard(opened.sessionId, args[1] ?? ''); return 'clipboard: written'; }
     }
@@ -572,7 +569,7 @@ export async function serve(args: string[]): Promise<void> {
         text = merged.map((t, i) => ({ ...t, ref: `@${frame.seq}.${i + 1}` }));
       }
     }
-    if (command === 'home') return `session: open source=${source} ${display ?? ''} size=${frame.width}x${frame.height} permissions=view${control?',control':''}\nframe: ${frame.seq} settled=${frame.still_ms>=150} unseen=${frame.changed ? frame.damage.length : 0} region\nwindows: unavailable on this compositor\ntext[${Math.min(text.length,12)} of ${text.length}]{ref,text,x,y}:\n${text.slice(0,12).map(t=>`  ${t.ref},${JSON.stringify(t.text)},${t.x},${t.y}`).join('\n')}\nhelp[2]:\n  desklink-axi diff\n  desklink-axi screen --query "<words>"`;
+    if (command === 'home') return `session: open source=${source} ${display ?? ''} size=${frame.width}x${frame.height}\nframe: ${frame.seq} settled=${frame.still_ms>=150} unseen=${frame.changed ? frame.damage.length : 0} region\nwindows: unavailable on this compositor\ntext[${Math.min(text.length,12)} of ${text.length}]{ref,text,x,y}:\n${text.slice(0,12).map(t=>`  ${t.ref},${JSON.stringify(t.text)},${t.x},${t.y}`).join('\n')}\nhelp[2]:\n  desklink-axi diff\n  desklink-axi screen --query "<words>"`;
     if (command === 'screen') {
       const query = args.includes('--query') ? args[args.indexOf('--query')+1] : undefined;
       const items = query ? text.filter(t => t.text.toLowerCase().includes(query.toLowerCase())) : text;

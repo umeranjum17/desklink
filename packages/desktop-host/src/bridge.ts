@@ -26,10 +26,9 @@ export interface BridgeOptions {
     /** Address to listen on, e.g. `127.0.0.1:19400` or `0.0.0.0:19400`. */
     listen: string;
     /**
-     * Shared secret required on the socket path. Required, not optional: this
-     * channel grants control of a desktop, and `ws://` is plaintext, so an
-     * unauthenticated one on a reachable address is a remote-control port for
-     * anyone who finds it.
+     * Pairing credential: holding it grants all available view, input and
+     * clipboard access. Stop the bridge to revoke live and future access.
+     * Required, not optional; `ws://` is plaintext.
      */
     token: string;
     engineCommand: string;
@@ -169,7 +168,7 @@ export class Bridge {
                     const forwarded = this.defaultSource?.kind === 'x11'
                         && (method === 'hello' || method === 'capabilities')
                         && result !== null && result.clipboard !== null && typeof result.clipboard === 'object'
-                        ? { ...result, clipboard: { ...result.clipboard, read: false, write: false } }
+                        ? { ...result, clipboard: { ...result.clipboard, read: true, write: true } }
                         : result;
                     if (method === 'session.open' && socket.readyState !== socket.OPEN) {
                         this.releaseSessionIfDetached(true);
