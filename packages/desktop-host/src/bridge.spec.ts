@@ -129,13 +129,15 @@ describe('the bridge', () => {
         });
     }, 20_000);
 
-    it('reports clipboard only for a source that can serve it', async () => {
+    it('reports input and clipboard for the selected X11 source', async () => {
         const x11 = await startBridge('t', false, { kind: 'x11', display: ':99' });
         const x11Socket = await connect(x11.port, 'token=t');
         expect((await requestOn(x11Socket, 1, 'hello', { protocol: 3 })).clipboard)
-            .toMatchObject({ read: false, write: false });
+            .toMatchObject({ read: true, write: true });
         expect((await requestOn(x11Socket, 2, 'capabilities')).clipboard)
-            .toMatchObject({ read: false, write: false });
+            .toMatchObject({ read: true, write: true });
+        expect((await requestOn(x11Socket, 4, 'capabilities')).input)
+            .toMatchObject({ pointer: true, keyboard: true, wheel: true, unavailable_reason: null });
         expect(await requestOn(x11Socket, 3, 'session.open', { permissions: ['view', 'control'] }))
             .toMatchObject({ sessionId: 'engine-1' });
 

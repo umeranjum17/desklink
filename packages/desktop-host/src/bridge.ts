@@ -166,10 +166,15 @@ export class Bridge {
                 .request<Record<string, unknown>>(method, params)
                 .then((result) => {
                     this.rememberSession(method, result);
+                    // Capabilities describe the selected X server, whose input
+                    // and clipboard do not depend on the ambient Wayland seat.
                     const forwarded = this.defaultSource?.kind === 'x11'
                         && (method === 'hello' || method === 'capabilities')
-                        && result !== null && result.clipboard !== null && typeof result.clipboard === 'object'
-                        ? { ...result, clipboard: { ...result.clipboard, read: false, write: false } }
+                        ? { ...result,
+                            input: { ...(result.input as object), pointer: true, wheel: true, keyboard: true,
+                                grant: 'granted', unavailable_reason: null },
+                            clipboard: { ...(result.clipboard as object), read: true, write: true },
+                        }
                         : result;
                     if (method === 'session.open' && socket.readyState !== socket.OPEN) {
                         this.releaseSessionIfDetached(true);

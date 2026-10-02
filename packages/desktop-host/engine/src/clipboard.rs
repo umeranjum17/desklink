@@ -31,7 +31,7 @@ pub fn read() -> Result<(String, bool)> {
 
 /// The text within `limit` bytes, cut on a character boundary, and whether
 /// anything past the limit was dropped.
-fn bounded_text(raw: &[u8], limit: usize) -> Result<(String, bool)> {
+pub(crate) fn bounded_text(raw: &[u8], limit: usize) -> Result<(String, bool)> {
     let truncated = raw.len() > limit;
     let bytes = if truncated { &raw[..limit] } else { raw };
     match std::str::from_utf8(bytes) {

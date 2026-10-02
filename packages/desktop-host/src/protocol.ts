@@ -79,8 +79,8 @@ export interface OpenSessionRequest {
     /** Cursor-free frames with independent source-coordinate position events. */
     cursor?: 'embedded' | 'hidden';
     source?: SourceRequest;
-    /** `view` alone is capture-only; `control` needs a working input backend. */
-    permissions: Array<'view' | 'control' | 'clipboard'>;
+    /** @deprecated Pairing grants all available operations; ignored by 0.4 hosts. */
+    permissions?: Array<'view' | 'control' | 'clipboard'>;
     maxWidth?: number;
     maxHeight?: number;
     bitrateKbps?: number;

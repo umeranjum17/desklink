@@ -16,7 +16,7 @@ use crate::peer::{
 };
 use crate::portal::{self, SelectedSource};
 use crate::protocol::{
-    ControlMessage, ControlReply, EncodedCodec, Permission, PointerPhase, SourceRequest,
+    ControlMessage, ControlReply, EncodedCodec, PointerPhase, SourceRequest,
 };
 use crate::x11::X11Desktop;
 use anyhow::{Context, Result};
@@ -593,7 +593,6 @@ pub struct OpenRequest {
     pub cursor: crate::protocol::CursorMode,
     /** Which desktop to capture; absent means the portal. */
     pub source: Option<SourceRequest>,
-    pub permissions: Vec<Permission>,
     pub max_width: usize,
     pub max_height: usize,
     pub bitrate_kbps: u32,
@@ -684,7 +683,6 @@ enum PointDesktop {
 struct Inner {
     id: String,
     generation: u64,
-    permissions: Vec<Permission>,
     source: SelectedSource,
     geometry: serde_json::Value,
     metrics: Arc<Mutex<Metrics>>,
@@ -702,6 +700,8 @@ struct Inner {
     point_overlay: Mutex<Option<crate::indicator::Indicator>>,
     #[cfg(target_os = "linux")]
     point_desktop: PointDesktop,
+    #[cfg(target_os = "linux")]
+    x11_clipboard: Mutex<Option<Arc<crate::clipboard_x11::Clipboard>>>,
     capture: Mutex<Option<FrameSource>>,
     /// Absent for an encoded source: there is no local keyboard to translate a
     /// character through, because the client's keys are forwarded instead.
@@ -765,8 +765,7 @@ pub fn capabilities() -> serde_json::Value {
     } else {
         "none"
     };
-    // Clipboard transfer needs Wayland; writes also need a selection server
-    // that can outlive this engine. Do not offer it when that tool is absent.
+    // X11 selections are served on the selected display; Wayland writes need wl-copy.
     let clipboard = wayland_clipboard_available();
     let x11 = crate::x11::X11Desktop::connect(None)
         .map(|desktop| serde_json::json!([desktop.screen_size().0, desktop.screen_size().1]))
@@ -811,7 +810,7 @@ pub fn capabilities() -> serde_json::Value {
             "unavailable_reason": unavailable,
             "grant": grant_state,
         },
-        "clipboard": { "read": clipboard, "write": clipboard && clipboard::writer_available(), "mime": ["text/plain;charset=utf-8"],
+        "clipboard": { "read": clipboard || x11.is_array(), "write": x11.is_array() || (clipboard && clipboard::writer_available()), "mime": ["text/plain;charset=utf-8"],
                        "maxBytes": clipboard::MAX_CLIPBOARD_BYTES },
         // Video this engine does not capture or encode but can carry, so a
         // consumer can tell an old engine from one that takes `session.feed`
@@ -909,12 +908,6 @@ impl Session {
         request: OpenRequest,
         events: tokio_mpsc::UnboundedSender<Notice>,
     ) -> std::result::Result<Self, SessionError> {
-        if !request.permissions.contains(&Permission::View) {
-            return Err(SessionError::new(
-                "permission",
-                "session.open requires the view permission",
-            ));
-        }
         #[cfg(target_os = "windows")]
         if request.agent_indicator {
             return Err(SessionError::new(
@@ -936,7 +929,6 @@ impl Session {
             }
         }
         let id = opaque_id();
-        let wants_control = request.permissions.contains(&Permission::Control);
         let wants_x11 = matches!(request.source, Some(SourceRequest::X11 { .. }));
         let max_fps = request.max_fps.clamp(1, 60);
         // A source the consumer feeds needs no capture backend, no encoder and
@@ -953,20 +945,6 @@ impl Session {
         // Which desktop decides which input path is even available: an X display
         // takes XTest, which cannot reach any other session, while a portal
         // desktop needs kernel input access.
-        if wants_control && !wants_x11 {
-            // Refuse up front rather than presenting a control surface that
-            // silently does nothing.
-            if crate::input::probe().is_err() {
-                #[cfg(target_os = "macos")]
-                let _ = crate::input::request_access();
-                if let Err(unavailable) = crate::input::probe() {
-                    return Err(SessionError::new(
-                        "input-unavailable",
-                        format!("{}; {}", unavailable.reason, unavailable.remedy),
-                    ));
-                }
-            }
-        }
 
         let metrics = Arc::new(Mutex::new(Metrics::default()));
         let mut indicator = None;
@@ -1139,7 +1117,7 @@ impl Session {
                 let (width, height) =
                     fit(source_w, source_h, request.max_width, request.max_height);
                 #[cfg(target_os = "linux")]
-                if request.agent_indicator && wants_control {
+                if request.agent_indicator {
                     indicator = Some(
                         crate::indicator::Indicator::start_wayland(source_w, source_h).map_err(
                             |error| {
@@ -1149,7 +1127,7 @@ impl Session {
                     );
                 }
                 #[cfg(target_os = "macos")]
-                if request.agent_indicator && wants_control {
+                if request.agent_indicator {
                     indicator = Some(
                         crate::indicator::Indicator::start(source.node_id, source_w, source_h)
                             .map_err(|error| {
@@ -1231,7 +1209,7 @@ impl Session {
         let source_w = source.width.max(1) as usize;
         let source_h = source.height.max(1) as usize;
         #[cfg(target_os = "linux")]
-        if request.agent_indicator && wants_control && wants_x11 {
+        if request.agent_indicator && wants_x11 {
             let display = match &request.source {
                 Some(SourceRequest::X11 {
                     display: Some(display),
@@ -1262,39 +1240,39 @@ impl Session {
 
         // Everything that can still refuse the session comes before the peer:
         // a peer created and then abandoned keeps its socket and tasks alive.
-        let input = if !wants_control {
-            None
-        } else {
-            Some(match &x11 {
-                Some(desktop) => InputTarget {
-                    applier: Applier::X11(desktop.clone()),
-                    held: HeldState::default(),
-                    explicit_modifiers: Vec::new(),
-                    chord_modifiers: Vec::new(),
-                    chord_keys: Vec::new(),
-                    wheel_rest: (0.0, 0.0),
-                },
-                None => InputTarget {
-                    applier: Applier::Uinput({
-                        #[cfg(target_os = "linux")]
-                        let devices = InputDevices::create(source_w as i32, source_h as i32);
-                        #[cfg(any(target_os = "macos", target_os = "windows"))]
-                        let devices = InputDevices::create_for_display(
-                            source_w as i32,
-                            source_h as i32,
-                            source.node_id,
-                        );
-                        devices.map_err(|error| {
+        let input = match &x11 {
+            Some(desktop) => Some(InputTarget {
+                applier: Applier::X11(desktop.clone()),
+                held: HeldState::default(),
+                explicit_modifiers: Vec::new(),
+                chord_modifiers: Vec::new(),
+                chord_keys: Vec::new(),
+                wheel_rest: (0.0, 0.0),
+            }),
+            None => {
+                #[cfg(target_os = "macos")]
+                let _ = crate::input::request_access();
+                if crate::input::probe().is_ok() {
+                    #[cfg(target_os = "linux")]
+                    let devices = InputDevices::create(source_w as i32, source_h as i32);
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    let devices = InputDevices::create_for_display(
+                        source_w as i32, source_h as i32, source.node_id,
+                    );
+                    Some(InputTarget {
+                        applier: Applier::Uinput(devices.map_err(|error| {
                             SessionError::new("input-unavailable", format!("{error:#}"))
-                        })?
-                    }),
-                    held: HeldState::default(),
-                    explicit_modifiers: Vec::new(),
-                    chord_modifiers: Vec::new(),
-                    chord_keys: Vec::new(),
-                    wheel_rest: (0.0, 0.0),
-                },
-            })
+                        })?),
+                        held: HeldState::default(),
+                        explicit_modifiers: Vec::new(),
+                        chord_modifiers: Vec::new(),
+                        chord_keys: Vec::new(),
+                        wheel_rest: (0.0, 0.0),
+                    })
+                } else {
+                    None
+                }
+            }
         };
 
         let layout = Layout::from_environment().map_err(|error| {
@@ -1338,7 +1316,6 @@ impl Session {
         let inner = Arc::new(Inner {
             id,
             generation,
-            permissions: request.permissions,
             source,
             geometry,
             metrics,
@@ -1350,6 +1327,8 @@ impl Session {
             input: Mutex::new(input),
             indicator: Mutex::new(indicator),
             point_overlay: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            x11_clipboard: Mutex::new(None),
             #[cfg(target_os = "linux")]
             point_desktop: if wants_x11 {
                 match &request.source {
@@ -1432,7 +1411,6 @@ impl Session {
         let inner = Arc::new(Inner {
             id,
             generation,
-            permissions: request.permissions,
             source: SelectedSource {
                 node_id: 0,
                 width: width as i32,
@@ -1452,6 +1430,8 @@ impl Session {
             input: Mutex::new(None),
             indicator: Mutex::new(None),
             point_overlay: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            x11_clipboard: Mutex::new(None),
             #[cfg(target_os = "linux")]
             point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
             capture: Mutex::new(None),
@@ -1554,12 +1534,7 @@ impl Session {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Err(SessionError::new("session", "the session is closed"));
         }
-        if !self.inner.permissions.contains(&Permission::View) {
-            return Err(SessionError::new(
-                "permission",
-                "point requires view permission",
-            ));
-        }
+
         if lock(&self.inner.encoded).is_some() {
             return Err(SessionError::new(
                 "operation",
@@ -1732,11 +1707,8 @@ impl Session {
         path: &str,
         region: Option<[usize; 4]>,
     ) -> std::result::Result<serde_json::Value, SessionError> {
-        if !self.inner.permissions.contains(&Permission::View) {
-            return Err(SessionError::new(
-                "permission",
-                "view permission is required",
-            ));
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return Err(SessionError::new("session", "the session is closed"));
         }
         if lock(&self.inner.encoded).is_some() {
             return Err(SessionError::new(
@@ -1843,15 +1815,17 @@ impl Session {
         if let Some((_, reason)) = self.inner.clipboard_refusal() {
             return Err(reason.to_owned());
         }
-        clipboard_task(move || clipboard::read_or_explain()).await
+        let inner = self.inner.clone();
+        clipboard_task(move || inner.read_clipboard_text()).await
     }
 
     pub async fn write_clipboard(&self, text: String) -> std::result::Result<(), String> {
         if let Some((_, reason)) = self.inner.clipboard_refusal() {
             return Err(reason.to_owned());
         }
+        let inner = self.inner.clone();
         clipboard_task(move || {
-            clipboard::write(&text)
+            inner.write_clipboard_text(&text)
                 .map(|()| String::new())
                 .map_err(|error| format!("{error:#}"))
         })
@@ -1894,6 +1868,10 @@ impl Inner {
         }
         self.control_open.store(false, Ordering::SeqCst);
         self.pipeline.store(false, Ordering::SeqCst);
+        #[cfg(target_os = "linux")]
+        if let Some(clipboard) = lock(&self.x11_clipboard).take() {
+            clipboard.stop();
+        }
         drop(lock(&self.encoded).take());
         // The encoder goes now, not with the last handle: a hardware session
         // still open when the process exits can hang the driver's exit
@@ -1945,25 +1923,44 @@ impl Inner {
         }
     }
 
-    fn has(&self, permission: Permission) -> bool {
-        self.permissions.contains(&permission)
-    }
-
     fn clipboard_refusal(&self) -> Option<(&'static str, &'static str)> {
-        if matches!(
-            self.source.source_type.as_deref(),
-            Some("x11-root") | Some("encoded")
-        ) || !wayland_clipboard_available()
-        {
-            return Some((
-                "clipboard-unsupported",
-                "clipboard is unavailable for this desktop source",
-            ));
+        if self.closed.load(Ordering::SeqCst) {
+            return Some(("session", "the session has ended"));
         }
-        if !self.has(Permission::Clipboard) {
-            return Some(("permission", "this session has no clipboard permission"));
+        #[cfg(target_os = "linux")]
+        if matches!(self.point_desktop, PointDesktop::X11(_)) {
+            return None;
+        }
+        if self.source.source_type.as_deref() == Some("encoded") || !wayland_clipboard_available() {
+            return Some(("clipboard-unsupported", "clipboard is unavailable for this desktop source"));
         }
         None
+    }
+
+    fn read_clipboard_text(&self) -> std::result::Result<(String, bool), String> {
+        if let Some((_, reason)) = self.clipboard_refusal() { return Err(reason.to_owned()); }
+        #[cfg(target_os = "linux")]
+        if let PointDesktop::X11(display) = &self.point_desktop {
+            let mut backend = lock(&self.x11_clipboard);
+            if self.closed.load(Ordering::SeqCst) { return Err(String::from("the session has ended")); }
+            if backend.is_none() {
+                *backend = Some(crate::clipboard_x11::Clipboard::connect(Some(display)).map_err(|error| format!("{error:#}"))?);
+            }
+            return backend.as_ref().unwrap().read(Some(display)).map_err(|error| format!("{error:#}"));
+        }
+        clipboard::read_or_explain()
+    }
+
+    fn write_clipboard_text(&self, text: &str) -> Result<()> {
+        if let Some((_, reason)) = self.clipboard_refusal() { anyhow::bail!(reason); }
+        #[cfg(target_os = "linux")]
+        if let PointDesktop::X11(display) = &self.point_desktop {
+            let mut backend = lock(&self.x11_clipboard);
+            anyhow::ensure!(!self.closed.load(Ordering::SeqCst), "the session has ended");
+            if backend.is_none() { *backend = Some(crate::clipboard_x11::Clipboard::connect(Some(display))?); }
+            return backend.as_ref().unwrap().write(text);
+        }
+        clipboard::write(text)
     }
 
     fn reject(&self, seq: u64, code: &'static str, message: &str) {
@@ -1990,7 +1987,7 @@ impl Inner {
         Ok(())
     }
 
-    /// Admit one client action. Validation, permission and ordering checks all
+    /// Admit one client action. Validation, lifecycle and ordering checks all
     /// happen before any physical effect, so a refused action leaves the desktop
     /// exactly as it was.
     fn apply(self: &Arc<Self>, message: ControlMessage) {
@@ -2003,10 +2000,7 @@ impl Inner {
             self.reject(seq, "session", "the control channel is not open");
             return;
         }
-        if !self.has(Permission::Control) {
-            self.reject(seq, "permission", "this session is view-only");
-            return;
-        }
+
         if seq != 0 {
             let mut last = match self.last_seq.lock() {
                 Ok(last) => last,
@@ -2318,7 +2312,10 @@ impl Inner {
         }
         let inner = Arc::clone(self);
         tokio::spawn(async move {
-            let (text, truncated, error) = match clipboard_task(clipboard::read_or_explain).await {
+            let (text, truncated, error) = match {
+                let backend = inner.clone();
+                clipboard_task(move || backend.read_clipboard_text()).await
+            } {
                 Ok((text, truncated)) => (text, truncated, None),
                 Err(reason) => (String::new(), false, Some(reason)),
             };
@@ -2338,8 +2335,9 @@ impl Inner {
         }
         let inner = Arc::clone(self);
         tokio::spawn(async move {
+            let backend = inner.clone();
             let error = clipboard_task(move || {
-                clipboard::write(&text)
+                backend.write_clipboard_text(&text)
                     .map(|()| String::new())
                     .map_err(|error| format!("{error:#}"))
             })
@@ -3226,7 +3224,6 @@ mod tests {
         let inner = Arc::new(Inner {
             id: String::from("encoded-session"),
             generation: 1,
-            permissions: Vec::new(),
             source: SelectedSource {
                 node_id: 0,
                 width: 640,
@@ -3250,6 +3247,8 @@ mod tests {
             input: Mutex::new(None),
             indicator: Mutex::new(None),
             point_overlay: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            x11_clipboard: Mutex::new(None),
             #[cfg(target_os = "linux")]
             point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
             capture: Mutex::new(None),
@@ -3396,10 +3395,7 @@ mod tests {
     #[tokio::test]
     async fn a_wayland_portal_session_reports_typed_point_unsupported() {
         let (events, _) = tokio_mpsc::unbounded_channel();
-        let (mut inner, _) = test_inner(events).await;
-        Arc::get_mut(&mut inner)
-            .expect("test session has one owner")
-            .permissions = vec![Permission::View];
+        let (inner, _) = test_inner(events).await;
         let session = Session { inner };
 
         let error = session
@@ -3445,7 +3441,6 @@ mod tests {
         let (events, _) = tokio_mpsc::unbounded_channel();
         let (mut inner, _) = test_inner(events).await;
         let state = Arc::get_mut(&mut inner).unwrap();
-        state.permissions = vec![Permission::View];
         state.point_desktop = PointDesktop::Wayland;
         state.source.width = 1280;
         state.source.height = 720;
@@ -3538,7 +3533,6 @@ mod tests {
         let inner = Arc::new(Inner {
             id: String::from("test-session"),
             generation: 1,
-            permissions: vec![Permission::Control],
             source: SelectedSource {
                 node_id: 0,
                 width: 640,
@@ -3572,6 +3566,8 @@ mod tests {
             capture: Mutex::new(None),
             indicator: Mutex::new(None),
             point_overlay: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            x11_clipboard: Mutex::new(None),
             #[cfg(target_os = "linux")]
             point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
             layout: Mutex::new(Some(Layout::from_environment().expect("a keymap"))),
@@ -3845,38 +3841,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn x11_capture_refuses_both_clipboard_directions() {
-        let (events, _received) = tokio_mpsc::unbounded_channel();
-        let (mut inner, _recorded) = test_inner(events).await;
-        let owned = Arc::get_mut(&mut inner).unwrap();
-        owned.source.source_type = Some(String::from("x11-root"));
-        owned.permissions.push(Permission::Clipboard);
-        let session = Session {
-            inner: inner.clone(),
-        };
-        assert!(session
-            .read_clipboard()
-            .await
-            .unwrap_err()
-            .contains("unavailable"));
-        assert!(session
-            .write_clipboard(String::from("secret"))
-            .await
-            .unwrap_err()
-            .contains("unavailable"));
-        inner.clipboard_read(String::from("read"));
-        inner.clipboard_write(String::from("write"), String::from("secret"));
-        assert_eq!(inner.metrics.lock().unwrap().input_rejected, 2);
-    }
-
-    #[tokio::test]
     async fn a_stopped_capture_never_serves_the_last_frame() {
         let (events, _) = tokio_mpsc::unbounded_channel();
-        let (mut inner, _) = test_inner(events).await;
-        Arc::get_mut(&mut inner)
-            .unwrap()
-            .permissions
-            .push(Permission::View);
+        let (inner, _) = test_inner(events).await;
         let session = Session { inner };
         *lock(&session.inner.latest) =
             Some((1, Instant::now(), 2, 2, vec![0; 16], vec![1], vec![]));
@@ -3956,7 +3923,6 @@ mod tests {
                 width: 486,
                 height: 1080,
             }),
-            permissions: vec![Permission::View, Permission::Control],
             max_width: 3840,
             max_height: 2160,
             bitrate_kbps: 0,
@@ -4131,32 +4097,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opening_without_view_permission_is_refused_before_capture() {
-        let (events, _received) = tokio_mpsc::unbounded_channel();
-        let result = Session::open(
-            OpenRequest {
-                cursor: crate::protocol::CursorMode::Embedded,
-                source: None,
-                permissions: vec![Permission::Control],
-                max_width: 640,
-                max_height: 480,
-                bitrate_kbps: 0,
-                max_fps: 30,
-                ice_servers: Vec::new(),
-                restore_token: None,
-                ttl: None,
-                loopback_tcp: false,
-                agent_indicator: false,
-                local_frames: true,
-            },
-            events,
-        )
-        .await;
-        let error = match result {
-            Ok(_) => panic!("a viewless session must not open"),
-            Err(error) => error,
-        };
-        assert_eq!(error.code, "permission");
+    async fn opening_without_permissions_grants_encoded_input() {
+        let (events, mut received) = tokio_mpsc::unbounded_channel();
+        let session = Session::open(encoded_open(), events).await.unwrap();
+        session.inner.control_open.store(true, Ordering::Relaxed);
+        session.inner.apply(ControlMessage::ReleaseAll { seq: 1 });
+        loop {
+            if matches!(next_notice(&mut received).await.event, SessionEvent::Input { .. }) { break; }
+        }
+        assert_eq!(session.metrics().input_forwarded, 1);
+        session.close("pairing revoked").await;
+        session.inner.apply(ControlMessage::ReleaseAll { seq: 2 });
+        assert_eq!(session.metrics().input_forwarded, 1);
     }
 
     #[tokio::test]

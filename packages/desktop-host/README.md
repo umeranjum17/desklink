@@ -235,8 +235,7 @@ npx -p @desklink/host desklink-host setup-input   # anywhere else, e.g. under an
 ```
 
 That prints the exact, narrowly scoped rule — and changes nothing. Without
-`uinput` access a portal session can still be opened with `view` permission;
-asking for `control` is refused rather than presenting inert controls. An X
+`uinput` access a portal session still streams, with input unavailable. An X
 session instead uses XTest and does not need `/dev/uinput`.
 
 ## Licence and provenance
@@ -263,7 +262,7 @@ import { EngineClient, resolveEngine } from '@desklink/host';
 
 const engine = resolveEngine();                       // prebuilt, or a source build
 const client = await EngineClient.start(engine.command, engine.args);
-const session = await client.openSession({ permissions: ['view', 'control', 'clipboard'] });
+const session = await client.openSession({});
 
 // Everything the engine wants to tell the client arrives here, in order.
 client.drainEvents().forEach((event) => myChannel.send(event));

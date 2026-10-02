@@ -16,6 +16,8 @@ mod capture;
 mod capture;
 #[cfg(target_os = "linux")]
 mod clipboard;
+#[cfg(target_os = "linux")]
+mod clipboard_x11;
 #[cfg(target_os = "macos")]
 #[path = "clipboard_mac.rs"]
 mod clipboard;
@@ -645,7 +647,6 @@ async fn dispatch(
             let open = session::OpenRequest {
                 source: params.source,
                 cursor: params.cursor,
-                permissions: params.permissions,
                 max_width: params.max_width,
                 max_height: params.max_height,
                 bitrate_kbps: params.bitrate_kbps,

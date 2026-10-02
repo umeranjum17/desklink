@@ -53,14 +53,6 @@ pub struct HelloParams {
     pub protocol: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Permission {
-    View,
-    Control,
-    Clipboard,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct IceServerParam {
     #[serde(default)]
@@ -126,8 +118,6 @@ pub struct OpenParams {
     /// Absent means "the portal, with the user's consent".
     #[serde(default)]
     pub source: Option<SourceRequest>,
-    #[serde(default)]
-    pub permissions: Vec<Permission>,
     #[serde(default = "default_max_width")]
     pub max_width: usize,
     #[serde(default = "default_max_height")]
