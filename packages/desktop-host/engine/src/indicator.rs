@@ -4,6 +4,89 @@ use anyhow::{Context, Result};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 
+/// One drawn state of the X11 agent cue, announced by the helper before it
+/// reaches the screen: the window's origin and size plus the inputs of
+/// `desklink_indicator_covered`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Cue {
+    pub x: i64,
+    pub y: i64,
+    pub size: i64,
+    pub unit: f64,
+    pub opacity: f64,
+    pub click: f64,
+    pub typed: f64,
+    pub threshold: u32,
+    /// Logical radius drawn so far while the shaped cue appears or leaves.
+    pub reveal: f64,
+}
+
+impl Cue {
+    fn parse(line: &str) -> Option<Self> {
+        let mut parts = line.strip_prefix("P ")?.split(' ');
+        let mut next = || parts.next();
+        Some(Self {
+            x: next()?.parse().ok()?,
+            y: next()?.parse().ok()?,
+            size: next()?
+                .parse()
+                .ok()
+                .filter(|size| (1..=1024).contains(size))?,
+            unit: next()?
+                .parse()
+                .ok()
+                .filter(|unit: &f64| unit.is_finite() && *unit > 0.0)?,
+            opacity: next()?.parse().ok()?,
+            click: next()?.parse().ok()?,
+            typed: next()?.parse().ok()?,
+            threshold: next()?.parse().ok()?,
+            reveal: next()?.parse().ok()?,
+        })
+    }
+}
+
+/// The X11 agent cue's announcements, read by the capture loop itself. The
+/// helper writes each state before drawing it, so everything a grab can
+/// contain is already in the pipe when the grab returns.
+#[derive(Default)]
+pub struct CueFeed {
+    reader: Option<BufReader<std::process::ChildStdout>>,
+    line: Vec<u8>,
+    recent: Vec<Cue>,
+}
+
+impl CueFeed {
+    /// The last two states (the newer may not be drawn yet) plus every state
+    /// announced since the previous call.
+    pub fn drain(&mut self) -> Vec<Cue> {
+        let mut states = self.recent.clone();
+        while let Some(reader) = self.reader.as_mut() {
+            match reader.read_until(b'\n', &mut self.line) {
+                Ok(_) if self.line.ends_with(b"\n") => {
+                    if let Some(cue) = Cue::parse(String::from_utf8_lossy(&self.line).trim()) {
+                        states.push(cue);
+                        self.recent.push(cue);
+                        if self.recent.len() > 2 {
+                            self.recent.remove(0);
+                        }
+                    }
+                    self.line.clear();
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                // The helper exited, and it closes its window before that.
+                _ => {
+                    self.reader = None;
+                    self.recent.clear();
+                }
+            }
+        }
+        states
+    }
+}
+
+pub type Cues = std::sync::Arc<std::sync::Mutex<CueFeed>>;
+
 pub struct Indicator {
     child: Option<Child>,
     input: Option<ChildStdin>,
@@ -11,6 +94,7 @@ pub struct Indicator {
     scale_y: f64,
     #[cfg(target_os = "linux")]
     position: std::sync::Arc<std::sync::Mutex<Option<(i64, i64)>>>,
+    cues: Cues,
 }
 
 #[cfg(target_os = "linux")]
@@ -161,24 +245,42 @@ impl Indicator {
         let stdout = child.stdout.take().unwrap();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let reader = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
             let mut ready = String::new();
-            let result = BufReader::new(stdout).read_line(&mut ready);
-            let _ = ready_tx.send(if result.is_ok() {
-                ready.trim().to_owned()
-            } else {
-                String::new()
-            });
+            let _ = reader.read_line(&mut ready);
+            let _ = ready_tx.send((ready.trim().to_owned(), reader));
         });
-        let ready = ready_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap_or_default();
+        let (ready, reader_after) = match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok((ready, reader)) => (ready, Some(reader)),
+            Err(_) => (String::new(), None),
+        };
         if ready != "READY" {
             let _ = child.kill();
             let _ = child.wait();
             let _ = reader.join();
             anyhow::bail!("agent indicator did not open its overlay within 5s: {ready}");
         }
-        let _ = reader.join();
+        drop(reader);
+        // Only the X11 agent cue writes after READY, and only its capture loop
+        // reads; the helper blocks on a full pipe rather than draw unannounced.
+        let cues = Cues::default();
+        #[cfg(not(unix))]
+        drop(reader_after);
+        #[cfg(unix)]
+        if let Some(reader) = reader_after {
+            use std::os::fd::AsRawFd;
+            let fd = reader.get_ref().as_raw_fd();
+            unsafe {
+                libc::fcntl(
+                    fd,
+                    libc::F_SETFL,
+                    libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK,
+                )
+            };
+            if let Ok(mut feed) = cues.lock() {
+                feed.reader = Some(reader);
+            }
+        }
         Ok(Self {
             input: child.stdin.take(),
             child: Some(child),
@@ -186,7 +288,12 @@ impl Indicator {
             scale_y,
             #[cfg(target_os = "linux")]
             position: Default::default(),
+            cues,
         })
+    }
+
+    pub fn cues(&self) -> Cues {
+        self.cues.clone()
     }
 
     #[cfg(target_os = "macos")]
@@ -215,8 +322,12 @@ impl Drop for Indicator {
         // Closing stdin fades the edge and exits; do not wait for the animation.
         self.input.take();
         if let Some(mut child) = self.child.take() {
+            // Keep reading the cue's pipe open until it exits, so it can
+            // still animate out; it leaves at once only when the engine does.
+            let cues = self.cues.clone();
             std::thread::spawn(move || {
                 let _ = child.wait();
+                drop(cues);
             });
         }
     }
@@ -224,6 +335,60 @@ impl Drop for Indicator {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    #[test]
+    fn cue_feed_keeps_recent_states_until_the_helper_exits() {
+        use std::os::fd::AsRawFd;
+        let mut child = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "for x in 1 2 3; do echo \"P $x 0 110 1 1 -1 -1 128 99\"; done; read _",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let reader = super::BufReader::new(child.stdout.take().unwrap());
+        let fd = reader.get_ref().as_raw_fd();
+        unsafe {
+            libc::fcntl(
+                fd,
+                libc::F_SETFL,
+                libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK,
+            )
+        };
+        let mut feed = super::CueFeed {
+            reader: Some(reader),
+            ..Default::default()
+        };
+        let mut drained = vec![];
+        for _ in 0..200 {
+            drained.extend(feed.drain().into_iter().map(|cue| cue.x));
+            if drained.len() >= 3 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            drained,
+            [1, 2, 3],
+            "a drain that finds nothing does not block"
+        );
+        let xs =
+            |feed: &mut super::CueFeed| feed.drain().iter().map(|cue| cue.x).collect::<Vec<_>>();
+        assert_eq!(
+            xs(&mut feed),
+            [2, 3],
+            "either of the last two may be on screen"
+        );
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        assert_eq!(xs(&mut feed), [2, 3]);
+        assert!(
+            xs(&mut feed).is_empty(),
+            "a closed helper has no window left"
+        );
+    }
+
     unsafe extern "C" {
         fn desklink_wayland_geometry(
             source_w: i32,
