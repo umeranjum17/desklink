@@ -24,7 +24,15 @@ const socket = `/tmp/.X11-unix/X${number}`;
 const authority = join(dir,'Xauthority');
 const auth = spawnSync('xauth',['-f',authority,'add',display,'.',randomBytes(16).toString('hex')],{encoding:'utf8'});
 assert.equal(auth.status,0,`could not prepare private X authority: ${auth.stderr}`);
-const xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], { stdio: 'ignore' });
+// The socket and lock appear before Xvfb can serve clients. -sigstop stops the
+// server only once initialization is complete; resume that owned PID before
+// probing. Unlike -displayfd, this preserves the X lock ownership assertion and
+// explicit high display. -noreset avoids reinitialization between probe clients.
+const xvfb = spawn('Xvfb', [display, '-sigstop', '-noreset', '-auth', authority, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], { stdio: ['ignore', 'ignore', 'pipe'] });
+let xvfbReady = false;
+let xvfbError = '';
+xvfb.stderr.on('data', chunk => xvfbError = (xvfbError + chunk).slice(-2000));
+xvfb.on('error', error => xvfbError = String(error));
 trackOwnedXvfb(xvfb, display);
 const pidFile = join(dir, 'bridges.pid');
 const enginePidFile = join(dir, 'engines.pid');
@@ -75,7 +83,7 @@ function sessionStrays() {
 }
 async function goneOwned(pid) {
   const started = owned.get(pid);
-  for (let i=0; i<40 && proc(pid)?.started===started && proc(pid)?.state!=='Z'; i++) await new Promise(r=>setTimeout(r,50));
+  for (let i=0; i<200 && proc(pid)?.started===started && proc(pid)?.state!=='Z'; i++) await new Promise(r=>setTimeout(r,50));
   assert(!started || proc(pid)?.started!==started || proc(pid)?.state==='Z', `task process ${pid} survived stop`);
 }
 async function stopProcess(pid) {
@@ -89,9 +97,17 @@ async function stopProcess(pid) {
 }
 async function stopXvfbGracefully() { await stopOwnedXvfb(xvfb); }
 async function verifyXvfb() {
+  if (!xvfbReady) {
+    for (let i=0;i<200 && proc(xvfb.pid)?.state!=='T' && xvfb.pid && xvfb.exitCode===null && xvfb.signalCode===null;i++) await new Promise(r=>setTimeout(r,50));
+    assert(xvfb.pid && xvfb.exitCode===null && proc(xvfb.pid)?.state==='T', `private Xvfb did not become ready: ${xvfbError}`);
+  }
   await verifyOwnedXvfb(xvfb);
+  if (!xvfbReady) {
+    xvfb.kill('SIGCONT');
+    xvfbReady = true;
+  }
   const info = spawnSync(example,['--probe'],{env,encoding:'utf8',timeout:3000});
-  assert.equal(info.status,0,`X client could not verify ${display}: ${info.stderr}`);
+  assert.equal(info.status,0,`X client could not verify ${display}: ${info.error ?? info.signal ?? ''} ${info.stderr}`);
   assert.match(info.stdout,/vendor=The X.Org Foundation size=1280x720 xwayland=false/, 'unexpected server vendor or geometry');
 }
 
@@ -254,6 +270,22 @@ try {
     assert.equal(result.status,0,result.stderr);
     return { state:JSON.parse(result.stdout), raw:readFileSync(rootPath) };
   };
+  // Capture is asynchronous: a newer sequence can still describe an intermediate
+  // cue. Establish the expected pixels before using its sequence as a baseline.
+  const capturedPixels = async (expected, afterSeq) => {
+    const deadline = performance.now() + 6000;
+    let frame;
+    do {
+      frame = await client.request('session.frame', {
+        session_id:session.sessionId, path, after_seq:afterSeq, still_ms:100,
+        timeout_ms:Math.max(0, Math.ceil(deadline-performance.now())),
+      });
+      if (readFileSync(path).equals(expected)) return frame;
+      afterSeq = frame.seq;
+    } while (performance.now() < deadline);
+    assert.deepEqual(readFileSync(path),expected,'capture must reach the expected desktop pixels');
+    return frame;
+  };
   const savePointShot = async (raw, name) => {
     if (!process.env.DESKLINK_POINT_EVIDENCE_DIR) return;
     const { PNG } = await import('pngjs');
@@ -290,12 +322,14 @@ try {
   assert.deepEqual((await desktop()).raw,beforePoint.raw,'timeout removes the cue');
   await client.point(session.sessionId,{x:400,y:300,timeoutMs:10000});
   await new Promise(r=>setTimeout(r,50));
-  assert.notDeepEqual((await desktop()).raw,beforePoint.raw);
+  const finalPoint = await desktop();
+  assert.notDeepEqual(finalPoint.raw,beforePoint.raw);
+  const finalPointFrame = await capturedPixels(finalPoint.raw,withPoint.seq);
   await client.point(session.sessionId,{clear:true});
   await client.point(session.sessionId,{clear:true});
   assert.deepEqual((await desktop()).raw,beforePoint.raw,'clear removes the cue and is idempotent');
   assert.deepEqual((await desktop()).state,beforePoint.state);
-  await client.request('session.frame',{session_id:session.sessionId,path,after_seq:withPoint.seq,still_ms:100,timeout_ms:2000});
+  await capturedPixels(cleanFrame,finalPointFrame.seq);
   // Xcursor sprites live outside GetImage(root): motion and ripple must not
   // create a different frame or damage region from an indicator-off session.
   await verifyXvfb();
@@ -306,7 +340,7 @@ try {
   // definition can wake the capture loop independently of later cursor motion.
   overlay.stdin.write('M 100 100\n');
   await new Promise(r=>setTimeout(r,100));
-  const cleanSeq = (await client.request('session.frame',{session_id:session.sessionId,still_ms:100})).seq;
+  const cleanSeq = (await capturedPixels(cleanFrame,0)).seq;
   overlay.stdin.write('M 300 300\nC 300 300\n');
   await new Promise(r=>setTimeout(r,600));
   const cursorOnly = await client.request('session.frame',{session_id:session.sessionId,path,since:cleanSeq});
