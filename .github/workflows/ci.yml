@@ -169,7 +169,7 @@ jobs:
           packages/desktop-host/release/check-install.sh | tee dist-desklink/darwin-install-smoke.txt
           {
             uname -a
-            git rev-parse HEAD HEAD^{tree}
+            git rev-parse HEAD 'HEAD^{tree}'
             git archive HEAD | shasum -a 256
             shasum -a 256 package-lock.json packages/desktop-host/engine/Cargo.lock packages/desktop-host/release/build-engine-macos-arm64.sh
             brew info --json=v2 libvpx

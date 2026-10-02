@@ -22,7 +22,7 @@ this changelog is not a claim that unpublished packages are available.
 
 - Legacy `permissions` remains compatibility-only. AXI always connects its control channel; hidden `start --control` is an ignored no-op and `start`/`home` no longer print permission scopes.
 - Linux agent-driving indicators have more visible arrows/halos and reveal/retract motion. [Indicator change](https://github.com/umeranjum17/desklink/pull/60), [wording clarification](https://github.com/umeranjum17/desklink/pull/62).
-- The standard hosted ARM64 macOS CI job uses the existing release builder and clean-install smoke, recording architecture, source/archive and dependency hashes, static libvpx, executable hash and capabilities with its downloadable artifact. This is non-interactive artifact qualification, not macOS desktop qualification.
+- Hosted ARM64 macOS CI now produces a downloadable release artifact through the existing build and clean-install path. See the [packaging guide](packages/desktop-host/README.md#building-and-packing-a-release) for provenance checks and qualification limits.
 
 ### Known issues and limits
 
