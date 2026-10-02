@@ -192,6 +192,98 @@ impl Drop for X11Capture {
     }
 }
 
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn desklink_indicator_covered(
+        x: f64,
+        y: f64,
+        opacity: f64,
+        click: f64,
+        typed: f64,
+        threshold: u32,
+        reveal: f64,
+    ) -> i32;
+}
+
+/// The X11 agent cue is a real window, so root grabs contain it. Restore
+/// exactly the pixels the announced cues cover (one pixel wider for edge
+/// rounding) from the last clean frame; everything else, including what lies
+/// inside the halo, stays live.
+#[cfg(target_os = "linux")]
+struct CueMask {
+    cues: crate::indicator::Cues,
+    clean: Option<Vec<u8>>,
+}
+
+#[cfg(target_os = "linux")]
+impl CueMask {
+    fn new(cues: crate::indicator::Cues) -> Self {
+        Self { cues, clean: None }
+    }
+
+    fn snapshot(&self) -> Vec<crate::indicator::Cue> {
+        self.cues
+            .lock()
+            .map(|mut feed| feed.drain())
+            .unwrap_or_default()
+    }
+
+    /// `before` is the snapshot taken when the grab started: with the states
+    /// announced by the time it returned, it covers whatever the grab saw.
+    fn apply(
+        &mut self,
+        raw: &mut [u8],
+        width: usize,
+        height: usize,
+        mut cues: Vec<crate::indicator::Cue>,
+    ) {
+        cues.extend(self.snapshot());
+        if let Some(clean) = self.clean.as_ref().filter(|clean| clean.len() == raw.len()) {
+            for cue in cues {
+                let side = cue.size as usize + 2;
+                let mut covered = vec![false; side * side];
+                for row in 0..cue.size as usize {
+                    for col in 0..cue.size as usize {
+                        let half = cue.size as f64 / 2.0;
+                        covered[(row + 1) * side + col + 1] = unsafe {
+                            desklink_indicator_covered(
+                                (col as f64 - half) / cue.unit,
+                                (row as f64 - half) / cue.unit,
+                                cue.opacity,
+                                cue.click,
+                                cue.typed,
+                                cue.threshold,
+                                cue.reveal,
+                            )
+                        } != 0;
+                    }
+                }
+                for row in 0..side {
+                    for col in 0..side {
+                        let near =
+                            |r: usize, c: usize| r < side && c < side && covered[r * side + c];
+                        if !(near(row, col)
+                            || near(row.wrapping_sub(1), col)
+                            || near(row + 1, col)
+                            || near(row, col.wrapping_sub(1))
+                            || near(row, col + 1))
+                        {
+                            continue;
+                        }
+                        let (x, y) = (cue.x - 1 + col as i64, cue.y - 1 + row as i64);
+                        if x < 0 || y < 0 || x >= width as i64 || y >= height as i64 {
+                            continue;
+                        }
+                        let at = (y as usize * width + x as usize) * 4;
+                        raw[at..at + 4].copy_from_slice(&clean[at..at + 4]);
+                    }
+                }
+            }
+        }
+        self.clean = Some(raw.to_vec());
+    }
+}
+
 /// What a chosen capture backend gives the session.
 struct Selected {
     source: SelectedSource,
@@ -210,6 +302,7 @@ fn select_x11(
     max_fps: u32,
     metrics: Arc<Mutex<Metrics>>,
     #[cfg(target_os = "linux")] cursor_sink: Option<crate::cursor::CursorSink>,
+    #[cfg(target_os = "linux")] cues: Option<crate::indicator::Cues>,
     sink: capture::FrameSink,
     on_stop: Box<dyn Fn(String) + Send>,
 ) -> Result<Selected> {
@@ -250,6 +343,8 @@ fn select_x11(
                 let mut first = true;
                 #[cfg(target_os = "linux")]
                 let mut cursor = cursor_sink.map(crate::cursor::Reporter::new);
+                #[cfg(target_os = "linux")]
+                let mut mask = cues.map(CueMask::new);
                 while !stop.load(Ordering::SeqCst) {
                     #[cfg(target_os = "linux")]
                     if let Some(cursor) = cursor.as_mut() {
@@ -273,8 +368,16 @@ fn select_x11(
                     let started = Instant::now();
                     let grabbed = Instant::now();
                     let frame = {
+                        #[cfg(target_os = "linux")]
+                        let before = mask.as_ref().map(CueMask::snapshot);
                         let mut desktop = lock(&desktop);
-                        desktop.capture_with_pixels(max_width, max_height)
+                        desktop.capture_raw().and_then(|mut raw| {
+                            #[cfg(target_os = "linux")]
+                            if let (Some(mask), Some(before)) = (mask.as_mut(), before) {
+                                mask.apply(&mut raw, width as usize, height as usize, before);
+                            }
+                            Ok((desktop.convert(&raw, max_width, max_height)?, raw))
+                        })
                     };
                     let grab_micros = grabbed.elapsed().as_micros() as u64;
                     match frame {
@@ -970,6 +1073,22 @@ impl Session {
 
         let metrics = Arc::new(Mutex::new(Metrics::default()));
         let mut indicator = None;
+        // The X11 cue starts before capture: its window is in root pixels, so
+        // the capture thread needs the announced cue states from the first grab.
+        #[cfg(target_os = "linux")]
+        if request.agent_indicator && wants_control && wants_x11 {
+            let display = match &request.source {
+                Some(SourceRequest::X11 {
+                    display: Some(display),
+                }) => display.clone(),
+                _ => std::env::var("DISPLAY")
+                    .map_err(|_| SessionError::new("indicator-unavailable", "no X display"))?,
+            };
+            indicator = Some(
+                crate::indicator::Indicator::start(&display, 0, 0)
+                    .map_err(|error| SessionError::new("indicator", format!("{error:#}")))?,
+            );
+        }
         let (frame_tx, frame_rx) = latest_frame();
         let latest = Arc::new(Mutex::new(None::<FrameSnapshot>));
         let observed = latest.clone();
@@ -1091,6 +1210,8 @@ impl Session {
                 metrics.clone(),
                 #[cfg(target_os = "linux")]
                 cursor_sink,
+                #[cfg(target_os = "linux")]
+                indicator.as_ref().map(crate::indicator::Indicator::cues),
                 sink,
                 Box::new({
                     let status = capture_status.clone();
@@ -1230,20 +1351,6 @@ impl Session {
 
         let source_w = source.width.max(1) as usize;
         let source_h = source.height.max(1) as usize;
-        #[cfg(target_os = "linux")]
-        if request.agent_indicator && wants_control && wants_x11 {
-            let display = match &request.source {
-                Some(SourceRequest::X11 {
-                    display: Some(display),
-                }) => display.clone(),
-                _ => std::env::var("DISPLAY")
-                    .map_err(|_| SessionError::new("indicator-unavailable", "no X display"))?,
-            };
-            indicator = Some(
-                crate::indicator::Indicator::start(&display, source_w, source_h)
-                    .map_err(|error| SessionError::new("indicator", format!("{error:#}")))?,
-            );
-        }
         let (width, height) = fit(source_w, source_h, request.max_width, request.max_height);
 
         let bitrate_kbps = if request.bitrate_kbps == 0 {
@@ -3216,6 +3323,60 @@ fn opaque_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn x11_cue_mask_restores_only_the_cue_pixels() {
+        use crate::indicator::Cue;
+        let (w, h) = (200usize, 120usize);
+        let at = |x: usize, y: usize| (y * w + x) * 4;
+        let (cx, cy) = (20 + 55, 10 + 55);
+        // Shaped (128) and composited (1) helpers announce different thresholds.
+        for threshold in [128, 1] {
+            let cue = Cue {
+                x: 20,
+                y: 10,
+                size: 110,
+                unit: 1.0,
+                opacity: 1.0,
+                click: -1.0,
+                typed: -1.0,
+                threshold,
+                reveal: 99.0,
+            };
+            let mut mask = CueMask::new(Default::default());
+            let clean: Vec<u8> = (0..w * h * 4).map(|i| (i % 251) as u8).collect();
+            mask.apply(&mut clean.clone(), w, h, vec![]);
+            // Paint the cue's keyline and live content inside the halo.
+            let mut frame = clean.clone();
+            frame[at(cx - 24, cy)..at(cx - 24, cy) + 4].fill(255);
+            frame[at(cx - 5, cy)..at(cx - 5, cy) + 4].fill(7);
+            frame[at(190, 110)..at(190, 110) + 4].fill(9);
+            mask.apply(&mut frame, w, h, vec![cue]);
+            assert_eq!(
+                &frame[at(cx - 24, cy)..at(cx - 24, cy) + 4],
+                &clean[at(cx - 24, cy)..at(cx - 24, cy) + 4]
+            );
+            assert_eq!(
+                &frame[at(cx - 5, cy)..at(cx - 5, cy) + 4],
+                &[7; 4],
+                "the halo interior stays live"
+            );
+            assert_eq!(
+                &frame[at(190, 110)..at(190, 110) + 4],
+                &[9; 4],
+                "pixels away from the cue stay live"
+            );
+            let mut after = clean.clone();
+            after[at(cx - 24, cy)..at(cx - 24, cy) + 4].fill(3);
+            mask.apply(&mut after, w, h, vec![]);
+            assert_eq!(
+                &after[at(cx - 24, cy)..at(cx - 24, cy) + 4],
+                &[3; 4],
+                "a hidden cue masks nothing"
+            );
+        }
+    }
+
     use super::*;
 
     #[tokio::test]

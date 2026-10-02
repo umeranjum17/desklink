@@ -38,6 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=native/mac_stream.mm");
     println!("cargo:rerun-if-changed=native/agent_overlay_mac.m");
     println!("cargo:rerun-if-changed=native/agent_overlay_x11.c");
+    println!("cargo:rerun-if-changed=native/agent_indicator.h");
     println!("cargo:rerun-if-changed=native/agent_overlay_wayland.c");
     println!("cargo:rerun-if-changed=Info.plist");
     println!("cargo:rerun-if-changed=vendor/inputtino/src/uinput/include/inputtino/keyboard.hpp");

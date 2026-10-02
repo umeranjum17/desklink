@@ -20,6 +20,10 @@ const number = Array.from({length:30},(_,i)=>170+i).find(n =>
   !existsSync(`/tmp/.X11-unix/X${n}`) && !existsSync(`/tmp/.X${n}-lock`));
 assert(number !== undefined, 'no unclaimed high X display');
 const display = `:${number}`;
+const evidenceScale = process.env.DESKLINK_INDICATOR_SCALE === '2' ? 2 : 1;
+const evidenceOnly = !!process.env.DESKLINK_INDICATOR_EVIDENCE_DIR;
+const width = evidenceOnly ? 1920 * evidenceScale : 1280;
+const height = evidenceOnly ? 1080 * evidenceScale : 720;
 const socket = `/tmp/.X11-unix/X${number}`;
 const authority = join(dir,'Xauthority');
 const auth = spawnSync('xauth',['-f',authority,'add',display,'.',randomBytes(16).toString('hex')],{encoding:'utf8'});
@@ -28,7 +32,7 @@ assert.equal(auth.status,0,`could not prepare private X authority: ${auth.stderr
 // server only once initialization is complete; resume that owned PID before
 // probing. Unlike -displayfd, this preserves the X lock ownership assertion and
 // explicit high display. -noreset avoids reinitialization between probe clients.
-const xvfb = spawn('Xvfb', [display, '-sigstop', '-noreset', '-auth', authority, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], { stdio: ['ignore', 'ignore', 'pipe'] });
+const xvfb = spawn('Xvfb', [display, '-sigstop', '-noreset', '-auth', authority, '-screen', '0', `${width}x${height}x24`, '-nolisten', 'tcp'], { stdio: ['ignore', 'ignore', 'pipe'] });
 let xvfbReady = false;
 let xvfbError = '';
 xvfb.stderr.on('data', chunk => xvfbError = (xvfbError + chunk).slice(-2000));
@@ -108,7 +112,7 @@ async function verifyXvfb() {
   }
   const info = spawnSync(example,['--probe'],{env,encoding:'utf8',timeout:3000});
   assert.equal(info.status,0,`X client could not verify ${display}: ${info.error ?? info.signal ?? ''} ${info.stderr}`);
-  assert.match(info.stdout,/vendor=The X.Org Foundation size=1280x720 xwayland=false/, 'unexpected server vendor or geometry');
+  assert(info.stdout.includes(`vendor=The X.Org Foundation size=${width}x${height} xwayland=false`), 'unexpected server vendor or geometry');
 }
 
 const cli = resolve('packages/axi/bin/desklink-axi.js');
@@ -155,6 +159,12 @@ async function run(...args) {
 try {
   remember(xvfb.pid,'Xvfb');
   await verifyXvfb(); // Never open a session or send input before ownership is proven.
+  if (evidenceOnly) {
+    const { recordX11 } = await import('./indicator-evidence.mjs');
+    await recordX11({ env, enginePath, display, width, height, scale: evidenceScale, verifyXvfb, remember });
+    await cleanup();
+    process.exit(0);
+  }
   const cursorEvents = [];
   client = await EngineClient.start(enginePath, ['serve'], { onEvent: event => cursorEvents.push(event) }, env);
   recordProcesses();
@@ -260,7 +270,6 @@ try {
   const changed = await client.request('session.frame',{session_id:session.sessionId,since:first.seq,path,after_seq:first.seq,still_ms:150,timeout_ms:6000});
   assert(changed.still_ms>=150 && changed.damage.length > 0);
   assert.notDeepEqual(readFileSync(path),original);
-  const cleanFrame = readFileSync(path);
   // The cue is visible in the root screenshot, independent of pointer/focus,
   // and included in the session frame. Only this verified private display is read.
   const desktop = async () => {
@@ -324,30 +333,32 @@ try {
   await new Promise(r=>setTimeout(r,50));
   const finalPoint = await desktop();
   assert.notDeepEqual(finalPoint.raw,beforePoint.raw);
-  const finalPointFrame = await capturedPixels(finalPoint.raw,withPoint.seq);
+  await capturedPixels(finalPoint.raw,withPoint.seq);
   await client.point(session.sessionId,{clear:true});
   await client.point(session.sessionId,{clear:true});
   assert.deepEqual((await desktop()).raw,beforePoint.raw,'clear removes the cue and is idempotent');
   assert.deepEqual((await desktop()).state,beforePoint.state);
-  await capturedPixels(cleanFrame,finalPointFrame.seq);
-  // Xcursor sprites live outside GetImage(root): motion and ripple must not
-  // create a different frame or damage region from an indicator-off session.
+  await client.request('session.frame',{session_id:session.sessionId,path,after_seq:withPoint.seq,still_ms:100,timeout_ms:2000});
+  // The agent cue is a click-through window over every app, never a cursor
+  // override: on screen it shows its white keyline 24 px from the pointer and
+  // leaves the halo's interior live. Sessions that own it mask it from capture
+  // (the CLI --wait change checks below would otherwise see it).
   await verifyXvfb();
+  const beforeCue = await desktop();
   overlay = spawn(enginePath, ['agent-overlay', display], { env, stdio: ['pipe','pipe','pipe'] });
   remember(overlay.pid,enginePath);
   await new Promise((resolve,reject) => {overlay.stdout.once('data',resolve);overlay.once('error',reject);});
-  // Install the Xcursor override before taking the baseline. Its first
-  // definition can wake the capture loop independently of later cursor motion.
-  overlay.stdin.write('M 100 100\n');
-  await new Promise(r=>setTimeout(r,100));
-  const cleanSeq = (await capturedPixels(cleanFrame,0)).seq;
-  overlay.stdin.write('M 300 300\nC 300 300\n');
-  await new Promise(r=>setTimeout(r,600));
-  const cursorOnly = await client.request('session.frame',{session_id:session.sessionId,path,since:cleanSeq});
-  assert.equal(cursorOnly.seq,cleanSeq, 'cursor motion and ripple add no frame damage');
-  assert.deepEqual(readFileSync(path),cleanFrame, 'indicator-on and indicator-off captures match');
+  overlay.stdin.write('M 300 300\n');
+  await new Promise(r=>setTimeout(r,400));
+  const cued = await desktop();
+  const pixel = (raw,x,y) => [...raw.subarray((y*1280+x)*4,(y*1280+x)*4+3)];
+  assert.deepEqual(pixel(cued.raw,276,300),[255,255,255],'the cue keyline is on screen');
+  assert.deepEqual(pixel(cued.raw,290,300),pixel(beforeCue.raw,290,300),'the halo interior stays see-through');
+  assert.deepEqual(cued.state,beforeCue.state,'the cue must not move the pointer or change focus');
   overlay.stdin.end();
   await new Promise(r=>overlay.once('exit',r)); overlay = undefined;
+  await new Promise(r=>setTimeout(r,100));
+  assert.deepEqual((await desktop()).raw,beforeCue.raw,'the cue is removed when it ends');
   await client.stop(); client = undefined;
   const started = await run('start','--control','--source','x11','--display',display);
   assert.match(started,/permissions=view,control/);

@@ -247,13 +247,23 @@ A source may still supply fewer frames.
 
 `agent_indicator` is opt-in local feedback for an agent controller; desklink-axi
 sets it for control sessions, never for view-only or human phone control. It
-adds an eased pointer halo, click ripple, and typing pulse. On Wayland it uses
-a click-through layer-shell surface with an edge glow; its bounded area is
-masked before capture/diff (pixels behind the effect can remain briefly stale).
-On bare X11 it replaces the pointer sprite instead, which the X11 grab excludes:
-there is no edge glow on that path. macOS uses a nonactivating, click-through
-window excluded by the ScreenCaptureKit content filter. Closing the session
-fades and removes the indicator.
+adds an eased arrow inside a halo that brightens on clicks and keys, animating in
+and out, with light and dark keylines so it reads on any content. On Wayland it
+uses a click-through layer-shell surface with an edge glow, drawn at the
+outputs' integer scale; its bounded area is masked before capture/diff (pixels
+behind the effect can remain briefly stale). On bare X11 it is an
+override-redirect, click-through window that follows the pointer, so it stays
+visible over windows that set their own cursor and never replaces the cursor.
+Its size follows `Xft.dpi`; it grows in and shrinks out, and also fades when a
+compositing manager provides alpha (otherwise it is a shaped window). The
+helper announces each state before drawing it, and X11 capture restores just
+the pixels the cue covers from the previous frame, so the halo's interior stays
+live; changes under the arrow and ring show once the cue moves away. Click and
+key feedback only recolour the cue, so a still cue never changes what is
+restored. There is no edge glow on that path.
+macOS uses a nonactivating, click-through window excluded by the
+ScreenCaptureKit content filter. Closing the session fades and removes the
+indicator.
 
 `local_frames` keeps the latest pre-encode frame and its tile hashes for
 `session.frame` and `session.frame.changed` (see "Latest frame over the local

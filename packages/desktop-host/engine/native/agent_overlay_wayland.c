@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <math.h>
+#include "agent_indicator.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,7 +64,13 @@ static const struct wl_interface xdg_manager_interface={"zxdg_output_manager_v1"
 static const struct wl_message output_requests[]={{"destroy","",NULL}};
 static const struct wl_message output_events[]={{"logical_position","ii",NULL},{"logical_size","ii",NULL},{"done","",NULL},{"name","2s",NULL},{"description","2s",NULL}};
 static const struct wl_interface xdg_output_interface={"zxdg_output_v1",2,1,output_requests,5,output_events};
-struct Output { struct wl_output *handle; struct wl_proxy *logical; int x,y,w,h,valid; };
+struct Output { struct wl_output *handle; struct wl_proxy *logical; int x,y,w,h,valid,scale; };
+static void output_geometry(void *data,struct wl_output *p,int32_t x,int32_t y,int32_t pw,int32_t ph,int32_t sub,const char *make,const char *model,int32_t transform)
+    {(void)data;(void)p;(void)x;(void)y;(void)pw;(void)ph;(void)sub;(void)make;(void)model;(void)transform;}
+static void output_mode(void *data,struct wl_output *p,uint32_t flags,int32_t w,int32_t h,int32_t refresh){(void)data;(void)p;(void)flags;(void)w;(void)h;(void)refresh;}
+static void output_done(void *data,struct wl_output *p){(void)data;(void)p;}
+static void output_scale(void *data,struct wl_output *p,int32_t scale){(void)p;((struct Output *)data)->scale=scale;}
+static const struct wl_output_listener output_listener={.geometry=output_geometry,.mode=output_mode,.done=output_done,.scale=output_scale};
 static void logical_position(void *data, struct wl_proxy *p,int32_t x,int32_t y){(void)p;struct Output *o=data;o->x=x;o->y=y;o->valid=1;}
 static void logical_size(void *data,struct wl_proxy *p,int32_t w,int32_t h){(void)p;struct Output *o=data;o->w=w;o->h=h;}
 static void logical_done(void *data,struct wl_proxy *p){(void)data;(void)p;}
@@ -89,14 +96,16 @@ struct Overlay {
     struct Output outputs[32]; int output_count;
     struct wl_surface *surface;
     struct Buffer buffers[2];
-    int width, height, source_w, source_h, configured, closed;
+    int width, height, scale, source_w, source_h, configured, closed;
 };
 static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec/1e9; }
 static void registry_global(void *data, struct wl_registry *registry, uint32_t name, const char *interface, uint32_t version) {
     struct Overlay *o=data;
     if (!strcmp(interface,"wl_output") && o->output_count<32) {
         struct Output *out=&o->outputs[o->output_count++];
-        out->handle=wl_registry_bind(registry,name,&wl_output_interface,1);
+        out->handle=wl_registry_bind(registry,name,&wl_output_interface,version<2?version:2);
+        out->scale=1;
+        wl_output_add_listener(out->handle,&output_listener,out);
     }
     if (!strcmp(interface,"zxdg_output_manager_v1")) o->output_manager=wl_registry_bind(registry,name,&xdg_manager_interface,version<2?version:2);
     if (!strcmp(interface,"wl_compositor")) o->compositor=wl_registry_bind(registry,name,&wl_compositor_interface,version<4?version:4);
@@ -119,13 +128,14 @@ static void buffer_release(void *data, struct wl_buffer *buffer) { (void)buffer;
 static const struct wl_buffer_listener buffer_listener={buffer_release};
 
 static int create_buffer(struct Overlay *o, struct Buffer *b) {
-    b->length=(size_t)o->width*o->height*4;
+    int w=o->width*o->scale,h=o->height*o->scale;
+    b->length=(size_t)w*h*4;
     int fd=memfd_create("desklink-agent-overlay",MFD_CLOEXEC);
     if (fd<0 || ftruncate(fd,b->length)) { if(fd>=0)close(fd); return -1; }
     b->pixels=mmap(NULL,b->length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
     if (b->pixels==MAP_FAILED) {close(fd);return -1;}
     struct wl_shm_pool *pool=wl_shm_create_pool(o->shm,fd,(int)b->length);
-    b->handle=wl_shm_pool_create_buffer(pool,0,o->width,o->height,o->width*4,WL_SHM_FORMAT_ARGB8888);
+    b->handle=wl_shm_pool_create_buffer(pool,0,w,h,w*4,WL_SHM_FORMAT_ARGB8888);
     wl_shm_pool_destroy(pool); close(fd);
     wl_buffer_add_listener(b->handle,&buffer_listener,b);
     return 0;
@@ -134,12 +144,15 @@ static void blend(uint32_t *pixel, unsigned alpha, unsigned rgb) {
     // premultiplied ARGB8888: the compositor blends this over the desktop.
     *pixel=(alpha<<24)|(((rgb>>16)&255)*alpha/255<<16)|(((rgb>>8)&255)*alpha/255<<8)|((rgb&255)*alpha/255);
 }
-static void draw(struct Overlay *o, struct Buffer *b, double x, double y, double click, double typed, double ending, int positioned) {
-    double t=now(), opacity=ending?fmax(0,1-(t-ending)/0.6):1;
+static void draw(struct Overlay *o, struct Buffer *b, double x, double y, double click, double typed, double ending, double started, double cue_started) {
+    double t=now(), opacity=ending?fmax(0,1-(t-ending)/0.6):fmin(1,(t-started)/0.18);
+    // The cue fades in from its first position, not from the session's start.
+    double cue=ending?opacity:fmin(1,(t-cue_started)/0.18);
     memset(b->pixels,0,b->length);
-    int w=o->width,h=o->height;
-    for (int edge=0;edge<7;edge++) {
-        unsigned alpha=(unsigned)((7-edge)*1.8*opacity);
+    // Draw in buffer pixels; the cue itself is specified in logical pixels.
+    int s=o->scale,w=o->width*s,h=o->height*s;x*=s;y*=s;
+    for (int edge=0;edge<7*s;edge++) {
+        unsigned alpha=(unsigned)((7-(double)edge/s)*1.8*opacity);
         for(int px=edge;px<w-edge;px++) {
             blend(&b->pixels[(size_t)edge*w+px],alpha,0x4c9ed0);
             blend(&b->pixels[(size_t)(h-1-edge)*w+px],alpha,0x4c9ed0);
@@ -149,16 +162,17 @@ static void draw(struct Overlay *o, struct Buffer *b, double x, double y, double
             blend(&b->pixels[(size_t)py*w+w-1-edge],alpha,0x4c9ed0);
         }
     }
-    int left=fmax(0,x-55),right=fmin(w,x+55),top=fmax(0,y-55),bottom=fmin(h,y+55);
-    if(positioned)for(int py=top;py<bottom;py++)for(int px=left;px<right;px++) {
-        double distance=hypot(px-x,py-y);
-        double ring=fmax(0,1-fabs(distance-13)/5)*0.18;
-        ring+=fmax(0,1-fabs(distance-23)/7)*0.06;
-        if(click && t-click<0.55)ring+=fmax(0,1-fabs(distance-(12+37*(t-click)/0.55))/3)*0.42*(1-(t-click)/0.55);
-        if(typed && t-typed<0.4)
-            ring+=fmax(0,1-fabs(distance-(8+15*(t-typed)/0.4))/3)*0.22*(1-(t-typed)/0.4);
-        unsigned alpha=(unsigned)(fmin(1,ring*opacity)*255);
-        if(alpha)blend(&b->pixels[(size_t)py*w+px],alpha,0x4c9ed0);
+    int left=fmax(0,x-40*s),right=fmin(w,x+40*s),top=fmax(0,y-40*s),bottom=fmin(h,y+40*s);
+    if(cue_started)for(int py=top;py<bottom;py++)for(int px=left;px<right;px++) {
+        // Capture keeps the pointer's own pixels live (IndicatorMask), so the
+        // tip stays clear; the real cursor sits there anyway.
+        if(hypot((px-x)/s,(py-y)/s)<6)continue;
+        uint32_t src=indicator_pixel((px-x)/s,(py-y)/s,cue,
+            click?(t-click)/0.55:-1,typed?(t-typed)/0.4:-1), *dst=&b->pixels[(size_t)py*w+px];
+        // Premultiplied source-over, keeping the edge glow under the cue.
+        unsigned inverse=255-(src>>24);
+        if(src)*dst=src+((((*dst>>24)&255)*inverse/255)<<24)+((((*dst>>16)&255)*inverse/255)<<16)
+            +((((*dst>>8)&255)*inverse/255)<<8)+((*dst&255)*inverse/255);
     }
 }
 
@@ -202,7 +216,7 @@ static void draw_point(struct Overlay *o,struct Buffer *b,double x,double y,cons
 
 static int overlay_main(int source_w,int source_h,int point_mode,int origin_known,int origin_x,int origin_y) {
 
-    struct Overlay o={.source_w=source_w,.source_h=source_h};
+    struct Overlay o={.source_w=source_w,.source_h=source_h,.scale=1};
     o.display=wl_display_connect(NULL);
     if(!o.display)return 2;
     struct wl_registry *registry=wl_display_get_registry(o.display);
@@ -228,6 +242,11 @@ static int overlay_main(int source_w,int source_h,int point_mode,int origin_know
         if(!selected && o.output_count==1 && (!origin_known || !o.output_manager))selected=o.outputs[0].handle;
         if(!selected){puts("selected_output_unavailable");fflush(stdout);wl_display_disconnect(o.display);return 2;}
     }
+    if(!point_mode && wl_proxy_get_version((struct wl_proxy *)o.compositor)>=3) {
+        // Render the cue at the densest output's integer scale so it stays crisp on HiDPI.
+        if(wl_display_roundtrip(o.display)<0)return 2;
+        for(int i=0;i<o.output_count;i++)if(o.outputs[i].scale>o.scale)o.scale=o.outputs[i].scale<4?o.outputs[i].scale:4;
+    }
     FT_Library library=NULL;FT_Face font=point_mode?point_font(&library):NULL;
     if(point_mode&&!font){wl_display_disconnect(o.display);return 2;}
     o.surface=wl_compositor_create_surface(o.compositor);
@@ -244,13 +263,14 @@ static int overlay_main(int source_w,int source_h,int point_mode,int origin_know
         wl_surface_set_input_region(o.surface,empty);
         wl_region_destroy(empty);
     }
+    if(o.scale>1)wl_surface_set_buffer_scale(o.surface,o.scale);
     wl_surface_commit(o.surface);
     while(!o.configured&&!o.closed&&wl_display_dispatch(o.display)>=0) {}
     if(o.closed||o.width<=0||o.height<=0){wl_display_disconnect(o.display);return 2;}
     if(create_buffer(&o,&o.buffers[0])||create_buffer(&o,&o.buffers[1])){wl_display_disconnect(o.display);return 2;}
     int flags=fcntl(STDIN_FILENO,F_GETFL);fcntl(STDIN_FILENO,F_SETFL,flags|O_NONBLOCK);
     puts("READY");fflush(stdout);
-    double tx=0,ty=0,x=0,y=0,click=0,typed=0,ending=0;
+    double tx=0,ty=0,x=0,y=0,click=0,typed=0,ending=0,started=0,cue_started=0;
     int active=0,positioned=0;
     double deadline=0;char label[97]={0};int dirty=0,visible=0;
     char pending[512];size_t used=0;
@@ -277,8 +297,9 @@ static int overlay_main(int source_w,int source_h,int point_mode,int origin_know
                     else if(kind=='M'||kind=='C'||kind=='T'||kind=='A') {
                         if(px>=0&&py>=0) {
                             if(desklink_wayland_geometry(o.source_w,o.source_h,o.width,o.height,px,py,&tx,&ty)
-                                && !positioned){x=tx;y=ty;positioned=1;}
+                                && !positioned){x=tx;y=ty;positioned=1;cue_started=now();}
                         }
+                        if(!active)started=now();
                         active=1;
                         if(kind=='C')click=now();
                         if(kind=='T')typed=now();
@@ -292,11 +313,11 @@ static int overlay_main(int source_w,int source_h,int point_mode,int origin_know
         if(!point_mode){x+=(tx-x)*0.24;y+=(ty-y)*0.24;}
         for(int i=0;i<2;i++)if(!o.buffers[i].busy) {
             if(point_mode)draw_point(&o,&o.buffers[i],x,y,label,font,visible);
-            else draw(&o,&o.buffers[i],x,y,click,typed,ending,positioned);
+            else draw(&o,&o.buffers[i],x,y,click,typed,ending,started,cue_started);
             dirty=0;
             o.buffers[i].busy=1;
             wl_surface_attach(o.surface,o.buffers[i].handle,0,0);
-            wl_surface_damage_buffer(o.surface,0,0,o.width,o.height);
+            wl_surface_damage_buffer(o.surface,0,0,o.width*o.scale,o.height*o.scale);
             wl_surface_commit(o.surface);
             break;
         }
