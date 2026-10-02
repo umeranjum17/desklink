@@ -4,7 +4,7 @@
   <a href="https://www.npmjs.com/package/@desklink/axi"><img alt="npm" src="https://img.shields.io/npm/v/@desklink/axi?style=flat" /></a>
   <a href="https://github.com/umeranjum17/desklink/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/umeranjum17/desklink/ci.yml?style=flat&branch=main" /></a>
   <a href="https://github.com/umeranjum17/desklink/blob/main/LICENSE"><img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-666?style=flat" /></a>
-  <img alt="Linux and macOS" src="https://img.shields.io/badge/Linux%20%7C%20macOS-111?style=flat" />
+  <img alt="Linux and macOS (preview)" src="https://img.shields.io/badge/Linux%20%7C%20macOS%20%28preview%29-111?style=flat" />
 </p>
 
 <p align="center">
@@ -21,13 +21,14 @@ npm install -g @desklink/axi
 ```
 
 Or build from the repository root with `npm install && npm run build`.
+Delete copied `*.tsbuildinfo` before rebuilding a moved worktree.
 The engine is resolved by `@desklink/host`; see its [installation guide](../desktop-host/README.md#install-and-run)
-for supported platforms and [macOS setup](../desktop-host/README.md#macos).
+for supported platforms and [macOS setup](../desktop-host/README.md#macos-preview).
 Set `DESKLINK_AXI_ENGINE` for a source build.
 
-A Linux/macOS desktop AXI. It runs a private bridge per session, captures read-only frames through `@desklink/host` protocol v3, and sends input only through a WebRTC `control` channel. The bridge's Unix socket lives in `$XDG_RUNTIME_DIR/desklink-axi` (or the OS temp directory), with `DESKLINK_AXI_SESSION` selecting an isolated socket. It opens a separate engine session; don't drive the desktop while someone else is controlling it.
+A Linux desktop AXI with macOS in preview. It runs a private bridge per session, captures read-only frames through `@desklink/host` protocol v3, and sends input only through a WebRTC `control` channel. The bridge's Unix socket lives in `$XDG_RUNTIME_DIR/desklink-axi` (or the OS temp directory), with `DESKLINK_AXI_SESSION` selecting an isolated socket. It opens a separate engine session; don't drive the desktop while someone else is controlling it.
 
-The engine is resolved by `@desklink/host`; set `DESKLINK_AXI_ENGINE` to an executable built from source if no packaged binary is installed. On macOS use `PATH=/opt/homebrew/bin:$PATH`, Rust >= 1.97.1, delete copied `*.tsbuildinfo` before rebuilding a moved worktree, and `DESKLINK_VPX_STATIC_DIR=/opt/homebrew` (the install **prefix**, not `/opt/homebrew/lib`). For macOS start the bridge from a stable signed app, not `desklink-axi start` in Terminal/SSH: `open -n /absolute/DesklinkHost.app --args axi-bridge /absolute/path/to/packages/axi/bin/desklink-axi.js --control`. Install or update that app using `packages/desktop-host/release/install-mac-app.sh`; grant Screen Recording and Accessibility to it once. An SSH-launched Node helper does not inherit those grants. OCR needs the optional `tesseract` executable (`brew install tesseract`, `sudo pacman -S tesseract` or `sudo apt install tesseract-ocr`); on macOS AXI also finds Homebrew's standard install paths when LaunchServices omits them from PATH. `look` works without it.
+For macOS source prerequisites, signing and permission attribution, follow the [host setup guide](../desktop-host/README.md#macos-preview). To launch AXI through its signed local harness, use `open -n /absolute/DesklinkHost.app --args axi-bridge /absolute/path/to/packages/axi/bin/desklink-axi.js --control` from the logged-in Mac session. OCR needs the optional `tesseract` executable (`brew install tesseract`, `sudo pacman -S tesseract` or `sudo apt install tesseract-ocr`); on macOS AXI also finds Homebrew's standard install paths when LaunchServices omits them from PATH. `look` works without it.
 
 ```
 desklink-axi start --control --source x11 --display :97
@@ -64,13 +65,20 @@ desklink-axi browser select 1 / open <url> / navigate <url> / close 1 / detach
 
 Non-loopback endpoints are refused; `launch` renders on `$DISPLAY` (X11) so it never follows `WAYLAND_DISPLAY` to another desktop, and `--arg <chromium flag>` (repeatable) passes extra flags such as `--arg=--window-size=1280,640`. Snapshot refs are re-derived on every command and rejected as `stale-ref` when the page changed. `upload` only sets files on `<input type=file>`; for OS-level dialogs it returns `not-supported` and names the desktop lane (`desklink-axi click/type`), which is also the route for real native-dialog navigation — a DOM upload is not equivalent to completing a native file dialog. `detach` stops the browser only if this lane launched it; a passed `--profile` directory is kept, a lane-created temp profile is removed.
 
+On Linux, a lane-launched browser's recorded PID and start time must match
+before connection or cleanup. Cached sessions from older versions without a
+recorded start time are refused; use a fresh `DESKLINK_AXI_SESSION` and profile.
+Cleanup verifies helper PID/start-time pairs against the private launch marker
+before signalling them. Browsers attached through `--cdp` remain caller-owned.
+
 ## Batch outcomes
 
 `batch` steps are `[verb, ...args]` arrays or `{verb, args?, name?, wait?}` objects with verbs `click, type, press, scroll, wait, snapshot, assert, tree, marks`. A named snapshot step binds its OCR items so later steps can target `@name.n`; `assert` steps make success depend on observed screen text; per-step lines separate `input: applied` (transport acknowledgement) from `effect: change observed | none within timeout`, and the footer says `effects: asserted[n]` or `effects: unverified (input acknowledgements only)` — an input acknowledgement is never a verified outcome, so wrong-focus typing or a no-op click fails the batch instead of reporting success.
 
 ## Proofs and measurements
 
-From the repository root with a task-built engine (`DESKLINK_AXI_ENGINE`) on Linux:
+From the repository root with a task-built engine (`DESKLINK_AXI_ENGINE`) on
+Linux, following the [private-lab guidance](../../README.md#develop):
 
 - `node packages/axi/test/smoke.mjs` — clean-tree rebuild of host+axi, then `batch` and `click` on a private Xvfb; asserts no task-owned survivors.
 - `node packages/axi/test/flow.mjs` — full desktop proof (frame/damage, point coordinates/timeout/clear without pointer or focus changes, click-through, input, chords, batch outcomes, injected-failure cleanup).

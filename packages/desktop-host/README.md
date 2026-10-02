@@ -162,9 +162,11 @@ current input layout is diagnostic); free-form text uses Unicode key events.
 The published engine is an **unsigned macOS arm64 CLI** in the optional
 `@desklink/host-darwin-arm64` platform package; no Developer ID identity or
 notarization is required. The macOS (preview) engine is enabled by default; `DESKLINK_MACOS=0` explicitly disables it.
-To build and pack it, build on an Apple Silicon Mac with Rust 1.97+ and static
+To build and pack it, build on an Apple Silicon Mac with Rust 1.97.1+ and static
 Homebrew libvpx, then follow
 [Building and packing a release](#building-and-packing-a-release).
+For a source build, `DESKLINK_VPX_STATIC_DIR` is the libvpx install prefix
+(containing `include/` and `lib/libvpx.a`), not its `lib/` directory.
 The app-bundled signed harness is for local TCC qualification, not npm
 installation. See the [macOS protocol](docs/PROTOCOL.md#macos).
 
@@ -374,6 +376,9 @@ npm run build
 node packages/desktop-host/release/pack.mjs --engine dist-desklink/engine-darwin-arm64 --platform darwin-arm64
 packages/desktop-host/release/check-install.sh
 ```
+
+The Mac release build copies libvpx headers and its archive into an
+archive-only prefix and rejects an executable that still links a libvpx dylib.
 
 Each call keeps the other platform tarball and also packs the host,
 React Native receiver and AXI CLI. All package versions must match before

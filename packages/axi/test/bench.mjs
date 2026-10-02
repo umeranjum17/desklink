@@ -230,7 +230,9 @@ const tasks = {
       return { ok, ms, calls, chars, retries };
     }
     let retries = 0, calls = 0, chars = 0, ms = 0;
-    let reload = await call('batch', JSON.stringify([['press', 'ctrl+r'], ['wait', 'settle']])); calls++; chars += reload.chars; ms += reload.ms;
+    // Wait for a post-key frame change: standalone settle can accept the old
+    // page while reload is pending and discard the typing that follows.
+    let reload = await call('batch', JSON.stringify([['press', 'ctrl+r', '--wait', 'settle']])); calls++; chars += reload.chars; ms += reload.ms;
     // The fixture focuses its input on reload; Enter submits the form.
     // OCR can return overlapping rows for the inline labels.
     let act = await call('batch', JSON.stringify([

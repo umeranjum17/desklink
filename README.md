@@ -146,16 +146,18 @@ npm run test:engine    # the Rust engine's tests; needs the native libraries CI 
 ```
 
 Desktop integration checks refuse ambient `DISPLAY`/`WAYLAND_DISPLAY` before
-contact. They create authenticated private labs and verify Xvfb PID/socket
-ownership; cleanup never adopts an unknown session-tagged PID. Unit/compile
+contact; unset both before running them. Use only verified, high-display,
+task-owned Xvfb labs; `Xvfb -displayfd` can choose the live Xwayland `:0`.
+The labs authenticate clients and verify Xvfb PID/socket ownership; cleanup
+never adopts an unknown session-tagged PID. Unit/compile
 checks need no desktop. On Linux, prove refusal and owned teardown with:
 
 ```sh
 env -u DISPLAY -u WAYLAND_DISPLAY npm run test:lab-safety
 ```
 
-Cached Linux browsers lacking the matching PID start-time recorded at launch
-are refused before browser contact or cleanup; use a fresh task session.
+For browser session ownership and migration, see the
+[AXI browser lane](packages/axi/README.md#browser-lane-opt-in-loopback-only).
 
 Releasing, including the reproducible engine build, is in
 [packages/desktop-host/README.md](packages/desktop-host/README.md#building-and-packing-a-release).

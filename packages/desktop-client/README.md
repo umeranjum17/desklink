@@ -291,12 +291,14 @@ a scroll:
 
 ```sh
 npm run build && cargo build --manifest-path packages/desktop-host/engine/Cargo.toml
-DESKLINK_IOS_MAC=user@mac npm run test:ios --workspace @desklink/react-native
+env -u DISPLAY -u WAYLAND_DISPLAY DESKLINK_IOS_MAC=user@mac npm run test:ios --workspace @desklink/react-native
 ```
 
 The Mac needs Xcode with an iOS simulator runtime, CocoaPods, node and
 [`axe`](https://github.com/cameroncooke/AXe) on its login `PATH`; everything
-the run builds or caches stays in `~/desklink-ios` there. When the selected
+the run builds or caches stays in `~/desklink-ios` there. The run creates a
+uniquely named simulator and deletes it during cleanup. For host desktop isolation, see the
+[private-lab guidance](../../README.md#develop). When the selected
 Xcode has no simulator platform, point `DESKLINK_IOS_XCODE` at one that does;
 `DESKLINK_IOS_RUNTIME` picks the iOS version (for example `18.6`); the
 script's header lists the other settings. To capture the cursor tip proof, set
