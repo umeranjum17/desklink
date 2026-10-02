@@ -16,6 +16,11 @@
 
 export const PROTOCOL_VERSION = 3;
 
+/**
+ * @deprecated Pairing is the only trust boundary: a paired session always has
+ * view, input and clipboard, so there is nothing to ask for. Kept so 0.3 code
+ * compiles; removed at 1.0.
+ */
 export type Permission = 'view' | 'control' | 'clipboard';
 
 /**
@@ -42,7 +47,8 @@ export interface SurfaceGeometry {
 
 export interface SessionOpenRequest {
     cursor?: 'embedded' | 'hidden';
-    permissions: Permission[];
+    /** @deprecated Ignored: a paired session always has view, input and clipboard. */
+    permissions?: Permission[];
     maxWidth?: number;
     maxHeight?: number;
     bitrateKbps?: number;
@@ -127,6 +133,7 @@ export type SessionStatus =
     | 'failed';
 
 export type SessionFailure =
+    /** The app's `authorize()` refused, or the host did: not paired, or the pairing was revoked. */
     | { code: 'permission'; message: string }
     /** Nobody approved the desktop's own screen-sharing prompt in time. */
     | { code: 'consent'; message: string }

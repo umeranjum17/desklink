@@ -476,14 +476,18 @@ try {
   assert.match(waited,/input: applied; frame: timed out/);
   await verifyXvfb();
   const expectedText = 'AXI_SYNTHETIC_726';
+  const beforeTyping = events.length;
   const typing = spawn(process.execPath,[cli,'type',expectedText],{env});
   let typed = ''; for await (const part of typing.stdout) typed += part;
   assert.equal(typing.exitCode ?? await new Promise(r=>typing.once('exit',r)),0,typed);
   assert.match(typed,/input: applied/);
-  // The X client saves asynchronously; on slow runners the file can lag the
-  // applied input by a moment. Bounded settle — the text must still land.
-  for (let i = 0; i < 20 && readFileSync(typedPath,'utf8') !== expectedText; i++) await new Promise(r=>setTimeout(r,100));
+  // Saving the final character proves key-down, not key-up. Observe the target's
+  // release of the final '6' (X11 keycode 15) before taking the chord baseline.
+  const finalTypingRelease = '{"kind":"key","keycode":15,"phase":"up"}\n';
+  for (let i = 0; i < 20 && (readFileSync(typedPath,'utf8') !== expectedText
+    || !events.slice(beforeTyping).includes(finalTypingRelease)); i++) await new Promise(r=>setTimeout(r,100));
   assert.equal(readFileSync(typedPath,'utf8'),expectedText,'saved X-client buffer must equal typed text');
+  assert(events.slice(beforeTyping).includes(finalTypingRelease),'target must observe the final typing key release before chords');
   const beforeChords = events.length;
   await run('press','Alt+Tab');
   await run('press','Meta+2');
