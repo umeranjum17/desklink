@@ -13,6 +13,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
+import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
+
+assertNoAmbientDesktop();
 
 const axiRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = resolve(axiRoot, '../..');
@@ -31,7 +34,7 @@ writeFileSync(join(fixture, 'index.html'), `<!doctype html><title>Research Index
 <a href="cobalt.html" target="_blank">cobalt</a>
 <a href="heron.html" target="_blank">heron</a>
 <form onsubmit="event.preventDefault();document.getElementById('saved').textContent='Saved '+document.getElementById('name').value">
-  <label>Name <input id="name"></label>
+  <label>Name <input id="name" autofocus></label>
   <button id="save">Save</button>
 </form>
 <span id="saved"></span>`);
@@ -50,15 +53,13 @@ const display = `:${number}`;
 const socket = `/tmp/.X11-unix/X${number}`;
 const authority = join(dir, 'Xauthority');
 assert.equal(spawnSync('xauth', ['-f', authority, 'add', display, '.', randomBytes(16).toString('hex')], { encoding: 'utf8' }).status, 0, 'xauth failed');
-const xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], { stdio: 'ignore' });
-for (let i = 0; i < 100 && !existsSync(socket) && xvfb.exitCode === null; i++) await new Promise(r => setTimeout(r, 50));
-assert(xvfb.pid && xvfb.exitCode === null && existsSync(socket), 'private Xvfb did not start');
-assert.equal(Number(readFileSync(`/tmp/.X${number}-lock`, 'utf8').trim()), xvfb.pid, 'X lock belongs to another server');
+let xvfb;
 
-const marker = `DESKLINK_AXI_SESSION=bench-${process.pid}`;
+const sessionName = `bench-${process.pid}-${randomBytes(16).toString('hex')}`;
+const marker = `DESKLINK_AXI_SESSION=${sessionName}`;
 const owned = new Map(); // PID -> start time
-owned.set(xvfb.pid, proc(xvfb.pid)?.started);
-const env = { ...process.env, DISPLAY: display, XAUTHORITY: authority, DESKLINK_AXI_SESSION: `bench-${process.pid}`, DESKLINK_AXI_ENGINE: enginePath };
+const env = { ...process.env, DISPLAY: display, WAYLAND_DISPLAY: '', XAUTHORITY: authority, DESKLINK_AXI_SESSION: sessionName, DESKLINK_AXI_ENGINE: enginePath,
+  DESKLINK_AXI_PID_FILE: join(dir, 'bridges.pid'), DESKLINK_AXI_ENGINE_PID_FILE: join(dir, 'engines.pid') };
 function proc(pid) {
   try {
     const fields = readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ')[1].split(' ');
@@ -72,12 +73,6 @@ async function stopProcess(pid) {
   for (let i = 0; i < 60 && alive(pid); i++) await new Promise(r => setTimeout(r, 50));
   if (alive(pid)) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
   for (let i = 0; i < 40 && alive(pid); i++) await new Promise(r => setTimeout(r, 25));
-}
-async function stopXvfb() {
-  if (!alive(xvfb.pid)) return;
-  try { xvfb.kill('SIGTERM'); } catch { /* gone */ }
-  for (let i = 0; i < 40 && alive(xvfb.pid); i++) await new Promise(r => setTimeout(r, 50));
-  if (alive(xvfb.pid)) { try { process.kill(xvfb.pid, 'SIGKILL'); } catch { /* gone */ } }
 }
 function childrenOf(pid) {
   try { return readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number); }
@@ -96,8 +91,37 @@ function sessionStrays() {
   return strays;
 }
 function rememberTree(pid) {
-  owned.set(pid, proc(pid)?.started);
+  const state = proc(pid);
+  if (!state || state.state === 'Z') return;
+  if (owned.has(pid) && owned.get(pid) !== state.started) return;
+  owned.set(pid, state.started);
   for (const kid of childrenOf(pid)) if (!owned.has(kid)) rememberTree(kid);
+}
+function recordProcesses() {
+  // These files are written by this run's bridge, inside its fresh private dir.
+  for (const [file, command] of [[env.DESKLINK_AXI_PID_FILE, '--bridge'], [env.DESKLINK_AXI_ENGINE_PID_FILE, enginePath]]) {
+    if (!existsSync(file)) continue;
+    for (const pid of readFileSync(file, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number)) {
+      const state = proc(pid);
+      if (!state || state.state === 'Z' || (owned.has(pid) && owned.get(pid) !== state.started)) continue;
+      let cmdline, environment;
+      try {
+        cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ');
+        environment = readFileSync(`/proc/${pid}/environ`).toString('latin1').split('\0');
+      } catch (error) {
+        const current = proc(pid);
+        if (!current || current.state === 'Z' || current.started !== state.started) continue;
+        throw error;
+      }
+      const current = proc(pid);
+      if (!current || current.state === 'Z' || current.started !== state.started) continue;
+      assert(cmdline.includes(command), 'unexpected recorded process');
+      assert(environment.includes(marker), 'recorded process is outside our session');
+      owned.set(pid, state.started);
+      rememberTree(pid);
+    }
+  }
+  for (const pid of owned.keys()) if (alive(pid)) rememberTree(pid);
 }
 
 const cli = resolve(axiRoot, 'bin/desklink-axi.js');
@@ -106,10 +130,13 @@ const CALL_TIMEOUT_MS = 20000;
 let runDeadline = Infinity;
 async function call(...args) {
   if (performance.now() > runDeadline) throw new Error('run-deadline exceeded');
+  recordProcesses();
   const started = performance.now();
   const child = spawn(process.execPath, [cli, ...args], { env, timeout: CALL_TIMEOUT_MS, killSignal: 'SIGKILL' });
+  rememberTree(child.pid);
   let out = ''; for await (const part of child.stdout) out += part;
-  const code = await new Promise(r => child.on('exit', r));
+  const code = child.exitCode ?? await new Promise(r => child.on('exit', r));
+  recordProcesses();
   return { ms: performance.now() - started, chars: out.length, out, code };
 }
 const tokenProxy = chars => Math.ceil(chars / 4); // labeled proxy, not a tokenizer
@@ -178,7 +205,7 @@ const tasks = {
       return { ok, ms, calls, chars, retries };
     }
     let retries = 0, calls = 0, chars = 0, ms = 0;
-    let batch = await call('batch', JSON.stringify([['press', 'Meta+l'], ['type', indexUrl], ['press', 'Return'], ['wait', 'change']])); calls++; chars += batch.chars; ms += batch.ms;
+    let batch = await call('batch', JSON.stringify([['press', 'ctrl+l'], ['type', indexUrl], ['press', 'Return'], ['wait', 'change']])); calls++; chars += batch.chars; ms += batch.ms;
     let verify = await call('screen', '--query', 'Research Index'); calls++; chars += verify.chars; ms += verify.ms;
     let ok = !verify.out.includes('text: 0 items match');
     if (!ok) { retries++; verify = await call('screen', '--query', 'Research Index'); calls++; chars += verify.chars; ms += verify.ms; ok = !verify.out.includes('text: 0 items match'); }
@@ -203,13 +230,13 @@ const tasks = {
       return { ok, ms, calls, chars, retries };
     }
     let retries = 0, calls = 0, chars = 0, ms = 0;
-    let reload = await call('batch', JSON.stringify([['press', 'Meta+l'], ['type', indexUrl], ['press', 'Return'], ['wait', 'change']])); calls++; chars += reload.chars; ms += reload.ms;
-    // AXI target() clicks the word inside the OCR line, so the merged
-    // "Name | Save" row needs no coordinate calibration.
+    // Wait for a post-key frame change: standalone settle can accept the old
+    // page while reload is pending and discard the typing that follows.
+    let reload = await call('batch', JSON.stringify([['press', 'ctrl+r', '--wait', 'settle']])); calls++; chars += reload.chars; ms += reload.ms;
+    // The fixture focuses its input on reload; Enter submits the form.
+    // OCR can return overlapping rows for the inline labels.
     let act = await call('batch', JSON.stringify([
-      ['snapshot'],
-      ['type', name, '--into', 'Name'],
-      ['click', 'Save'],
+      ['type', name, '--submit'],
       ['wait', '300'],
     ])); calls++; chars += act.chars; ms += act.ms;
     let verify = await call('screen', '--query', `Saved ${name}`); calls++; chars += verify.chars; ms += verify.ms;
@@ -260,9 +287,7 @@ const tasks = {
     let retries = 0, calls = 0, chars = 0, ms = 0;
     // Popups from earlier runs are closed with ctrl+w, so exactly one popup is open at a time.
     let snap = await call('screen', '--query', 'cobalt'); calls++; chars += snap.chars; ms += snap.ms;
-    let cobaltRef = /^  (@\d+\.\d+),"cobalt"/m.exec(snap.out)?.[1];
-    if (!cobaltRef) { retries++; snap = await call('screen', '--query', 'cobalt'); calls++; chars += snap.chars; ms += snap.ms; cobaltRef = /^  (@\d+\.\d+),"cobalt"/m.exec(snap.out)?.[1]; }
-    let click1 = await call('click', cobaltRef, '--wait', 'change'); calls++; chars += click1.chars; ms += click1.ms;
+    let click1 = await call('click', 'cobalt', '--wait', 'change'); calls++; chars += click1.chars; ms += click1.ms;
     let verify1 = await call('screen', '--query', 'cobalt answer'); calls++; chars += verify1.chars; ms += verify1.ms;
     let okCobalt = !verify1.out.includes('text: 0 items match');
     if (!okCobalt) { retries++; await new Promise(r => setTimeout(r, 400)); verify1 = await call('screen', '--query', 'cobalt answer'); calls++; chars += verify1.chars; ms += verify1.ms; okCobalt = !verify1.out.includes('text: 0 items match'); }
@@ -270,9 +295,7 @@ const tasks = {
     let close1 = await call('press', 'ctrl+w'); calls++; chars += close1.chars; ms += close1.ms;
     await new Promise(r => setTimeout(r, 300));
     snap = await call('screen', '--query', 'heron'); calls++; chars += snap.chars; ms += snap.ms;
-    let heronRef = /^  (@\d+\.\d+),"heron"/m.exec(snap.out)?.[1];
-    if (!heronRef) { retries++; snap = await call('screen', '--query', 'heron'); calls++; chars += snap.chars; ms += snap.ms; heronRef = /^  (@\d+\.\d+),"heron"/m.exec(snap.out)?.[1]; }
-    let click2 = await call('click', heronRef, '--wait', 'change'); calls++; chars += click2.chars; ms += click2.ms;
+    let click2 = await call('click', 'heron', '--wait', 'change'); calls++; chars += click2.chars; ms += click2.ms;
     let verify2 = await call('screen', '--query', 'heron answer'); calls++; chars += verify2.chars; ms += verify2.ms;
     let okHeron = !verify2.out.includes('text: 0 items match');
     if (!okHeron) { retries++; await new Promise(r => setTimeout(r, 400)); verify2 = await call('screen', '--query', 'heron answer'); calls++; chars += verify2.chars; ms += verify2.ms; okHeron = !verify2.out.includes('text: 0 items match'); }
@@ -283,6 +306,10 @@ const tasks = {
 };
 
 try {
+  xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], { stdio: 'ignore' });
+  trackOwnedXvfb(xvfb, display);
+  owned.set(xvfb.pid, proc(xvfb.pid)?.started);
+  await verifyOwnedXvfb(xvfb);
   // AXI desktop session on the private display (control input, OCR refs).
   const start = await call('start', '--control', '--source', 'x11', '--display', display);
   assert.equal(start.code, 0, start.out);
@@ -347,15 +374,18 @@ try {
   }
   for (const key of notCompleted) console.log(`| ${key.split('|')[0]} | ${key.split('|')[1]} | not completed | - | - | - | - | run deadline hit |`);
   if (process.env.DESKLINK_AXI_BENCH_PATH) writeFileSync(process.env.DESKLINK_AXI_BENCH_PATH, JSON.stringify({ ...report, notCompleted }, null, 1));
-  // Overlay/engine children can outlive the bridge stop; reap ours by PID.
-  for (const stray of sessionStrays()) { owned.set(stray.pid, proc(stray.pid)?.started); await stopProcess(stray.pid); }
+  // Only recorded PID/start-time identities may be reaped; tags detect leaks.
   const strays = sessionStrays();
   assert.equal(strays.length, 0, `stray session members: ${JSON.stringify(strays)}`);
   console.log(`\nbench: ${RUNS}-run comparison recorded; no task-owned survivors on Xvfb :${number}`);
 } finally {
-  if (browserProfile) await call('browser', 'detach').catch(() => { });
-  for (const pid of [...owned.keys()]) await stopProcess(pid);
-  for (const stray of sessionStrays()) { try { process.kill(stray.pid, 'SIGKILL'); } catch { /* gone */ } }
-  await stopXvfb();
-  rmSync(dir, { recursive: true, force: true });
+  try {
+    if (browserProfile) await call('browser', 'detach').catch(() => { });
+    recordProcesses();
+  } finally {
+    for (const pid of [...owned.keys()]) if (pid !== xvfb?.pid) await stopProcess(pid);
+    if (xvfb) await stopOwnedXvfb(xvfb);
+    assert.equal(sessionStrays().length, 0, 'unrecorded session processes survived');
+    rmSync(dir, { recursive: true, force: true });
+  }
 }

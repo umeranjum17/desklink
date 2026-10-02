@@ -184,7 +184,7 @@ export function explainMissingEngine(
         return `There is no prebuilt desktop engine for ${tag}. Build it from source (see the @desklink/host README) and point DESKLINK_ENGINE at the binary.`;
     }
     if (process.platform !== 'linux') {
-        return `The desktop engine runs on Linux and macOS; ${process.platform} is not supported yet.`;
+        return `The desktop engine runs on Linux and macOS (preview); ${process.platform} is not supported yet.`;
     }
     const tag = platformTag();
     if (PREBUILT_PLATFORMS.includes(tag)) {

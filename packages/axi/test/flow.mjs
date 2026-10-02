@@ -3,10 +3,13 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { EngineClient } from '@desklink/host';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 
+import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
+
+assertNoAmbientDesktop();
+const { EngineClient } = await import('@desklink/host');
 const dir = mkdtempSync(join(tmpdir(), 'desklink-axi-flow-'));
 const enginePath = process.env.DESKLINK_AXI_ENGINE;
 assert(enginePath && existsSync(enginePath), 'set DESKLINK_AXI_ENGINE to this task’s built engine');
@@ -30,10 +33,12 @@ let xvfbReady = false;
 let xvfbError = '';
 xvfb.stderr.on('data', chunk => xvfbError = (xvfbError + chunk).slice(-2000));
 xvfb.on('error', error => xvfbError = String(error));
+trackOwnedXvfb(xvfb, display);
 const pidFile = join(dir, 'bridges.pid');
 const enginePidFile = join(dir, 'engines.pid');
 const owned = new Map(); // PID -> /proc start time; never signal a reused PID.
-const env = { ...process.env, DISPLAY: display, WAYLAND_DISPLAY: '', XAUTHORITY: authority, DESKLINK_AXI_SESSION: `flow-${process.pid}`, DESKLINK_AXI_ENGINE: enginePath, DESKLINK_AXI_PID_FILE: pidFile, DESKLINK_AXI_ENGINE_PID_FILE: enginePidFile };
+const sessionName = `flow-${process.pid}-${randomBytes(16).toString('hex')}`;
+const env = { ...process.env, DISPLAY: display, WAYLAND_DISPLAY: '', XAUTHORITY: authority, DESKLINK_AXI_SESSION: sessionName, DESKLINK_AXI_ENGINE: enginePath, DESKLINK_AXI_PID_FILE: pidFile, DESKLINK_AXI_ENGINE_PID_FILE: enginePidFile };
 function proc(pid) {
   try {
     const fields = readFileSync(`/proc/${pid}/stat`,'utf8').split(') ')[1].split(' ');
@@ -62,11 +67,8 @@ function recordProcesses() {
     } catch { /* Child already exited. */ }
   }
 }
-// A stale dist whose bridge predates pid-file support (the benchmark's false
-// failure) writes neither PID file, so recordProcesses() finds nothing. Every
-// process this run started carries this run's unique session marker in its
-// environment; scan /proc for exact marker matches and reap them too.
-const sessionMarker = `DESKLINK_AXI_SESSION=flow-${process.pid}`;
+// Detect unrecorded session members, but never adopt them for cleanup.
+const sessionMarker = `DESKLINK_AXI_SESSION=${sessionName}`;
 function sessionStrays() {
   const strays = [];
   for (const entry of readdirSync('/proc')) {
@@ -93,37 +95,13 @@ async function stopProcess(pid) {
   for (let i=0;i<40 && alive();i++) await new Promise(r=>setTimeout(r,25));
   assert(!alive(), `task-owned process ${pid} survived cleanup`);
 }
-async function stopXvfbGracefully() {
-  const alive = () => { const state = proc(xvfb.pid); return state?.started === owned.get(xvfb.pid) && state.state !== 'Z'; };
-  if (!alive()) return;
-  // Startup verification can fail while -sigstop has the server stopped.
-  // Let it handle SIGTERM and unlink its own socket and lock in that case.
-  if (proc(xvfb.pid)?.state === 'T') xvfb.kill('SIGCONT');
-  try { xvfb.kill('SIGTERM'); } catch { /* already gone */ }
-  for (let i = 0; i < 40 && alive(); i++) await new Promise(r => setTimeout(r, 50));
-  if (alive()) await stopProcess(xvfb.pid); // Graceful exit unlinks the X socket; SIGKILL leaves it behind.
-}
+async function stopXvfbGracefully() { await stopOwnedXvfb(xvfb); }
 async function verifyXvfb() {
   if (!xvfbReady) {
     for (let i=0;i<200 && proc(xvfb.pid)?.state!=='T' && xvfb.pid && xvfb.exitCode===null && xvfb.signalCode===null;i++) await new Promise(r=>setTimeout(r,50));
     assert(xvfb.pid && xvfb.exitCode===null && proc(xvfb.pid)?.state==='T', `private Xvfb did not become ready: ${xvfbError}`);
   }
-  assert(xvfb.pid && xvfb.exitCode===null && existsSync(socket), 'private Xvfb did not start');
-  assert.equal(Number(readFileSync(`/tmp/.X${number}-lock`,'utf8').trim()),xvfb.pid,'X lock belongs to another server');
-  // Every accepted client connection also carries the socket path and sorts
-  // before the listener, so the first table row is the wrong inode whenever
-  // a client is connected or its just-closed row still lingers: select the
-  // listening socket (Flags carries __SO_ACCEPTCON 0x00010000) instead.
-  const rows = readFileSync('/proc/net/unix','utf8').split('\n').filter(line=>line.endsWith(` ${socket}`));
-  assert(rows.length > 0,'X socket missing from proc socket table');
-  const listening = rows.filter(line=>(parseInt(line.trim().split(/\s+/)[3],16) & 0x10000) !== 0);
-  assert(listening.length > 0,'X listening socket missing from proc socket table');
-  assert(listening.some(line=> {
-    const inode = line.trim().split(/\s+/)[6];
-    return readdirSync(`/proc/${xvfb.pid}/fd`).some(fd=> {
-      try { return readlinkSync(`/proc/${xvfb.pid}/fd/${fd}`)===`socket:[${inode}]`; } catch { return false; }
-    });
-  }), 'X server socket is not held by the spawned Xvfb PID');
+  await verifyOwnedXvfb(xvfb);
   if (!xvfbReady) {
     xvfb.kill('SIGCONT');
     xvfbReady = true;
@@ -147,10 +125,8 @@ function cleanup() {
     if (target) target.kill('SIGTERM');
     const failures = [];
     try { recordProcesses(); } catch (error) { failures.push(error); }
-    for (const stray of sessionStrays()) {
-      try { remember(stray.pid, stray.cmdline.slice(0, 48)); }
-      catch (error) { failures.push(error); }
-    }
+    // Session tags detect leaks; they do not grant permission to kill a PID.
+    if (sessionStrays().length) failures.push(new Error('unrecorded session processes survived'));
     for (const pid of owned.keys()) if (pid !== xvfb.pid) {
       try { await stopProcess(pid); } catch (error) { failures.push(error); }
     }
@@ -481,7 +457,7 @@ try {
   await run('stop');
   const badDisplay = `:${number+1000}`;
   assert(!existsSync(`/tmp/.X11-unix/X${number+1000}`) && !existsSync(`/tmp/.X${number+1000}-lock`));
-  const failed = spawn(process.execPath,[cli,'start','--source','x11','--display',badDisplay,'--timeout','3000'],{env:{...env,DESKLINK_AXI_SESSION:`failed-${process.pid}`}});
+  const failed = spawn(process.execPath,[cli,'start','--source','x11','--display',badDisplay,'--timeout','3000'],{env:{...env,DESKLINK_AXI_SESSION:`${sessionName}-failed`}});
   let failure=''; for await (const part of failed.stdout) failure += part;
   assert.equal(failed.exitCode ?? await new Promise(r=>failed.once('exit',r)),1,failure);
   recordProcesses();

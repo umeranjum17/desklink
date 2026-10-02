@@ -16,20 +16,19 @@ import struct
 import threading
 import subprocess
 import time
+for name in ("DISPLAY", "WAYLAND_DISPLAY"):
+    if os.environ.get(name):
+        raise RuntimeError(f"private lab refuses ambient {name}; unset it before running this test")
 from PIL import Image, ImageChops
 
 ROOT = Path(__file__).resolve().parents[4]
 ENGINE = ROOT / "packages/desktop-host/engine"
 EVIDENCE = Path(os.environ["DESKLINK_POINT_EVIDENCE_DIR"]).resolve()
 TARGET = Path(os.environ["CARGO_TARGET_DIR"]).resolve()
+assert not EVIDENCE.exists() or not any(EVIDENCE.iterdir()), "use a fresh task-owned evidence directory"
 EVIDENCE.mkdir(parents=True, exist_ok=True)
 runtime = EVIDENCE / "runtime"
-runtime.mkdir(mode=0o700, exist_ok=True)
-assert not any(runtime.glob("wayland-*")), "runtime must have no preexisting compositor socket"
-for path in EVIDENCE.glob("*.ready"):
-    path.unlink()
-for path in EVIDENCE.glob("*.continue"):
-    path.unlink()
+runtime.mkdir(mode=0o700)
 env = os.environ.copy()
 for key in ["WAYLAND_DISPLAY", "DISPLAY", "SWAYSOCK", "HYPRLAND_INSTANCE_SIGNATURE", "DBUS_SESSION_BUS_ADDRESS", "AT_SPI_BUS_ADDRESS"]:
     env.pop(key, None)
@@ -61,6 +60,19 @@ def wait_until(predicate, seconds=15):
     while not predicate():
         assert time.monotonic() < deadline, "private flow timed out"
         time.sleep(0.02)
+
+def assert_owned_socket(child, path):
+    assert child.poll() is None, "private compositor exited"
+    listeners = {line.split()[6] for line in Path("/proc/net/unix").read_text().splitlines()
+                 if line.endswith(" " + str(path)) and int(line.split()[3], 16) & 0x10000}
+    fds = set()
+    for fd in Path(f"/proc/{child.pid}/fd").iterdir():
+        try:
+            fds.add(os.readlink(fd))
+        except FileNotFoundError:
+            pass
+    assert any(f"socket:[{inode}]" in fds for inode in listeners), "socket is not held by our compositor"
+    assert Path(path).stat().st_uid == os.getuid(), "unexpected socket owner"
 
 def ipc(*args):
     return json.loads(subprocess.check_output([swaymsg, "-r", *args], env=env))
@@ -180,11 +192,12 @@ try:
     socket_lock = next(runtime.glob("wayland-*.lock"))
     env["WAYLAND_DISPLAY"] = str(socket_lock.with_suffix(""))  # absolute PRIVATE socket
     env["SWAYSOCK"] = str(next(runtime.glob("sway-ipc.*.sock")))
+    assert_owned_socket(compositor, env["WAYLAND_DISPLAY"])
+    assert_owned_socket(compositor, env["SWAYSOCK"])
     outputs = ipc("-t", "get_outputs")
     assert {o["name"] for o in outputs} == {"HEADLESS-1", "HEADLESS-2"}
     pointer = virtual_pointer(env["WAYLAND_DISPLAY"])
     unavailable_path = runtime / "no-layer-shell"
-    if unavailable_path.exists(): unavailable_path.unlink()
     unavailable = no_layer_shell_server(unavailable_path)
     fixture = start(["foot", "-c", "/dev/null", "-o", "cursor.blink=no", "sh", "-c",
                      "printf 'Desklink: point here\nPrivate Wayland output\n\033[?1000h\033[?1006h'; stty -echo -icanon; exec cat > "+shlex.quote(str(EVIDENCE / "click.bin"))], "fixture.log")

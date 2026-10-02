@@ -75,6 +75,9 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
 
+import { assertNoAmbientDesktop } from './lab-safety.mjs';
+
+assertNoAmbientDesktop();
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '../../..');
 const self = fileURLToPath(import.meta.url);
@@ -95,6 +98,7 @@ const firstFile = (paths) => paths.find((path) => typeof path === 'string' && pa
  * dies with this process: it is the pid namespace's init.
  */
 async function cage(dir) {
+    assert.equal(process.pid, 1, 'portal cage must be the init of its private PID namespace');
     const config = JSON.parse(readFileSync(join(dir, 'cage.json'), 'utf8'));
     const runtime = `/run/user/${process.getuid()}`;
     const env = {

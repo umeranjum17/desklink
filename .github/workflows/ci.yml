@@ -66,6 +66,7 @@ jobs:
           DESKLINK_POINT_EVIDENCE_DIR: ${{ runner.temp }}/desklink-point-wayland
           CARGO_TARGET_DIR: ${{ github.workspace }}/packages/desktop-host/engine/target
       - run: npm ci && npm run build
+      - run: npm run test:lab-safety
       - run: node packages/axi/test/flow.mjs
         env:
           DESKLINK_AXI_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/desklink-host
