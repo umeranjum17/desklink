@@ -235,8 +235,8 @@ const styles = StyleSheet.create({
     message: { position: 'absolute', left: 0, right: 0, bottom: 48, alignItems: 'center' },
     messageText: { color: '#fff', fontSize: 16 },
     confirmation: { minHeight: 48, justifyContent: 'center' },
-    keys: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingBottom: 24, flexDirection: 'row', backgroundColor: 'rgba(22, 23, 26, 0.94)' },
-    row: { flex: 1, backgroundColor: 'transparent' },
+    keys: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingBottom: 24, backgroundColor: 'rgba(22, 23, 26, 0.94)' },
+    row: { backgroundColor: 'transparent' },
     copy: { margin: 8, minHeight: 44, paddingHorizontal: 12, borderRadius: 8, justifyContent: 'center', backgroundColor: '#2b2d33' },
     copyLabel: { color: '#c9ccd3', fontSize: 15, fontWeight: '500' },
     // Below the status bar and any notch.

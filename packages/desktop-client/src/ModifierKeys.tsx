@@ -57,8 +57,8 @@ export const KEY_COLORS = {
 };
 
 const styles = StyleSheet.create({
-    row: { flexDirection: 'row', gap: 8, padding: 8, backgroundColor: KEY_COLORS.backing },
-    key: { minWidth: 56, minHeight: 44, paddingHorizontal: 12, borderRadius: 8, borderWidth: 2, alignItems: 'center', justifyContent: 'center' },
+    row: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, padding: 8, backgroundColor: KEY_COLORS.backing },
+    key: { minWidth: 56, maxWidth: '100%', minHeight: 44, paddingHorizontal: 12, borderRadius: 8, borderWidth: 2, alignItems: 'center', justifyContent: 'center' },
     off: { backgroundColor: KEY_COLORS.off, borderColor: '#4b4e57' },
     on: { backgroundColor: KEY_COLORS.on, borderColor: KEY_COLORS.on },
     lock: { borderColor: '#ffffff' },
