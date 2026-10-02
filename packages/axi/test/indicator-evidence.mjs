@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, readdirSync,
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { PNG } from 'pngjs';
 import { assertNoAmbientDesktop } from '../../desktop-host/test/lab-safety.mjs';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -76,6 +77,8 @@ export function legibility(path, background) {
         failing_angles: failing, best_contrast: Math.round(best*10)/10 };
 }
 async function sequence({ env, enginePath, args, dir, scale, width, height, background, screenshot, recorder, track=child=>child }) {
+    const engineHash = () => createHash('sha256').update(readFileSync(enginePath)).digest('hex');
+    const engineSha256 = engineHash();
     mkdirSync(dir,{recursive:true});
     const phase=process.env.DESKLINK_INDICATOR_PHASE || 'after';
     const clip=join(dir,`desklink-agent-indicator-${phase}.mp4`);
@@ -114,7 +117,8 @@ async function sequence({ env, enginePath, args, dir, scale, width, height, back
     assert(existsSync(clip),'native clip exists');
     const probe=JSON.parse(run('ffprobe',['-v','error','-show_streams','-of','json',clip],env));
     assert.equal(probe.streams[0].width,width);assert.equal(probe.streams[0].height,height);
-    writeFileSync(join(dir,`${phase}-provenance.json`),JSON.stringify({enginePath:resolve(enginePath),width,height,scale,clip,colors,legibility:results,display:env.DISPLAY,wayland:env.WAYLAND_DISPLAY},null,2));
+    assert.equal(engineHash(),engineSha256,'engine changed during recording');
+    writeFileSync(join(dir,`${phase}-provenance.json`),JSON.stringify({enginePath:resolve(enginePath),engineSha256,width,height,scale,clip,colors,legibility:results,display:env.DISPLAY,wayland:env.WAYLAND_DISPLAY},null,2));
     return results;
 }
 export async function recordX11({ env, enginePath, display, width, height, scale, verifyXvfb, remember }) {
