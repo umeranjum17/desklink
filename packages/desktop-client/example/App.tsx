@@ -12,7 +12,7 @@
  */
 import * as React from 'react';
 import { Settings, StyleSheet, Text, View } from 'react-native';
-import { CONTROL_PERMISSIONS, DesktopView, useDesktopSession, type SessionEvent, type Signaling } from '@desklink/react-native';
+import { DesktopView, useDesktopSession, type SessionEvent, type Signaling } from '@desklink/react-native';
 
 const url: unknown = Settings.get('desklinkUrl');
 
@@ -72,7 +72,7 @@ export default function App() {
             // A reconnect gets a fresh socket: the bridge ends a session whose socket closed.
             signaling.current?.close();
             signaling.current = bridgeSignaling(url);
-            return { signaling: signaling.current, session: { permissions: CONTROL_PERMISSIONS } };
+            return { signaling: signaling.current, session: {} };
         },
     });
     const { status, presented, failure, geometry } = desktop.snapshot;

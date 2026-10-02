@@ -58,12 +58,12 @@ changes, and trackpad presses reach the desktop as touches.
 ## Use
 
 ```tsx
-import { DesktopView, useDesktopSession, CONTROL_PERMISSIONS } from '@desklink/react-native';
+import { DesktopView, useDesktopSession } from '@desklink/react-native';
 
 const desktop = useDesktopSession({
     authorize: async () => ({
         signaling,                                   // your authenticated channel to the host
-        session: { permissions: CONTROL_PERMISSIONS },
+        session: {},
     }),
 });
 
@@ -77,6 +77,13 @@ desktop.showKeyboard();
 desktop.setOrientation('landscape');   // Android only; iOS apps configure supported orientations themselves
 await desktop.pasteLocalToRemote(await Clipboard.getStringAsync());
 ```
+
+Pairing is the only trust boundary. `authorize` is the app's pairing check: it
+returns a channel to a paired computer or throws, and it runs again on every
+reconnect, so a revoked pairing cannot reopen. A paired session has view,
+input and clipboard; there are no in-app grants, and `session.permissions` is
+ignored. Only the operating system's own consent (screen recording,
+accessibility, a screen-sharing prompt) still applies on the computer.
 
 A screen that only decides *whether* to offer a desktop does not need the
 session: import the flag from its own entry, which is a constant on web and a
@@ -98,7 +105,7 @@ engine only produces frames on change.
 Keep the encoded picture inside a 1920×1080 box:
 
 ```tsx
-session: { permissions: CONTROL_PERMISSIONS, maxWidth: 1920, maxHeight: 1080 },
+session: { maxWidth: 1920, maxHeight: 1080 },
 ```
 
 The engine never upscales, so a smaller desktop is sent at its own size and a
@@ -212,11 +219,13 @@ heat and battery.
   network is still down. Renegotiation transients from a restart the session
   asked for itself are expected, not a new outage: they neither flip the
   status nor trigger another restart for a short grace window.
-- **Control starts off.** `setInputEnabled(true)` enables pointer, keyboard and
-  clipboard input; `setInputEnabled(false)` blocks new input, releases held keys
-  and buttons, and resets pending gestures. The app decides when to enable it
-  after a deliberate action and must disable it on background or lost readiness;
-  a clipboard write already in flight may still finish.
+- **Input starts disarmed.** This is a local arm against accidental touches,
+  not a permission: the session already has input. `setInputEnabled(true)` arms
+  pointer, keyboard and clipboard input; `setInputEnabled(false)` blocks new
+  input, releases held keys and buttons, and resets pending gestures. The app
+  decides when to arm it after a deliberate action and must disarm it on
+  background or lost readiness; a clipboard write already in flight may still
+  finish.
 - **Released state.** The app disables input on background and unmount;
   session close and a lost control channel release what the desktop was holding.
 - **Explicit clipboard.** Two methods, called on a user action while control is

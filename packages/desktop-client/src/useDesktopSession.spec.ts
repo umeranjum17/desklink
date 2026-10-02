@@ -136,7 +136,7 @@ async function connectedSession(onCursor?: DesktopSessionOptions['onCursor']): P
     const held: { current: DesktopSession | null } = { current: null };
     function Harness() {
         held.current = useDesktopSession({
-            authorize: async () => ({ signaling: signaling(), session: { permissions: ['view', 'control'] } }),
+            authorize: async () => ({ signaling: signaling(), session: {} }),
             onCursor,
         });
         return null;
@@ -174,6 +174,34 @@ async function liveSession(): Promise<{ current: DesktopSession }> {
 function sentKinds(): string[] {
     return sent.map((message) => (JSON.parse(message) as { kind: string }).kind);
 }
+
+describe('session.open on the wire', () => {
+    // Pairing is the boundary, so the app's own permissions are ignored. The
+    // full set still goes on the wire because a 0.3 engine refuses an open
+    // without view.
+    it('always carries the full permission set, whatever the app asked for', async () => {
+        await connectedSession();
+        const legacy: { current: DesktopSession | null } = { current: null };
+        function Legacy() {
+            legacy.current = useDesktopSession({
+                authorize: async () => ({ signaling: signaling(), session: { permissions: ['view'] } }),
+            });
+            return null;
+        }
+        await TestRenderer.act(async () => {
+            mounted.push(TestRenderer.create(React.createElement(Legacy)));
+        });
+        await TestRenderer.act(async () => {
+            await legacy.current?.connect();
+        });
+
+        const opens = requests.filter((request) => request.method === 'session.open');
+        expect(opens.map((open) => open.params?.permissions)).toEqual([
+            ['view', 'control', 'clipboard'],
+            ['view', 'control', 'clipboard'],
+        ]);
+    });
+});
 
 describe('control messages', () => {
     it('leaves the sequence to the platform so input and app messages share one counter', async () => {
@@ -285,7 +313,7 @@ describe('a refusal the host makes', () => {
                             },
                             subscribe: () => () => undefined,
                         },
-                        session: { permissions: ['view', 'control'] },
+                        session: {},
                     };
                 },
             });
@@ -322,7 +350,7 @@ describe('an opened host session whose native creation fails', () => {
         const held: { current: DesktopSession | null } = { current: null };
         function Harness() {
             held.current = useDesktopSession({
-                authorize: async () => ({ signaling: channel, session: { permissions: ['view', 'control'] } }),
+                authorize: async () => ({ signaling: channel, session: {} }),
             });
             return null;
         }
@@ -376,7 +404,7 @@ describe('a session that finishes opening after the screen was torn down', () =>
 
         function Harness() {
             held.current = useDesktopSession({
-                authorize: async () => ({ signaling, session: { permissions: ['view', 'control'] } }),
+                authorize: async () => ({ signaling, session: {} }),
             });
             return null;
         }
@@ -608,7 +636,7 @@ describe('an offer that beats the open result back', () => {
                             return () => { emit = null; };
                         },
                     },
-                    session: { permissions: ['view', 'control'] },
+                    session: {},
                 }),
             });
             return null;

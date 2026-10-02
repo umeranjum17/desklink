@@ -269,14 +269,12 @@ async function start() {
     const capabilities = await request('capabilities');
     const clipboardAvailable = capabilities.clipboard?.read === true && capabilities.clipboard?.write === true;
     const controlAvailable = capabilities.input?.pointer === true && capabilities.input?.keyboard === true;
-    const permissions = ['view'];
-    if (controlAvailable) permissions.push('control');
-    if (clipboardAvailable) permissions.push('clipboard');
-    const session = await request('session.open', { permissions });
+    // The bridge token is the pairing: a paired session has view, input and clipboard.
+    const session = await request('session.open', {});
     currentSessionId = session.sessionId;
     keyboard.disabled = !controlAvailable;
     keyboardButton.disabled = !controlAvailable;
-    keyboardButton.title = controlAvailable ? '' : capabilities.input?.unavailable_reason?.remedy ?? 'This session is view-only';
+    keyboardButton.title = controlAvailable ? '' : capabilities.input?.unavailable_reason?.remedy ?? 'Input is unavailable on this machine';
     video.style.pointerEvents = controlAvailable ? 'auto' : 'none';
     copy.hidden = !clipboardAvailable;
     paste.hidden = !clipboardAvailable;

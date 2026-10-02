@@ -122,7 +122,7 @@ function Harness() {
             await socketOpen;
             probe.opens += 1;
             const ttlSeconds = (window as any).__ttlSeconds;
-            return { signaling, session: { permissions: ['view', 'control', 'clipboard'], maxWidth: 1280, maxHeight: 800, maxFps: 30, ttlSeconds } };
+            return { signaling, session: { maxWidth: 1280, maxHeight: 800, maxFps: 30, ttlSeconds } };
         },
         onStateChange: (snapshot) => {
             probe.status = snapshot.status;
@@ -641,7 +641,7 @@ export default { root: PAGE, logLevel: 'warn',
     console.log(`SUSPEND-RESULT ${JSON.stringify(suspended)}`);
     await evaluate(cdp, 'window.__silencePeerFailure = false');
 
-    // ---- an authorization revocation still ends --------------------------
+    // ---- pairing revocation still ends -----------------------------------
     // A session opened with an 8 s lease: its expiry is the grant ending, not
     // an outage, so the session ends and nothing reopens it.
     await evaluate(cdp, 'window.__ttlSeconds = 8; true');

@@ -106,7 +106,7 @@ async function liveDesktop() {
     const rejected: string[] = [];
     function Harness() {
         held.current = useDesktopSession({
-            authorize: async () => ({ signaling, session: { permissions: ['view', 'control'] } }),
+            authorize: async () => ({ signaling, session: {} }),
             onRejected: ({ code }) => rejected.push(code),
         });
         return null;

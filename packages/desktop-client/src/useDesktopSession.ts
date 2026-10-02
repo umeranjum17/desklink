@@ -172,10 +172,10 @@ async function loadPlatform(): Promise<boolean> {
 
 export interface DesktopSessionOptions {
     /**
-     * Ask the owning application for a fresh, short-lived authorization and the
-     * authenticated channel to the host engine. Called for the first connection
-     * and again for a reconnect: the package never reuses authority it was not
-     * granted again.
+     * The app's pairing check: return the authenticated channel to the host
+     * engine of a paired computer, or throw. Pairing is the only trust
+     * boundary, so a paired session has view, input and clipboard. Called again
+     * on every reconnect, so a revoked pairing cannot reopen.
      */
     authorize: () => Promise<{ signaling: Signaling; session: SessionOpenRequest }>;
     onStateChange?: (snapshot: SessionSnapshot) => void;
@@ -717,7 +717,10 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         let openedResult: SessionOpenResult;
         try {
             openedResult = await authorization.signaling.request<SessionOpenResult>('session.open', {
-                permissions: authorization.session.permissions,
+                // Ignored by 0.4+ engines, whatever the app asked for. A 0.3
+                // engine refuses an open without `view`, so the full set stays
+                // on the wire until 0.3 hosts leave support.
+                permissions: ['view', 'control', 'clipboard'],
                 max_width: authorization.session.maxWidth,
                 ...(authorization.session.cursor === undefined ? {} : { cursor: authorization.session.cursor }),
                 max_height: authorization.session.maxHeight,
@@ -1106,5 +1109,5 @@ function randomId(): string {
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-/** The permissions a normal remote-control session asks for. */
+/** @deprecated Ignored: a paired session always has view, input and clipboard. Removed at 1.0. */
 export const CONTROL_PERMISSIONS: Permission[] = ['view', 'control', 'clipboard'];
