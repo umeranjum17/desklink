@@ -137,10 +137,10 @@ jobs:
         env:
           DESKLINK_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/x86_64-pc-windows-msvc/debug/desklink-host.exe
 
-  # Shared dependency/module changes must still compile on macOS. The release
-  # build with static libvpx remains qualified by the macOS release script.
+  # Standard hosted ARM64 runner: build/pack/install the existing unsigned CLI
+  # release path without capture, input, or interactive macOS qualification.
   engine-macos-seam:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Rust (the version the release build pins)
@@ -148,6 +148,41 @@ jobs:
       - run: cargo build --locked --manifest-path packages/desktop-host/engine/Cargo.toml
       - run: cargo test --locked --manifest-path packages/desktop-host/engine/Cargo.toml
       - run: packages/desktop-host/engine/target/debug/desklink-host capabilities
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Build matching Darwin release artifact with static libvpx
+        run: |
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          brew install libvpx
+          test -f "$(brew --prefix libvpx)/lib/libvpx.a"
+          npm ci && npm run build
+          packages/desktop-host/release/build-engine-macos-arm64.sh
+          node packages/desktop-host/release/pack.mjs --engine dist-desklink/engine-darwin-arm64 --platform darwin-arm64
+          packages/desktop-host/release/check-install.sh | tee dist-desklink/darwin-install-smoke.txt
+          {
+            uname -a
+            git rev-parse HEAD HEAD^{tree}
+            git archive HEAD | shasum -a 256
+            shasum -a 256 package-lock.json packages/desktop-host/engine/Cargo.lock packages/desktop-host/release/build-engine-macos-arm64.sh
+            brew info --json=v2 libvpx
+            shasum -a 256 "$(brew --prefix libvpx)/lib/libvpx.a"
+            dist-desklink/engine-darwin-arm64/desklink-host version
+            dist-desklink/engine-darwin-arm64/desklink-host capabilities
+            otool -L dist-desklink/engine-darwin-arm64/desklink-host
+            shasum -a 256 dist-desklink/engine-darwin-arm64/* dist-desklink/*.tgz
+          } > dist-desklink/darwin-build-manifest.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-arm64-release
+          path: |
+            dist-desklink/engine-darwin-arm64/
+            dist-desklink/desklink-host-darwin-arm64-*.tgz
+            dist-desklink/darwin-build-manifest.txt
+            dist-desklink/darwin-install-smoke.txt
+          if-no-files-found: error
 
   # The glass-to-glass latency/fps lab: a stamp target on a private Xvfb, read
   # back in headless Chromium. Report-only (continue-on-error): CI runners are
