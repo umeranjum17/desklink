@@ -522,13 +522,13 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         return PNG.sync.read(readFileSync(path));
     };
     /** The picture's top, left and bottom edge in points, scanning for the paper from the screen's edges. */
-    const pictureBox = (png) => {
+    const pictureBox = (png, width = screenWidth) => {
         const light = (x, y) => { const i = (y * png.width + x) * 4; return png.data[i] + png.data[i + 1] + png.data[i + 2] > 600; };
         const middle = Math.round(png.width * 0.6);
         let top = 0; while (top < png.height - 1 && !light(middle, top)) top++;
         let bottom = png.height - 1; while (bottom > top && !light(middle, bottom)) bottom--;
         let left = 0; while (left < png.width - 1 && !light(left, top + 4)) left++;
-        const density = png.width / screenWidth;
+        const density = png.width / width;
         return { top: top / density, left: left / density, bottom: (bottom + 1) / density };
     };
     /** Share of the screen inside fully black rows or columns: the letterbox. */
@@ -742,11 +742,18 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     log(`panned: the second click's dot moved from x ${dotFirst.toFixed(1)} to ${dotPanned === null ? 'off the screen' : `${dotPanned.toFixed(1)} pt`}`);
     pointerSteps(udid, [{ action: 'landscape', x: 0, y: 0 }]);
     await sleep(1500);
-    const landscape = capture(join(out, 'desklink-receiver-fill-landscape.png'));
-    assert(landscape.width > landscape.height, `the simulator turned to landscape: ${landscape.width}x${landscape.height}`);
+    // simctl saves the display's native portrait pixels; turned to landscapeLeft, the
+    // picture's top-left lands at the screenshot's top-right. Turn it upright.
+    const sideways = capture(join(out, 'simulator-landscape-native.png'));
+    const landscape = new PNG({ width: sideways.height, height: sideways.width });
+    for (let y = 0; y < sideways.height; y++) {
+        for (let x = 0; x < sideways.width; x++) sideways.data.copy(landscape.data, ((sideways.width - 1 - x) * landscape.width + y) * 4, (y * sideways.width + x) * 4, (y * sideways.width + x) * 4 + 4);
+    }
+    writeFileSync(join(out, 'desklink-receiver-fill-landscape.png'), PNG.sync.write(landscape));
     const bars = barShare(landscape);
     assert(bars < 0.15, `black bars take under 15% of the landscape screen: ${(100 * bars).toFixed(1)}%`);
-    log(`landscape: ${(100 * bars).toFixed(1)}% black bars`);
+    const across = pictureBox(landscape, screenHeight);
+    log(`landscape: ${(100 * bars).toFixed(1)}% black bars, picture from (${across.left.toFixed(1)}, ${across.top.toFixed(1)}) pt`);
     pointerSteps(udid, [{ action: 'portrait', x: 0, y: 0 }]);
     await sleep(1500);
     const back = pictureBox(capture(join(out, 'desklink-receiver-fill-portrait-rotated-back.png')));
