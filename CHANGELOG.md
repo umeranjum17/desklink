@@ -14,6 +14,7 @@ this changelog is not a claim that unpublished packages are available.
 
 ### Fixed
 
+- The React Native example shows plain states such as Connected or Your desktop ended this session, without bridge URLs, pairing tokens, raw failure text or developer frame metrics. SDK failure messages are diagnostic data, not safe user-facing copy. [Status/privacy fix](https://github.com/umeranjum17/desklink/pull/65).
 - The React Native client always sends the legacy `view`, `control`, `clipboard` wire permission set, even when the app specifies no permissions or only `view`. This retains access to published 0.3.1 hosts while new hosts ignore scopes. [Client/reference change](https://github.com/umeranjum17/desklink/pull/64).
 - Unsupported input backends refuse the individual action without denying otherwise available view or clipboard access. Failure to create an optional driving indicator does not become a second consent gate.
 
