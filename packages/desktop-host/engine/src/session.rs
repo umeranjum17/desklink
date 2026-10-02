@@ -367,18 +367,19 @@ fn select_x11(
                     }
                     let started = Instant::now();
                     let grabbed = Instant::now();
+                    #[cfg(target_os = "linux")]
                     let frame = {
-                        #[cfg(target_os = "linux")]
                         let before = mask.as_ref().map(CueMask::snapshot);
                         let mut desktop = lock(&desktop);
                         desktop.capture_raw().and_then(|mut raw| {
-                            #[cfg(target_os = "linux")]
                             if let (Some(mask), Some(before)) = (mask.as_mut(), before) {
                                 mask.apply(&mut raw, width as usize, height as usize, before);
                             }
                             Ok((desktop.convert(&raw, max_width, max_height)?, raw))
                         })
                     };
+                    #[cfg(not(target_os = "linux"))]
+                    let frame = lock(&desktop).capture_with_pixels(max_width, max_height);
                     let grab_micros = grabbed.elapsed().as_micros() as u64;
                     match frame {
                         Ok((frame, raw)) => {
