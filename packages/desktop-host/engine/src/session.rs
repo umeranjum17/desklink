@@ -1007,13 +1007,6 @@ impl Session {
         request: OpenRequest,
         events: tokio_mpsc::UnboundedSender<Notice>,
     ) -> std::result::Result<Self, SessionError> {
-        #[cfg(target_os = "windows")]
-        if request.agent_indicator {
-            return Err(SessionError::new(
-                "indicator-unavailable",
-                "Windows agent indicator is not implemented in this build.",
-            ));
-        }
         if request.cursor == crate::protocol::CursorMode::Hidden {
             #[cfg(not(target_os = "linux"))]
             return Err(SessionError::new(
@@ -1056,16 +1049,13 @@ impl Session {
         #[cfg(target_os = "linux")]
         if request.agent_indicator && wants_x11 {
             let display = match &request.source {
-                Some(SourceRequest::X11 {
-                    display: Some(display),
-                }) => display.clone(),
-                _ => std::env::var("DISPLAY")
-                    .map_err(|_| SessionError::new("indicator-unavailable", "no X display"))?,
-            };
-            indicator = Some(
-                crate::indicator::Indicator::start(&display, 0, 0)
-                    .map_err(|error| SessionError::new("indicator", format!("{error:#}")))?,
-            );
+                Some(SourceRequest::X11 { display }) => display.clone(),
+                _ => None,
+            }
+            .or_else(|| std::env::var("DISPLAY").ok());
+            if let Some(display) = display {
+                indicator = crate::indicator::Indicator::start(&display, 0, 0).ok();
+            }
         }
         let (frame_tx, frame_rx) = latest_frame();
         let latest = Arc::new(Mutex::new(None::<FrameSnapshot>));
@@ -1239,22 +1229,12 @@ impl Session {
                     fit(source_w, source_h, request.max_width, request.max_height);
                 #[cfg(target_os = "linux")]
                 if request.agent_indicator {
-                    indicator = Some(
-                        crate::indicator::Indicator::start_wayland(source_w, source_h).map_err(
-                            |error| {
-                                SessionError::new("indicator-unavailable", format!("{error:#}"))
-                            },
-                        )?,
-                    );
+                    indicator = crate::indicator::Indicator::start_wayland(source_w, source_h).ok();
                 }
                 #[cfg(target_os = "macos")]
                 if request.agent_indicator {
-                    indicator = Some(
-                        crate::indicator::Indicator::start(source.node_id, source_w, source_h)
-                            .map_err(|error| {
-                                SessionError::new("indicator", format!("{error:#}"))
-                            })?,
-                    );
+                    indicator =
+                        crate::indicator::Indicator::start(source.node_id, source_w, source_h).ok();
                 }
                 #[cfg(target_os = "macos")]
                 let capture = capture::start(
@@ -1348,7 +1328,9 @@ impl Session {
         // Everything that can still refuse the session comes before the peer:
         // a peer created and then abandoned keeps its socket and tasks alive.
         let applier = match &x11 {
-            Some(desktop) => Some(Applier::X11(desktop.clone())),
+            Some(desktop) => lock(desktop)
+                .input_available()
+                .then(|| Applier::X11(desktop.clone())),
             None => {
                 #[cfg(target_os = "linux")]
                 let devices = InputDevices::create(source_w as i32, source_h as i32);
@@ -1601,6 +1583,10 @@ impl Session {
 
     pub fn generation(&self) -> u64 {
         self.inner.generation
+    }
+
+    pub fn agent_indicator(&self) -> bool {
+        lock(&self.inner.indicator).is_some()
     }
 
     pub fn cursor_info(&self) -> &serde_json::Value {
@@ -2110,6 +2096,14 @@ impl Inner {
         // consumer injects it where the picture actually came from.
         if lock(&self.encoded).is_some() {
             self.forward(message);
+            return;
+        }
+        if !matches!(
+            &message,
+            ControlMessage::ClipboardRead { .. } | ControlMessage::ClipboardWrite { .. }
+        ) && lock(&self.input).is_none()
+        {
+            self.reject(seq, "input-unavailable", "no input backend");
             return;
         }
         let outcome = match message {

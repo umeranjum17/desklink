@@ -10,8 +10,7 @@ macOS engine uses the same v3 stdio/WebRTC session path, with native display
 capture, input and clipboard adapters. A Windows build with static libvpx
 (`DESKLINK_VPX_STATIC_DIR`) also serves consumer-fed H.264 encoded sources over
 the shared session path. Native desktop capture, input and clipboard are not
-implemented on Windows, and `session.open` refuses `agent_indicator` with
-`indicator-unavailable`. Without static libvpx, the Windows compile seam
+implemented on Windows; optional agent feedback is unavailable there. Without static libvpx, the Windows compile seam
 reports encoding unavailable and refuses `serve`. The protocol contains no
 application concepts: no accounts, no chat, no machine ids, no pane ids.
 
@@ -265,6 +264,9 @@ restored. There is no edge glow on that path.
 macOS adds an eased arrow and halo, click ripple, and typing pulse in a
 nonactivating, click-through window excluded by the ScreenCaptureKit content
 filter. Closing the session animates out and removes the indicator.
+Indicator startup is best-effort on every platform; a missing helper or overlay
+backend does not refuse the session. The open result reports `agentIndicator:
+true` only when the helper started.
 
 `local_frames` keeps the latest pre-encode frame and its tile hashes for
 `session.frame` and `session.frame.changed` (see "Latest frame over the local

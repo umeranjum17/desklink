@@ -163,6 +163,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   if (request.method === 'session.open') { active = true; return out({id:request.id,result:{sessionId:'live',generation:1}}); }
   if (request.method === 'shutdown') {
     if (active) { active = false; fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({session:'live',closed:true,pid:process.pid})); }
+    out({event:'session.state',params:{sessionId:'live',capture:'ended',transport:'closed',first_frame:false}});
     out({id:request.id,result:{}}); process.exit(0);
   }
 });
@@ -173,9 +174,12 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         const oldPort = bridge.port;
         const live = await connect(oldPort, 'token=old-pairing');
         expect(await requestOn(live, 1, 'session.open')).toMatchObject({sessionId:'live'});
+        const notices: unknown[] = [];
+        live.on('message', raw => notices.push(JSON.parse(String(raw))));
         const disconnected = new Promise<void>(resolve => live.once('close', () => resolve()));
         await bridge.close();
         await disconnected;
+        expect(notices).toContainEqual({event:'session.state',params:{sessionId:'live',capture:'ended',transport:'closed',first_frame:false}});
         const ended = JSON.parse(readFileSync(log, 'utf8')) as {session:string;closed:boolean;pid:number};
         expect(ended).toMatchObject({session:'live',closed:true});
         expect(() => process.kill(ended.pid, 0)).toThrow(/ESRCH/);
@@ -187,6 +191,34 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         const newlyPaired = await connect(oldPort, 'token=new-pairing');
         expect(await requestOn(newlyPaired, 2, 'session.open')).toMatchObject({sessionId:'live'});
     }, 20_000);
+
+    it('bounds revocation when the engine and socket cannot finish gracefully', async () => {
+        const directory = mkdtempSync(join(tmpdir(), 'desklink-stalled-close-'));
+        const script = join(directory, 'engine.cjs');
+        writeFileSync(script, `
+const readline = require('node:readline');
+setInterval(() => {}, 1000);
+const out = value => process.stdout.write(JSON.stringify(value)+'\\n');
+readline.createInterface({input:process.stdin}).on('line', line => {
+  const request = JSON.parse(line);
+  if (request.method === 'hello') out({id:request.id,result:{protocol:3}});
+  if (request.method === 'session.open') out({id:request.id,result:{sessionId:'stalled',generation:1,pid:process.pid}});
+});
+`);
+        const bridge = await Bridge.start({listen:'127.0.0.1:0',token:'t',
+            engineCommand:process.execPath,engineArgs:[script],serveExample:false});
+        bridges.push(bridge);
+        const port = bridge.port;
+        const socket = await connect(port, 'token=t');
+        const opened = await requestOn(socket, 1, 'session.open');
+        socket.pause();
+        const started = Date.now();
+        await bridge.close();
+        expect(Date.now()-started).toBeLessThan(6000);
+        socket.resume();
+        expect(() => process.kill(Number(opened.pid), 0)).toThrow(/ESRCH/);
+        await expect(connect(port, 'token=t')).rejects.toThrow();
+    }, 10_000);
 
     it('serves the reference page only to a caller that already has the token', async () => {
         const { port } = await startBridge('s3cret');

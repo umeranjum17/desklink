@@ -1120,6 +1120,12 @@ impl VideoPeer {
     }
 
     pub async fn close(&self) {
+        let _ = tokio::time::timeout(Duration::from_millis(500), async {
+            while self.control.outstanding_bytes().await.unwrap_or(0) > 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
         self.feedback.abort();
         let _ = self.control.close().await;
         let _ = self.peer.close().await;

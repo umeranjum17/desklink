@@ -112,6 +112,14 @@ impl X11Desktop {
         })
     }
 
+    pub fn input_available(&self) -> bool {
+        self.connection
+            .xtest_get_version(2, 2)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .is_some()
+    }
+
     /// Allocate one MIT-SHM segment for the full root and map it here. Any
     /// failure means "no SHM on this server", never an error: the caller
     /// falls back to socket GetImage and reports it via [`Self::capture_path`].

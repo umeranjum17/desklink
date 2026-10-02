@@ -679,6 +679,7 @@ async fn dispatch(
                 },
                 "geometry": session.geometry(),
                 "cursor": session.cursor_info(),
+                "agentIndicator": session.agent_indicator(),
             });
             *current = Some(session);
             Ok(result)

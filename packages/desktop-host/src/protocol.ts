@@ -102,6 +102,7 @@ export interface OpenSessionRequest {
 }
 
 export interface OpenedSession {
+    agentIndicator?: boolean;
     cursor?: CursorInfo;
     sessionId: string;
     generation: number;
