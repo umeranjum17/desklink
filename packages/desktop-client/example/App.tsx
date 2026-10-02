@@ -12,7 +12,7 @@
  */
 import * as React from 'react';
 import { Settings, StyleSheet, Text, View } from 'react-native';
-import { DesktopView, useDesktopSession, type SessionEvent, type Signaling } from '@desklink/react-native';
+import { DesktopView, useDesktopSession, type SessionEvent, type SessionSnapshot, type Signaling } from '@desklink/react-native';
 
 const url: unknown = Settings.get('desklinkUrl');
 
@@ -21,7 +21,8 @@ function bridgeSignaling(address: string): Signaling & { close: () => void } {
     const socket = new WebSocket(address);
     const open = new Promise<void>((resolve, reject) => {
         socket.onopen = () => resolve();
-        socket.onerror = () => reject(new Error(`cannot reach ${address.replace(/token=[^&]*/, 'token=…')}`));
+        // The address carries the pairing token, so no error ever names it.
+        socket.onerror = () => reject(new Error('cannot reach the desktop host'));
     });
     const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
     const handlers = new Set<(event: SessionEvent) => void>();
@@ -64,18 +65,60 @@ function bridgeSignaling(address: string): Signaling & { close: () => void } {
     };
 }
 
+/**
+ * What the status line tells the person. It uses status, frame readiness and
+ * failure code; see SessionSnapshot.failure for why raw messages stay hidden.
+ */
+export function statusText({ status, presented, failure }: SessionSnapshot): string {
+    switch (status) {
+        case 'idle':
+            return '';
+        case 'opening':
+        case 'connecting':
+            return 'Connecting…';
+        case 'live':
+            return presented ? 'Connected' : 'Connecting…';
+        case 'reconnecting':
+            return 'Can’t reach your desktop. Reconnecting…';
+        case 'ended':
+            return failure?.code === 'revoked' ? 'Your desktop ended this session' : 'Session ended';
+        case 'failed':
+            switch (failure?.code) {
+                case 'transport':
+                    return 'Can’t reach your desktop.';
+                case 'permission':
+                    return 'This phone isn’t allowed to show your desktop.';
+                case 'consent':
+                    return 'Screen sharing wasn’t approved on your desktop.';
+                case 'no-screen':
+                    return 'Your desktop has no screen to show.';
+                case 'unsupported-codec':
+                case 'incompatible-version':
+                    return 'This app and your desktop need updating to work together.';
+                case 'source-changed':
+                    return 'Your desktop’s screen changed. Reconnect to continue.';
+                case 'revoked':
+                    return 'Your desktop ended this session';
+                case 'input-unavailable':
+                    return 'Your desktop can’t take control from this phone.';
+                default:
+                    return 'This phone can’t show your desktop.';
+            }
+    }
+}
+
 export default function App() {
     const signaling = React.useRef<ReturnType<typeof bridgeSignaling> | null>(null);
     const desktop = useDesktopSession({
         authorize: async () => {
-            if (typeof url !== 'string') throw new Error('launch with -desklinkUrl ws://HOST:PORT/desktop?token=…');
+            if (typeof url !== 'string') throw new Error('launch with -desklinkUrl set to the bridge URL');
             // A reconnect gets a fresh socket: the bridge ends a session whose socket closed.
             signaling.current?.close();
             signaling.current = bridgeSignaling(url);
             return { signaling: signaling.current, session: {} };
         },
     });
-    const { status, presented, failure, geometry } = desktop.snapshot;
+    const { status } = desktop.snapshot;
 
     React.useEffect(() => {
         void desktop.connect();
@@ -89,7 +132,7 @@ export default function App() {
             <DesktopView sessionId={desktop.nativeId} style={StyleSheet.absoluteFill} accessibilityLabel="desktop" />
             <View pointerEvents="none" style={styles.bar}>
                 <Text testID="desklink-status" style={styles.status}>
-                    {`${status}${presented ? ' presented' : ''}${geometry ? ` ${geometry.encoded.width}x${geometry.encoded.height}` : ''}${failure ? ` ${failure.code}: ${failure.message}` : ''}`}
+                    {statusText(desktop.snapshot)}
                 </Text>
             </View>
         </View>

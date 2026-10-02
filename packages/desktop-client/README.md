@@ -287,7 +287,11 @@ What the consuming app — not this package — must get right before review.
 
 `example/` is the smallest app that shows a desktop: a native (non-Expo Go)
 build with `react-native-webrtc`, connecting to `desklink-host bridge` with the
-URL it is launched with. `test/ios-flow.mjs` builds it for the iOS simulator on
+URL it is launched with. Its status line shows plain messages: `Connected`
+once a frame is presented, `Can’t reach your desktop. Reconnecting…` while
+retrying, and `Your desktop ended this session` after revocation. It never
+displays the bridge URL, pairing token, raw failure text or frame metrics.
+`test/ios-flow.mjs` builds it for the iOS simulator on
 a Mac over ssh, serves a private Xvfb desktop from this machine through the
 bridge, and checks that the first frame is presented, that the answer puts
 H.264 first with NACK when the host offers it (VP9 otherwise; both descriptions

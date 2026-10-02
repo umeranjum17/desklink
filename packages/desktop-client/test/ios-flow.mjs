@@ -473,7 +473,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
 
     let seen = { status: null };
     const deadline = Date.now() + 90_000;
-    while (!/^live presented\b/.test(seen.status ?? '')) {
+    while (seen.status !== 'Connected') {
         assert(Date.now() < deadline, `the simulator never showed the desktop: status ${seen.status}\n${engineLog}`);
         await sleep(1000);
         try { seen = screen(udid); } catch (error) { seen = { status: `unreadable (${error.message.split('\n')[0]})` }; }
