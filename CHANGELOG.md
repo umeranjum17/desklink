@@ -5,6 +5,7 @@
 - Make consumer pairing the only trust boundary: paired sessions get all available view, input and clipboard access. Legacy `permissions` is accepted and ignored; OS consent remains required and missing input backends fail per action.
 - Add bounded X11 CLIPBOARD read/write on the selected display, without INCR transfers or persistence after engine exit.
 - AXI always connects its control channel. Legacy `start --control` is an ignored no-op; `start` and `home` no longer print `permissions=`.
+- The React Native example's status line shows plain states such as Connected or Your desktop ended this session. It no longer shows the bridge address, pairing token, raw failure text or frame metrics.
 - Host and engine stay pinned together with protocol 3. New AXI requires the matching engine; overriding it with a 0.3.x engine is unsupported. Release waits for the React Native compatibility update and integrated proof.
 
 ## 0.3.1

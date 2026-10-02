@@ -153,6 +153,10 @@ export interface SessionSnapshot {
     geometry: SurfaceGeometry | null;
     /** True once an authorized, current-generation frame has actually rendered. */
     presented: boolean;
+    /**
+     * `message` is free text from the app's `authorize()`, the host or the
+     * engine, kept for logs. Show people a state chosen from `code` instead.
+     */
     failure: SessionFailure | null;
     /** Redacted diagnostics: codec, route, counters. Never identities. */
     diagnostics: Record<string, string | number | boolean>;
