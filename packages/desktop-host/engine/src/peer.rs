@@ -5,10 +5,10 @@
 //! module never assumes anything about that channel, which is what keeps the
 //! engine usable by an application that is not this one.
 //!
-//! Input and clipboard ride the session's data channel rather than the local
-//! protocol. The channel is inside the DTLS/SRTP session the engine created for
-//! one authorized grant, so it inherits that session's identity and dies with
-//! it — a revoked session cannot be driven by a client that kept a socket open.
+//! Remote input and clipboard ride the session's data channel; co-located
+//! consumers can also use the local clipboard protocol. The channel is inside
+//! the DTLS/SRTP session opened by a paired consumer and dies with it — a revoked
+//! session cannot be driven by a client that kept a socket open.
 
 use anyhow::{Context, Result};
 use rtc::interceptor::{

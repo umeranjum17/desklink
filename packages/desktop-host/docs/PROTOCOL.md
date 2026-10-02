@@ -796,9 +796,10 @@ instead; both reach the same clipboard:
 Refused with `error.code = "clipboard"` when the desktop has no text or a
 clipboard operation fails. Encoded sources have no desktop clipboard; their
 control channel answers with an empty clipboard reply and an explanatory error.
-X11 owns CLIPBOARD on the session's selected display, serving TARGETS,
-UTF8_STRING and TEXT. Writes are limited to 256 KiB and the server's single
-request limit; the text lives until another client takes ownership, the engine
+X11 uses a fresh connection to the session's selected display for each operation.
+Writes verify CLIPBOARD ownership before succeeding and serve TARGETS,
+UTF8_STRING and TEXT; reads request UTF8_STRING. Writes are limited to 256 KiB
+and the server's single request limit; the text lives until another client takes ownership, the engine
 exits, or the display dies. Reads wait at most 2.5 seconds for the owner.
 INCR transfers are refused explicitly as unsupported, not reported as success;
 STRING, PRIMARY and persistence after engine exit are not implemented.
