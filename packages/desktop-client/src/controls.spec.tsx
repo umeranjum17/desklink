@@ -10,12 +10,37 @@ vi.mock('react-native', () => ({
     Pressable: 'Pressable',
     Text: 'Text',
     View: 'View',
+    Settings: { get: () => undefined },
+}));
+
+const example = vi.hoisted(() => ({
+    write: vi.fn(),
+    copy: vi.fn(),
+    connect: vi.fn(),
+}));
+vi.mock('expo-clipboard', () => ({ setStringAsync: example.write }));
+vi.mock('@desklink/react-native', async () => ({
+    CONTROL_PERMISSIONS: ['view', 'control', 'clipboard'],
+    ClipboardConfirmation: (await import('./ClipboardConfirmation')).ClipboardConfirmation,
+    ModifierKeys: (await import('./ModifierKeys')).ModifierKeys,
+    DesktopView: 'DesktopView',
+    useDesktopSession: () => ({
+        snapshot: { status: 'live' },
+        nativeId: 'example-session',
+        modifiers: { Control: 'off', Shift: 'off', Alt: 'off', Meta: 'off' },
+        clipboard: null,
+        connect: example.connect,
+        setInputEnabled: vi.fn(),
+        copyRemoteToLocal: example.copy,
+        tapModifier: vi.fn(),
+    }),
 }));
 
 import { KEY_COLORS, ModifierKeys } from './ModifierKeys';
 import { CLIPBOARD_CONFIRMATION_MS, ClipboardConfirmation, PILL_COLORS, describeTransfer } from './ClipboardConfirmation';
 import { NO_MODIFIERS } from './stickyModifiers';
 import type { ClipboardTransfer } from './useDesktopSession';
+import App from '../example/App';
 
 type Style = Record<string, unknown>;
 const flatten = (style: unknown): Style =>
@@ -116,5 +141,56 @@ describe('ClipboardConfirmation', () => {
     it('reads at 4.5:1 or better over a white or a black desktop', () => {
         expect(contrast(PILL_COLORS.text, PILL_COLORS.backing, '#ffffff')).toBeGreaterThanOrEqual(4.5);
         expect(contrast(PILL_COLORS.text, PILL_COLORS.backing, '#000000')).toBeGreaterThanOrEqual(4.5);
+    });
+});
+
+describe('example Copy', () => {
+    it('writes only on a tap and retains a backed accessible failure until the next tap', async () => {
+        example.write.mockReset();
+        example.copy.mockReset();
+        example.copy.mockImplementation(async (write: (text: string) => Promise<void>) => { await write('desktop text'); });
+        let tree!: TestRenderer.ReactTestRenderer;
+        await act(async () => { tree = TestRenderer.create(<App />); });
+        expect(example.write).not.toHaveBeenCalled();
+        const tap = () => tree.root.findByProps({ testID: 'desklink-copy' }).props.onPress();
+
+        example.copy.mockRejectedValueOnce(new Error('clipboard is unavailable for this desktop source'));
+        await act(async () => { tap(); });
+        expect(tree.root.findByProps({ testID: 'desklink-copy-error' }).findByType('Text').props.children)
+            .toBe('Copy failed: clipboard is unavailable for this desktop source');
+        expect(example.write).not.toHaveBeenCalled();
+
+        example.write.mockResolvedValue(false);
+        await act(async () => { tap(); });
+        expect(example.write).toHaveBeenCalledWith('desktop text');
+        const error = tree.root.findByProps({ testID: 'desklink-copy-error' });
+        expect(error.props.accessible).toBe(true);
+        expect(error.props.accessibilityRole).toBe('alert');
+        expect(error.props.accessibilityLiveRegion).toBe('polite');
+        const style = flatten(error.props.style);
+        expect(style.paddingHorizontal).toBeGreaterThan(0);
+        expect(style.paddingVertical).toBeGreaterThan(0);
+        expect(contrast('#ffffff', style.backgroundColor as string)).toBeGreaterThanOrEqual(4.5);
+        expect(error.findByType('Text').props.children).toBe('Copy failed: The phone refused the clipboard write.');
+        expect(tree.root.findAllByProps({ testID: 'desklink-clipboard' })).toHaveLength(0);
+
+        vi.useFakeTimers();
+        try {
+            act(() => { vi.advanceTimersByTime(5000); });
+            expect(tree.root.findAllByProps({ testID: 'desklink-copy-error' })).toHaveLength(1);
+        } finally { vi.useRealTimers(); }
+
+        example.write.mockRejectedValue(new Error('native write refused'));
+        await act(async () => { tap(); });
+        expect(tree.root.findByProps({ testID: 'desklink-copy-error' }).findByType('Text').props.children).toBe('Copy failed: native write refused');
+
+        let finish!: (written: boolean) => void;
+        example.write.mockImplementation(() => new Promise<boolean>((resolve) => { finish = resolve; }));
+        await act(async () => { tap(); });
+        expect(tree.root.findAllByProps({ testID: 'desklink-copy-error' })).toHaveLength(0);
+        expect(tree.root.findAllByProps({ testID: 'desklink-clipboard' })).toHaveLength(0);
+        await act(async () => { finish(true); });
+        expect(tree.root.findAllByProps({ testID: 'desklink-copy-error' })).toHaveLength(0);
+        act(() => { tree.unmount(); });
     });
 });

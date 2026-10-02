@@ -214,8 +214,11 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
                 <Text style={styles.messageText}>{statusText(desktop.snapshot)}</Text>
             </View>}
             <View pointerEvents="none" style={styles.confirmation}>
-                <ClipboardConfirmation transfer={desktop.clipboard} />
-                {copyError && <Text accessibilityLiveRegion="polite" style={styles.copyLabel}>{copyError}</Text>}
+                {copyError ? (
+                    <View testID="desklink-copy-error" accessible accessibilityRole="alert" accessibilityLiveRegion="polite" style={styles.copyError}>
+                        <Text style={styles.copyErrorLabel}>{`Copy failed: ${copyError}`}</Text>
+                    </View>
+                ) : <ClipboardConfirmation transfer={desktop.clipboard} />}
             </View>
             <View style={styles.keys}>
                 <ModifierKeys modifiers={desktop.modifiers} onTap={desktop.tapModifier} style={styles.row} />
@@ -235,6 +238,8 @@ const styles = StyleSheet.create({
     message: { position: 'absolute', left: 0, right: 0, bottom: 48, alignItems: 'center' },
     messageText: { color: '#fff', fontSize: 16 },
     confirmation: { minHeight: 48, justifyContent: 'center' },
+    copyError: { marginHorizontal: 16, marginVertical: 8, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12, backgroundColor: '#521b24' },
+    copyErrorLabel: { color: '#ffffff', fontSize: 14, fontWeight: '600' },
     keys: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingBottom: 24, backgroundColor: 'rgba(22, 23, 26, 0.94)' },
     row: { backgroundColor: 'transparent' },
     copy: { margin: 8, minHeight: 44, paddingHorizontal: 12, borderRadius: 8, justifyContent: 'center', backgroundColor: '#2b2d33' },

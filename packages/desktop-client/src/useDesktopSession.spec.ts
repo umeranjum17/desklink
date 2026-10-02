@@ -230,6 +230,49 @@ describe('the clipboard', () => {
         nativeEvent('control', id, { message: JSON.stringify({ kind: 'clipboard', request, text, error }) });
     }
 
+    it.each([
+        ['clipboard-unsupported', 'clipboard is unavailable for this desktop source'],
+        ['permission', 'this session has no clipboard permission'],
+    ])('settles pending transfers promptly on clipboard refusal %s', async (code, message) => {
+        const session = await liveSession();
+        session.current.setInputEnabled(true);
+        const writeLocal = vi.fn(async () => {});
+        let copyResult: unknown;
+        let pasteResult: unknown;
+        const copied = session.current.copyRemoteToLocal(writeLocal).catch((error) => { copyResult = error; });
+        const pasted = session.current.pasteLocalToRemote('phone text').catch((error) => { pasteResult = error; });
+
+        nativeEvent('control', session.current.nativeId, {
+            message: JSON.stringify({ kind: 'rejected', seq: 0, code, message }),
+        });
+        await TestRenderer.act(async () => {});
+        expect(copyResult).toBeInstanceOf(Error);
+        expect((copyResult as Error).message).toBe(message);
+        expect(pasteResult).toBeInstanceOf(Error);
+        expect((pasteResult as Error).message).toBe(message);
+        await Promise.all([copied, pasted]);
+        expect(writeLocal).not.toHaveBeenCalled();
+        expect(session.current.clipboard).toBeNull();
+    });
+
+    it('does not attribute unrelated control rejection to a pending Copy', async () => {
+        const session = await liveSession();
+        session.current.setInputEnabled(true);
+        const writeLocal = vi.fn(async () => {});
+        let settled = false;
+        const copied = session.current.copyRemoteToLocal(writeLocal).finally(() => { settled = true; });
+        nativeEvent('control', session.current.nativeId, {
+            message: JSON.stringify({ kind: 'rejected', seq: 0, code: 'permission', message: 'this session has no control permission' }),
+        });
+        await TestRenderer.act(async () => {});
+        expect(settled).toBe(false);
+        expect(writeLocal).not.toHaveBeenCalled();
+        answer(session.current.nativeId, 'clipboard_read', 'desktop text');
+        await TestRenderer.act(async () => { await copied; });
+        expect(writeLocal).toHaveBeenCalledWith('desktop text');
+        expect(session.current.clipboard?.text).toBe('desktop text');
+    });
+
     it('reports each transfer that completed, and not one that failed', async () => {
         const session = await liveSession();
         session.current.setInputEnabled(true);
