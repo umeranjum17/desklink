@@ -15,6 +15,7 @@
  * the simulator's accessibility tree.
  */
 import * as React from 'react';
+import * as Clipboard from 'expo-clipboard';
 import { Linking, Platform, Pressable, Settings, StatusBar, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
@@ -163,6 +164,18 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
         },
     });
     const { status } = desktop.snapshot;
+    const [copyError, setCopyError] = React.useState<string | null>(null);
+
+    async function copy() {
+        setCopyError(null);
+        try {
+            await desktop.copyRemoteToLocal(async (text) => {
+                if (!await Clipboard.setStringAsync(text)) throw new Error('The phone refused the clipboard write.');
+            });
+        } catch (error) {
+            setCopyError(error instanceof Error ? error.message : String(error));
+        }
+    }
 
     React.useEffect(() => {
         void desktop.connect();
@@ -200,10 +213,13 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
             {status !== 'live' && <View pointerEvents="none" style={styles.message}>
                 <Text style={styles.messageText}>{statusText(desktop.snapshot)}</Text>
             </View>}
-            <ClipboardConfirmation transfer={desktop.clipboard} style={styles.toast} />
+            <View pointerEvents="none" style={styles.confirmation}>
+                <ClipboardConfirmation transfer={desktop.clipboard} />
+                {copyError && <Text accessibilityLiveRegion="polite" style={styles.copyLabel}>{copyError}</Text>}
+            </View>
             <View style={styles.keys}>
                 <ModifierKeys modifiers={desktop.modifiers} onTap={desktop.tapModifier} style={styles.row} />
-                <Pressable testID="desklink-copy" accessibilityRole="button" onPress={() => void desktop.copyRemoteToLocal().catch(() => undefined)} style={styles.copy}>
+                <Pressable testID="desklink-copy" accessibilityRole="button" onPress={() => void copy()} style={styles.copy}>
                     <Text style={styles.copyLabel}>Copy</Text>
                 </Pressable>
             </View>
@@ -218,6 +234,7 @@ const styles = StyleSheet.create({
     status: { color: 'transparent', fontSize: 1 },
     message: { position: 'absolute', left: 0, right: 0, bottom: 48, alignItems: 'center' },
     messageText: { color: '#fff', fontSize: 16 },
+    confirmation: { minHeight: 48, justifyContent: 'center' },
     keys: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingBottom: 24, flexDirection: 'row', backgroundColor: 'rgba(22, 23, 26, 0.94)' },
     row: { flex: 1, backgroundColor: 'transparent' },
     copy: { margin: 8, minHeight: 44, paddingHorizontal: 12, borderRadius: 8, justifyContent: 'center', backgroundColor: '#2b2d33' },

@@ -8,8 +8,6 @@ export interface ModifierKeysProps {
     modifiers: StickyModifiers;
     /** The session's `tapModifier`. */
     onTap: (name: StickyModifier) => void;
-    /** Which keys the row shows, in order. */
-    keys?: readonly StickyModifier[];
     style?: StyleProp<ViewStyle>;
 }
 
@@ -25,10 +23,10 @@ export const STATE_NAMES: Record<StickyState, string> = { off: 'off', once: 'lat
  * in shape as well as colour. The row carries its own backing, so it reads
  * the same over a light desktop as over a dark one.
  */
-export function ModifierKeys({ modifiers, onTap, keys = ['Control', 'Shift', 'Alt', 'Meta'], style }: ModifierKeysProps) {
+export function ModifierKeys({ modifiers, onTap, style }: ModifierKeysProps) {
     return (
         <View style={[styles.row, style]}>
-            {keys.map((name) => {
+            {(['Control', 'Shift', 'Alt', 'Meta'] as const).map((name) => {
                 const state = modifiers[name];
                 return (
                     <Pressable

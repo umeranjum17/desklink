@@ -59,6 +59,7 @@ changes, and trackpad presses reach the desktop as touches.
 
 ```tsx
 import { DesktopView, useDesktopSession } from '@desklink/react-native';
+import * as Clipboard from 'expo-clipboard';
 
 const desktop = useDesktopSession({
     authorize: async () => ({
@@ -75,6 +76,9 @@ await desktop.connect();
 desktop.setInputEnabled(true);
 desktop.showKeyboard();
 desktop.setOrientation('landscape');   // Android only; iOS apps configure supported orientations themselves
+await desktop.copyRemoteToLocal(async (text) => {
+    if (!await Clipboard.setStringAsync(text)) throw new Error('Clipboard write refused');
+});
 await desktop.pasteLocalToRemote(await Clipboard.getStringAsync());
 // Optional receiver evidence: codec, decoder and video counters; no ICE addresses.
 const stats = await desktop.getStats();
@@ -246,10 +250,15 @@ heat and battery.
   session close and a lost control channel release what the desktop was holding.
 - **Explicit clipboard.** Two methods, called on a user action while control is
   enabled. The package never polls the clipboard or uses it as a way to type.
+  `copyRemoteToLocal(writeLocal)` awaits the caller-owned local writer, which
+  must reject on failure or refusal, before recording completion. The returned
+  text and truncation flag describe what was written. `pasteLocalToRemote(text)`
+  records completion only after the desktop acknowledges the write.
   `clipboard` is the last transfer that completed, and
   `<ClipboardConfirmation transfer={desktop.clipboard} />` confirms each one
-  with a backed pill at the top of the view — where it went, the start of the
-  text and its size — that ignores touches and leaves after 1.5 s.
+  with a backed pill — where it went, the start of the text and its size —
+  that ignores touches and leaves after 1.5 s. Place it in a reserved area
+  outside `DesktopView`, keeping that area present when the pill is dismissed.
 
 ### `Signaling`
 

@@ -15,8 +15,8 @@ const PREVIEW_CHARS = 24;
 
 /**
  * A short pill confirming each clipboard transfer: where it went, the start of
- * the text and its size. It sits at the top of whatever it is placed over,
- * ignores touches so it never covers input, and goes away on its own.
+ * the text and its size. Place it in reserved space outside the desktop
+ * surface. It ignores touches and goes away on its own.
  */
 export function ClipboardConfirmation({ transfer, style }: ClipboardConfirmationProps) {
     const [shown, setShown] = React.useState<ClipboardTransfer | null>(null);
@@ -53,7 +53,7 @@ function formatBytes(bytes: number): string {
 export const PILL_COLORS = { backing: 'rgba(17, 18, 20, 0.94)', text: '#ffffff' };
 
 const styles = StyleSheet.create({
-    place: { position: 'absolute', top: 16, left: 16, right: 16, alignItems: 'center' },
+    place: { paddingHorizontal: 16, alignItems: 'center' },
     pill: { maxWidth: '100%', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: PILL_COLORS.backing },
     text: { color: PILL_COLORS.text, fontSize: 14, fontWeight: '600' },
 });

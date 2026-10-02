@@ -237,9 +237,14 @@ describe('the clipboard', () => {
 
         sent.length = 0;
         let copied!: Promise<unknown>;
-        TestRenderer.act(() => { copied = session.current.copyRemoteToLocal(); });
+        let finishWrite!: () => void;
+        const writeLocal = vi.fn(() => new Promise<void>((resolve) => { finishWrite = resolve; }));
+        TestRenderer.act(() => { copied = session.current.copyRemoteToLocal(writeLocal); });
         answer(session.current.nativeId, 'clipboard_read', 'from the desktop');
-        await TestRenderer.act(async () => { await copied; });
+        await TestRenderer.act(async () => {});
+        expect(writeLocal).toHaveBeenCalledWith('from the desktop');
+        expect(session.current.clipboard).toBeNull();
+        await TestRenderer.act(async () => { finishWrite(); await copied; });
         expect(session.current.clipboard).toEqual({ id: 1, direction: 'to-phone', text: 'from the desktop', truncated: false });
 
         sent.length = 0;
@@ -253,6 +258,22 @@ describe('the clipboard', () => {
         TestRenderer.act(() => { pasted = session.current.pasteLocalToRemote('refused'); });
         answer(session.current.nativeId, 'clipboard_write', '', 'the desktop refused');
         await TestRenderer.act(async () => { await expect(pasted).rejects.toThrow('the desktop refused'); });
+        expect(session.current.clipboard?.id).toBe(2);
+
+        sent.length = 0;
+        TestRenderer.act(() => {
+            copied = session.current.copyRemoteToLocal(async () => { throw new Error('local write refused'); });
+        });
+        answer(session.current.nativeId, 'clipboard_read', 'not copied');
+        await TestRenderer.act(async () => { await expect(copied).rejects.toThrow('local write refused'); });
+        expect(session.current.clipboard?.id).toBe(2);
+
+        sent.length = 0;
+        writeLocal.mockClear();
+        TestRenderer.act(() => { copied = session.current.copyRemoteToLocal(writeLocal); });
+        answer(session.current.nativeId, 'clipboard_read', '', 'read refused');
+        await TestRenderer.act(async () => { await expect(copied).rejects.toThrow('read refused'); });
+        expect(writeLocal).not.toHaveBeenCalled();
         expect(session.current.clipboard?.id).toBe(2);
     });
 });

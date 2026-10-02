@@ -94,6 +94,7 @@ describe('ClipboardConfirmation', () => {
         act(() => { tree.update(<ClipboardConfirmation transfer={transfer(1)} />); });
         const place = tree.toJSON() as TestRenderer.ReactTestRendererJSON;
         expect(place.props.pointerEvents).toBe('none');
+        expect(flatten(place.props.style).position).toBeUndefined();
         expect(JSON.stringify(place)).toContain('Sent to desktop · “hello world” · 11 B');
 
         act(() => { vi.advanceTimersByTime(CLIPBOARD_CONFIRMATION_MS - 1); });

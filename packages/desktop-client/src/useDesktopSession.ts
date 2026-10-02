@@ -207,8 +207,8 @@ export interface DesktopSession {
     close: (reason?: string) => Promise<void>;
     showKeyboard: () => void;
     hideKeyboard: () => void;
-    /** Copy the desktop's clipboard to the phone; the caller places it locally. */
-    copyRemoteToLocal: () => Promise<{ text: string; truncated: boolean }>;
+    /** Copy using the caller's local writer, which must reject if the write fails. */
+    copyRemoteToLocal: (writeLocal: (text: string) => Promise<void>) => Promise<{ text: string; truncated: boolean }>;
     /** Send the phone's clipboard text to the desktop. */
     pasteLocalToRemote: (text: string) => Promise<void>;
     /** Release anything the desktop is holding, without ending the session. */
@@ -949,7 +949,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         };
     }, [transportFailed, onTransportState, cancelRestart, spendRestartAttempt, notePing, teardown, update, pressKey, typeText]);
 
-    const copyRemoteToLocal = useCallback(async () => {
+    const copyRemoteToLocal = useCallback(async (writeLocal: (text: string) => Promise<void>) => {
         if (!inputEnabled.current) throw new Error('Desktop control is off.');
         const id = nativeRef.current;
         if (id == null || nativeDesklink == null) throw new Error('No desktop session is open.');
@@ -963,6 +963,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         nativeDesklink.sendControl(id, JSON.stringify({ kind: 'clipboard_read', request }));
         const reply = await answer;
         if (reply.error != null) throw new Error(reply.error);
+        await writeLocal(reply.text);
         setClipboard({ id: ++clipboardCount.current, direction: 'to-phone', text: reply.text, truncated: reply.truncated });
         return { text: reply.text, truncated: reply.truncated };
     }, []);

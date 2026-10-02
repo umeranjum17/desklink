@@ -546,7 +546,7 @@ it('drops control and stale keyboard input while disarmed, then resumes only aft
     dispatch(keyboard, 'compositionend', { data: 'x' });
     session.current.send({ kind: 'key', name: 'Escape', down: true });
     session.current.pressKey('Enter')();
-    await expect(session.current.copyRemoteToLocal()).rejects.toThrow('Desktop control is off.');
+    await expect(session.current.copyRemoteToLocal(async () => {})).rejects.toThrow('Desktop control is off.');
     await expect(session.current.pasteLocalToRemote('phone')).rejects.toThrow('Desktop control is off.');
     nativeDesklink.sendControl(session.current.nativeId!, JSON.stringify({ kind: 'clipboard_read', request: 'blocked' }));
     nativeDesklink.sendControl(session.current.nativeId!, JSON.stringify({ kind: 'clipboard_write', request: 'blocked', text: 'phone' }));
@@ -565,7 +565,7 @@ it('drops control and stale keyboard input while disarmed, then resumes only aft
     touch(video, 'pointerup', 200, 200);
     dispatch(keyboard, 'beforeinput', { inputType: 'insertText', data: 'z' });
     expect(sent).toEqual([...click(200, 200, 1), { kind: 'text', text: 'z' }]);
-    const read = session.current.copyRemoteToLocal();
+    const read = session.current.copyRemoteToLocal(async () => {});
     const readRequest = sent.at(-1)!.request as string;
     expect(sent.at(-1)).toEqual({ kind: 'clipboard_read', request: readRequest });
     reply({ kind: 'clipboard', request: readRequest, text: 'desktop' });
