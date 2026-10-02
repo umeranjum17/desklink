@@ -149,7 +149,7 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
     // starts again, at the desktop's top-left corner, where a page's first words are.
     React.useEffect(() => { setZoom(null); setOffset(TOP_LEFT); }, [size.width, size.height]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    React.useEffect(() => { if (zoom === null) setOffset(TOP_LEFT); }, [fill]);
+    React.useEffect(() => { if (zoom === null) setOffset(TOP_LEFT); }, [fill, bounds.width, bounds.height, top, left, insets?.right, insets?.bottom]);
     const pictureWidth = size.width * scale;
     const pictureHeight = size.height * scale;
     const point = (x: number, y: number, clamp = false): Point | null => {

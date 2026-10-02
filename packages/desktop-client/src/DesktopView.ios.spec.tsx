@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
 import TestRenderer from 'react-test-renderer';
+import { pictureBox } from '../test/picture-box.mjs';
 
 /** `act` refuses to flush state updates unless React is told this is a test. */
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -190,6 +191,26 @@ describe('DesktopView.ios parity with DesktopView.kt', () => {
         TestRenderer.act(() => { nativeDesklink.fitToView(id); });
         TestRenderer.act(() => { nativeDesklink.setSurfaceSize(id, DESKTOP.width, DESKTOP.height); });
         expect(rtcStyle().width).toBeCloseTo(BOUNDS.width, 5);
+    });
+
+    it('resets both default offsets on equal-scale layout and inset changes', async () => {
+        const { DesktopView } = await import('./DesktopView.ios');
+        const insets = { top: 0, left: 47, bottom: 21, right: 47 };
+        const { id, renderer, outer, rtcStyle, grant, move, release } = await openView({ whole: false, bounds: { width: 844, height: 390 }, insets });
+        const pan = () => {
+            grant([touch(400, 200)]);
+            move([touch(340, 140)]);
+            release();
+        };
+        const width = rtcStyle().width;
+        pan();
+        expect(rtcStyle().left).toBeLessThan(47);
+        expect(rtcStyle().top).toBeLessThan(0);
+        TestRenderer.act(() => { outer().onLayout({ nativeEvent: { layout: { width: 844, height: 400 } } }); });
+        expect(rtcStyle()).toMatchObject({ left: 47, top: 0, width });
+        pan();
+        TestRenderer.act(() => { renderer.update(<DesktopView sessionId={id} insets={{ top: 10, left: 50, right: 44, bottom: 21 }} />); });
+        expect(rtcStyle()).toMatchObject({ left: 50, top: 10, width });
     });
 
     it('starts and pans inside the insets while the picture still reaches under them', async () => {
@@ -461,5 +482,30 @@ describe('DesktopView.ios hardware keyboard and pointer', () => {
         expect(wheels[0].dy).toBeCloseTo(30 / SCALE / 120, 5);
         // What stayed below the send threshold goes out when the scroll ends.
         expect(wheels[1].dy).toBeCloseTo(0.01 / SCALE / 120, 5);
+    });
+});
+
+
+describe('iOS proof picture bounds', () => {
+    it('measures contiguous paper without including the disconnected home indicator', () => {
+        for (const density of [1, 3]) {
+            const png = { width: 390 * density, height: 844 * density, data: new Uint8Array(390 * 844 * density * density * 4) };
+            const paper = (left: number, top: number, right: number, bottom: number) => {
+                for (let y = top * density; y < bottom * density; y++) for (let x = left * density; x < right * density; x++) {
+                    const i = (y * png.width + x) * 4;
+                    png.data.set([251, 250, 247, 255], i);
+                }
+            };
+            paper(0, 47, 390, 266);
+            paper(125, 825, 265, 830);
+            expect(pictureBox(png, 390)).toEqual({ top: 47, left: 0, bottom: 266 });
+            png.data.fill(0);
+            paper(0, 203, 390, 642);
+            paper(125, 825, 265, 830);
+            expect(pictureBox(png, 390)).toEqual({ top: 203, left: 0, bottom: 642 });
+            png.data.fill(0);
+            paper(47, 0, 390, 844);
+            expect(pictureBox(png, 390)).toEqual({ top: 0, left: 47, bottom: 844 });
+        }
     });
 });

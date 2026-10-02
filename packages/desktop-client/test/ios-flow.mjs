@@ -73,6 +73,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PNG } from 'pngjs';
+import { pictureBox } from './picture-box.mjs';
 import { WebSocket, WebSocketServer } from 'ws';
 
 import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
@@ -519,16 +520,6 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${DIR}/tmp/ios-flow.png`, path]).status, 0, 'copy the screenshot back');
         return PNG.sync.read(readFileSync(path));
     };
-    /** The picture's top, left and bottom edge in points, scanning for the paper from the screen's edges. */
-    const pictureBox = (png, width = screenWidth) => {
-        const light = (x, y) => { const i = (y * png.width + x) * 4; return png.data[i] + png.data[i + 1] + png.data[i + 2] > 600; };
-        const middle = Math.round(png.width * 0.6);
-        let top = 0; while (top < png.height - 1 && !light(middle, top)) top++;
-        let bottom = png.height - 1; while (bottom > top && !light(middle, bottom)) bottom--;
-        let left = 0; while (left < png.width - 1 && !light(left, top + 4)) left++;
-        const density = png.width / width;
-        return { top: top / density, left: left / density, bottom: (bottom + 1) / density };
-    };
     /** Share of the screen inside fully black rows or columns: the letterbox. */
     const barShare = (png) => {
         const dark = (x, y) => { const i = (y * png.width + x) * 4; return png.data[i] + png.data[i + 1] + png.data[i + 2] < 30; };
@@ -540,7 +531,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     let box = { top: 0, left: 0, bottom: 0 };
     for (let attempt = 0; attempt < 20 && box.bottom - box.top < screenWidth * geometry.height / geometry.width - 2; attempt++) {
         if (attempt > 0) await sleep(500);
-        box = pictureBox(capture(join(out, 'desklink-receiver-fill-portrait.png')));
+        box = pictureBox(capture(join(out, 'desklink-receiver-fill-portrait.png')), screenWidth);
     }
     const scale = (box.bottom - box.top) / geometry.height;
     const origin = { x: box.left, y: box.top };
@@ -740,7 +731,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     }
     pointerSteps(udid, [{ action: 'portrait', x: 0, y: 0 }]);
     await sleep(1500);
-    const back = pictureBox(capture(join(out, 'desklink-receiver-fill-portrait-rotated-back.png')));
+    const back = pictureBox(capture(join(out, 'desklink-receiver-fill-portrait-rotated-back.png')), screenWidth);
     assert(Math.abs(back.top - box.top) <= 1 && back.left <= 1, `turned back, the picture starts at the top-left again: (${back.left.toFixed(1)}, ${back.top.toFixed(1)}) pt, first (${box.left.toFixed(1)}, ${box.top.toFixed(1)})`);
     log('rotated back: the picture starts at the top-left again');
     const clicksBefore = await page.evaluate('clicks.length');
@@ -750,7 +741,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     }]);
     await sleep(1000);
     const zoomedShot = capture(join(out, 'simulator-zoomed.png'));
-    const zoomedBox = pictureBox(zoomedShot);
+    const zoomedBox = pictureBox(zoomedShot, screenWidth);
     const zoomedScale = (zoomedBox.bottom - zoomedBox.top) / geometry.height;
     assert(zoomedScale > scale * 1.5, `the pinch visibly zooms to cropped content: ${zoomedScale / scale}x`);
     assert(zoomedScale * geometry.width > screenWidth, 'the zoomed desktop has horizontal content to pan');
