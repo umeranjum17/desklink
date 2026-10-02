@@ -92,7 +92,7 @@ const POINTER_PROOF = process.env.DESKLINK_IOS_POINTER_PROOF;
 if (POINTER_PROOF) assert(['before', 'after'].includes(POINTER_PROOF));
 const DEVICE = ['desklink-ios-flow', IPAD ? 'ipad' : '', RUNTIME, process.pid, randomBytes(8).toString('hex')].filter(Boolean).join('-');
 const DEVICE_TYPE = IPAD ? 'iPad-Pro-11-inch-M4-8GB' : 'iPhone-16';
-const DESKTOP = { width: 1280, height: 800 };
+const DESKTOP = { width: 1280, height: 720 };
 /** The notes column, near the desktop's left edge: the filled picture shows it on every simulator the flow runs on. */
 const COLUMN = { left: 40, right: 340 };
 const MARK = `DESKLINK_IOS_FLOW=${process.pid}`;
@@ -507,8 +507,6 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // ---- taps -------------------------------------------------------------------------
     const geometry = crossed.opened?.geometry?.encoded;
     assert.deepEqual(geometry, DESKTOP, 'the desktop is encoded at its own size');
-    // The app's view fills the screen, and the picture fills the view from the
-    // desktop's top-left corner, inside the status bar and home indicator.
     // Where it landed is read off a screenshot: the light paper on the app's black.
     const { width: screenWidth, height: screenHeight } = seen.frame;
     const rgb = (png, point) => {
@@ -540,16 +538,15 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     };
     // The first frame can trail the live status by a moment.
     let box = { top: 0, left: 0, bottom: 0 };
-    for (let attempt = 0; attempt < 20 && box.bottom - box.top < screenHeight / 4; attempt++) {
+    for (let attempt = 0; attempt < 20 && box.bottom - box.top < screenWidth * geometry.height / geometry.width - 2; attempt++) {
         if (attempt > 0) await sleep(500);
         box = pictureBox(capture(join(out, 'desklink-receiver-fill-portrait.png')));
     }
-    // Portrait fills by height, so the whole height shows: its height gives the scale.
     const scale = (box.bottom - box.top) / geometry.height;
     const origin = { x: box.left, y: box.top };
     assert(box.left <= 1, `the picture starts at the screen's left edge, the desktop's left edge with it: ${box.left.toFixed(1)} pt`);
     assert(box.top >= 20, `the status bar does not cover the picture: it starts ${box.top.toFixed(1)} pt down`);
-    assert(scale * geometry.width > screenWidth, `the picture fills the screen's width: ${(scale * geometry.width).toFixed(0)} pt`);
+    assert(Math.abs(scale * geometry.width - screenWidth) <= 3, `portrait fits the screen's width: ${(scale * geometry.width).toFixed(0)} pt`);
     const slack = Math.ceil(1 / scale) + 1;
     const shown = { left: -origin.x / scale, right: (screenWidth - origin.x) / scale };
     assert(shown.left <= COLUMN.left && shown.right >= COLUMN.right, `the screen shows the notes column: desktop x ${shown.left.toFixed(0)}-${shown.right.toFixed(0)}`);
@@ -718,7 +715,6 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         log(`hover: ${hovers - 1} buttonless moves from the pointer's hover reports`);
     }
     // ---- pan and rotation ----------------------------------------------------------------------
-    // One finger drags the picture left and up: it pans, and clicks nothing.
     // The second click's dot is the widest dark run on its row; text strokes are thin.
     const dotAt = (shot) => {
         const y = origin.y + targets[1].y * scale;
@@ -737,23 +733,32 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     const pannedShot = capture(join(out, 'desklink-receiver-fill-portrait-panned.png'));
     const dotPanned = dotAt(pannedShot);
     assert(dotFirst !== null, 'the second click\'s dot is on the screen before the pan');
-    assert(dotPanned === null || dotFirst - dotPanned > 40, `the pan moved the picture left: the dot at x ${dotFirst.toFixed(1)} pt, then ${dotPanned?.toFixed(1)} pt`);
+    assert(dotPanned !== null && Math.abs(dotFirst - dotPanned) <= 1, `fit-width keeps the whole desktop reachable after a pan: dot at x ${dotFirst.toFixed(1)} pt, then ${dotPanned?.toFixed(1)} pt`);
     assert.equal(await page.evaluate('clicks.length'), clicksBefore, 'a one-finger pan clicks nothing');
     log(`panned: the second click's dot moved from x ${dotFirst.toFixed(1)} to ${dotPanned === null ? 'off the screen' : `${dotPanned.toFixed(1)} pt`}`);
     pointerSteps(udid, [{ action: 'landscape', x: 0, y: 0 }]);
     await sleep(1500);
     // simctl saves the display's native portrait pixels; turned to landscapeLeft, the
     // picture's top-left lands at the screenshot's top-right. Turn it upright.
-    const sideways = capture(join(out, 'simulator-landscape-native.png'));
-    const landscape = new PNG({ width: sideways.height, height: sideways.width });
-    for (let y = 0; y < sideways.height; y++) {
-        for (let x = 0; x < sideways.width; x++) sideways.data.copy(landscape.data, ((sideways.width - 1 - x) * landscape.width + y) * 4, (y * sideways.width + x) * 4, (y * sideways.width + x) * 4 + 4);
-    }
-    writeFileSync(join(out, 'desklink-receiver-fill-landscape.png'), PNG.sync.write(landscape));
-    const bars = barShare(landscape);
-    assert(bars < 0.15, `black bars take under 15% of the landscape screen: ${(100 * bars).toFixed(1)}%`);
+    const landscapeCapture = (name) => {
+        const sideways = capture(join(out, 'simulator-landscape-native.png'));
+        const landscape = new PNG({ width: sideways.height, height: sideways.width });
+        for (let y = 0; y < sideways.height; y++) {
+            for (let x = 0; x < sideways.width; x++) sideways.data.copy(landscape.data, ((sideways.width - 1 - x) * landscape.width + y) * 4, (y * sideways.width + x) * 4, (y * sideways.width + x) * 4 + 4);
+        }
+        writeFileSync(join(out, name), PNG.sync.write(landscape));
+        const bars = barShare(landscape);
+        assert(bars < 0.15, `black bars take under 15% of the landscape screen (${name}): ${(100 * bars).toFixed(1)}%`);
+        return landscape;
+    };
+    const landscape = landscapeCapture('desklink-receiver-fill-landscape.png');
     const across = pictureBox(landscape, screenHeight);
-    log(`landscape: ${(100 * bars).toFixed(1)}% black bars, picture from (${across.left.toFixed(1)}, ${across.top.toFixed(1)}) pt`);
+    log(`landscape: ${(100 * barShare(landscape)).toFixed(1)}% black bars, picture from (${across.left.toFixed(1)}, ${across.top.toFixed(1)}) pt`);
+    for (const dx of [-1, 1]) for (const dy of [-1, 1]) {
+        mac(`axe swipe --start-x ${(screenHeight * (dx < 0 ? 0.85 : 0.15)).toFixed(0)} --start-y ${(screenWidth * (dy < 0 ? 0.85 : 0.15)).toFixed(0)} --end-x ${(screenHeight * (dx < 0 ? 0.15 : 0.85)).toFixed(0)} --end-y ${(screenWidth * (dy < 0 ? 0.15 : 0.85)).toFixed(0)} --duration 0.6 --udid ${udid}`);
+        await sleep(1000);
+        landscapeCapture(`desklink-receiver-fill-landscape-panned-${dx}-${dy}.png`);
+    }
     pointerSteps(udid, [{ action: 'portrait', x: 0, y: 0 }]);
     await sleep(1500);
     const back = pictureBox(capture(join(out, 'desklink-receiver-fill-portrait-rotated-back.png')));

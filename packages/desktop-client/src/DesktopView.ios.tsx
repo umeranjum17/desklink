@@ -138,10 +138,10 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
     const visibleBottom = Math.min(top + safeHeight, bounds.height - (keyboardHeight ? keyboardHeight + keyboardClearance : 0));
     const visibleHeight = Math.max(1, visibleBottom - top);
     const fit = size.width && size.height ? Math.min(safeWidth / size.width, visibleHeight / size.height) : 1;
-    // Filled, the picture covers the uncovered part (the keyboard moves it
-    // rather than shrinking it) and one finger moves around it; a pinch out
-    // still shows the whole desktop.
-    const fill = size.width && size.height ? Math.max(fit, Math.min(MAX_SCALE, Math.max(safeWidth / size.width, safeHeight / size.height))) : 1;
+    const defaultScale = bounds.width <= bounds.height
+        ? safeWidth / size.width
+        : Math.max(bounds.width / size.width, (bounds.height - top) / size.height);
+    const fill = size.width && size.height ? Math.max(fit, Math.min(MAX_SCALE, defaultScale)) : 1;
     const scale = zoom === null ? fill : fit * zoom;
     /** The zoom over the whole-desktop fit the picture is at now. */
     const zoomed = fit > 0 ? scale / fit : 1;
@@ -168,7 +168,7 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
     // A rotation or the keyboard can leave the offset past the picture's new edges.
     const shown = clampOffset(offset.x, offset.y);
     const originX = left + (safeWidth - pictureWidth) / 2 + shown.x;
-    const originY = top + (visibleHeight - pictureHeight) / 2 + shown.y;
+    const originY = top + (zoom === null && pictureHeight <= visibleHeight ? 0 : (visibleHeight - pictureHeight) / 2) + shown.y;
     const send = (control: Record<string, unknown>) => { if (sessionId) nativeDesklink.sendControl(sessionId, JSON.stringify(control)); };
     const flushWheel = (force: boolean) => {
         const { x, y } = wheel.current;
@@ -284,7 +284,7 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
                 g.mode = 'scroll';
                 const under = point(at.x, at.y);
                 if (under) pointer('move', under);
-            } else g.mode = zoomed > 1.001 ? 'pan' : 'hover';
+            } else g.mode = zoom === null || zoomed > 1.001 ? 'pan' : 'hover';
         }
         if (g.mode === 'scroll') {
             // Content follows the finger: moving it up scrolls the page down.

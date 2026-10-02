@@ -458,9 +458,9 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
     return min(safeWidth() / surfaceWidth, safeHeight() / surfaceHeight)
   }
 
-  /** The default: the picture covers the whole view, as far as the zoom limit allows. */
   private fun fillScale(): Float {
-    val cover = max(safeWidth() / surfaceWidth, safeHeight() / surfaceHeight)
+    val cover = if (width <= height) safeWidth() / surfaceWidth
+      else max(width.toFloat() / surfaceWidth, (height - insetTop) / surfaceHeight)
     return max(fitScale(), min(cover, MAX_SCALE))
   }
 
@@ -496,7 +496,7 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
     val right = width - insetRight
     val bottom = visibleBottom()
     originX = if (pictureWidth <= right - insetLeft) insetLeft + (right - insetLeft - pictureWidth) / 2f else originX.coerceIn(right - pictureWidth, insetLeft)
-    originY = if (pictureHeight <= bottom - insetTop) insetTop + (bottom - insetTop - pictureHeight) / 2f else originY.coerceIn(bottom - pictureHeight, insetTop)
+    originY = if (pictureHeight <= bottom - insetTop) insetTop + (if (filling) 0f else (bottom - insetTop - pictureHeight) / 2f) else originY.coerceIn(bottom - pictureHeight, insetTop)
   }
 
   private fun zoomAround(focusX: Float, focusY: Float, factor: Float) {
@@ -682,7 +682,7 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
           }
           // The whole desktop has nowhere to move to, so the finger moves the
           // desktop's pointer instead, without a button.
-          gesture = if (!fitted) Gesture.PAN else if (downOnPicture) Gesture.HOVER else Gesture.LETTERBOX
+          gesture = if (filling || !fitted) Gesture.PAN else if (downOnPicture) Gesture.HOVER else Gesture.LETTERBOX
           lastX = event.x
           lastY = event.y
           if (gesture == Gesture.HOVER) hoverTo(active, event.x, event.y)
