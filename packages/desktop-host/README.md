@@ -390,6 +390,17 @@ packages/desktop-host/release/check-install.sh
 The Mac release build copies libvpx headers and its archive into an
 archive-only prefix and rejects an executable that still links a libvpx dylib.
 
+The `engine-macos-seam` CI job also runs this build, packing and clean-install
+check on a hosted ARM64 runner. Its `darwin-arm64-release` artifact contains the
+engine output, native tarball, install log and `darwin-build-manifest.txt`.
+The manifest records the candidate source commit/tree and archive hash,
+architecture, lockfile and builder hashes, actual Homebrew/static-libvpx inputs,
+engine version/capabilities, linked libraries and output hashes. On pull requests
+the job checks out the candidate head rather than the synthetic merge commit.
+Verify the downloaded artifact's source, version, architecture and hashes before
+including it in the release. This job does not qualify interactive capture,
+input, clipboard or OS-consent journeys.
+
 Each call keeps the other platform tarball and also packs the host,
 React Native receiver and AXI CLI. All package versions must match before
 publication. Packing publishes nothing.
