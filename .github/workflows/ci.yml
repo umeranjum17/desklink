@@ -96,6 +96,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run build --workspace @desklink/host
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -129,12 +130,6 @@ jobs:
           name: windows-libvpx-notices
           path: ${{ runner.temp }}/desklink-vpx/prefix/THIRD_PARTY_LICENSES.txt
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm run build --workspace @desklink/host
       - name: Windows Node resolver and spawn unit specs
         run: npx vitest run packages/desktop-host/src/resolveEngine.spec.ts packages/desktop-host/src/engineProcess.windows.spec.ts
       - name: Windows Node resolver and serve handshake via the published API (no desktop access)
