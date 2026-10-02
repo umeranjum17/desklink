@@ -237,8 +237,8 @@ try {
     }, 25);
   });
 
-  const started = await runOk('start', '--control', '--source', 'x11', '--display', display);
-  assert.match(started.out, /permissions=view,control/);
+  const started = await runOk('start', '--source', 'x11', '--display', display);
+  assert.match(started.out, /session: open source=x11/);
 
   // --- item 3: the accessibility tree over semantic refs ---
   const tree1 = await runOk('tree', '--full');

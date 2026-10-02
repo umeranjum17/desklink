@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, readdirSy
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
+import { connect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
 import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
@@ -13,13 +14,19 @@ const { EngineClient } = await import('@desklink/host');
 const dir = mkdtempSync(join(tmpdir(), 'desklink-axi-flow-'));
 const enginePath = process.env.DESKLINK_AXI_ENGINE;
 assert(enginePath && existsSync(enginePath), 'set DESKLINK_AXI_ENGINE to this task’s built engine');
-const build = spawnSync('cargo', ['build','-q','--manifest-path','packages/desktop-host/engine/Cargo.toml','--example','x11_target'], { stdio:'ignore' });
+const build = spawnSync('cargo', ['build','-q','--manifest-path','packages/desktop-host/engine/Cargo.toml','--example','x11_target','--example','x11_clip'], { stdio:'inherit' });
 assert.equal(build.status,0,'X client builds');
 const example = join(process.env.CARGO_TARGET_DIR ?? 'packages/desktop-host/engine/target','debug','examples','x11_target');
+const clipboardExample = join(process.env.CARGO_TARGET_DIR ?? 'packages/desktop-host/engine/target','debug','examples','x11_clip');
 const number = Array.from({length:30},(_,i)=>170+i).find(n =>
   !existsSync(`/tmp/.X11-unix/X${n}`) && !existsSync(`/tmp/.X${n}-lock`));
 assert(number !== undefined, 'no unclaimed high X display');
 const display = `:${number}`;
+const evidenceScale = process.env.DESKLINK_INDICATOR_SCALE === '2' ? 2 : 1;
+const evidenceOnly = !!process.env.DESKLINK_INDICATOR_EVIDENCE_DIR;
+const width = evidenceOnly ? 1920 * evidenceScale : 1280;
+const height = evidenceOnly ? 1080 * evidenceScale : 720;
+const noXtest = process.env.DESKLINK_AXI_NO_XTEST === '1';
 const socket = `/tmp/.X11-unix/X${number}`;
 const authority = join(dir,'Xauthority');
 const auth = spawnSync('xauth',['-f',authority,'add',display,'.',randomBytes(16).toString('hex')],{encoding:'utf8'});
@@ -28,7 +35,7 @@ assert.equal(auth.status,0,`could not prepare private X authority: ${auth.stderr
 // server only once initialization is complete; resume that owned PID before
 // probing. Unlike -displayfd, this preserves the X lock ownership assertion and
 // explicit high display. -noreset avoids reinitialization between probe clients.
-const xvfb = spawn('Xvfb', [display, '-sigstop', '-noreset', '-auth', authority, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], { stdio: ['ignore', 'ignore', 'pipe'] });
+const xvfb = spawn('Xvfb', [display, '-sigstop', '-noreset', '-auth', authority, '-screen', '0', `${width}x${height}x24`, '-nolisten', 'tcp', ...(noXtest ? ['-extension', 'XTEST'] : [])], { stdio: ['ignore', 'ignore', 'pipe'] });
 let xvfbReady = false;
 let xvfbError = '';
 xvfb.stderr.on('data', chunk => xvfbError = (xvfbError + chunk).slice(-2000));
@@ -108,7 +115,7 @@ async function verifyXvfb() {
   }
   const info = spawnSync(example,['--probe'],{env,encoding:'utf8',timeout:3000});
   assert.equal(info.status,0,`X client could not verify ${display}: ${info.error ?? info.signal ?? ''} ${info.stderr}`);
-  assert.match(info.stdout,/vendor=The X.Org Foundation size=1280x720 xwayland=false/, 'unexpected server vendor or geometry');
+  assert(info.stdout.includes(`vendor=The X.Org Foundation size=${width}x${height} xwayland=false`), 'unexpected server vendor or geometry');
 }
 
 const cli = resolve('packages/axi/bin/desklink-axi.js');
@@ -145,7 +152,9 @@ for (const [signal,code] of [['SIGTERM',143],['SIGINT',130]]) process.once(signa
 async function run(...args) {
   await verifyXvfb();
   const started = performance.now();
-  const child = spawn(process.execPath, [cli, ...args], { env });
+  // AXI's engine has no ambient display: named-source capture/input/clipboard
+  // must still reach the private display, never a process-global fallback.
+  const child = spawn(process.execPath, [cli, ...args], { env: {...env, DISPLAY:''} });
   let out = ''; for await (const part of child.stdout) out += part;
   const code = child.exitCode ?? await new Promise(r => child.once('exit', r));
   assert.equal(code, 0, `${args.join(' ')}: ${out}`);
@@ -155,6 +164,91 @@ async function run(...args) {
 try {
   remember(xvfb.pid,'Xvfb');
   await verifyXvfb(); // Never open a session or send input before ownership is proven.
+  if (evidenceOnly) {
+    const { recordX11 } = await import('./indicator-evidence.mjs');
+    await recordX11({ env, enginePath, display, width, height, scale: evidenceScale, verifyXvfb, remember });
+    await cleanup();
+    process.exit(0);
+  }
+  if (process.env.DESKLINK_AXI_CAPABILITY_PROOF === '1' || noXtest) {
+    const { PeerConnection, cleanup: cleanupPeers } = await import('node-datachannel');
+    const probeEnv = {...env, PATH:dir, XDG_SESSION_TYPE:'x11'};
+    delete probeEnv.WAYLAND_DISPLAY;
+    for (const [wayland,expected] of [[false,{read:false,write:false}],[true,{read:true,write:false}]]) {
+      await verifyXvfb();
+      client = await EngineClient.start(enginePath, ['serve'], {}, wayland
+        ? {...probeEnv, XDG_SESSION_TYPE:'wayland', WAYLAND_DISPLAY:'desklink-private-capability-probe'}
+        : probeEnv);
+      recordProcesses();
+      const capabilities = await client.capabilities();
+      assert.equal(capabilities.x11.available,true,'the private X display is reachable');
+      assert.deepEqual({read:capabilities.clipboard.read,write:capabilities.clipboard.write},expected,
+        'portal flags use only Wayland availability, with no wl-copy on the child PATH');
+      const hello = await client.request('hello',{protocol:3});
+      assert.deepEqual(hello.clipboard,capabilities.clipboard);
+      await client.stop(); client=undefined;
+    }
+    const notices = [];
+    client = await EngineClient.start(enginePath, ['serve'], {onEvent:event=>notices.push(event)}, {...env, DISPLAY:''});
+    recordProcesses();
+    const opened = await client.openSession({source:{kind:'x11',display}, agentIndicator:true, loopbackTcp:true});
+    recordProcesses();
+    assert.equal(opened.agentIndicator, true, 'supported indicator still starts');
+    const path = join(dir,'frame.raw');
+    const frame = await client.request('session.frame',{session_id:opened.sessionId,path,after_seq:0,timeout_ms:3000});
+    assert(frame.seq > 0 && readFileSync(path).length > 0, 'capture remains available');
+    await verifyXvfb();
+    await client.writeClipboard(opened.sessionId, 'no-XTEST clipboard ✓');
+    const selection = spawnSync(clipboardExample,['get'],{env,encoding:'utf8',timeout:3000});
+    assert.equal(selection.status,0,selection.stderr);
+    assert.equal(selection.stdout,'no-XTEST clipboard ✓');
+    assert.equal((await client.readClipboard(opened.sessionId)).text, selection.stdout);
+    const peer = new PeerConnection('capability-proof',{iceServers:[],bindAddress:'127.0.0.1',enableIceTcp:true});
+    try {
+      let channel;
+      const replies = [];
+      peer.onDataChannel(ch => { if (ch.getLabel() === 'control') {
+        channel = ch;
+        ch.onMessage(raw => replies.push(JSON.parse(String(raw))));
+      } });
+      peer.onLocalCandidate((candidate,mid)=>void client.addCandidate(opened.sessionId,opened.generation,candidate,mid,Number(mid)||0));
+      peer.onLocalDescription(sdp=>void client.acceptAnswer(opened.sessionId,opened.generation,sdp));
+      const offer = notices.find(event=>event.event==='session.description');
+      assert(offer,'session offers transport');
+      peer.setRemoteDescription(offer.params.description.sdp,'offer');
+      for (const event of notices.filter(event=>event.event==='session.candidate')) peer.addRemoteCandidate(event.params.candidate,event.params.sdpMid ?? '0');
+      const deadline = Date.now()+10000;
+      while (!replies.some(reply=>reply.kind==='hello') && Date.now()<deadline) await new Promise(r=>setTimeout(r,20));
+      assert(replies.some(reply=>reply.kind==='hello'),'control channel opens');
+      const actions = [
+        ...['move','down','up','cancel'].map(phase=>({kind:'pointer',phase,x:100,y:100,button:1})),
+        ...[{dx:1,dy:0},{dx:-1,dy:0},{dx:0,dy:1},{dx:0,dy:-1}].map(delta=>({kind:'wheel',...delta})),
+        {kind:'key',name:'Enter',down:true,modifiers:['Shift']},
+        {kind:'key',name:'Enter',down:false,modifiers:[]},
+        {kind:'key',character:'b',down:true},
+        {kind:'key',character:'b',down:false},
+        {kind:'key',name:'Shift',down:true},
+        {kind:'key',name:'Shift',down:false},
+        {kind:'text',text:'hello'},
+        {kind:'release_all'},
+      ];
+      for (const [index,action] of actions.entries()) {
+        await verifyXvfb();
+        const seq=index+1;
+        channel.sendMessage(JSON.stringify({...action,seq}));
+        const limit=Date.now()+3000;
+        while (!replies.some(reply=>reply.seq===seq) && Date.now()<limit) await new Promise(r=>setTimeout(r,10));
+        const reply=replies.find(reply=>reply.seq===seq);
+        assert(reply,`action ${seq} answered`);
+        if (noXtest) assert.deepEqual({kind:reply.kind,code:reply.code},{kind:'rejected',code:'input-unavailable'});
+        else assert.equal(reply.kind,'ack');
+      }
+    } finally { peer.close(); cleanupPeers(); }
+    await client.stop(); client=undefined;
+    assert.match(await run('start','--source','x11','--display',display),/session: open source=x11/);
+    await run('stop');
+    console.log(`private XTEST=${!noXtest}: capture, indicator, independent clipboard and all input paths passed`);
+  } else {
   const cursorEvents = [];
   client = await EngineClient.start(enginePath, ['serve'], { onEvent: event => cursorEvents.push(event) }, env);
   recordProcesses();
@@ -168,7 +262,7 @@ try {
     remember(cursorTarget.pid,example);
     await new Promise(r=>setTimeout(r,300));
   }
-  const hidden = await client.openSession({ source: {kind:'x11',display}, permissions:['view'], cursor:'hidden' });
+  const hidden = await client.openSession({ source: {kind:'x11',display}, cursor:'hidden' });
   assert.deepEqual(hidden.cursor, {mode:'hidden',positions:true});
   const hiddenPath = join(dir, 'hidden.raw');
   const hiddenFrame = await client.request('session.frame',{session_id:hidden.sessionId,path:hiddenPath,after_seq:0,still_ms:100,timeout_ms:3000});
@@ -232,7 +326,7 @@ try {
   }
   await client.closeSession(hidden.sessionId,hidden.generation);
   if(cursorTarget) {
-    const comparison = await client.openSession({source:{kind:'x11',display},permissions:['view'],cursor:'embedded'});
+    const comparison = await client.openSession({source:{kind:'x11',display},cursor:'embedded'});
     const frame = await client.request('session.frame',{session_id:comparison.sessionId,path:hiddenPath,after_seq:0,timeout_ms:3000});
     const raw=readFileSync(hiddenPath);
     assert.deepEqual(raw,hiddenPixels,'existing X11 root capture never composites the cursor');
@@ -245,7 +339,7 @@ try {
   }
   if(cursorTarget) { cursorTarget.kill('SIGTERM'); await goneOwned(cursorTarget.pid); }
 
-  const session = await client.openSession({ source: {kind:'x11',display}, permissions:['view'] });
+  const session = await client.openSession({ source: {kind:'x11',display},  });
   const path = join(dir, 'frame.raw');
   const first = await client.request('session.frame',{session_id:session.sessionId,path,after_seq:0,timeout_ms:3000});
   assert(first.seq > 0);
@@ -260,7 +354,6 @@ try {
   const changed = await client.request('session.frame',{session_id:session.sessionId,since:first.seq,path,after_seq:first.seq,still_ms:150,timeout_ms:6000});
   assert(changed.still_ms>=150 && changed.damage.length > 0);
   assert.notDeepEqual(readFileSync(path),original);
-  const cleanFrame = readFileSync(path);
   // The cue is visible in the root screenshot, independent of pointer/focus,
   // and included in the session frame. Only this verified private display is read.
   const desktop = async () => {
@@ -324,33 +417,36 @@ try {
   await new Promise(r=>setTimeout(r,50));
   const finalPoint = await desktop();
   assert.notDeepEqual(finalPoint.raw,beforePoint.raw);
-  const finalPointFrame = await capturedPixels(finalPoint.raw,withPoint.seq);
+  await capturedPixels(finalPoint.raw,withPoint.seq);
   await client.point(session.sessionId,{clear:true});
   await client.point(session.sessionId,{clear:true});
   assert.deepEqual((await desktop()).raw,beforePoint.raw,'clear removes the cue and is idempotent');
   assert.deepEqual((await desktop()).state,beforePoint.state);
-  await capturedPixels(cleanFrame,finalPointFrame.seq);
-  // Xcursor sprites live outside GetImage(root): motion and ripple must not
-  // create a different frame or damage region from an indicator-off session.
+  await client.request('session.frame',{session_id:session.sessionId,path,after_seq:withPoint.seq,still_ms:100,timeout_ms:2000});
+  // The agent cue is a click-through window over every app, never a cursor
+  // override: on screen it shows its white keyline 24 px from the pointer and
+  // leaves the halo's interior live. Sessions that own it mask it from capture
+  // (the CLI --wait change checks below would otherwise see it).
   await verifyXvfb();
+  const beforeCue = await desktop();
   overlay = spawn(enginePath, ['agent-overlay', display], { env, stdio: ['pipe','pipe','pipe'] });
   remember(overlay.pid,enginePath);
   await new Promise((resolve,reject) => {overlay.stdout.once('data',resolve);overlay.once('error',reject);});
-  // Install the Xcursor override before taking the baseline. Its first
-  // definition can wake the capture loop independently of later cursor motion.
-  overlay.stdin.write('M 100 100\n');
-  await new Promise(r=>setTimeout(r,100));
-  const cleanSeq = (await capturedPixels(cleanFrame,0)).seq;
-  overlay.stdin.write('M 300 300\nC 300 300\n');
-  await new Promise(r=>setTimeout(r,600));
-  const cursorOnly = await client.request('session.frame',{session_id:session.sessionId,path,since:cleanSeq});
-  assert.equal(cursorOnly.seq,cleanSeq, 'cursor motion and ripple add no frame damage');
-  assert.deepEqual(readFileSync(path),cleanFrame, 'indicator-on and indicator-off captures match');
+  overlay.stdin.write('M 300 300\n');
+  await new Promise(r=>setTimeout(r,400));
+  const cued = await desktop();
+  const pixel = (raw,x,y) => [...raw.subarray((y*1280+x)*4,(y*1280+x)*4+3)];
+  assert.deepEqual(pixel(cued.raw,276,300),[255,255,255],'the cue keyline is on screen');
+  assert.deepEqual(pixel(cued.raw,290,300),pixel(beforeCue.raw,290,300),'the halo interior stays see-through');
+  assert.deepEqual(cued.state,beforeCue.state,'the cue must not move the pointer or change focus');
   overlay.stdin.end();
   await new Promise(r=>overlay.once('exit',r)); overlay = undefined;
+  await new Promise(r=>setTimeout(r,100));
+  assert.deepEqual((await desktop()).raw,beforeCue.raw,'the cue is removed when it ends');
   await client.stop(); client = undefined;
-  const started = await run('start','--control','--source','x11','--display',display);
-  assert.match(started,/permissions=view,control/);
+  const started = await run('start','--source','x11','--display',display);
+  assert.match(started,/session: open source=x11/);
+  assert.doesNotMatch(started,/permissions=/);
   for (const args of [['wait','120001','--timeout','200000'], ['click','100,100','--wait','120001']]) {
     await verifyXvfb();
     const invalid = spawn(process.execPath,[cli,...args],{env});
@@ -425,7 +521,7 @@ try {
   const enginePid = Number(readFileSync(enginePidFile,'utf8').trim().split(/\s+/).at(-1));
   await run('stop');
   await goneOwned(bridgePid); await goneOwned(enginePid);
-  assert.match(await run('start','--control','--source','x11','--display',display),/permissions=view,control/);
+  assert.match(await run('start','--source','x11','--display',display),/session: open source=x11/);
   await run('diff'); // Establish the snapshot before the corner starts looping.
   target.kill('SIGTERM');
   await new Promise(r=>target.once('exit',r));
@@ -445,14 +541,86 @@ try {
   target.kill('SIGTERM');
   await new Promise(r=>target.once('exit',r));
   target = undefined;
-  assert.match(await run('start','--source','x11','--display',display),/permissions=view\n/);
-  for (const operation of [['read'],['write','private text']]) {
+  const paired = await run('start','--source','x11','--display',display);
+  assert.match(paired,/session: open source=x11/);
+  assert.doesNotMatch(paired,/permissions=/);
+  async function ownSelection(mode, text = '') {
     await verifyXvfb();
-    const child = spawn(process.execPath,[cli,'clipboard',...operation],{env});
-    let output=''; for await (const part of child.stdout) output+=part;
-    assert.equal(child.exitCode ?? await new Promise(r=>child.once('exit',r)),1);
-    assert.match(output,/clipboard requires start --control/);
+    const owner = spawn(clipboardExample, [mode], {env, stdio:['pipe','pipe','pipe']});
+    remember(owner.pid, clipboardExample);
+    const ready = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('selection owner did not start')), 3000);
+      owner.stdout.once('data', data => { clearTimeout(timer); resolve(String(data).trim()); });
+      owner.once('exit', code => { clearTimeout(timer); reject(new Error(`owner exited ${code}`)); });
+      owner.once('error', error => { clearTimeout(timer); reject(error); });
+    });
+    owner.stdin.end(text);
+    const ownership = await ready;
+    assert.match(ownership, /^owner=\d+ display=:\d+$/);
+    console.log(`independent selection: ${ownership}`);
+    return owner;
   }
+  async function readSelection(target) {
+    await verifyXvfb();
+    const result = spawnSync(clipboardExample, ['get', ...(target ? [target] : [])], {env, encoding:'utf8', timeout:4000});
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  }
+  async function refused(...args) {
+    await verifyXvfb();
+    const result = spawnSync(process.execPath, [cli, ...args], {env, encoding:'utf8', timeout:5000});
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    observations.push({command:args.join(' '), output:result.stdout});
+    return result.stdout;
+  }
+  const labOwner = await ownSelection('set', 'lab-owned ✓ 1');
+  assert.equal((await run('clipboard','read','--full')).trim(), 'clipboard: lab-owned ✓ 1 (13 chars)');
+  assert.match(await run('clipboard','write','client-sent ✓ 2'), /clipboard: written/);
+  await goneOwned(labOwner.pid); // SelectionClear must end the independent owner.
+  assert.equal(await readSelection(), 'client-sent ✓ 2');
+  assert.equal(await readSelection('TEXT'), 'client-sent ✓ 2');
+  assert.deepEqual((await readSelection('TARGETS')).trim().split('\n'), ['TARGETS','UTF8_STRING','TEXT']);
+  await verifyXvfb();
+  // Linux argv is smaller than 300000 bytes: send this payload over AXI's real socket.
+  const axiSocket = join(env.XDG_RUNTIME_DIR ?? join(tmpdir(), `desklink-axi-${process.getuid()}`), 'desklink-axi', `${sessionName}.sock`);
+  const oversized = await new Promise((resolve, reject) => {
+    const socket = connect(axiSocket); let output = '';
+    socket.setTimeout(5000, () => socket.destroy(new Error('oversized write timed out')));
+    socket.on('connect', () => socket.write(JSON.stringify({command:'clipboard',args:['write','x'.repeat(300000)]})+'\n'));
+    socket.on('data', chunk => output += chunk);
+    socket.on('end', () => resolve(output)); socket.on('error', reject);
+  });
+  assert.match(oversized, /refusing to place 300000 bytes/);
+  assert.equal(await readSelection(), 'client-sent ✓ 2', 'refused write preserves the real selection');
+  console.log(`oversized clipboard: ${oversized.trim()}`);
+  const longOwner = await ownSelection('set', 'a'.repeat(256*1024-1)+'✓suffix');
+  client = await EngineClient.start(enginePath, ['serve'], {}, {...env, DISPLAY:''});
+  recordProcesses();
+  const boundedSession = await client.openSession({source:{kind:'x11',display}});
+  const bounded = await client.readClipboard(boundedSession.sessionId);
+  assert.equal(bounded.text, 'a'.repeat(256*1024-1));
+  assert.equal(bounded.truncated, true, 'UTF-8 boundary truncation remains visible');
+  await client.closeSession(boundedSession.sessionId);
+  await assert.rejects(client.readClipboard(boundedSession.sessionId), /session/);
+  await client.stop(); client = undefined;
+  console.log('clipboard: bounded UTF-8 read and revoked session refusal passed without ambient DISPLAY');
+  const incrOwner = await ownSelection('incr');
+  await goneOwned(longOwner.pid);
+  assert.match(await refused('clipboard','read','--full'), /INCR is unsupported/);
+  console.log('INCR clipboard: explicitly refused');
+  const silentOwner = await ownSelection('silent');
+  await goneOwned(incrOwner.pid);
+  const timeoutStart = Date.now();
+  assert.match(await refused('clipboard','read','--full'), /clipboard owner did not answer/);
+  assert(Date.now()-timeoutStart < 4000, 'unresponsive owner is bounded');
+  await stopProcess(silentOwner.pid);
+  assert.match(await refused('clipboard','read','--full'), /desktop clipboard has no text/);
+  // Hidden compatibility no-op remains accepted, never displayed as a scope.
+  await run('stop');
+  const legacyStart = await run('start','--control','--source','x11','--display',display);
+  assert.doesNotMatch(legacyStart,/permissions=/);
+  assert.match(await run('clipboard','write','Umer'), /clipboard: written/);
+  assert.equal(await readSelection(), 'Umer');
   assert.match(await run('screen','--query','zebra'),/0 items match "zebra"/);
   await run('stop');
   const badDisplay = `:${number+1000}`;
@@ -464,7 +632,11 @@ try {
   await goneOwned(Number(readFileSync(pidFile,'utf8').trim().split(/\s+/).at(-1)));
   await goneOwned(Number(readFileSync(enginePidFile,'utf8').trim().split(/\s+/).at(-1)));
   if (process.env.DESKLINK_AXI_MEASURE_PATH) writeFileSync(process.env.DESKLINK_AXI_MEASURE_PATH,JSON.stringify(observations));
-  console.log('engine: private Xvfb frame/damage; CLI: saved text matched, click and cleanup passed');
+  console.log('engine: private Xvfb frame/damage; CLI: paired click, independent X11 clipboard owner/readback, bounds and cleanup passed');
+  }
+} catch (error) {
+  console.error(error);
+  throw error;
 } finally {
   await cleanup();
 }

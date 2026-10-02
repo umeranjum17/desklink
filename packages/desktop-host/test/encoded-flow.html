@@ -40,6 +40,8 @@ const state = {
     frames: 0,
     control: [],
     rejection: null,
+    revocation: null,
+    signalingClosed: false,
 };
 let nextId = 0;
 
@@ -61,6 +63,7 @@ function request(method, params) {
  */
 function onControl(reply) {
     state.control.push(reply.kind);
+    if (reply.kind === 'revoked') state.revocation = {kind:reply.kind, code:reply.code, signalingOpen:socket.readyState === WebSocket.OPEN};
     if (reply.kind === 'hello') {
         state.geometry = reply.geometry;
         nativeDesklink.setSurfaceSize(state.localId, reply.geometry.encoded.width, reply.geometry.encoded.height);
@@ -152,8 +155,10 @@ window.__flow = {
         state.localId = id;
         const opened = await request('session.open', {
             source: { kind: 'encoded', codec: 'h264', width: size.width, height: size.height },
-            permissions: ['view', 'control'],
+            permissions: ['view'],
+            agent_indicator: true,
         });
+        if (opened.agentIndicator !== false) throw new Error("encoded source has no indicator backend");
         state.sessionId = opened.sessionId;
         state.geometry = opened.geometry;
         attachSurface(id, document.getElementById('surface'));
@@ -205,6 +210,10 @@ window.__flow = {
         return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
     },
 };
+socket.addEventListener('close', () => {
+    state.signalingClosed = true;
+    nativeDesklink.closeSession(state.localId);
+});
 socket.addEventListener('open', () => {
     window.__flow.ready = true;
 });

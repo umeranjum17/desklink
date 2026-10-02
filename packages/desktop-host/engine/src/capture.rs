@@ -541,7 +541,8 @@ fn run_loop(
 
 // The portal composites layer-shell into its pixels. Keep the last clean
 // backing for the helper's bounded circle and edge strips before diff/encode;
-// the center stays live so a click marker at the caret remains observable.
+// the center (4 logical px, which the cue leaves clear) stays live so a
+// click marker at the caret remains observable.
 struct IndicatorMask {
     position: Arc<Mutex<Option<(i64, i64)>>>,
     clean: Option<Vec<u8>>,
@@ -591,6 +592,7 @@ impl IndicatorMask {
                     )
                 });
             let radius = (150 * width / source_w).max(55) as i64;
+            let hole = (4 * width / source_w) as i64;
             let edge = (20 * width / source_w)
                 .max(8)
                 .min(width / 2)
@@ -630,7 +632,7 @@ impl IndicatorMask {
                         };
                         (col as i64 - cx).pow(2) + (row as i64 - cy).pow(2) <= radius * radius
                     });
-                    if (distance <= radius * radius || along) && distance > 16 {
+                    if (distance <= radius * radius || along) && distance > hole * hole {
                         let at = start + col * 4;
                         raw[at..at + 4].copy_from_slice(&clean[at..at + 4]);
                     }

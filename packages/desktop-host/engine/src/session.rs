@@ -1,9 +1,9 @@
 //! One authorized desktop session: capture in, VP9 out, control channel in,
 //! desktop input out, and a bounded teardown.
 //!
-//! The trust contract is defined in docs/PROTOCOL.md (Opening a session).
-//! The engine has no second identity system, no account and no notion of
-//! which application asked.
+//! The consumer's pairing is the authority for all available access. The engine
+//! has no second identity system, no account and no notion of which application
+//! asked.
 
 use crate::capture::{self, Capture};
 use crate::clipboard;
@@ -190,6 +190,98 @@ impl Drop for X11Capture {
     }
 }
 
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn desklink_indicator_covered(
+        x: f64,
+        y: f64,
+        opacity: f64,
+        click: f64,
+        typed: f64,
+        threshold: u32,
+        reveal: f64,
+    ) -> i32;
+}
+
+/// The X11 agent cue is a real window, so root grabs contain it. Restore
+/// exactly the pixels the announced cues cover (one pixel wider for edge
+/// rounding) from the last clean frame; everything else, including what lies
+/// inside the halo, stays live.
+#[cfg(target_os = "linux")]
+struct CueMask {
+    cues: crate::indicator::Cues,
+    clean: Option<Vec<u8>>,
+}
+
+#[cfg(target_os = "linux")]
+impl CueMask {
+    fn new(cues: crate::indicator::Cues) -> Self {
+        Self { cues, clean: None }
+    }
+
+    fn snapshot(&self) -> Vec<crate::indicator::Cue> {
+        self.cues
+            .lock()
+            .map(|mut feed| feed.drain())
+            .unwrap_or_default()
+    }
+
+    /// `before` is the snapshot taken when the grab started: with the states
+    /// announced by the time it returned, it covers whatever the grab saw.
+    fn apply(
+        &mut self,
+        raw: &mut [u8],
+        width: usize,
+        height: usize,
+        mut cues: Vec<crate::indicator::Cue>,
+    ) {
+        cues.extend(self.snapshot());
+        if let Some(clean) = self.clean.as_ref().filter(|clean| clean.len() == raw.len()) {
+            for cue in cues {
+                let side = cue.size as usize + 2;
+                let mut covered = vec![false; side * side];
+                for row in 0..cue.size as usize {
+                    for col in 0..cue.size as usize {
+                        let half = cue.size as f64 / 2.0;
+                        covered[(row + 1) * side + col + 1] = unsafe {
+                            desklink_indicator_covered(
+                                (col as f64 - half) / cue.unit,
+                                (row as f64 - half) / cue.unit,
+                                cue.opacity,
+                                cue.click,
+                                cue.typed,
+                                cue.threshold,
+                                cue.reveal,
+                            )
+                        } != 0;
+                    }
+                }
+                for row in 0..side {
+                    for col in 0..side {
+                        let near =
+                            |r: usize, c: usize| r < side && c < side && covered[r * side + c];
+                        if !(near(row, col)
+                            || near(row.wrapping_sub(1), col)
+                            || near(row + 1, col)
+                            || near(row, col.wrapping_sub(1))
+                            || near(row, col + 1))
+                        {
+                            continue;
+                        }
+                        let (x, y) = (cue.x - 1 + col as i64, cue.y - 1 + row as i64);
+                        if x < 0 || y < 0 || x >= width as i64 || y >= height as i64 {
+                            continue;
+                        }
+                        let at = (y as usize * width + x as usize) * 4;
+                        raw[at..at + 4].copy_from_slice(&clean[at..at + 4]);
+                    }
+                }
+            }
+        }
+        self.clean = Some(raw.to_vec());
+    }
+}
+
 /// What a chosen capture backend gives the session.
 struct Selected {
     source: SelectedSource,
@@ -208,6 +300,7 @@ fn select_x11(
     max_fps: u32,
     metrics: Arc<Mutex<Metrics>>,
     #[cfg(target_os = "linux")] cursor_sink: Option<crate::cursor::CursorSink>,
+    #[cfg(target_os = "linux")] cues: Option<crate::indicator::Cues>,
     sink: capture::FrameSink,
     on_stop: Box<dyn Fn(String) + Send>,
 ) -> Result<Selected> {
@@ -248,6 +341,8 @@ fn select_x11(
                 let mut first = true;
                 #[cfg(target_os = "linux")]
                 let mut cursor = cursor_sink.map(crate::cursor::Reporter::new);
+                #[cfg(target_os = "linux")]
+                let mut mask = cues.map(CueMask::new);
                 while !stop.load(Ordering::SeqCst) {
                     #[cfg(target_os = "linux")]
                     if let Some(cursor) = cursor.as_mut() {
@@ -270,10 +365,19 @@ fn select_x11(
                     }
                     let started = Instant::now();
                     let grabbed = Instant::now();
+                    #[cfg(target_os = "linux")]
                     let frame = {
+                        let before = mask.as_ref().map(CueMask::snapshot);
                         let mut desktop = lock(&desktop);
-                        desktop.capture_with_pixels(max_width, max_height)
+                        desktop.capture_raw().and_then(|mut raw| {
+                            if let (Some(mask), Some(before)) = (mask.as_mut(), before) {
+                                mask.apply(&mut raw, width as usize, height as usize, before);
+                            }
+                            Ok((desktop.convert(&raw, max_width, max_height)?, raw))
+                        })
                     };
+                    #[cfg(not(target_os = "linux"))]
+                    let frame = lock(&desktop).capture_with_pixels(max_width, max_height);
                     let grab_micros = grabbed.elapsed().as_micros() as u64;
                     match frame {
                         Ok((frame, raw)) => {
@@ -698,8 +802,6 @@ struct Inner {
     point_overlay: Mutex<Option<crate::indicator::Indicator>>,
     #[cfg(target_os = "linux")]
     point_desktop: PointDesktop,
-    #[cfg(target_os = "linux")]
-    x11_clipboard: Mutex<Option<Arc<crate::clipboard_x11::Clipboard>>>,
     capture: Mutex<Option<FrameSource>>,
     /// Absent for an encoded source: there is no local keyboard to translate a
     /// character through, because the client's keys are forwarded instead.
@@ -763,11 +865,10 @@ pub fn capabilities() -> serde_json::Value {
     } else {
         "none"
     };
-    // X11 selections are served on the selected display; Wayland writes need wl-copy.
-    let clipboard = wayland_clipboard_available();
     let x11 = crate::x11::X11Desktop::connect(None)
         .map(|desktop| serde_json::json!([desktop.screen_size().0, desktop.screen_size().1]))
         .unwrap_or(serde_json::Value::Null);
+    let clipboard = wayland_clipboard_available();
     let (input, grant_state, unavailable) = match crate::input::probe() {
         Ok(()) => (serde_json::json!(true), "granted", serde_json::Value::Null),
         Err(unavailable) => (
@@ -808,7 +909,7 @@ pub fn capabilities() -> serde_json::Value {
             "unavailable_reason": unavailable,
             "grant": grant_state,
         },
-        "clipboard": { "read": clipboard || x11.is_array(), "write": x11.is_array() || (clipboard && clipboard::writer_available()), "mime": ["text/plain;charset=utf-8"],
+        "clipboard": { "read": clipboard, "write": clipboard && clipboard::writer_available(), "mime": ["text/plain;charset=utf-8"],
                        "maxBytes": clipboard::MAX_CLIPBOARD_BYTES },
         // Video this engine does not capture or encode but can carry, so a
         // consumer can tell an old engine from one that takes `session.feed`
@@ -906,13 +1007,6 @@ impl Session {
         request: OpenRequest,
         events: tokio_mpsc::UnboundedSender<Notice>,
     ) -> std::result::Result<Self, SessionError> {
-        #[cfg(target_os = "windows")]
-        if request.agent_indicator {
-            return Err(SessionError::new(
-                "indicator-unavailable",
-                "Windows agent indicator is not implemented in this build.",
-            ));
-        }
         if request.cursor == crate::protocol::CursorMode::Hidden {
             #[cfg(not(target_os = "linux"))]
             return Err(SessionError::new(
@@ -943,9 +1037,26 @@ impl Session {
         // Which desktop decides which input path is even available: an X display
         // takes XTest, which cannot reach any other session, while a portal
         // desktop needs kernel input access.
+        #[cfg(target_os = "macos")]
+        if crate::input::probe().is_err() {
+            let _ = crate::input::request_access();
+        }
 
         let metrics = Arc::new(Mutex::new(Metrics::default()));
         let mut indicator = None;
+        // The X11 cue starts before capture: its window is in root pixels, so
+        // the capture thread needs the announced cue states from the first grab.
+        #[cfg(target_os = "linux")]
+        if request.agent_indicator && wants_x11 {
+            let display = match &request.source {
+                Some(SourceRequest::X11 { display }) => display.clone(),
+                _ => None,
+            }
+            .or_else(|| std::env::var("DISPLAY").ok());
+            if let Some(display) = display {
+                indicator = crate::indicator::Indicator::start(&display, 0, 0).ok();
+            }
+        }
         let (frame_tx, frame_rx) = latest_frame();
         let latest = Arc::new(Mutex::new(None::<FrameSnapshot>));
         let observed = latest.clone();
@@ -1067,6 +1178,8 @@ impl Session {
                 metrics.clone(),
                 #[cfg(target_os = "linux")]
                 cursor_sink,
+                #[cfg(target_os = "linux")]
+                indicator.as_ref().map(crate::indicator::Indicator::cues),
                 sink,
                 Box::new({
                     let status = capture_status.clone();
@@ -1116,22 +1229,12 @@ impl Session {
                     fit(source_w, source_h, request.max_width, request.max_height);
                 #[cfg(target_os = "linux")]
                 if request.agent_indicator {
-                    indicator = Some(
-                        crate::indicator::Indicator::start_wayland(source_w, source_h).map_err(
-                            |error| {
-                                SessionError::new("indicator-unavailable", format!("{error:#}"))
-                            },
-                        )?,
-                    );
+                    indicator = crate::indicator::Indicator::start_wayland(source_w, source_h).ok();
                 }
                 #[cfg(target_os = "macos")]
                 if request.agent_indicator {
-                    indicator = Some(
-                        crate::indicator::Indicator::start(source.node_id, source_w, source_h)
-                            .map_err(|error| {
-                                SessionError::new("indicator", format!("{error:#}"))
-                            })?,
-                    );
+                    indicator =
+                        crate::indicator::Indicator::start(source.node_id, source_w, source_h).ok();
                 }
                 #[cfg(target_os = "macos")]
                 let capture = capture::start(
@@ -1206,20 +1309,6 @@ impl Session {
 
         let source_w = source.width.max(1) as usize;
         let source_h = source.height.max(1) as usize;
-        #[cfg(target_os = "linux")]
-        if request.agent_indicator && wants_x11 {
-            let display = match &request.source {
-                Some(SourceRequest::X11 {
-                    display: Some(display),
-                }) => display.clone(),
-                _ => std::env::var("DISPLAY")
-                    .map_err(|_| SessionError::new("indicator-unavailable", "no X display"))?,
-            };
-            indicator = Some(
-                crate::indicator::Indicator::start(&display, source_w, source_h)
-                    .map_err(|error| SessionError::new("indicator", format!("{error:#}")))?,
-            );
-        }
         let (width, height) = fit(source_w, source_h, request.max_width, request.max_height);
 
         let bitrate_kbps = if request.bitrate_kbps == 0 {
@@ -1238,42 +1327,30 @@ impl Session {
 
         // Everything that can still refuse the session comes before the peer:
         // a peer created and then abandoned keeps its socket and tasks alive.
-        let input = match &x11 {
-            Some(desktop) => Some(InputTarget {
-                applier: Applier::X11(desktop.clone()),
-                held: HeldState::default(),
-                explicit_modifiers: Vec::new(),
-                chord_modifiers: Vec::new(),
-                chord_keys: Vec::new(),
-                wheel_rest: (0.0, 0.0),
-            }),
+        let applier = match &x11 {
+            Some(desktop) => lock(desktop)
+                .input_available()
+                .then(|| Applier::X11(desktop.clone())),
             None => {
-                #[cfg(target_os = "macos")]
-                let _ = crate::input::request_access();
-                if crate::input::probe().is_ok() {
-                    #[cfg(target_os = "linux")]
-                    let devices = InputDevices::create(source_w as i32, source_h as i32);
-                    #[cfg(any(target_os = "macos", target_os = "windows"))]
-                    let devices = InputDevices::create_for_display(
-                        source_w as i32,
-                        source_h as i32,
-                        source.node_id,
-                    );
-                    Some(InputTarget {
-                        applier: Applier::Uinput(devices.map_err(|error| {
-                            SessionError::new("input-unavailable", format!("{error:#}"))
-                        })?),
-                        held: HeldState::default(),
-                        explicit_modifiers: Vec::new(),
-                        chord_modifiers: Vec::new(),
-                        chord_keys: Vec::new(),
-                        wheel_rest: (0.0, 0.0),
-                    })
-                } else {
-                    None
-                }
+                #[cfg(target_os = "linux")]
+                let devices = InputDevices::create(source_w as i32, source_h as i32);
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                let devices = InputDevices::create_for_display(
+                    source_w as i32,
+                    source_h as i32,
+                    source.node_id,
+                );
+                devices.ok().map(Applier::Uinput)
             }
         };
+        let input = applier.map(|applier| InputTarget {
+            applier,
+            held: HeldState::default(),
+            explicit_modifiers: Vec::new(),
+            chord_modifiers: Vec::new(),
+            chord_keys: Vec::new(),
+            wheel_rest: (0.0, 0.0),
+        });
 
         let layout = Layout::from_environment().map_err(|error| {
             SessionError::new("input", format!("no keyboard layout: {error:#}"))
@@ -1327,8 +1404,6 @@ impl Session {
             input: Mutex::new(input),
             indicator: Mutex::new(indicator),
             point_overlay: Mutex::new(None),
-            #[cfg(target_os = "linux")]
-            x11_clipboard: Mutex::new(None),
             #[cfg(target_os = "linux")]
             point_desktop: if wants_x11 {
                 match &request.source {
@@ -1431,8 +1506,6 @@ impl Session {
             indicator: Mutex::new(None),
             point_overlay: Mutex::new(None),
             #[cfg(target_os = "linux")]
-            x11_clipboard: Mutex::new(None),
-            #[cfg(target_os = "linux")]
             point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
             capture: Mutex::new(None),
             layout: Mutex::new(None),
@@ -1512,6 +1585,10 @@ impl Session {
         self.inner.generation
     }
 
+    pub fn agent_indicator(&self) -> bool {
+        lock(&self.inner.indicator).is_some()
+    }
+
     pub fn cursor_info(&self) -> &serde_json::Value {
         &self.inner.cursor_info
     }
@@ -1534,7 +1611,6 @@ impl Session {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Err(SessionError::new("session", "the session is closed"));
         }
-
         if lock(&self.inner.encoded).is_some() {
             return Err(SessionError::new(
                 "operation",
@@ -1707,9 +1783,6 @@ impl Session {
         path: &str,
         region: Option<[usize; 4]>,
     ) -> std::result::Result<serde_json::Value, SessionError> {
-        if self.inner.closed.load(Ordering::SeqCst) {
-            return Err(SessionError::new("session", "the session is closed"));
-        }
         if lock(&self.inner.encoded).is_some() {
             return Err(SessionError::new(
                 "operation",
@@ -1816,7 +1889,7 @@ impl Session {
             return Err(reason.to_owned());
         }
         let inner = self.inner.clone();
-        clipboard_task(move || inner.read_clipboard_text()).await
+        clipboard_task(move || inner.clipboard_read_text()).await
     }
 
     pub async fn write_clipboard(&self, text: String) -> std::result::Result<(), String> {
@@ -1824,14 +1897,9 @@ impl Session {
             return Err(reason.to_owned());
         }
         let inner = self.inner.clone();
-        clipboard_task(move || {
-            inner
-                .write_clipboard_text(&text)
-                .map(|()| String::new())
-                .map_err(|error| format!("{error:#}"))
-        })
-        .await
-        .map(|_written| ())
+        clipboard_task(move || inner.clipboard_write_text(&text))
+            .await
+            .map(|_written| ())
     }
 
     pub fn mark_closed_reason(&self) -> Option<String> {
@@ -1869,10 +1937,6 @@ impl Inner {
         }
         self.control_open.store(false, Ordering::SeqCst);
         self.pipeline.store(false, Ordering::SeqCst);
-        #[cfg(target_os = "linux")]
-        if let Some(clipboard) = lock(&self.x11_clipboard).take() {
-            clipboard.stop();
-        }
         drop(lock(&self.encoded).take());
         // The encoder goes now, not with the last handle: a hardware session
         // still open when the process exits can hang the driver's exit
@@ -1924,12 +1988,32 @@ impl Inner {
         }
     }
 
+    fn clipboard_read_text(&self) -> std::result::Result<(String, bool), String> {
+        #[cfg(target_os = "linux")]
+        if let PointDesktop::X11(display) = &self.point_desktop {
+            return clipboard::x11_read(display).map_err(|error| format!("{error:#}"));
+        }
+        clipboard::read_or_explain()
+    }
+
+    fn clipboard_write_text(&self, text: &str) -> std::result::Result<String, String> {
+        #[cfg(target_os = "linux")]
+        if let PointDesktop::X11(display) = &self.point_desktop {
+            return clipboard::x11_write(display, text)
+                .map(|()| String::new())
+                .map_err(|error| format!("{error:#}"));
+        }
+        clipboard::write(text)
+            .map(|()| String::new())
+            .map_err(|error| format!("{error:#}"))
+    }
+
     fn clipboard_refusal(&self) -> Option<(&'static str, &'static str)> {
-        if self.closed.load(Ordering::SeqCst) {
+        if self.closed.load(Ordering::Relaxed) {
             return Some(("session", "the session has ended"));
         }
         #[cfg(target_os = "linux")]
-        if matches!(self.point_desktop, PointDesktop::X11(_)) {
+        if self.source.source_type.as_deref() == Some("x11-root") {
             return None;
         }
         if self.source.source_type.as_deref() == Some("encoded") || !wayland_clipboard_available() {
@@ -1939,47 +2023,6 @@ impl Inner {
             ));
         }
         None
-    }
-
-    fn read_clipboard_text(&self) -> std::result::Result<(String, bool), String> {
-        if let Some((_, reason)) = self.clipboard_refusal() {
-            return Err(reason.to_owned());
-        }
-        #[cfg(target_os = "linux")]
-        if let PointDesktop::X11(display) = &self.point_desktop {
-            let mut backend = lock(&self.x11_clipboard);
-            if self.closed.load(Ordering::SeqCst) {
-                return Err(String::from("the session has ended"));
-            }
-            if backend.is_none() {
-                *backend = Some(
-                    crate::clipboard_x11::Clipboard::connect(Some(display))
-                        .map_err(|error| format!("{error:#}"))?,
-                );
-            }
-            return backend
-                .as_ref()
-                .unwrap()
-                .read(Some(display))
-                .map_err(|error| format!("{error:#}"));
-        }
-        clipboard::read_or_explain()
-    }
-
-    fn write_clipboard_text(&self, text: &str) -> Result<()> {
-        if let Some((_, reason)) = self.clipboard_refusal() {
-            anyhow::bail!(reason);
-        }
-        #[cfg(target_os = "linux")]
-        if let PointDesktop::X11(display) = &self.point_desktop {
-            let mut backend = lock(&self.x11_clipboard);
-            anyhow::ensure!(!self.closed.load(Ordering::SeqCst), "the session has ended");
-            if backend.is_none() {
-                *backend = Some(crate::clipboard_x11::Clipboard::connect(Some(display))?);
-            }
-            return backend.as_ref().unwrap().write(text);
-        }
-        clipboard::write(text)
     }
 
     fn reject(&self, seq: u64, code: &'static str, message: &str) {
@@ -2006,7 +2049,7 @@ impl Inner {
         Ok(())
     }
 
-    /// Admit one client action. Validation, lifecycle and ordering checks all
+    /// Admit one client action. Validation and ordering checks all
     /// happen before any physical effect, so a refused action leaves the desktop
     /// exactly as it was.
     fn apply(self: &Arc<Self>, message: ControlMessage) {
@@ -2019,7 +2062,6 @@ impl Inner {
             self.reject(seq, "session", "the control channel is not open");
             return;
         }
-
         if seq != 0 {
             let mut last = match self.last_seq.lock() {
                 Ok(last) => last,
@@ -2054,6 +2096,14 @@ impl Inner {
         // consumer injects it where the picture actually came from.
         if lock(&self.encoded).is_some() {
             self.forward(message);
+            return;
+        }
+        if !matches!(
+            &message,
+            ControlMessage::ClipboardRead { .. } | ControlMessage::ClipboardWrite { .. }
+        ) && lock(&self.input).is_none()
+        {
+            self.reject(seq, "input-unavailable", "no input backend");
             return;
         }
         let outcome = match message {
@@ -2331,13 +2381,12 @@ impl Inner {
         }
         let inner = Arc::clone(self);
         tokio::spawn(async move {
-            let (text, truncated, error) = match {
-                let backend = inner.clone();
-                clipboard_task(move || backend.read_clipboard_text()).await
-            } {
-                Ok((text, truncated)) => (text, truncated, None),
-                Err(reason) => (String::new(), false, Some(reason)),
-            };
+            let reader = inner.clone();
+            let (text, truncated, error) =
+                match clipboard_task(move || reader.clipboard_read_text()).await {
+                    Ok((text, truncated)) => (text, truncated, None),
+                    Err(reason) => (String::new(), false, Some(reason)),
+                };
             let _ = inner.reply(&ControlReply::Clipboard {
                 request: &request,
                 text,
@@ -2354,15 +2403,10 @@ impl Inner {
         }
         let inner = Arc::clone(self);
         tokio::spawn(async move {
-            let backend = inner.clone();
-            let error = clipboard_task(move || {
-                backend
-                    .write_clipboard_text(&text)
-                    .map(|()| String::new())
-                    .map_err(|error| format!("{error:#}"))
-            })
-            .await
-            .err();
+            let writer = inner.clone();
+            let error = clipboard_task(move || writer.clipboard_write_text(&text))
+                .await
+                .err();
             let _ = inner.reply(&ControlReply::Clipboard {
                 request: &request,
                 text: String::new(),
@@ -3234,6 +3278,60 @@ fn opaque_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn x11_cue_mask_restores_only_the_cue_pixels() {
+        use crate::indicator::Cue;
+        let (w, h) = (200usize, 120usize);
+        let at = |x: usize, y: usize| (y * w + x) * 4;
+        let (cx, cy) = (20 + 55, 10 + 55);
+        // Shaped (128) and composited (1) helpers announce different thresholds.
+        for threshold in [128, 1] {
+            let cue = Cue {
+                x: 20,
+                y: 10,
+                size: 110,
+                unit: 1.0,
+                opacity: 1.0,
+                click: -1.0,
+                typed: -1.0,
+                threshold,
+                reveal: 99.0,
+            };
+            let mut mask = CueMask::new(Default::default());
+            let clean: Vec<u8> = (0..w * h * 4).map(|i| (i % 251) as u8).collect();
+            mask.apply(&mut clean.clone(), w, h, vec![]);
+            // Paint the cue's keyline and live content inside the halo.
+            let mut frame = clean.clone();
+            frame[at(cx - 24, cy)..at(cx - 24, cy) + 4].fill(255);
+            frame[at(cx - 5, cy)..at(cx - 5, cy) + 4].fill(7);
+            frame[at(190, 110)..at(190, 110) + 4].fill(9);
+            mask.apply(&mut frame, w, h, vec![cue]);
+            assert_eq!(
+                &frame[at(cx - 24, cy)..at(cx - 24, cy) + 4],
+                &clean[at(cx - 24, cy)..at(cx - 24, cy) + 4]
+            );
+            assert_eq!(
+                &frame[at(cx - 5, cy)..at(cx - 5, cy) + 4],
+                &[7; 4],
+                "the halo interior stays live"
+            );
+            assert_eq!(
+                &frame[at(190, 110)..at(190, 110) + 4],
+                &[9; 4],
+                "pixels away from the cue stay live"
+            );
+            let mut after = clean.clone();
+            after[at(cx - 24, cy)..at(cx - 24, cy) + 4].fill(3);
+            mask.apply(&mut after, w, h, vec![]);
+            assert_eq!(
+                &after[at(cx - 24, cy)..at(cx - 24, cy) + 4],
+                &[3; 4],
+                "a hidden cue masks nothing"
+            );
+        }
+    }
+
     use super::*;
 
     #[tokio::test]
@@ -3267,8 +3365,6 @@ mod tests {
             input: Mutex::new(None),
             indicator: Mutex::new(None),
             point_overlay: Mutex::new(None),
-            #[cfg(target_os = "linux")]
-            x11_clipboard: Mutex::new(None),
             #[cfg(target_os = "linux")]
             point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
             capture: Mutex::new(None),
@@ -3587,8 +3683,6 @@ mod tests {
             indicator: Mutex::new(None),
             point_overlay: Mutex::new(None),
             #[cfg(target_os = "linux")]
-            x11_clipboard: Mutex::new(None),
-            #[cfg(target_os = "linux")]
             point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
             layout: Mutex::new(Some(Layout::from_environment().expect("a keymap"))),
             last_seq: Mutex::new(0),
@@ -3601,6 +3695,36 @@ mod tests {
             cursor_info: serde_json::json!({"mode":"embedded", "positions":false}),
         });
         (inner, recorded)
+    }
+
+    #[tokio::test]
+    async fn paired_input_without_a_backend_is_an_action_failure() {
+        let (events, _) = tokio_mpsc::unbounded_channel();
+        let (inner, recorded) = test_inner(events).await;
+        *lock(&inner.input) = None;
+        assert_eq!(
+            inner.with_input(|_| Ok(())).unwrap_err().0,
+            "input-unavailable"
+        );
+        inner.apply(ControlMessage::Pointer {
+            phase: PointerPhase::Move,
+            x: 10,
+            y: 20,
+            button: 1,
+            seq: 1,
+        });
+        assert_eq!(
+            *lock(&inner.last_seq),
+            1,
+            "paired action passes admission, never a permission refusal"
+        );
+        assert_eq!(lock(&inner.metrics).input_rejected, 1);
+        assert_eq!(lock(&inner.metrics).input_applied, 0);
+        assert!(lock(&recorded).is_empty());
+        assert!(
+            !inner.closed.load(Ordering::Relaxed),
+            "missing input does not close view access"
+        );
     }
 
     #[tokio::test]
@@ -3861,6 +3985,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn x11_capture_does_not_refuse_clipboard() {
+        let (events, _received) = tokio_mpsc::unbounded_channel();
+        let (mut inner, _recorded) = test_inner(events).await;
+        let owned = Arc::get_mut(&mut inner).unwrap();
+        owned.source.source_type = Some(String::from("x11-root"));
+        #[cfg(target_os = "linux")]
+        assert_eq!(inner.clipboard_refusal(), None);
+        Arc::get_mut(&mut inner).unwrap().source.source_type = Some(String::from("encoded"));
+        assert_eq!(
+            inner.clipboard_refusal().unwrap().0,
+            "clipboard-unsupported"
+        );
+    }
+
+    #[tokio::test]
     async fn a_stopped_capture_never_serves_the_last_frame() {
         let (events, _) = tokio_mpsc::unbounded_channel();
         let (inner, _) = test_inner(events).await;
@@ -4114,21 +4253,6 @@ mod tests {
             session.read_clipboard().await.unwrap_err(),
             "clipboard is unavailable for this desktop source",
         );
-    }
-
-    #[tokio::test]
-    async fn opening_without_permissions_grants_encoded_input() {
-        let (events, mut received) = tokio_mpsc::unbounded_channel();
-        let session = Session::open(encoded_open(), events).await.unwrap();
-        session.inner.control_open.store(true, Ordering::Relaxed);
-        session.inner.apply(ControlMessage::ReleaseAll { seq: 1 });
-        loop {
-            if matches!(next_notice(&mut received).await.event, SessionEvent::Input { .. }) { break; }
-        }
-        assert_eq!(session.metrics().input_forwarded, 1);
-        session.close("pairing revoked").await;
-        session.inner.apply(ControlMessage::ReleaseAll { seq: 2 });
-        assert_eq!(session.metrics().input_forwarded, 1);
     }
 
     #[tokio::test]

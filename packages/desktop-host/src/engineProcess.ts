@@ -191,7 +191,6 @@ export class EngineClient {
     openSession(request: OpenSessionRequest, timeoutMs?: number): Promise<OpenedSession> {
         return this.request<OpenedSession>('session.open', {
             ...(request.source === undefined ? {} : { source: request.source }),
-            permissions: request.permissions,
             ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
             ...(request.maxWidth === undefined ? {} : { max_width: request.maxWidth }),
             ...(request.maxHeight === undefined ? {} : { max_height: request.maxHeight }),

@@ -1,40 +1,82 @@
-// The X server draws cursors outside GetImage(root). No overlay window can
-// expose black pixels, intercept input, or poison agent frame diffs.
+// The agent cue is a click-through override-redirect window that follows the
+// pointer, so it stays visible over windows that set their own cursor and never
+// replaces the person's cursor. With a compositing manager it uses an ARGB
+// visual; without one, a 1-bit shape. It appears in GetImage(root), so each
+// state is reported on stdout before it is drawn and the engine restores the
+// covered pixels in X11 capture (desklink_indicator_covered below).
 #include <X11/Xlib.h>
-#include <X11/Xcursor/Xcursor.h>
+#include <X11/Xutil.h>
+#include <X11/Xresource.h>
+#include <X11/extensions/shape.h>
 #include <math.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include "agent_indicator.h"
+
+// The same coverage test the helper draws with, for the engine's capture mask.
+int desklink_indicator_covered(double x, double y, double opacity, double click, double typed, unsigned threshold, double reveal) {
+    return hypot(x,y)<reveal && (indicator_pixel(x,y,opacity,click,typed)>>24) >= threshold;
+}
 
 static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec/1e9; }
 
-static unsigned pixel(double distance, double radius, double opacity) {
-    double edge = fmax(0, 1 - fabs(distance-radius)/2.5);
-    unsigned alpha = (unsigned)(fmin(1, edge * opacity) * 255);
-    return (alpha << 24) | 0x4c9ed0;
+static double desktop_scale(Display *d) {
+    double scale=1;
+    const char *resources=XResourceManagerString(d);
+    if(!resources) return scale;
+    XrmInitialize(); XrmDatabase db=XrmGetStringDatabase(resources);
+    XrmValue value; char *type;
+    if(db && XrmGetResource(db,"Xft.dpi","Xft.Dpi",&type,&value) && value.addr) {
+        double dpi=strtod(value.addr,NULL);
+        if(isfinite(dpi) && dpi>=96 && dpi<=384)scale=dpi/96;
+    }
+    if(db)XrmDestroyDatabase(db);
+    return scale;
 }
 
 int desklink_agent_overlay_main(const char *display_name) {
     Display *d = XOpenDisplay(display_name);
     if (!d) return 2;
-    Window root = DefaultRootWindow(d);
-    unsigned best_w=64,best_h=64;
-    XQueryBestCursor(d,root,64,64,&best_w,&best_h);
-    unsigned size = best_w < best_h ? best_w : best_h;
-    if (size < 32) { XCloseDisplay(d); return 2; }
-    if (size > 96) size = 96;
-    XcursorImage *image = XcursorImageCreate(size,size);
-    if (!image) { XCloseDisplay(d); return 2; }
-    image->version = XCURSOR_IMAGE_VERSION;
-    Cursor previous = None;
+    int event_base, error_base, screen=DefaultScreen(d);
+    if (!XShapeQueryExtension(d,&event_base,&error_base)) { XCloseDisplay(d); return 2; }
+    Window root = RootWindow(d,screen);
+    double scale=desktop_scale(d);
+    // The arrow reaches 36 logical px from the cue's center.
+    int size=(int)ceil(80*scale);
+    char selection[32]; snprintf(selection,sizeof(selection),"_NET_WM_CM_S%d",screen);
+    XVisualInfo argb;
+    int alpha = XGetSelectionOwner(d,XInternAtom(d,selection,False))!=None
+        && XMatchVisualInfo(d,screen,32,TrueColor,&argb);
+    XSetWindowAttributes attrs={0};
+    attrs.override_redirect=True;
+    attrs.background_pixmap=None;
+    attrs.border_pixel=0;
+    unsigned long mask=CWOverrideRedirect|CWBackPixmap|CWBorderPixel;
+    Visual *visual=DefaultVisual(d,screen); int depth=DefaultDepth(d,screen);
+    if(alpha) {
+        visual=argb.visual; depth=32;
+        attrs.colormap=XCreateColormap(d,root,visual,AllocNone); mask|=CWColormap;
+    } else if(depth<24) { XCloseDisplay(d); return 2; }
+    Window window=XCreateWindow(d,root,0,0,size,size,0,depth,InputOutput,visual,mask,&attrs);
+    XStoreName(d,window,"Desklink agent");
+    XShapeCombineRectangles(d,window,ShapeInput,0,0,NULL,0,ShapeSet,Unsorted);
+    XSelectInput(d,window,ExposureMask);
+    XSelectInput(d,root,SubstructureNotifyMask);
+    GC gc=XCreateGC(d,window,0,NULL);
+    uint32_t *pixels=calloc((size_t)size*size,4);
+    int row=(size+7)/8;
+    char *bits=calloc((size_t)row*size,1);
+    XImage *image=pixels?XCreateImage(d,visual,depth,ZPixmap,0,(char *)pixels,size,size,32,0):NULL;
+    if(!image || !bits || image->bits_per_pixel!=32) { XCloseDisplay(d); return 2; }
     int stdin_flags = fcntl(STDIN_FILENO, F_GETFL);
     fcntl(STDIN_FILENO, F_SETFL, stdin_flags | O_NONBLOCK);
     puts("READY"); fflush(stdout);
-    double target_x=0,target_y=0,cursor_x=0,cursor_y=0,click=0,typed=0,ending=0;
-    int active=0;
+    double target_x=0,target_y=0,cue_x=0,cue_y=0,click=0,typed=0,ending=0,started=0;
+    int active=0,mapped=0,redraw=0,was_animating=0,last_x=-100000,last_y=-100000;
     char pending[128]; size_t used=0;
     for (;;) {
         char bytes[128]; ssize_t n = read(STDIN_FILENO, bytes, sizeof(bytes));
@@ -44,11 +86,12 @@ int desklink_agent_overlay_main(const char *display_name) {
                 pending[used]=0; char kind=0; double px=0,py=0;
                 if (sscanf(pending,"%c %lf %lf",&kind,&px,&py)>=1) {
                     if (kind=='S') ending=now();
-                    else if (kind=='M'||kind=='C'||kind=='T') {
+                    else if ((kind=='M'||kind=='C'||kind=='T') && (active || (px>=0 && py>=0))) {
                         if (px>=0 && py>=0) {
                             target_x=px; target_y=py;
-                            if (!active) { cursor_x=px; cursor_y=py; }
+                            if (!active) { cue_x=px; cue_y=py; }
                         }
+                        if (!active) started=now();
                         active=1;
                         if (kind=='C') click=now();
                         if (kind=='T') typed=now();
@@ -57,48 +100,66 @@ int desklink_agent_overlay_main(const char *display_name) {
                 used=0;
             } else if (used < sizeof(pending)-1) pending[used++]=bytes[i];
         }
+        while (XPending(d)) {
+            XEvent event; XNextEvent(d,&event);
+            if (event.type==Expose && event.xexpose.window==window) redraw=1;
+            // Stay above windows and menus mapped or restacked after us.
+            if (mapped && ((event.type==MapNotify && event.xmap.window!=window)
+                || (event.type==ConfigureNotify && event.xconfigure.window!=window))) XRaiseWindow(d,window);
+        }
         double t=now();
-        if (ending && t-ending>0.55) break;
+        if (ending && (!active || t-ending>0.55)) break;
         if (active) {
-            cursor_x += (target_x-cursor_x)*0.24;
-            cursor_y += (target_y-cursor_y)*0.24;
-            int radius=(int)size/2-3;
-            image->xhot = (unsigned)fmax(0,fmin(size-1,(double)size/2+target_x-cursor_x));
-            image->yhot = (unsigned)fmax(0,fmin(size-1,(double)size/2+target_y-cursor_y));
-            for (unsigned y=0;y<size;y++) for (unsigned x=0;x<size;x++) {
-                double distance=hypot(x-(double)size/2,y-(double)size/2);
-                double opacity=ending ? fmax(0,1-(t-ending)/0.55) : 1;
-                unsigned color=pixel(distance,12,0.72*opacity);
-                if (distance>=16 && distance<=radius) {
-                    unsigned outer=pixel(distance,20,0.20*opacity);
-                    if ((outer>>24)>(color>>24)) color=outer;
+            cue_x += (target_x-cue_x)*0.24;
+            cue_y += (target_y-cue_y)*0.24;
+            double opacity=ending ? fmax(0,1-(t-ending)/0.55) : fmin(1,(t-started)/0.18);
+            double c=click?(t-click)/0.55:-1, k=typed?(t-typed)/0.4:-1;
+            int animating = opacity<1 || (c>=0 && c<1) || (k>=0 && k<1);
+            // One more frame once an animation ends, so the rest state is exact.
+            if (!animating && was_animating) redraw=1;
+            was_animating=animating;
+            int x=(int)lround(cue_x), y=(int)lround(cue_y);
+            if (animating || redraw || x!=last_x || y!=last_y) {
+                // A 1-bit shape cannot fade: reveal outward from the tip and
+                // retract inward, so coverage only grows while appearing and a
+                // still cue never uncovers stale pixels.
+                double unit=scale, reveal=alpha?99:40*opacity*(2-opacity);
+                memset(bits,0,(size_t)row*size);
+                for (int py=0;py<size;py++) for (int px=0;px<size;px++) {
+                    double lx=(px-size/2.0)/unit, ly=(py-size/2.0)/unit;
+                    uint32_t color=hypot(lx,ly)<reveal?indicator_pixel(lx,ly,alpha?opacity:1,c,k):0;
+                    unsigned a=color>>24;
+                    if (alpha) { pixels[py*size+px]=color; continue; }
+                    if (a<128) { pixels[py*size+px]=0; continue; }
+                    bits[py*row+px/8]|=(char)(1<<(px%8));
+                    // Un-premultiply: the shaped path paints opaque pixels.
+                    pixels[py*size+px]=((((color>>16)&255)*255/a)<<16)|((((color>>8)&255)*255/a)<<8)|((color&255)*255/a);
                 }
-                if (click && t-click<0.5) {
-                    double progress=(t-click)/0.5;
-                    unsigned ripple=pixel(distance,12+(radius-14)*progress,0.6*(1-progress)*opacity);
-                    if ((ripple>>24)>(color>>24)) color=ripple;
+                // Announce first: capture reads this pipe after each grab, so
+                // every state a grab can see is already announced.
+                printf("P %d %d %d %.6f %.4f %.4f %.4f %u %.4f\n",x-size/2,y-size/2,size,unit,alpha?opacity:1,c,k,alpha?1u:128u,reveal);
+                // No reader means the engine is gone: leave at once rather
+                // than animate unmasked into whatever captures next.
+                if (fflush(stdout)) break;
+                if (!alpha) {
+                    Pixmap shape=XCreateBitmapFromData(d,window,bits,size,size);
+                    XShapeCombineMask(d,window,ShapeBounding,0,0,shape,ShapeSet);
+                    XFreePixmap(d,shape);
                 }
-                if (typed && t-typed<0.35) {
-                    double progress=(t-typed)/0.35;
-                    if (distance<5+progress*12) {
-                        unsigned pulse=(unsigned)(0.22*(1-progress)*opacity*255);
-                        if (pulse>(color>>24)) color=(pulse<<24)|0x5baed8;
-                    }
-                }
-                image->pixels[y*size+x]=color;
-            }
-            Cursor next=XcursorImageLoadCursor(d,image);
-            if (next!=None) {
-                XDefineCursor(d,root,next); XFlush(d);
-                if (previous!=None) XFreeCursor(d,previous);
-                previous=next;
+                if (x!=last_x || y!=last_y) XMoveWindow(d,window,x-size/2,y-size/2);
+                if (!mapped) { XMapRaised(d,window); mapped=1; }
+                XPutImage(d,window,gc,image,0,0,0,0,size,size);
+                // Wait until the server has drawn it, so at most the newest
+                // announced state is not on screen yet.
+                XSync(d,False);
+                last_x=x; last_y=y; redraw=0;
             }
         }
         usleep(16000);
     }
-    XUndefineCursor(d,root); XFlush(d);
-    if (previous!=None) XFreeCursor(d,previous);
-    XcursorImageDestroy(image); XCloseDisplay(d);
+    XDestroyWindow(d,window);
+    XDestroyImage(image); free(bits);
+    XFreeGC(d,gc); XCloseDisplay(d);
     return 0;
 }
 
@@ -106,8 +167,6 @@ int desklink_agent_overlay_main(const char *display_name) {
 // window works without a compositor; an empty input shape passes every event
 // through and mapping it never asks for keyboard focus. It intentionally appears
 // in GetImage(root), so the local person and the video observer share the cue.
-#include <X11/extensions/shape.h>
-#include <stdlib.h>
 
 int desklink_point_overlay_main(const char *display_name) {
     Display *d = XOpenDisplay(display_name);

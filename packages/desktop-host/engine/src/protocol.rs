@@ -529,6 +529,13 @@ mod tests {
 
     #[test]
     fn open_defaults_keep_the_desktops_own_pixels_up_to_4k() {
+        for payload in [
+            r#"{}"#,
+            r#"{"permissions":["view"]}"#,
+            r#"{"permissions":["view","unknown-legacy-scope"]}"#,
+        ] {
+            let _: OpenParams = serde_json::from_str(payload).unwrap();
+        }
         let params: OpenParams =
             serde_json::from_str(r#"{"permissions":["view","control"]}"#).unwrap();
         assert_eq!(params.max_width, 3840);

@@ -26,10 +26,9 @@ export interface BridgeOptions {
     /** Address to listen on, e.g. `127.0.0.1:19400` or `0.0.0.0:19400`. */
     listen: string;
     /**
-     * Shared secret required on the socket path. Required, not optional: this
-     * channel grants control of a desktop, and `ws://` is plaintext, so an
-     * unauthenticated one on a reachable address is a remote-control port for
-     * anyone who finds it.
+     * Pairing credential: holding it grants all available view, input and
+     * clipboard access. Stop the bridge to revoke live and future access.
+     * Required, not optional; `ws://` is plaintext.
      */
     token: string;
     engineCommand: string;
@@ -73,12 +72,13 @@ export class Bridge {
 
     static async start(options: BridgeOptions): Promise<Bridge> {
         if (options.token.trim() === '') throw new Error('the bridge token must not be blank');
+        let bridge: Bridge | undefined;
         const server = createServer((request, response) => {
             const url = new URL(request.url ?? '/', 'http://localhost');
             // The page is served only to a caller that already has the token: an
             // unauthenticated page that connects to a desktop would be a worse
             // secret than the socket itself.
-            if (options.serveExample !== false && url.pathname === '/' && url.searchParams.get('token') === options.token) {
+            if (!bridge?.closing && options.serveExample !== false && url.pathname === '/' && url.searchParams.get('token') === options.token) {
                 response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
                 response.end(examplePage());
                 return;
@@ -95,7 +95,7 @@ export class Bridge {
             // all, not merely be refused an answer.
             verifyClient: ((info: { req: IncomingMessage }) => {
                 const url = new URL(info.req.url ?? '/', 'http://localhost');
-                return url.searchParams.get('token') === options.token;
+                return !bridge?.closing && url.searchParams.get('token') === options.token;
             }) as VerifyClientCallbackSync<IncomingMessage>,
         });
 
@@ -113,8 +113,8 @@ export class Bridge {
             },
         });
 
-        const bridge = new Bridge(server, sockets, engine, options.source, options.engineOptions?.onEvent !== undefined);
-        sockets.on('connection', (socket) => bridge.attach(socket));
+        bridge = new Bridge(server, sockets, engine, options.source, options.engineOptions?.onEvent !== undefined);
+        sockets.on('connection', (socket) => bridge?.attach(socket));
 
         const address = splitAddress(options.listen);
         await new Promise<void>((resolve, reject) => {
@@ -132,6 +132,7 @@ export class Bridge {
 
     private attach(socket: WebSocket): void {
         socket.on('message', (raw) => {
+            if (this.closing) return;
             let request: { id?: number; method?: string; params?: Record<string, unknown> };
             try {
                 request = JSON.parse(String(raw)) as typeof request;
@@ -166,15 +167,10 @@ export class Bridge {
                 .request<Record<string, unknown>>(method, params)
                 .then((result) => {
                     this.rememberSession(method, result);
-                    // Capabilities describe the selected X server, whose input
-                    // and clipboard do not depend on the ambient Wayland seat.
                     const forwarded = this.defaultSource?.kind === 'x11'
                         && (method === 'hello' || method === 'capabilities')
-                        ? { ...result,
-                            input: { ...(result.input as object), pointer: true, wheel: true, keyboard: true,
-                                grant: 'granted', unavailable_reason: null },
-                            clipboard: { ...(result.clipboard as object), read: true, write: true },
-                        }
+                        && result !== null && result.clipboard !== null && typeof result.clipboard === 'object'
+                        ? { ...result, clipboard: { ...result.clipboard, read: true, write: true } }
                         : result;
                     if (method === 'session.open' && socket.readyState !== socket.OPEN) {
                         this.releaseSessionIfDetached(true);
@@ -234,10 +230,17 @@ export class Bridge {
     async close(): Promise<void> {
         if (this.closing) return;
         this.closing = true;
-        for (const socket of this.sockets.clients) socket.close();
-        await new Promise<void>((resolve) => this.sockets.close(() => resolve()));
-        await new Promise<void>((resolve) => this.server.close(() => resolve()));
+        const listenerClosed = new Promise<void>((resolve) => this.server.close(() => resolve()));
         await this.engine.stop().catch(() => undefined);
+        this.session = undefined;
+        for (const socket of this.sockets.clients) socket.close();
+        const timer = setTimeout(() => {
+            for (const socket of this.sockets.clients) socket.terminate();
+        }, 1000);
+        await new Promise<void>((resolve) => this.sockets.close(() => resolve()));
+        clearTimeout(timer);
+        this.server.closeAllConnections();
+        await listenerClosed;
     }
 }
 

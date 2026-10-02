@@ -17,7 +17,7 @@ mean the phone pins a native host build, or the host pins a mobile runtime.
 **Boundary:** "given a granted desktop source, produce a WebRTC video track and
 apply authenticated input to the same desktop".
 
-- In: `session.open`, SDP/ICE, WebRTC control-channel input, explicit
+- In: `session.open`, SDP/ICE, the session's WebRTC control-channel input, explicit
   clipboard read/write, close — and `session.feed`, which supplies the access
   units of a consumer-encoded `encoded` source. See `docs/PROTOCOL.md`.
 - Out: one video track — VP9 or H.264 (the receiver's answer picks) the engine
@@ -44,9 +44,8 @@ an account never appears in the protocol or in the engine's state.
 local gestures into that session's input".
 
 - `useDesktopSession({ authorize, onStateChange, onError })` owns connection,
-  negotiation, readiness, reconnect and typed errors. For the `authorize()`
-  pairing check and session options, see the
-  [client usage](../../desktop-client/README.md#use).
+  negotiation, readiness, reconnect and typed errors. `authorize()` returns the
+  session's authenticated `signaling` channel.
 - `<DesktopView sessionId style />` owns the live surface and gesture mapping. It
   owns nothing about layout, chrome, navigation or the conversation it sits in.
 - `session.showKeyboard()/hideKeyboard()`,
@@ -58,9 +57,9 @@ local gestures into that session's input".
   decodes in hardware), the renderer and the IME/text
   connection. For input enablement and release on background/unmount, see the
   [client contract](../../desktop-client/README.md#what-the-package-guarantees).
-- The app supplies `authorize()` as described in the client usage above. The
-  package never sees a pairing blob, a machine id or a token format, and never
-  persists one.
+- The app supplies `authorize()` (its pairing check plus the authenticated
+  `signaling` channel it carries). The package never sees a
+  pairing blob, a machine id or a token format, and never persists one.
 - Platform files: `.native.ts` uses WebRTC through the app's existing native
   binding; `.web.ts` uses the browser's own `RTCPeerConnection`, so the same
   screen works in the PWA. `[decided]` the browser shim shares the
@@ -71,10 +70,10 @@ local gestures into that session's input".
 ## What the consumer (this application) keeps
 
 - The computer action in the conversation and the return.
-- Its own pairing, machine identity, authorization decision and revocation.
+- Its own pairing, machine identity and revocation; revoking ends live and
+  future sessions.
 - Carrying SDP/ICE over its existing authenticated encrypted channel.
-- The product's own start/loading/error copy. The engine's trust boundary is
-  defined in [the session-open contract](PROTOCOL.md#opening-a-session).
+- The product's own start/loading/error copy.
 - Where the keyboard and clipboard controls sit, and the fact that internal ids
   are never displayed.
 
@@ -98,7 +97,7 @@ local gestures into that session's input".
 | H.264 encode (Linux GPU) | NVENC, VA-API — loaded at runtime from the driver | NVIDIA driver / libva MIT |
 | H.264 encode (Linux, no GPU encoder) | Cisco's prebuilt openh264, downloaded at runtime, never built or shipped | BSD-2-Clause (Cisco's binary licence) |
 | Virtual mouse/keyboard | inputtino (uinput/libevdev) | MIT |
-| Wayland clipboard read/write | `wl-clipboard-rs` | MIT |
+| Clipboard adapters | [Linux implementation](../engine/src/clipboard.rs) | See [provenance](../README.md#licence-and-provenance) |
 | Keyboard layout mapping | `xkbcommon` | MIT |
 
 Not adopted: libwebrtc (a multi-gigabyte source build with an LGPL/GIO portal

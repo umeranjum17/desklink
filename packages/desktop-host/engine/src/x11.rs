@@ -112,6 +112,14 @@ impl X11Desktop {
         })
     }
 
+    pub fn input_available(&self) -> bool {
+        self.connection
+            .xtest_get_version(2, 2)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .is_some()
+    }
+
     /// Allocate one MIT-SHM segment for the full root and map it here. Any
     /// failure means "no SHM on this server", never an error: the caller
     /// falls back to socket GetImage and reports it via [`Self::capture_path`].
@@ -235,6 +243,13 @@ impl X11Desktop {
         max_width: usize,
         max_height: usize,
     ) -> Result<(I420, Vec<u8>)> {
+        let raw = self.capture_raw()?;
+        let frame = self.convert(&raw, max_width, max_height)?;
+        Ok((frame, raw))
+    }
+
+    /// The root image as `width * 4`-byte BGRX rows at the screen's own size.
+    pub fn capture_raw(&mut self) -> Result<Vec<u8>> {
         // The server's depth is the only field that can tell us how the pixel is
         // packed; the engine assumes the byte order every TrueColor server uses.
         let _ = self.depth;
@@ -242,7 +257,7 @@ impl X11Desktop {
         // Prefer MIT-SHM. A segment that worked at connect can still break
         // later (revoked by the server); that degrades to the socket path,
         // which keeps capturing, instead of stalling on failing grabs.
-        if let Ok(output) = self.capture_shm(stride, max_width, max_height) {
+        if let Ok(output) = self.capture_shm(stride) {
             return Ok(output);
         }
         self.shm = None;
@@ -268,35 +283,34 @@ impl X11Desktop {
                 self.height
             );
         }
+        Ok(image.data)
+    }
+
+    /// Downscale a [`Self::capture_raw`] image into the caller's box as I420.
+    pub fn convert(&self, raw: &[u8], max_width: usize, max_height: usize) -> Result<I420> {
         let (width, height) = fit(self.width, self.height, max_width, max_height);
-        let frame = to_i420(
-            &image.data,
+        to_i420(
+            raw,
             self.width,
             self.height,
-            stride,
+            self.width * 4,
             crate::convert::PixelFormat::Bgrx,
             width,
             height,
         )
-        .context("the captured X11 pixels are not a format this engine can read")?;
-        Ok((frame, image.data))
+        .context("the captured X11 pixels are not a format this engine can read")
     }
 
     /// One MIT-SHM grab into the reused segment. The caller tears the
     /// segment down on any error and falls back to the socket path.
-    fn capture_shm(
-        &self,
-        stride: usize,
-        max_width: usize,
-        max_height: usize,
-    ) -> Result<(I420, Vec<u8>)> {
+    fn capture_shm(&self, stride: usize) -> Result<Vec<u8>> {
         let (seg, ptr, len) = match &self.shm {
             Some(shm) => (shm.seg, shm.ptr, shm.len),
             None => anyhow::bail!("no MIT-SHM segment"),
         };
         // MIT-SHM: the server writes the root straight into our mapping;
         // the reply only signals completion. The segment is reused, so
-        // copy out through the conversion below before the next grab.
+        // copy out before the next grab.
         self.connection
             .shm_get_image(
                 self.root,
@@ -325,22 +339,8 @@ impl X11Desktop {
             );
         }
         // Copy out of the reused segment before the next grab overwrites
-        // it; the caller samples these full-screen rows into the frame's
-        // geometry. This copy is inherent to SHM; the socket arm below
-        // moves its reply instead.
-        let owned = pixels.to_vec();
-        let (width, height) = fit(self.width, self.height, max_width, max_height);
-        let frame = to_i420(
-            &owned,
-            self.width,
-            self.height,
-            stride,
-            crate::convert::PixelFormat::Bgrx,
-            width,
-            height,
-        )
-        .context("the captured X11 pixels are not a format this engine can read")?;
-        Ok((frame, owned))
+        // it. This copy is inherent to SHM; the socket arm moves its reply.
+        Ok(pixels.to_vec())
     }
 
     fn flush(&self) -> Result<()> {

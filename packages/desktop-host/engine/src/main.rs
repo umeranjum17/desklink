@@ -22,8 +22,6 @@ mod clipboard;
 #[cfg(target_os = "windows")]
 #[path = "clipboard_win.rs"]
 mod clipboard;
-#[cfg(target_os = "linux")]
-mod clipboard_x11;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod convert;
 #[cfg(target_os = "linux")]
@@ -312,7 +310,7 @@ fn print_input_setup() {
             println!(
                 "To undo it: remove the rule, remove the user from the group, reload the rules."
             );
-            println!("Without it the engine still captures the desktop and reports view-only.");
+            println!("Without it the engine still captures the desktop; input actions are refused with input-unavailable.");
         }
     }
 }
@@ -681,6 +679,7 @@ async fn dispatch(
                 },
                 "geometry": session.geometry(),
                 "cursor": session.cursor_info(),
+                "agentIndicator": session.agent_indicator(),
             });
             *current = Some(session);
             Ok(result)

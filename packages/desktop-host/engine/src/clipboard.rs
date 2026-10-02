@@ -31,7 +31,7 @@ pub fn read() -> Result<(String, bool)> {
 
 /// The text within `limit` bytes, cut on a character boundary, and whether
 /// anything past the limit was dropped.
-pub(crate) fn bounded_text(raw: &[u8], limit: usize) -> Result<(String, bool)> {
+fn bounded_text(raw: &[u8], limit: usize) -> Result<(String, bool)> {
     let truncated = raw.len() > limit;
     let bytes = if truncated { &raw[..limit] } else { raw };
     match std::str::from_utf8(bytes) {
@@ -94,6 +94,180 @@ pub fn read_or_explain() -> Result<(String, bool), String> {
                 Err(root)
             }
         }
+    }
+}
+
+/// Each operation uses its own connection: capture drains selection events.
+fn x11_window(display: &str) -> Result<(x11rb::rust_connection::RustConnection, u32)> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{ConnectionExt, CreateWindowAux, WindowClass};
+    let (connection, screen) = x11rb::connect(Some(display))?;
+    let window = connection.generate_id()?;
+    connection
+        .create_window(
+            0,
+            window,
+            connection.setup().roots[screen].root,
+            0,
+            0,
+            1,
+            1,
+            0,
+            WindowClass::INPUT_ONLY,
+            0,
+            &CreateWindowAux::new(),
+        )?
+        .check()?;
+    Ok((connection, window))
+}
+
+fn x11_atom(connection: &impl x11rb::connection::Connection, name: &[u8]) -> Result<u32> {
+    use x11rb::protocol::xproto::ConnectionExt;
+    Ok(connection.intern_atom(false, name)?.reply()?.atom)
+}
+
+/// Own CLIPBOARD until another client replaces it, the engine exits, or X dies.
+/// No INCR send: a single bounded property is the entire supported transfer.
+pub fn x11_write(display: &str, text: &str) -> Result<()> {
+    use x11rb::connection::{Connection, RequestConnection};
+    use x11rb::protocol::{xproto::*, Event};
+    use x11rb::wrapper::ConnectionExt as _;
+    anyhow::ensure!(
+        text.len() <= MAX_CLIPBOARD_BYTES,
+        "refusing to place {} bytes on the clipboard",
+        text.len()
+    );
+    let (connection, window) = x11_window(display)?;
+    // Leave room for the ChangeProperty header and alignment padding.
+    anyhow::ensure!(
+        text.len() <= connection.maximum_request_bytes().saturating_sub(28),
+        "clipboard text is too large for one transfer (INCR is unsupported)"
+    );
+    let selection = x11_atom(&connection, b"CLIPBOARD")?;
+    let targets = x11_atom(&connection, b"TARGETS")?;
+    let utf8 = x11_atom(&connection, b"UTF8_STRING")?;
+    let text_target = x11_atom(&connection, b"TEXT")?;
+    connection
+        .set_selection_owner(window, selection, x11rb::CURRENT_TIME)?
+        .check()?;
+    anyhow::ensure!(
+        connection.get_selection_owner(selection)?.reply()?.owner == window,
+        "the X server refused clipboard ownership"
+    );
+    let text = text.to_owned();
+    std::thread::Builder::new()
+        .name(String::from("desklink-x11-clipboard"))
+        .spawn(move || -> Result<()> {
+            loop {
+                match connection.wait_for_event()? {
+                    Event::SelectionClear(_) => break,
+                    Event::SelectionRequest(request) => {
+                        let property = if request.property == x11rb::NONE {
+                            request.target
+                        } else {
+                            request.property
+                        };
+                        let accepted = if request.target == targets {
+                            connection
+                                .change_property32(
+                                    PropMode::REPLACE,
+                                    request.requestor,
+                                    property,
+                                    AtomEnum::ATOM,
+                                    &[targets, utf8, text_target],
+                                )?
+                                .check()
+                                .is_ok()
+                        } else if request.target == utf8 || request.target == text_target {
+                            connection
+                                .change_property8(
+                                    PropMode::REPLACE,
+                                    request.requestor,
+                                    property,
+                                    utf8,
+                                    text.as_bytes(),
+                                )?
+                                .check()
+                                .is_ok()
+                        } else {
+                            false
+                        };
+                        let reply = SelectionNotifyEvent {
+                            response_type: SELECTION_NOTIFY_EVENT,
+                            sequence: 0,
+                            time: request.time,
+                            requestor: request.requestor,
+                            selection: request.selection,
+                            target: request.target,
+                            property: if accepted { property } else { x11rb::NONE },
+                        };
+                        connection.send_event(
+                            false,
+                            request.requestor,
+                            EventMask::NO_EVENT,
+                            reply,
+                        )?;
+                        connection.flush()?;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        })?;
+    Ok(())
+}
+
+pub fn x11_read(display: &str) -> Result<(String, bool)> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::{xproto::ConnectionExt, Event};
+    let (connection, window) = x11_window(display)?;
+    let selection = x11_atom(&connection, b"CLIPBOARD")?;
+    anyhow::ensure!(
+        connection.get_selection_owner(selection)?.reply()?.owner != x11rb::NONE,
+        "the desktop clipboard has no text"
+    );
+    let utf8 = x11_atom(&connection, b"UTF8_STRING")?;
+    let incr = x11_atom(&connection, b"INCR")?;
+    let property = x11_atom(&connection, b"DESKLINK_CLIPBOARD")?;
+    connection.convert_selection(window, selection, utf8, property, x11rb::CURRENT_TIME)?;
+    connection.flush()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2500);
+    loop {
+        if let Some(Event::SelectionNotify(event)) = connection.poll_for_event()? {
+            if event.requestor != window || event.selection != selection {
+                continue;
+            }
+            anyhow::ensure!(
+                event.property != x11rb::NONE,
+                "the desktop clipboard has no text"
+            );
+            let reply = connection
+                .get_property(
+                    true,
+                    window,
+                    property,
+                    x11rb::protocol::xproto::AtomEnum::ANY,
+                    0,
+                    (MAX_CLIPBOARD_BYTES / 4 + 1) as u32,
+                )?
+                .reply()?;
+            // ponytail: one property only; implement INCR when larger transfers are needed.
+            anyhow::ensure!(
+                reply.type_ != incr,
+                "clipboard text is too large for one transfer (INCR is unsupported)"
+            );
+            anyhow::ensure!(
+                reply.format == 8 && reply.type_ == utf8,
+                "the clipboard contents are not UTF-8 text"
+            );
+            let (text, truncated) = bounded_text(&reply.value, MAX_CLIPBOARD_BYTES)?;
+            return Ok((text, truncated || reply.bytes_after > 0));
+        }
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "the clipboard owner did not answer"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
 

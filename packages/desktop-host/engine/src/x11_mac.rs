@@ -18,6 +18,10 @@ impl X11Desktop {
         (0, 0)
     }
 
+    pub fn input_available(&self) -> bool {
+        false
+    }
+
     pub fn capture_with_pixels(&mut self, _: usize, _: usize) -> Result<(I420, Vec<u8>)> {
         bail!("the X11 backend is only available on Linux")
     }

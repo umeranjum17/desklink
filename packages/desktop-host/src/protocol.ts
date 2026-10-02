@@ -79,7 +79,7 @@ export interface OpenSessionRequest {
     /** Cursor-free frames with independent source-coordinate position events. */
     cursor?: 'embedded' | 'hidden';
     source?: SourceRequest;
-    /** @deprecated Pairing grants all available operations; ignored by 0.4 hosts. */
+    /** @deprecated Pairing grants all available access; accepted and ignored. */
     permissions?: Array<'view' | 'control' | 'clipboard'>;
     maxWidth?: number;
     maxHeight?: number;
@@ -102,6 +102,7 @@ export interface OpenSessionRequest {
 }
 
 export interface OpenedSession {
+    agentIndicator?: boolean;
     cursor?: CursorInfo;
     sessionId: string;
     generation: number;
@@ -173,7 +174,7 @@ export class EngineRefused extends Error {
     }
 }
 
-/** A visual cue in selected-desktop pixels that does not inject input. */
+/** A visual cue in selected-desktop pixels, not input. */
 export type PointRequest = {
     x: number;
     y: number;
