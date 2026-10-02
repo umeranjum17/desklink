@@ -127,14 +127,15 @@ Where each piece's responsibility ends is in
 On a Linux x64 desktop session (macOS arm64 works too, as a preview):
 
 ```sh
-npx @desklink/host capabilities          # what this machine can do
-npx @desklink/host bridge --listen 127.0.0.1:19400
+npx @desklink/host bridge
 ```
 
 Open the `open` URL it prints, and your desktop appears in a browser tab. The page
 is [`examples/reference-client.html`](packages/desktop-host/examples/reference-client.html):
 one file, no build step, a complete client of the protocol. Portal capture asks
 the compositor for consent first; input needs [kernel input access](packages/desktop-host/README.md#kernel-input-access).
+If the desktop does not appear, `npx @desklink/host capabilities` prints what this
+machine can do.
 
 ## Develop
 
