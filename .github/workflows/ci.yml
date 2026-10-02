@@ -157,6 +157,7 @@ jobs:
           node-version: 22
           cache: npm
       - name: Build matching Darwin release artifact with static libvpx
+        shell: bash
         run: |
           test "$(uname -s)" = Darwin
           test "$(uname -m)" = arm64
