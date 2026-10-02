@@ -97,7 +97,7 @@ local gestures into that session's input".
 | H.264 encode (Linux GPU) | NVENC, VA-API — loaded at runtime from the driver | NVIDIA driver / libva MIT |
 | H.264 encode (Linux, no GPU encoder) | Cisco's prebuilt openh264, downloaded at runtime, never built or shipped | BSD-2-Clause (Cisco's binary licence) |
 | Virtual mouse/keyboard | inputtino (uinput/libevdev) | MIT |
-| Clipboard read/write | `wl-clipboard-rs` | MIT |
+| Clipboard adapters | [Linux implementation](../engine/src/clipboard.rs) | See [provenance](../README.md#licence-and-provenance) |
 | Keyboard layout mapping | `xkbcommon` | MIT |
 
 Not adopted: libwebrtc (a multi-gigabyte source build with an LGPL/GIO portal

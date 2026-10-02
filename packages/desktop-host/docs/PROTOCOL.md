@@ -191,7 +191,10 @@ instead and does not require that grant. The engine probes XTest on that named
 display; if it is unavailable, capture and clipboard still open, and input
 messages are refused with `input-unavailable`. X11 clipboard uses CLIPBOARD on the
 session's named display; the WebSocket bridge reports it independently of the
-engine's ambient Wayland clipboard probe. On Linux the engine never asks for
+engine's ambient Wayland clipboard probe. The engine's Linux `clipboard.read`
+reports the Wayland session environment; `clipboard.write` additionally requires
+`wl-copy`. A portal bridge preserves those flags even when Xwayland is reachable.
+On Linux the engine never asks for
 privileges on its own; macOS may request Screen Recording or Accessibility consent at `session.open`.
 
 `capabilities` is safe to call before any consent has been given and must not
@@ -590,7 +593,7 @@ and `EngineClient.point(sessionId, {clear: true})`. `@desklink/axi` exposes
 
 Input does **not** travel the local protocol. It rides the WebRTC data channel
 the engine creates for the session, which is inside the DTLS/SRTP session that
-was opened for one authorized grant: it inherits that session's identity and dies
+was opened by a paired consumer: it inherits that session's identity and dies
 with it, so a client that kept a socket open cannot keep driving a session that
 was revoked, and the consumer's request path never carries a pointer move.
 

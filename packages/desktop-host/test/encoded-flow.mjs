@@ -35,7 +35,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -530,6 +530,10 @@ async function main() {
             `browser → ${first.width}x${first.height}, ${second.frames - first.frames} frames in 1.2 s,` +
                 ` mean luminance ${second.meanLuminance.toFixed(1)}`,
         );
+        if (process.env.DESKLINK_ENCODED_SCREENSHOT) {
+            const screenshot = await chrome.send('Page.captureScreenshot', { format: 'png' });
+            writeFileSync(process.env.DESKLINK_ENCODED_SCREENSHOT, Buffer.from(screenshot.data, 'base64'));
+        }
 
         // A real click, through the client's own gestures: the picture's centre.
         const rect = await chrome.evaluate('window.__flow.pictureRect()');

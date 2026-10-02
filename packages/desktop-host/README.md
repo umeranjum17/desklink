@@ -126,7 +126,7 @@ libvpx's licence and patent grant in `prefix/THIRD_PARTY_LICENSES.txt`.
 Without that prefix the compile seam still builds and refuses `serve`.
 Hosted Windows CI resolves the opt-in engine through the published Node API
 and completes a `serve` hello/capabilities handshake with clean shutdown; it
-also checks indicator refusal, Chrome decode and input relay, and DLL
+also checks Chrome decode and input relay, and DLL
 dependencies. Dedicated Windows rig qualification of
 capture, input, mixed DPI, GPU encoding and elevation is pending; signing and
 packaging are later lanes.
