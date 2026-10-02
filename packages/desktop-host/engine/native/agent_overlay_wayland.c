@@ -1,5 +1,5 @@
 // Minimal wlroots layer-shell surface: transparent, unfocusable and input-empty.
-// Only the portal path uses it; X11 uses a cursor sprite instead.
+// Portal capture masking is implemented by capture.rs::IndicatorMask.
 // Protocol interface names/signatures from wlr-layer-shell-unstable-v1:
 // Copyright (c) 2017 Drew DeVault. Permission is hereby granted to use, copy,
 // modify and distribute this protocol for any purpose without fee, provided
