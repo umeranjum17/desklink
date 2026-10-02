@@ -4,12 +4,12 @@
   <a href="https://www.npmjs.com/package/@desklink/host"><img alt="npm" src="https://img.shields.io/npm/v/@desklink/host?style=flat&label=npm" /></a>
   <a href="https://github.com/umeranjum17/desklink/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/umeranjum17/desklink/ci.yml?style=flat&branch=main" /></a>
   <a href="LICENSE"><img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-666?style=flat" /></a>
-  <img alt="Linux and macOS" src="https://img.shields.io/badge/Linux%20%7C%20macOS-111?style=flat" />
+  <img alt="Linux and macOS (preview)" src="https://img.shields.io/badge/Linux%20%7C%20macOS%20%28preview%29-111?style=flat" />
 </p>
 
 <p align="center">
   <strong>Your own desktop, live in a browser or an app, over a channel you already trust.</strong><br/>
-  desklink captures a Linux desktop, encodes it, carries it over WebRTC and applies the viewer's pointer, keyboard and clipboard back to the same desktop. It is a per-user process with a documented local protocol, not a service: no account, no pairing ceremony, no second identity system. Your application carries the offer and answer over the connection it already has, and a React Native view and an agent CLI sit on the same engine.
+  desklink captures a Linux desktop (macOS in preview), encodes it, carries it over WebRTC and applies the viewer's pointer, keyboard and clipboard back to the same desktop. It is a per-user process with a documented local protocol, not a service: no account, no pairing ceremony, no second identity system. Your application carries the offer and answer over the connection it already has, and a React Native view and an agent CLI sit on the same engine.
 </p>
 
 <h3 align="center"><a href="#try-it"><ins>Try it in one command</ins></a></h3>
@@ -115,7 +115,7 @@ Load moves these numbers, which is why every lab run records it: rerun for this 
 
 | Package | What it is |
 | --- | --- |
-| [`@desklink/host`](packages/desktop-host) | The per-user engine: screen capture, VP9/H.264 encode, WebRTC, pointer/keyboard/clipboard input, behind a [versioned local protocol](packages/desktop-host/docs/PROTOCOL.md). A prebuilt engine ships for Linux x64 (glibc 2.36+). |
+| [`@desklink/host`](packages/desktop-host) | The per-user engine: screen capture, VP9/H.264 encode, WebRTC, pointer/keyboard/clipboard input, behind a [versioned local protocol](packages/desktop-host/docs/PROTOCOL.md). A prebuilt engine ships for Linux x64 (glibc 2.36+), and a preview prebuilt engine ships for macOS arm64 (`@desklink/host-darwin-arm64`). |
 | [`@desklink/react-native`](packages/desktop-client) | A view and a session that render that desktop in a React Native app (Android, iOS, web) and turn touch, keyboard and clipboard into its input. |
 | [`@desklink/axi`](packages/axi) | A [desktop CLI](packages/axi/README.md) for agents: text and changed regions by default, image crops on request. |
 
@@ -124,7 +124,7 @@ Where each piece's responsibility ends is in
 
 ## Try it
 
-On a Linux x64 desktop session:
+On a Linux x64 desktop session (macOS arm64 works too, as a preview):
 
 ```sh
 npx @desklink/host capabilities          # what this machine can do
