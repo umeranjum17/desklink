@@ -102,9 +102,22 @@ function recordProcesses() {
   for (const [file, command] of [[env.DESKLINK_AXI_PID_FILE, '--bridge'], [env.DESKLINK_AXI_ENGINE_PID_FILE, enginePath]]) {
     if (!existsSync(file)) continue;
     for (const pid of readFileSync(file, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number)) {
-      if (!proc(pid)) continue;
-      assert(readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ').includes(command), 'unexpected recorded process');
-      assert(readFileSync(`/proc/${pid}/environ`).toString('latin1').split('\0').includes(marker), 'recorded process is outside our session');
+      const state = proc(pid);
+      if (!state || state.state === 'Z' || (owned.has(pid) && owned.get(pid) !== state.started)) continue;
+      let cmdline, environment;
+      try {
+        cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ');
+        environment = readFileSync(`/proc/${pid}/environ`).toString('latin1').split('\0');
+      } catch (error) {
+        const current = proc(pid);
+        if (!current || current.state === 'Z' || current.started !== state.started) continue;
+        throw error;
+      }
+      const current = proc(pid);
+      if (!current || current.state === 'Z' || current.started !== state.started) continue;
+      assert(cmdline.includes(command), 'unexpected recorded process');
+      assert(environment.includes(marker), 'recorded process is outside our session');
+      owned.set(pid, state.started);
       rememberTree(pid);
     }
   }
@@ -370,10 +383,13 @@ try {
   assert.equal(strays.length, 0, `stray session members: ${JSON.stringify(strays)}`);
   console.log(`\nbench: ${RUNS}-run comparison recorded; no task-owned survivors on Xvfb :${number}`);
 } finally {
-  if (browserProfile) await call('browser', 'detach').catch(() => { });
-  recordProcesses();
-  for (const pid of [...owned.keys()]) if (pid !== xvfb.pid) await stopProcess(pid);
-  if (xvfb) await stopOwnedXvfb(xvfb);
-  assert.equal(sessionStrays().length, 0, 'unrecorded session processes survived');
-  rmSync(dir, { recursive: true, force: true });
+  try {
+    if (browserProfile) await call('browser', 'detach').catch(() => { });
+    recordProcesses();
+  } finally {
+    for (const pid of [...owned.keys()]) if (pid !== xvfb?.pid) await stopProcess(pid);
+    if (xvfb) await stopOwnedXvfb(xvfb);
+    assert.equal(sessionStrays().length, 0, 'unrecorded session processes survived');
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
