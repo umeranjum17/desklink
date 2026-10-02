@@ -42,6 +42,8 @@ import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 
+import { Bridge, BRIDGE_PATH } from '../dist/index.js';
+
 import { assertNoAmbientDesktop } from './lab-safety.mjs';
 
 assertNoAmbientDesktop();
@@ -103,34 +105,37 @@ function findChrome() {
 /** The engine's local protocol, over the process's own stdin and stdout. */
 class Engine {
     constructor(binary) {
-        this.child = spawn(binary, ['serve'], { stdio: ['pipe', 'pipe', 'pipe'] });
         this.next = 0;
         this.pending = new Map();
         this.events = [];
         this.waiters = [];
-        /** Persistent listeners: a relay may not be told only one event. */
         this.subscribers = new Set();
+        this.onClosed = new Set();
         this.exited = false;
         this.stderr = '';
-        let buffered = '';
-        this.child.stdout.setEncoding('utf8');
-        this.child.stdout.on('data', (chunk) => {
-            buffered += chunk;
-            let newline = buffered.indexOf('\n');
-            while (newline !== -1) {
-                const line = buffered.slice(0, newline);
-                buffered = buffered.slice(newline + 1);
-                if (line.trim() !== '') this.#line(line);
-                newline = buffered.indexOf('\n');
-            }
-        });
-        this.child.stderr.setEncoding('utf8');
-        this.child.stderr.on('data', (chunk) => {
-            this.stderr += chunk;
-        });
-        this.child.on('exit', () => {
-            this.exited = true;
-        });
+        this.connected = (async () => {
+            this.bridge = await Bridge.start({
+                listen: '127.0.0.1:0', token: 'encoded-lab-pairing',
+                engineCommand: binary, engineArgs: ['serve'], serveExample: false,
+                source: { kind: 'encoded', codec: 'h264', ...SIZE },
+                engineOptions: {
+                    onEvent: event => this.#line(JSON.stringify(event)),
+                    onDiagnostic: line => { this.stderr += line; },
+                    onExit: () => { this.exited = true; },
+                },
+            });
+            this.socket = new WebSocket(`ws://127.0.0.1:${this.bridge.port}${BRIDGE_PATH}?token=encoded-lab-pairing`);
+            this.socket.on('message', raw => {
+                if (JSON.parse(String(raw)).id !== undefined) this.#line(String(raw));
+            });
+            this.socket.on('close', () => {
+                for (const handler of this.onClosed) handler();
+            });
+            await new Promise((resolve, reject) => {
+                this.socket.once('open', resolve);
+                this.socket.once('error', reject);
+            });
+        })();
         this.opened = this.request('hello', { protocol: 3 });
     }
 
@@ -149,13 +154,18 @@ class Engine {
         for (const waiter of this.waiters.splice(0)) waiter(message);
     }
 
-    request(method, params) {
+    async request(method, params) {
+        await this.connected;
         if (method === 'session.open') this.openPermissions = params?.permissions;
         const id = ++this.next;
         if (this.exited) return Promise.reject(new Error('the engine exited'));
         return new Promise((resolve, reject) => {
             this.pending.set(id, { resolve, reject });
-            this.child.stdin.write(`${JSON.stringify({ id, method, params: params ?? {} })}\n`);
+            if (method === 'session.open') {
+                params = { ...params };
+                delete params.source;
+            }
+            this.socket.send(JSON.stringify({ id, method, params: params ?? {} }));
         });
     }
 
@@ -188,9 +198,8 @@ class Engine {
     }
 
     async close() {
-        this.child.stdin.end();
-        await sleep(150);
-        if (!this.exited) this.child.kill('SIGKILL');
+        await this.connected;
+        await this.bridge.close();
     }
 }
 
@@ -267,7 +276,9 @@ function startRelay(engine) {
             };
             for (const message of engine.events) push(message);
             const unsubscribe = engine.subscribe(push);
-            socket.on('close', unsubscribe);
+            const closed = () => socket.close();
+            engine.onClosed.add(closed);
+            socket.on('close', () => { unsubscribe(); engine.onClosed.delete(closed); });
             socket.on('message', (raw) => {
                 const request = JSON.parse(raw.toString());
                 engine
@@ -404,12 +415,6 @@ async function main() {
     const capabilities = await engine.opened;
     assert.deepEqual(capabilities.encoded.codecs, ['h264']);
     assert.deepEqual(await engine.request('capabilities'), capabilities);
-    if (process.platform === 'win32') {
-        await assert.rejects(engine.request('session.open', {
-            agent_indicator: true,
-            source: { kind: 'encoded', codec: 'h264', ...SIZE },
-        }), /indicator-unavailable/);
-    }
     const units = accessUnits(readFileSync(fixture));
     const keyframes = units.filter((unit) => unit.keyframe).length;
 
@@ -587,7 +592,16 @@ async function main() {
             `session.metrics → fed ${metrics.fed_frames}, sent ${metrics.encoded_frames},` +
                 ` dropped ${metrics.dropped_frames}, forwarded ${metrics.input_forwarded}, applied ${metrics.input_applied}`,
         );
-        console.log('ok: the encoded source decodes in Chrome and its input comes back');
+        const port = engine.bridge.port;
+        await engine.close();
+        await chrome.until('window.__flow.state.signalingClosed === true', 5000, 'signaling closure');
+        assert.deepEqual(await chrome.evaluate('window.__flow.state.revocation'), {kind:'revoked', code:'closed', signalingOpen:true});
+        await assert.rejects(new Promise((resolve, reject) => {
+            const socket = new WebSocket(`ws://127.0.0.1:${port}${BRIDGE_PATH}?token=encoded-lab-pairing`);
+            socket.once('open', () => { socket.close(); resolve(); });
+            socket.once('error', reject);
+        }));
+        console.log('ok: decoded video, legacy input, and revoked/closed before signaling teardown');
     } finally {
         // Every step runs even if an earlier one fails: a browser left behind
         // holds a profile directory and an engine process, and the failure that

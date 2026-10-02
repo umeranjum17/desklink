@@ -22,6 +22,7 @@ const number = Array.from({length:30},(_,i)=>170+i).find(n =>
   !existsSync(`/tmp/.X11-unix/X${n}`) && !existsSync(`/tmp/.X${n}-lock`));
 assert(number !== undefined, 'no unclaimed high X display');
 const display = `:${number}`;
+const noXtest = process.env.DESKLINK_AXI_NO_XTEST === '1';
 const socket = `/tmp/.X11-unix/X${number}`;
 const authority = join(dir,'Xauthority');
 const auth = spawnSync('xauth',['-f',authority,'add',display,'.',randomBytes(16).toString('hex')],{encoding:'utf8'});
@@ -30,7 +31,7 @@ assert.equal(auth.status,0,`could not prepare private X authority: ${auth.stderr
 // server only once initialization is complete; resume that owned PID before
 // probing. Unlike -displayfd, this preserves the X lock ownership assertion and
 // explicit high display. -noreset avoids reinitialization between probe clients.
-const xvfb = spawn('Xvfb', [display, '-sigstop', '-noreset', '-auth', authority, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], { stdio: ['ignore', 'ignore', 'pipe'] });
+const xvfb = spawn('Xvfb', [display, '-sigstop', '-noreset', '-auth', authority, '-screen', '0', '1280x720x24', '-nolisten', 'tcp', ...(noXtest ? ['-extension', 'XTEST'] : [])], { stdio: ['ignore', 'ignore', 'pipe'] });
 let xvfbReady = false;
 let xvfbError = '';
 xvfb.stderr.on('data', chunk => xvfbError = (xvfbError + chunk).slice(-2000));
@@ -159,6 +160,69 @@ async function run(...args) {
 try {
   remember(xvfb.pid,'Xvfb');
   await verifyXvfb(); // Never open a session or send input before ownership is proven.
+  if (process.env.DESKLINK_AXI_CAPABILITY_PROOF === '1' || noXtest) {
+    const { PeerConnection, cleanup: cleanupPeers } = await import('node-datachannel');
+    const notices = [];
+    client = await EngineClient.start(enginePath, ['serve'], {onEvent:event=>notices.push(event)}, {...env, DISPLAY:''});
+    recordProcesses();
+    const opened = await client.openSession({source:{kind:'x11',display}, agentIndicator:true, loopbackTcp:true});
+    recordProcesses();
+    assert.equal(opened.agentIndicator, true, 'supported indicator still starts');
+    const path = join(dir,'frame.raw');
+    const frame = await client.request('session.frame',{session_id:opened.sessionId,path,after_seq:0,timeout_ms:3000});
+    assert(frame.seq > 0 && readFileSync(path).length > 0, 'capture remains available');
+    await verifyXvfb();
+    await client.writeClipboard(opened.sessionId, 'no-XTEST clipboard ✓');
+    const selection = spawnSync(clipboardExample,['get'],{env,encoding:'utf8',timeout:3000});
+    assert.equal(selection.status,0,selection.stderr);
+    assert.equal(selection.stdout,'no-XTEST clipboard ✓');
+    assert.equal((await client.readClipboard(opened.sessionId)).text, selection.stdout);
+    const peer = new PeerConnection('capability-proof',{iceServers:[],bindAddress:'127.0.0.1',enableIceTcp:true});
+    try {
+      let channel;
+      const replies = [];
+      peer.onDataChannel(ch => { if (ch.getLabel() === 'control') {
+        channel = ch;
+        ch.onMessage(raw => replies.push(JSON.parse(String(raw))));
+      } });
+      peer.onLocalCandidate((candidate,mid)=>void client.addCandidate(opened.sessionId,opened.generation,candidate,mid,Number(mid)||0));
+      peer.onLocalDescription(sdp=>void client.acceptAnswer(opened.sessionId,opened.generation,sdp));
+      const offer = notices.find(event=>event.event==='session.description');
+      assert(offer,'session offers transport');
+      peer.setRemoteDescription(offer.params.description.sdp,'offer');
+      for (const event of notices.filter(event=>event.event==='session.candidate')) peer.addRemoteCandidate(event.params.candidate,event.params.sdpMid ?? '0');
+      const deadline = Date.now()+10000;
+      while (!replies.some(reply=>reply.kind==='hello') && Date.now()<deadline) await new Promise(r=>setTimeout(r,20));
+      assert(replies.some(reply=>reply.kind==='hello'),'control channel opens');
+      const actions = [
+        ...['move','down','up','cancel'].map(phase=>({kind:'pointer',phase,x:100,y:100,button:1})),
+        ...[{dx:1,dy:0},{dx:-1,dy:0},{dx:0,dy:1},{dx:0,dy:-1}].map(delta=>({kind:'wheel',...delta})),
+        {kind:'key',name:'Enter',down:true,modifiers:['Shift']},
+        {kind:'key',name:'Enter',down:false,modifiers:[]},
+        {kind:'key',character:'b',down:true},
+        {kind:'key',character:'b',down:false},
+        {kind:'key',name:'Shift',down:true},
+        {kind:'key',name:'Shift',down:false},
+        {kind:'text',text:'hello'},
+        {kind:'release_all'},
+      ];
+      for (const [index,action] of actions.entries()) {
+        await verifyXvfb();
+        const seq=index+1;
+        channel.sendMessage(JSON.stringify({...action,seq}));
+        const limit=Date.now()+3000;
+        while (!replies.some(reply=>reply.seq===seq) && Date.now()<limit) await new Promise(r=>setTimeout(r,10));
+        const reply=replies.find(reply=>reply.seq===seq);
+        assert(reply,`action ${seq} answered`);
+        if (noXtest) assert.deepEqual({kind:reply.kind,code:reply.code},{kind:'rejected',code:'input-unavailable'});
+        else assert.equal(reply.kind,'ack');
+      }
+    } finally { peer.close(); cleanupPeers(); }
+    await client.stop(); client=undefined;
+    assert.match(await run('start','--source','x11','--display',display),/session: open source=x11/);
+    await run('stop');
+    console.log(`private XTEST=${!noXtest}: capture, indicator, independent clipboard and all input paths passed`);
+  } else {
   const cursorEvents = [];
   client = await EngineClient.start(enginePath, ['serve'], { onEvent: event => cursorEvents.push(event) }, env);
   recordProcesses();
@@ -542,6 +606,10 @@ try {
   await goneOwned(Number(readFileSync(enginePidFile,'utf8').trim().split(/\s+/).at(-1)));
   if (process.env.DESKLINK_AXI_MEASURE_PATH) writeFileSync(process.env.DESKLINK_AXI_MEASURE_PATH,JSON.stringify(observations));
   console.log('engine: private Xvfb frame/damage; CLI: paired click, independent X11 clipboard owner/readback, bounds and cleanup passed');
+  }
+} catch (error) {
+  console.error(error);
+  throw error;
 } finally {
   await cleanup();
 }
