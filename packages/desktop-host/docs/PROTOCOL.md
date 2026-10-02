@@ -256,8 +256,8 @@ On bare X11 it is an override-redirect, click-through window that follows the
 pointer, so it stays
 visible over windows that set their own cursor and never replaces the cursor.
 Its size follows `Xft.dpi` from 96–384 DPI, defaulting to 1x otherwise;
-the shaped window grows in and shrinks out, while a compositing manager with
-alpha enables fading instead. The helper announces each state before drawing
+the shaped cue reveals outward from the tip and retracts inward, while a
+compositing manager with alpha enables fading instead. The helper announces each state before drawing
 it, and X11 capture restores just
 the pixels the cue covers from the previous frame, so the halo's interior stays
 live; changes under the arrow and ring show once the cue moves away. Click and
