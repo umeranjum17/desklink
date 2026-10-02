@@ -143,6 +143,10 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Distribution provenance must name the candidate, not GitHub's
+          # synthetic pull-request merge commit. Other jobs test that merge.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Rust (the version the release build pins)
         run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
       - run: cargo build --locked --manifest-path packages/desktop-host/engine/Cargo.toml
