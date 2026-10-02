@@ -59,9 +59,8 @@ The engine supports Linux desktop sessions, and macOS (preview) desktop sessions
 - **Clipboard** explicitly, in both directions, only when asked. It is never
   polled and never used as a hidden way to type. On Wayland, writes require
   `wl-copy` from `wl-clipboard`; macOS uses the plain-text general pasteboard.
-  X11 serves CLIPBOARD on the session's selected display (UTF8_STRING/TEXT,
-  up to 256 KiB; no INCR, STRING or PRIMARY). The X11 text lasts until another
-  owner replaces it, the engine exits, or the display ends.
+  X11 uses the session's selected display; see the [clipboard protocol](docs/PROTOCOL.md#clipboard-over-the-local-protocol)
+  for supported targets, transfer limits and selection lifetime.
 
 ## What it deliberately does not do
 
@@ -289,7 +288,8 @@ preserves existing behavior. See [the cursor protocol](docs/PROTOCOL.md#cursor-f
 `myChannel` is the application's own authenticated connection, whatever that is.
 There is no second identity system, no pairing ceremony and no account: the
 engine trusts the consumer's pairing. A paired consumer gets all available
-view, input and clipboard access; missing OS backends fail per action.
+view, input and clipboard access; missing input or clipboard backends fail per
+action.
 For the application's pairing, identity and signaling transport, see the
 [BYOKit integration guidance](../../README.md#why-desklink-exists).
 
@@ -315,8 +315,12 @@ source with its flag or environment; clients cannot choose or override it.
 Two things the bridge is honest about: `ws://` is plaintext, so keep it on a
 private network or put it behind TLS; and the token in the URL *is* the
 pairing credential for full view, input and clipboard, so treat it as a secret.
-Stopping the bridge closes live sessions and the listener. Restarting with a
-new token also prevents the old pairing from opening future sessions.
+Stopping the bridge refuses new requests and stops the listener. It shuts down
+the engine while client transports remain open so an active control channel can
+receive `{"kind":"revoked","code":"closed"}` (with a reason), then closes the
+sockets. Teardown remains bounded if the engine or a client does not respond;
+notification failure does not preserve access. Restarting with a new token
+also prevents the old pairing from opening future sessions.
 
 ## Packaging
 

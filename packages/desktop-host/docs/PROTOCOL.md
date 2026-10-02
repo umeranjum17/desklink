@@ -187,7 +187,9 @@ build has, not what this machine can necessarily use.
 `input.unavailable_reason` and `input.grant` describe the portal/uinput path:
 without kernel input access a portal session opens and captures, but input
 messages are refused with `input-unavailable`. X display capture uses XTest
-instead and does not require that grant. X11 clipboard uses CLIPBOARD on the
+instead and does not require that grant. The engine probes XTest on that named
+display; if it is unavailable, capture and clipboard still open, and input
+messages are refused with `input-unavailable`. X11 clipboard uses CLIPBOARD on the
 session's named display; the WebSocket bridge reports it independently of the
 engine's ambient Wayland clipboard probe. On Linux the engine never asks for
 privileges on its own; macOS may request Screen Recording or Accessibility consent at `session.open`.
@@ -221,7 +223,7 @@ Result:
  "source":{"kind":"monitor","width":2560,"height":1440,"origin":{"x":0,"y":0}},
  "geometry":{"source":{"width":2560,"height":1440},
              "encoded":{"width":2560,"height":1440},
-             "origin":{"x":0,"y":0}}}
+             "origin":{"x":0,"y":0}},"agentIndicator":false}
 ```
 
 `source` selects the desktop. `portal` (or absent) asks the compositor for a
@@ -235,8 +237,9 @@ position to know which backend a machine can offer.
 There are no per-session permissions: whoever holds the channel is paired and
 gets all available view, input and clipboard access. The `permissions` field
 from 0.3 clients is accepted and ignored, including unknown scope names.
-Missing OS backends fail per action, not at open. The `permission` refusal code
-is reserved for 0.3 peers and is no longer emitted by this engine.
+Missing input or clipboard backends fail per action, not at open. The
+`permission` refusal code is reserved for 0.3 peers and is no longer emitted by
+this engine.
 
 `max_fps` defaults to 60 and is bounded to 1–60. It caps the encoded frame
 rate and X11 capture loop; portal capture offers it as the preferred PipeWire
