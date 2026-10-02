@@ -7,11 +7,13 @@
  *   xcrun simctl launch <device> dev.desklink.example -desklinkUrl 'ws://HOST:PORT/desktop?token=…'
  *
  * Control is enabled as soon as the picture is live, so a tap on the picture
- * clicks the desktop. The status line carries `testID="desklink-status"` for
- * test/ios-flow.mjs to read through the simulator's accessibility tree.
+ * clicks the desktop. The picture fills the screen inside its safe area. The
+ * status line carries `testID="desklink-status"` for test/ios-flow.mjs to read
+ * through the simulator's accessibility tree.
  */
 import * as React from 'react';
-import { Settings, StyleSheet, Text, View } from 'react-native';
+import { Settings, StatusBar, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { DesktopView, useDesktopSession, type SessionEvent, type SessionSnapshot, type Signaling } from '@desklink/react-native';
 
 const url: unknown = Settings.get('desklinkUrl');
@@ -108,6 +110,17 @@ export function statusText({ status, presented, failure }: SessionSnapshot): str
 }
 
 export default function App() {
+    return (
+        <SafeAreaProvider>
+            <Desktop />
+        </SafeAreaProvider>
+    );
+}
+
+function Desktop() {
+    // The picture fills the screen but starts and pans inside the status bar,
+    // camera cutout and home indicator, so none of them covers the desktop's corner.
+    const insets = useSafeAreaInsets();
     const signaling = React.useRef<ReturnType<typeof bridgeSignaling> | null>(null);
     const desktop = useDesktopSession({
         authorize: async () => {
@@ -129,7 +142,8 @@ export default function App() {
 
     return (
         <View style={styles.root}>
-            <DesktopView sessionId={desktop.nativeId} style={StyleSheet.absoluteFill} accessibilityLabel="desktop" />
+            <StatusBar barStyle="light-content" />
+            <DesktopView sessionId={desktop.nativeId} style={StyleSheet.absoluteFill} insets={insets} accessibilityLabel="desktop" />
             <View pointerEvents="none" style={styles.bar}>
                 <Text testID="desklink-status" style={styles.status}>
                     {statusText(desktop.snapshot)}
@@ -142,5 +156,5 @@ export default function App() {
 const styles = StyleSheet.create({
     root: { flex: 1, backgroundColor: '#000' },
     bar: { position: 'absolute', left: 0, right: 0, bottom: 48, alignItems: 'center' },
-    status: { color: '#9f9', fontSize: 13, fontFamily: 'Menlo' },
+    status: { color: '#fff', fontSize: 15, textAlign: 'center' },
 });

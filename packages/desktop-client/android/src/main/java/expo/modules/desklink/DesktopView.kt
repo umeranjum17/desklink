@@ -65,7 +65,8 @@ private const val MIN_WHEEL_STEP = 0.05f
  *  - tap: click where the finger lands; two taps: a double click on the same spot;
  *  - press and hold: a right click on release, or drag after it to hold the left
  *    button (select text, move a window);
- *  - one finger: move around a zoomed-in desktop; on the whole desktop,
+ *  - one finger: move around a zoomed-in desktop — the picture starts filled,
+ *    covering the view, so this is the default; on the whole desktop,
  *    move its pointer, which follows the finger without pressing a button —
  *    unless `gestures` is `browser`, where it scrolls the page, or `device`,
  *    where it lands with the button down and drags with it held;
@@ -102,11 +103,16 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
 
   // The picture's placement: surface pixels per desktop pixel, and where the
   // desktop's top-left corner sits in this view. `fitted` keeps a picture that
-  // was showing the whole desktop showing it when the view changes size.
+  // was showing the whole desktop showing it when the view changes size;
+  // `filling` keeps the default, a picture covering the view, until the user
+  // zooms or asks for the whole desktop. `filledScale` is the fill it was last
+  // centred at, so a new fill (a rotation, a new surface) centres again.
   private var scale = 1f
   private var originX = 0f
   private var originY = 0f
   private var fitted = true
+  private var filling = true
+  private var filledScale = 0f
 
   /**
    * How much of this view's bottom the phone's keyboard, and the app's own
@@ -254,6 +260,8 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
     surfaceWidth = width
     surfaceHeight = height
     fitted = true
+    filling = true
+    filledScale = 0f
     // A point on the old geometry says nothing about the new one.
     pointerAt = null
     layoutPicture()
@@ -296,6 +304,7 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
   /** Show the whole desktop again. */
   fun fitToView() {
     fitted = true
+    filling = false
     layoutPicture()
   }
 
@@ -419,11 +428,27 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
     return min(width.toFloat() / surfaceWidth, height.toFloat() / surfaceHeight)
   }
 
-  /** Re-derive the placement from `fitted`, the zoom limits and the edges. */
+  /** The default: the picture covers the whole view, as far as the zoom limit allows. */
+  private fun fillScale(): Float {
+    val cover = max(width.toFloat() / surfaceWidth, height.toFloat() / surfaceHeight)
+    return max(fitScale(), min(cover, MAX_SCALE))
+  }
+
+  /** Re-derive the placement from `filling`, `fitted`, the zoom limits and the edges. */
   private fun layoutPicture() {
     if (surfaceWidth == 0 || surfaceHeight == 0 || width == 0 || height == 0) return
     val fit = fitScale()
-    scale = if (fitted) fit else scale.coerceIn(fit, max(fit, MAX_SCALE))
+    if (filling) {
+      val fill = fillScale()
+      if (fill != filledScale) {
+        scale = fill
+        filledScale = fill
+        originX = (width - surfaceWidth * scale) / 2f
+        originY = (height - surfaceHeight * scale) / 2f
+      }
+    } else {
+      scale = if (fitted) fit else scale.coerceIn(fit, max(fit, MAX_SCALE))
+    }
     fitted = scale <= fit * 1.001f
     clampOrigin()
     publishTransform()
@@ -444,6 +469,7 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
   private fun zoomAround(focusX: Float, focusY: Float, factor: Float) {
     val fit = fitScale()
     val next = (scale * factor).coerceIn(fit, max(fit, MAX_SCALE))
+    filling = false
     val applied = next / scale
     originX = focusX - (focusX - originX) * applied
     originY = focusY - (focusY - originY) * applied
