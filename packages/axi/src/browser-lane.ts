@@ -26,6 +26,7 @@ interface BrowserState {
   endpoint: string;
   launched: boolean;
   pid?: number;
+  pidStarted?: string;
   profile?: string;
   profileCreated?: boolean;
   selectedTargetId?: string;
@@ -92,6 +93,7 @@ async function orderedPages(state: BrowserState, context: import('playwright-cor
 
 async function connect(): Promise<Connected> {
   const state = readState();
+  if (state.launched) assertOwnedBrowser(state);
   const { chromium } = await import('playwright-core');
   const browser = await chromium.connectOverCDP(`http://${state.endpoint}`).catch((error: Error) => {
     throw new AxiError(`browser: cannot reach ${state.endpoint}: ${error.message.split('\n')[0]}`, 'check that the browser is still running; re-attach with browser attach --cdp');
@@ -176,46 +178,67 @@ const attach: CommandModule = {
   },
 };
 
-function childrenOf(pid: number): number[] {
-  try { return readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number); }
-  catch { return []; }
+function processStarted(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(') ') + 2).split(' ');
+    return fields[0] === 'Z' ? undefined : fields[19];
+  } catch { return undefined; }
+}
+
+function assertOwnedBrowser(state: BrowserState): void {
+  if (process.platform !== 'linux') return; // /proc identity is Linux-only.
+  // The fingerprint was recorded from our ChildProcess at spawn. Chromium may
+  // hide/scrub /proc/environ after startup; it is not the root PID's identity.
+  if (!state.pid || !state.pidStarted || processStarted(state.pid) !== state.pidStarted) {
+    throw new AxiError('browser: refusing stale or unowned process identity', 'use a fresh task session; no process was signalled or contacted');
+  }
 }
 
 // Chromium helpers (crashpad handlers double-fork, xdg-settings spawns during
 // shutdown) can reparent out of the recorded child tree, so every launch
 // carries a unique marker in the spawned environment and the sweep below
 // reaps any same-uid process still carrying it.
-function markerStrays(marker: string): number[] {
+function markerStrays(marker: string): { pid: number; started?: string }[] {
   const needle = `DESKLINK_AXI_BROWSER_SESSION=${marker}`;
   let entries: string[];
   try { entries = readdirSync('/proc'); } catch { return []; }
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
-  const found: number[] = [];
+  const found: { pid: number; started?: string }[] = [];
   for (const entry of entries) {
     const pid = Number(entry);
     if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) continue;
     try {
-      if (uid !== undefined && statSync(`/proc/${pid}`).uid !== uid) continue;
-      if (readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').includes(needle)) found.push(pid);
+      const started = processStarted(pid);
+      if (!started || (uid !== undefined && statSync(`/proc/${pid}`).uid !== uid)) continue;
+      if (readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').includes(needle) && processStarted(pid) === started) found.push({ pid, started });
     } catch { /* vanished or unreadable */ }
   }
   return found;
 }
 
 async function stopLaunched(state: BrowserState): Promise<void> {
-  const stop = async (pid: number) => {
-    try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
-    for (let i = 0; i < 20; i++) {
+  const signal = (pid: number, started: string | undefined, value: NodeJS.Signals) => {
+    if (process.platform === 'linux' && (!started || processStarted(pid) !== started)) return;
+    try { process.kill(pid, value); } catch { /* already gone */ }
+  };
+  const stop = async (pid: number, started = processStarted(pid)) => {
+    const same = () => process.platform !== 'linux' || (started !== undefined && processStarted(pid) === started);
+    if (!same()) return;
+    signal(pid, started, 'SIGTERM');
+    for (let i = 0; i < 20 && same(); i++) {
       try { process.kill(pid, 0); } catch { return; }
       await new Promise(r => setTimeout(r, 50));
     }
-    try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    if (same()) signal(pid, started, 'SIGKILL');
   };
-  if (state.pid) {
-    // Record the child tree before any signal; kill only these exact PIDs.
-    const kids = [...new Set([...childrenOf(state.pid), ...childrenOf(state.pid).flatMap(childrenOf)])];
-    await stop(state.pid);
-    for (const kid of kids) await stop(kid);
+  if (state.pid && (process.platform !== 'linux' || processStarted(state.pid))) {
+    assertOwnedBrowser(state);
+    // This launch supplied the private marker at spawn. Snapshot matching
+    // PID/start-time pairs before signalling, never descendants of a reused PID.
+    const kids = state.browserSession ? markerStrays(state.browserSession) : [];
+    await stop(state.pid, state.pidStarted);
+    for (const kid of kids) await stop(kid.pid, kid.started);
   }
   // Helpers that reparented out of the recorded tree (crashpad handlers,
   // xdg-settings spawned during shutdown) still carry the launch marker:
@@ -227,10 +250,10 @@ async function stopLaunched(state: BrowserState): Promise<void> {
       const strays = markerStrays(state.browserSession);
       if (!strays.length) break;
       if (Date.now() >= deadline) {
-        for (const pid of strays) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+        for (const child of strays) signal(child.pid, child.started, 'SIGKILL');
         break;
       }
-      for (const pid of strays) { try { process.kill(pid, termed ? 'SIGKILL' : 'SIGTERM'); } catch { /* gone */ } }
+      for (const child of strays) signal(child.pid, child.started, termed ? 'SIGKILL' : 'SIGTERM');
       termed = true;
       await new Promise(r => setTimeout(r, 100));
     }
@@ -282,20 +305,21 @@ const launch: CommandModule = {
       ...(parsed.flags.headless ? ['--headless=new'] : []),
       ...(Array.isArray(parsed.flags.arg) ? parsed.flags.arg.map(String) : typeof parsed.flags.arg === 'string' ? [parsed.flags.arg] : []),
     ];
-    const browserSession = randomBytes(8).toString('hex');
+    const browserSession = randomBytes(16).toString('hex');
     const log = openSync(join(profile, 'chromium.log'), 'a');
     const child = spawn(executable, args, { detached: true, stdio: ['ignore', 'ignore', log], env: { ...process.env, DESKLINK_AXI_BROWSER_SESSION: browserSession } });
     closeSync(log);
+    const pidStarted = child.pid ? processStarted(child.pid) : undefined;
     const portFile = join(profile, 'DevToolsActivePort');
     for (let i = 0; i < 300 && (!existsSync(portFile) || !readFileSync(portFile, 'utf8').trim()) && child.pid; i++) await new Promise(r => setTimeout(r, 100));
     if (!existsSync(portFile) || !readFileSync(portFile, 'utf8').trim()) {
       try { child.kill('SIGKILL'); } catch { /* already gone */ }
-      for (const pid of markerStrays(browserSession)) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+      await stopLaunched({ endpoint: '', launched: true, pid: child.pid, pidStarted, browserSession });
       const tail = existsSync(join(profile, 'chromium.log')) ? readFileSync(join(profile, 'chromium.log'), 'utf8').split('\n').filter(Boolean).at(-1) ?? '' : '';
       throw new AxiError(`browser: Chromium did not open its debugging port${tail ? `: ${tail.slice(0, 200)}` : ''}`, 'check the executable; see chromium.log in the profile; try --headless on displays without a compositor');
     }
     const port = readFileSync(portFile, 'utf8').split('\n')[0]!.trim();
-    writeState({ endpoint: `127.0.0.1:${port}`, launched: true, pid: child.pid, profile, profileCreated: typeof parsed.flags.profile !== 'string', browserSession });
+    writeState({ endpoint: `127.0.0.1:${port}`, launched: true, pid: child.pid, pidStarted, profile, profileCreated: typeof parsed.flags.profile !== 'string', browserSession });
     child.unref();
     print(`browser: launched 127.0.0.1:${port} pid=${child.pid} profile=${profile}`);
     return 0;

@@ -24,10 +24,16 @@ fi
 
 metadata="$(mktemp -t desklink-cargo-metadata)"
 notices="$(mktemp -d -t desklink-notices)"
-trap 'rm -f "$metadata"; rm -rf "$notices"' EXIT
+static_vpx="$(mktemp -d -t desklink-vpx-static)"
+trap 'rm -f "$metadata"; rm -rf "$notices" "$static_vpx"' EXIT
+# Darwin can select a co-located dylib even when Cargo requests static=vpx.
+# Give the release linker an archive-only prefix, never the Homebrew dylib.
+mkdir -p "$static_vpx/lib"
+cp -R "$vpx/include" "$static_vpx/include"
+cp "$vpx/lib/libvpx.a" "$static_vpx/lib/"
 cargo metadata --manifest-path "$engine/Cargo.toml" --locked --format-version 1 \
   --filter-platform "$target" > "$metadata"
-DESKLINK_MACOS_CLI=1 DESKLINK_VPX_STATIC_DIR="$vpx" \
+DESKLINK_MACOS_CLI=1 DESKLINK_VPX_STATIC_DIR="$static_vpx" \
   cargo build --manifest-path "$engine/Cargo.toml" --locked --release --target "$target" --bin desklink-host
 
 mkdir -p "$notices/libvpx" "$notices/inputtino" "$notices/nv-codec-headers" "$notices/libva"
@@ -46,6 +52,10 @@ mkdir -p "$out"
 bin="$out/desklink-host"
 cp "${CARGO_TARGET_DIR:-$engine/target}/$target/release/desklink-host" "$bin"
 chmod 755 "$bin"
+if otool -L "$bin" | grep -q 'libvpx.*\.dylib'; then
+  echo 'release engine still depends on a libvpx dylib' >&2
+  exit 1
+fi
 version="$("$bin" version)"
 sha="$(shasum -a 256 "$bin" | awk '{print $1}')"
 rust="$(rustc --version)"

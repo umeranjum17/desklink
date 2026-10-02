@@ -22,6 +22,9 @@ import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 
+import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
+
+assertNoAmbientDesktop();
 const worktree = new URL('../../..', import.meta.url).pathname.replace(/\/$/, '');
 const SRC = join(worktree, 'packages/desktop-client/src');
 
@@ -232,7 +235,7 @@ function descendants(root) {
 }
 let frozenClient = [];
 function signalClient(signal) {
-    for (const pid of frozenClient) { try { process.kill(pid, signal); } catch { /* gone */ } }
+    for (const pid of frozenClient) if (alive(pid)) { try { process.kill(pid, signal); } catch { /* gone */ } }
 }
 function findEnginePid(bridgePid) {
     const found = [];
@@ -301,7 +304,7 @@ async function expectPointerSoft(cdp, evaluate, env, x, y, what, timeoutMs = 800
     }
 }
 
-let xvfbPid = 0; let fixturePid = 0; let clientPid = 0; let bridgePid = 0; let enginePid = 0;
+let xvfbPid = 0; let xvfb; let fixturePid = 0; let clientPid = 0; let bridgePid = 0; let enginePid = 0;
 let staticServer = null; let cdpPort = 0;
 async function cleanup() {
     try {
@@ -310,7 +313,7 @@ async function cleanup() {
         // SIGTERM lets the bridge child close the bridge (and its engine).
         if (bridgePid) await stopProcess(bridgePid, 'bridge');
         if (enginePid && alive(enginePid)) await stopProcess(enginePid, 'engine');
-        if (xvfbPid) await stopProcess(xvfbPid, 'Xvfb');
+        if (xvfb) await stopOwnedXvfb(xvfb);
         staticServer?.close();
     } catch (error) { log('cleanup error:', String(error)); }
     const strays = [];
@@ -406,12 +409,13 @@ try {
     const display = `:${number}`;
     const authority = join(dir, 'Xauthority');
     assert.equal(spawnSync('xauth', ['-f', authority, 'add', display, '.', randomBytes(16).toString('hex')]).status, 0);
-    const xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', '1280x800x24', '-nolisten', 'tcp'], { stdio: 'ignore' });
+    xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', '1280x800x24', '-nolisten', 'tcp'], { stdio: 'ignore' });
+    trackOwnedXvfb(xvfb, display);
     remember(xvfb.pid); xvfbPid = xvfb.pid;
     const socketPath = `/tmp/.X11-unix/X${number}`;
     for (let i = 0; i < 100 && !existsSync(socketPath) && alive(xvfbPid); i++) await sleep(50);
     assert(alive(xvfbPid) && existsSync(socketPath), 'private Xvfb did not start');
-    assert.equal(Number(readFileSync(`/tmp/.X${number}-lock`, 'utf8').trim()), xvfbPid, 'X lock belongs to another server');
+    await verifyOwnedXvfb(xvfb);
     log('xvfb', display, 'pid', xvfbPid);
 
     const baseEnv = {
@@ -609,7 +613,9 @@ export default { root: PAGE, logLevel: 'warn',
     await pollProbe(cdp, 10000, (p) => p.status === 'live');
     await evaluate(cdp, 'window.__silencePeerFailure = true');
     const beforeSuspend = await evaluate(cdp, 'window.__probe');
+    assert(alive(clientPid), 'viewer PID changed before suspend');
     frozenClient = descendants(clientPid);
+    for (const pid of frozenClient) remember(pid);
     const suspendAt = Date.now();
     log(`SUSPEND viewer (${frozenClient.length} processes) for 60s at ${suspendAt}`);
     signalClient('SIGSTOP');

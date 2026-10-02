@@ -2,14 +2,20 @@
 // runs it automatically via `npm test`).
 
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 
 const bin = fileURLToPath(new URL("../bin/desklink-axi.js", import.meta.url));
+const runtime = mkdtempSync(join(tmpdir(), 'desklink-cli-unit-'));
+afterAll(() => rmSync(runtime, { recursive: true, force: true }));
 
 function run(...args: string[]) {
-  return spawnSync("node", [bin, ...args], { encoding: "utf8", env: { ...process.env, DESKLINK_AXI_SESSION: `cli-test-${process.pid}` } });
+  return spawnSync(process.execPath, [bin, ...args], { encoding: "utf8", timeout: 5000,
+    env: { ...process.env, DISPLAY: '', WAYLAND_DISPLAY: '', XDG_RUNTIME_DIR: runtime,
+      DESKLINK_AXI_ENGINE: join(runtime, 'no-engine'), DESKLINK_AXI_SESSION: `cli-test-${process.pid}` } });
 }
 
 describe("desklink-axi AXI contract", () => {

@@ -13,6 +13,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
+
+assertNoAmbientDesktop();
 
 const measureRuns = (() => {
   const index = process.argv.indexOf('--measure');
@@ -49,6 +52,7 @@ const authority = join(dir, 'Xauthority');
 assert.equal(spawnSync('xauth', ['-f', authority, 'add', display, '.', randomBytes(16).toString('hex')], { encoding: 'utf8' }).status, 0);
 
 const xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], { stdio: ['ignore', 'ignore', 'pipe'] });
+trackOwnedXvfb(xvfb, display);
 let xvfbError = '';
 xvfb.stderr.on('data', part => xvfbError += part);
 
@@ -86,18 +90,7 @@ async function stopProcess(pid) {
   assert(!alive(), `task-owned process ${pid} survived cleanup`);
 }
 // SIGTERM lets Xvfb remove its own lock and socket; SIGKILL only as fallback.
-async function stopXvfb() {
-  const started = owned.get(xvfb.pid);
-  if (!started) return;
-  const alive = () => { const state = proc(xvfb.pid); return state?.started === started && state.state !== 'Z'; };
-  if (alive()) {
-    try { process.kill(xvfb.pid, 'SIGTERM'); } catch { /* fallback below */ }
-    for (let i = 0; i < 40 && alive(); i++) await new Promise(r => setTimeout(r, 25));
-  }
-  if (alive()) await stopProcess(xvfb.pid);
-  try { unlinkSync(`/tmp/.X${number}-lock`); } catch { /* removed by Xvfb */ }
-  try { unlinkSync(socket); } catch { /* removed by Xvfb */ }
-}
+async function stopXvfb() { await stopOwnedXvfb(xvfb); }
 function daemonFromPrinted(text, token) {
   const lines = text.trim().split('\n').filter(Boolean);
   const address = lines[0].split(',')[0]; // unix:path=..., strips the guid
@@ -123,7 +116,7 @@ const cageEnv = {
   XDG_RUNTIME_DIR: join(dir, 'xdg'), XDG_CONFIG_HOME: join(dir, 'home', '.config'),
   XDG_DATA_HOME: join(dir, 'home', '.local', 'share'), XDG_CACHE_HOME: join(dir, 'cache'),
   HOME: join(dir, 'home'), GSETTINGS_BACKEND: 'memory', NO_AT_BRIDGE: '0',
-  DESKLINK_AXI_SESSION: `a11y-${process.pid}`, DESKLINK_AXI_ENGINE: enginePath,
+  DESKLINK_AXI_SESSION: `a11y-${process.pid}-${randomBytes(16).toString('hex')}`, DESKLINK_AXI_ENGINE: enginePath,
   DESKLINK_AXI_PID_FILE: join(dir, 'bridges.pid'), DESKLINK_AXI_ENGINE_PID_FILE: join(dir, 'engines.pid'),
 };
 
@@ -177,17 +170,7 @@ const pctl = (samples) => (p) => {
   return sorted[Math.min(sorted.length - 1, Math.floor(p / 100 * sorted.length))] ?? NaN;
 };
 
-async function verifyXvfb() {
-  for (let i = 0; i < 100 && !existsSync(socket) && xvfb.exitCode === null; i++) await sleep(50);
-  assert(xvfb.pid && xvfb.exitCode === null && existsSync(socket), `private Xvfb did not start (exit ${xvfb.exitCode}): ${xvfbError.slice(-300)}`);
-  assert.equal(Number(readFileSync(`/tmp/.X${number}-lock`, 'utf8').trim()), xvfb.pid, 'X lock belongs to another server');
-  const line = readFileSync('/proc/net/unix', 'utf8').split('\n').find(line => line.endsWith(` ${socket}`));
-  assert(line, 'X socket missing from proc socket table');
-  const inode = line.trim().split(/\s+/)[6];
-  assert(readdirSync(`/proc/${xvfb.pid}/fd`).some(fd => {
-    try { return readlinkSync(`/proc/${xvfb.pid}/fd/${fd}`) === `socket:[${inode}]`; } catch { return false; }
-  }), 'X server socket is not held by the spawned Xvfb PID');
-}
+async function verifyXvfb() { await verifyOwnedXvfb(xvfb); }
 
 let cleanupDone = false;
 async function cleanup() {

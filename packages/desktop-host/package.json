@@ -1,6 +1,6 @@
 {
     "name": "@desklink/host",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "license": "Apache-2.0",
     "description": "Per-user, on-demand desktop capture, encode and input engine with a versioned local control protocol",
     "type": "module",
@@ -30,6 +30,6 @@
         "node": ">=22"
     },
     "dependencies": {
-        "ws": "^8.18.0"
+        "ws": "8.21.3"
     }
 }

@@ -22,8 +22,8 @@ const platforms = {
     },
     'darwin-arm64': {
         os: 'darwin', cpu: 'arm64', tag: 'darwin-arm64',
-        description: 'macOS arm64',
-        readme: 'This is an unsigned CLI binary. Screen Recording and Accessibility permissions belong to the responsible app that launches it (for example Terminal, iTerm, or a Node.js host), not to a DesklinkHost.app bundle. The macOS engine is enabled by default; DESKLINK_MACOS=0 opts out. libvpx is linked statically; notices are included.',
+        description: 'macOS arm64 (preview)',
+        readme: 'PREVIEW: macOS desktop support is not qualified for this checkpoint. This is an unsigned CLI binary. Screen Recording and Accessibility permissions belong to the responsible app that launches it (for example Terminal, iTerm, or a Node.js host), not to a DesklinkHost.app bundle. The macOS engine is enabled by default; DESKLINK_MACOS=0 opts out. libvpx is linked statically; notices are included.',
     },
 };
 const platformTagValue = values.platform ?? 'linux-x64-gnu';

@@ -1,6 +1,6 @@
 {
   "name": "@desklink/axi",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Agent-facing desktop control CLI",
   "type": "module",
   "bin": {
@@ -24,15 +24,15 @@
     "skill:check": "node scripts/gen-skill.mjs --check"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
-    "@types/pngjs": "^6.0.5",
-    "typescript": "^5.6.0"
+    "@types/node": "22.20.4",
+    "@types/pngjs": "6.0.5",
+    "typescript": "5.9.3"
   },
   "dependencies": {
-    "@desklink/host": "0.3.0",
-    "node-datachannel": "^0.33.4",
+    "@desklink/host": "0.3.1",
+    "node-datachannel": "0.33.4",
     "playwright-core": "1.62.1",
-    "pngjs": "^7.0.0"
+    "pngjs": "7.0.0"
   },
   "license": "Apache-2.0"
 }

@@ -42,6 +42,9 @@ import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 
+import { assertNoAmbientDesktop } from './lab-safety.mjs';
+
+assertNoAmbientDesktop();
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '../../..');
 const fixture = join(here, 'fixtures/encoded-486x1080.h264');
