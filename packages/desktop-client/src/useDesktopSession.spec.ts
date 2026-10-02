@@ -224,6 +224,39 @@ describe('control messages', () => {
     });
 });
 
+describe('the clipboard', () => {
+    function answer(id: string | null, kind: string, text: string, error?: string): void {
+        const { request } = JSON.parse(sent.find((message) => message.includes(kind))!) as { request: string };
+        nativeEvent('control', id, { message: JSON.stringify({ kind: 'clipboard', request, text, error }) });
+    }
+
+    it('reports each transfer that completed, and not one that failed', async () => {
+        const session = await liveSession();
+        session.current.setInputEnabled(true);
+        expect(session.current.clipboard).toBeNull();
+
+        sent.length = 0;
+        let copied!: Promise<unknown>;
+        TestRenderer.act(() => { copied = session.current.copyRemoteToLocal(); });
+        answer(session.current.nativeId, 'clipboard_read', 'from the desktop');
+        await TestRenderer.act(async () => { await copied; });
+        expect(session.current.clipboard).toEqual({ id: 1, direction: 'to-phone', text: 'from the desktop', truncated: false });
+
+        sent.length = 0;
+        let pasted!: Promise<unknown>;
+        TestRenderer.act(() => { pasted = session.current.pasteLocalToRemote('from the phone'); });
+        answer(session.current.nativeId, 'clipboard_write', '');
+        await TestRenderer.act(async () => { await pasted; });
+        expect(session.current.clipboard).toEqual({ id: 2, direction: 'to-desktop', text: 'from the phone', truncated: false });
+
+        sent.length = 0;
+        TestRenderer.act(() => { pasted = session.current.pasteLocalToRemote('refused'); });
+        answer(session.current.nativeId, 'clipboard_write', '', 'the desktop refused');
+        await TestRenderer.act(async () => { await expect(pasted).rejects.toThrow('the desktop refused'); });
+        expect(session.current.clipboard?.id).toBe(2);
+    });
+});
+
 describe('held input across a background transition', () => {
     it('releases a pointer that is still down when the app leaves the foreground', async () => {
         const session = await connectedSession();

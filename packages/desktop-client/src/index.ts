@@ -13,9 +13,12 @@ export { desktopAvailable } from './availability';
 export { DesktopView, type DesktopViewProps, type EdgeInsets } from './DesktopView';
 export { observeWebKeyboardMotion } from './webKeyboardMotion';
 export type { StickyModifier, StickyModifiers, StickyState } from './stickyModifiers';
+export { ModifierKeys, type ModifierKeysProps } from './ModifierKeys';
+export { ClipboardConfirmation, type ClipboardConfirmationProps } from './ClipboardConfirmation';
 export {
     useDesktopSession,
     CONTROL_PERMISSIONS,
+    type ClipboardTransfer,
     type DesktopSession,
     type DesktopSessionOptions,
 } from './useDesktopSession';

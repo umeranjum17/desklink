@@ -9,13 +9,23 @@
  *
  * Control is enabled as soon as the picture is live, so a tap on the picture
  * clicks the desktop. The picture fills the screen inside its safe area. The
- * hidden accessibility status carries `testID="desklink-status"` for
- * test/ios-flow.mjs to read through the simulator's accessibility tree.
+ * key row arms Ctrl, Shift, Alt and Meta, and Copy brings the desktop's
+ * clipboard over with its confirmation. The hidden accessibility status
+ * carries `testID="desklink-status"` for test/ios-flow.mjs to read through
+ * the simulator's accessibility tree.
  */
 import * as React from 'react';
-import { Linking, Platform, Settings, StatusBar, StyleSheet, Text, View } from 'react-native';
+import { Linking, Platform, Pressable, Settings, StatusBar, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { DesktopView, useDesktopSession, type SessionEvent, type SessionSnapshot, type Signaling } from '@desklink/react-native';
+import {
+    ClipboardConfirmation,
+    DesktopView,
+    ModifierKeys,
+    useDesktopSession,
+    type SessionEvent,
+    type SessionSnapshot,
+    type Signaling,
+} from '@desklink/react-native';
 
 function connectionLink(link: string | null): { url: string; report: string | null; key: string } | null {
     if (!link) return null;
@@ -190,6 +200,13 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
             {status !== 'live' && <View pointerEvents="none" style={styles.message}>
                 <Text style={styles.messageText}>{statusText(desktop.snapshot)}</Text>
             </View>}
+            <ClipboardConfirmation transfer={desktop.clipboard} style={styles.toast} />
+            <View style={styles.keys}>
+                <ModifierKeys modifiers={desktop.modifiers} onTap={desktop.tapModifier} style={styles.row} />
+                <Pressable testID="desklink-copy" accessibilityRole="button" onPress={() => void desktop.copyRemoteToLocal().catch(() => undefined)} style={styles.copy}>
+                    <Text style={styles.copyLabel}>Copy</Text>
+                </Pressable>
+            </View>
         </View>
     );
 }
@@ -201,4 +218,10 @@ const styles = StyleSheet.create({
     status: { color: 'transparent', fontSize: 1 },
     message: { position: 'absolute', left: 0, right: 0, bottom: 48, alignItems: 'center' },
     messageText: { color: '#fff', fontSize: 16 },
+    keys: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingBottom: 24, flexDirection: 'row', backgroundColor: 'rgba(22, 23, 26, 0.94)' },
+    row: { flex: 1, backgroundColor: 'transparent' },
+    copy: { margin: 8, minHeight: 44, paddingHorizontal: 12, borderRadius: 8, justifyContent: 'center', backgroundColor: '#2b2d33' },
+    copyLabel: { color: '#c9ccd3', fontSize: 15, fontWeight: '500' },
+    // Below the status bar and any notch.
+    toast: { top: 64 },
 });

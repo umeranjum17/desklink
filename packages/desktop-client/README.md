@@ -191,7 +191,13 @@ heat and battery.
 - **The keys a phone lacks.** `modifiers`, `tapModifier` and `pressKey` give
   sticky Ctrl and Shift: tap arms one for the next key, tap again locks it.
   While one is armed, the next key or character the phone's keyboard types is
-  sent as that key's chord, so Ctrl then v is Ctrl+V. The app draws the keys.
+  sent as that key's chord, so Ctrl then v is Ctrl+V. `modifiers` holds each
+  key's state (`off`, `once` for latched, `lock`) for the app to read.
+  `<ModifierKeys modifiers={desktop.modifiers} onTap={desktop.tapModifier} />`
+  draws them as a backed key row: off is an outlined key, latched a filled
+  one, locked a filled one with a white rim and a bar under its label, and a
+  screen reader hears off, latched or locked. An app may draw its own keys
+  from `modifiers` instead.
 - **Readiness is a rendered frame.** Android marks the first draw; iOS marks
   the first `RTCView` video-dimensions callback and ignores later ones, so a
   resize or remount during a reconnect does not read as live. Neither marks
@@ -240,6 +246,10 @@ heat and battery.
   session close and a lost control channel release what the desktop was holding.
 - **Explicit clipboard.** Two methods, called on a user action while control is
   enabled. The package never polls the clipboard or uses it as a way to type.
+  `clipboard` is the last transfer that completed, and
+  `<ClipboardConfirmation transfer={desktop.clipboard} />` confirms each one
+  with a backed pill at the top of the view — where it went, the start of the
+  text and its size — that ignores touches and leaves after 1.5 s.
 
 ### `Signaling`
 
