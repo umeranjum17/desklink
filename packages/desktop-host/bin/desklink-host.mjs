@@ -85,7 +85,8 @@ Set DESKLINK_ENGINE to use an engine built somewhere else (MUXR_DESKLINK_ENGINE 
         console.log('');
         console.log(`open     http://${host}:${bridge.port}/?token=${encodeURIComponent(token)}`);
         console.log('');
-        console.log('Open that URL in a browser on this machine, or point a phone at it.');
+        console.log('Anyone with this URL has full available view, input and clipboard access.');
+        console.log('Stop the bridge to revoke live and future access.');
         console.log('ws:// is plaintext: keep it on a private network, or put it behind TLS.');
         const stop = async () => { await bridge.close(); process.exit(0); };
         process.on('SIGINT', () => void stop());

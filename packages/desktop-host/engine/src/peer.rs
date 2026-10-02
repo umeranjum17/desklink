@@ -5,10 +5,10 @@
 //! module never assumes anything about that channel, which is what keeps the
 //! engine usable by an application that is not this one.
 //!
-//! Input and clipboard ride the session's data channel rather than the local
-//! protocol. The channel is inside the DTLS/SRTP session the engine created for
-//! one authorized grant, so it inherits that session's identity and dies with
-//! it — a revoked session cannot be driven by a client that kept a socket open.
+//! Remote input and clipboard ride the session's data channel; co-located
+//! consumers can also use the local clipboard protocol. The channel is inside
+//! the DTLS/SRTP session opened by a paired consumer and dies with it — a revoked
+//! session cannot be driven by a client that kept a socket open.
 
 use anyhow::{Context, Result};
 use rtc::interceptor::{
@@ -1120,6 +1120,12 @@ impl VideoPeer {
     }
 
     pub async fn close(&self) {
+        let _ = tokio::time::timeout(Duration::from_millis(500), async {
+            while self.control.outstanding_bytes().await.unwrap_or(0) > 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
         self.feedback.abort();
         let _ = self.control.close().await;
         let _ = self.peer.close().await;

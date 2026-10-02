@@ -22,7 +22,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   const request = JSON.parse(line);
   if (request.method === 'hello' && request.params.protocol !== 3) return out({ id: request.id, error: { code: 'unsupported-protocol', message: 'protocol 3 required' } });
   if (request.method === 'hello' || request.method === 'capabilities') return out({ id: request.id, result: {
-    protocol: 3, clipboard: { read: true, write: true, mime: [], maxBytes: 1024 },
+    protocol: 3, clipboard: { read: false, write: false, mime: [], maxBytes: 1024 },
   } });
   if (request.method === 'session.open') {
     out({ event: 'session.restoreToken', params: { sessionId: 'engine-1', token: 'test-private-grant' } });
@@ -96,6 +96,7 @@ describe('the bridge', () => {
         await expect(Bridge.start({ listen: '127.0.0.1:0', token: '  ', engineCommand: process.execPath, engineArgs: [] }))
             .rejects.toThrow(/token/);
         const { port, localEvents } = await startBridge('s3cret');
+        await expect(connect(port, '')).rejects.toThrow(/refused|401/);
         await expect(connect(port, 'token=wrong')).rejects.toThrow(/refused|401/);
 
         const socket = await connect(port, 'token=s3cret');
@@ -133,19 +134,93 @@ describe('the bridge', () => {
         const x11 = await startBridge('t', false, { kind: 'x11', display: ':99' });
         const x11Socket = await connect(x11.port, 'token=t');
         expect((await requestOn(x11Socket, 1, 'hello', { protocol: 3 })).clipboard)
-            .toMatchObject({ read: false, write: false });
+            .toMatchObject({ read: true, write: true });
         expect((await requestOn(x11Socket, 2, 'capabilities')).clipboard)
-            .toMatchObject({ read: false, write: false });
-        expect(await requestOn(x11Socket, 3, 'session.open', { permissions: ['view', 'control'] }))
+            .toMatchObject({ read: true, write: true });
+        expect(await requestOn(x11Socket, 3, 'session.open', { permissions: ['view'] }))
             .toMatchObject({ sessionId: 'engine-1' });
 
         const portal = await startBridge('t', false);
         const portalSocket = await connect(portal.port, 'token=t');
         expect((await requestOn(portalSocket, 1, 'capabilities')).clipboard)
-            .toMatchObject({ read: true, write: true });
-        expect(await requestOn(portalSocket, 2, 'session.open', { permissions: ['view', 'control', 'clipboard'] }))
+            .toMatchObject({ read: false, write: false });
+        expect((await requestOn(portalSocket, 4, 'hello', { protocol: 3 })).clipboard)
+            .toMatchObject({ read: false, write: false });
+        expect(await requestOn(portalSocket, 2, 'session.open', {}))
             .toMatchObject({ sessionId: 'engine-1' });
     }, 20_000);
+
+    it('revokes live sessions and future access when stopped and re-paired', async () => {
+        const directory = mkdtempSync(join(tmpdir(), 'desklink-revoke-'));
+        const script = join(directory, 'engine.cjs');
+        const log = join(directory, 'closed.log');
+        writeFileSync(script, `
+const fs = require('node:fs');
+const readline = require('node:readline');
+let active = false;
+const out = value => process.stdout.write(JSON.stringify(value)+'\\n');
+readline.createInterface({input:process.stdin}).on('line', line => {
+  const request = JSON.parse(line);
+  if (request.method === 'hello') return out({id:request.id,result:{protocol:3}});
+  if (request.method === 'session.open') { active = true; return out({id:request.id,result:{sessionId:'live',generation:1}}); }
+  if (request.method === 'shutdown') {
+    if (active) { active = false; fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({session:'live',closed:true,pid:process.pid})); }
+    out({event:'session.state',params:{sessionId:'live',capture:'ended',transport:'closed',first_frame:false}});
+    out({id:request.id,result:{}}); process.exit(0);
+  }
+});
+`);
+        const bridge = await Bridge.start({listen:'127.0.0.1:0',token:'old-pairing',
+            engineCommand:process.execPath,engineArgs:[script],serveExample:false});
+        bridges.push(bridge);
+        const oldPort = bridge.port;
+        const live = await connect(oldPort, 'token=old-pairing');
+        expect(await requestOn(live, 1, 'session.open')).toMatchObject({sessionId:'live'});
+        const notices: unknown[] = [];
+        live.on('message', raw => notices.push(JSON.parse(String(raw))));
+        const disconnected = new Promise<void>(resolve => live.once('close', () => resolve()));
+        await bridge.close();
+        await disconnected;
+        expect(notices).toContainEqual({event:'session.state',params:{sessionId:'live',capture:'ended',transport:'closed',first_frame:false}});
+        const ended = JSON.parse(readFileSync(log, 'utf8')) as {session:string;closed:boolean;pid:number};
+        expect(ended).toMatchObject({session:'live',closed:true});
+        expect(() => process.kill(ended.pid, 0)).toThrow(/ESRCH/);
+        await expect(connect(oldPort, 'token=old-pairing')).rejects.toThrow();
+        const replacement = await Bridge.start({listen:`127.0.0.1:${oldPort}`,token:'new-pairing',
+            engineCommand:process.execPath,engineArgs:[script],serveExample:false});
+        bridges.push(replacement);
+        await expect(connect(oldPort, 'token=old-pairing')).rejects.toThrow(/refused|401/);
+        const newlyPaired = await connect(oldPort, 'token=new-pairing');
+        expect(await requestOn(newlyPaired, 2, 'session.open')).toMatchObject({sessionId:'live'});
+    }, 20_000);
+
+    it('bounds revocation when the engine and socket cannot finish gracefully', async () => {
+        const directory = mkdtempSync(join(tmpdir(), 'desklink-stalled-close-'));
+        const script = join(directory, 'engine.cjs');
+        writeFileSync(script, `
+const readline = require('node:readline');
+setInterval(() => {}, 1000);
+const out = value => process.stdout.write(JSON.stringify(value)+'\\n');
+readline.createInterface({input:process.stdin}).on('line', line => {
+  const request = JSON.parse(line);
+  if (request.method === 'hello') out({id:request.id,result:{protocol:3}});
+  if (request.method === 'session.open') out({id:request.id,result:{sessionId:'stalled',generation:1,pid:process.pid}});
+});
+`);
+        const bridge = await Bridge.start({listen:'127.0.0.1:0',token:'t',
+            engineCommand:process.execPath,engineArgs:[script],serveExample:false});
+        bridges.push(bridge);
+        const port = bridge.port;
+        const socket = await connect(port, 'token=t');
+        const opened = await requestOn(socket, 1, 'session.open');
+        socket.pause();
+        const started = Date.now();
+        await bridge.close();
+        expect(Date.now()-started).toBeLessThan(6000);
+        socket.resume();
+        expect(() => process.kill(Number(opened.pid), 0)).toThrow(/ESRCH/);
+        await expect(connect(port, 'token=t')).rejects.toThrow();
+    }, 10_000);
 
     it('serves the reference page only to a caller that already has the token', async () => {
         const { port } = await startBridge('s3cret');

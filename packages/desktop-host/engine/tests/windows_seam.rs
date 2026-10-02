@@ -57,7 +57,7 @@ fn windows_engine_reports_available_codecs_and_desktop_limits() {
 
 #[cfg(desklink_vpx)]
 #[test]
-fn serving_handshakes_refuses_indicator_and_stops_on_eof() {
+fn serving_handshakes_reports_missing_source_with_optional_indicator_and_stops_on_eof() {
     use std::io::Write;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -74,6 +74,8 @@ fn serving_handshakes_refuses_indicator_and_stops_on_eof() {
         serde_json::json!({"id":2,"method":"capabilities"}),
         serde_json::json!({"id":3,"method":"session.open","params":{
             "permissions":["view","control"],"agent_indicator":true}}),
+        serde_json::json!({"id":4,"method":"session.open","params":{
+            "permissions":["view","control"],"agent_indicator":false}}),
     ] {
         writeln!(input, "{request}").unwrap();
     }
@@ -98,8 +100,11 @@ fn serving_handshakes_refuses_indicator_and_stops_on_eof() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(messages.len(), 3);
+    assert_eq!(messages.len(), 4);
     assert_eq!(messages[0]["result"]["protocol"], 3);
     assert_eq!(messages[0]["result"], messages[1]["result"]);
-    assert_eq!(messages[2]["error"]["code"], "indicator-unavailable");
+    assert_eq!(messages[2]["id"], 3);
+    assert_eq!(messages[3]["id"], 4);
+    assert_eq!(messages[2]["error"]["code"], "source");
+    assert_eq!(messages[2]["error"], messages[3]["error"]);
 }

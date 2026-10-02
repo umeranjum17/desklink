@@ -395,7 +395,7 @@ async function measure(run) {
         });
         const opened = await engine.request('session.open', {
             source: { kind: 'portal' },
-            permissions: ['view'],
+
             max_width: run.width,
             max_height: run.height,
             max_fps: run.maxFps,
@@ -716,7 +716,7 @@ async function cursorProof(engine, dir, run) {
         await sleep(300);
     };
     if (run.embeddedControl) {
-        const embedded = await engine.request('session.open', {source:{kind:'portal'},permissions:['view'],max_width:run.width,max_height:run.height},60000);
+        const embedded = await engine.request('session.open', {source:{kind:'portal'},max_width:run.width,max_height:run.height},60000);
         writeFileSync(join(dir,'freeze'),'');
         await sleep(500);
         await move(100,100);
@@ -731,7 +731,7 @@ async function cursorProof(engine, dir, run) {
     }
     let hidden;
     try {
-        hidden = await engine.request('session.open', {source:{kind:'portal'},permissions:['view'],cursor:'hidden',max_width:run.width,max_height:run.height}, 60000);
+        hidden = await engine.request('session.open', {source:{kind:'portal'},cursor:'hidden',max_width:run.width,max_height:run.height}, 60000);
     } catch (error) {
         assert.match(error.message, /^cursor_positions_unavailable:/, 'portal without SPA cursor metadata must refuse hidden capture');
         return {source:'portal',hidden_refused:'cursor_positions_unavailable'};
