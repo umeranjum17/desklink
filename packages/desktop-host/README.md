@@ -59,11 +59,14 @@ The engine supports Linux desktop sessions, and macOS (preview) desktop sessions
 - **Clipboard** explicitly, in both directions, only when asked. It is never
   polled and never used as a hidden way to type. On Wayland, writes require
   `wl-copy` from `wl-clipboard`; macOS uses the plain-text general pasteboard.
+  X11 serves CLIPBOARD on the session's selected display (UTF8_STRING/TEXT,
+  up to 256 KiB; no INCR, STRING or PRIMARY). The X11 text lasts until another
+  owner replaces it, the engine exits, or the display ends.
 
 ## What it deliberately does not do
 
-- It does not decide *who* the user is. The consumer authorizes; the engine
-  enforces the scope it was given.
+- It does not decide *who* the user is. The consumer pairs; a paired consumer
+  gets all available view, input and clipboard access, without per-session grants.
 - It does not open a public listener, run as root, install udev rules, join
   groups or raise capabilities.
 - It does not carry audio, arbitrate between two controllers, or remember a
@@ -135,7 +138,7 @@ The macOS engine shares protocol v3's WebRTC session path: selected-display
 ScreenCaptureKit capture, VP9 encoding (H.264 through VideoToolbox for a receiver
 that asks), Quartz pointer/keyboard events, and
 plain-text NSPasteboard operations. `capabilities` is non-prompting; `session.open`
-requests Screen Recording and, for control, Accessibility consent when needed.
+requests Screen Recording and, for input, Accessibility consent when needed.
 For persistent grants, install the signed `DesklinkHost.app` at one fixed path.
 Build the engine on the Mac, then run
 `release/install-mac-app.sh <engine> <absolute path to DesklinkHost.app> [existing signing PEM]`
@@ -235,8 +238,8 @@ npx -p @desklink/host desklink-host setup-input   # anywhere else, e.g. under an
 ```
 
 That prints the exact, narrowly scoped rule — and changes nothing. Without
-`uinput` access a portal session can still be opened with `view` permission;
-asking for `control` is refused rather than presenting inert controls. An X
+`uinput` access a portal session still opens and captures; input actions are
+refused with `input-unavailable` until access is set up. An X
 session instead uses XTest and does not need `/dev/uinput`.
 
 ## Licence and provenance
@@ -263,7 +266,7 @@ import { EngineClient, resolveEngine } from '@desklink/host';
 
 const engine = resolveEngine();                       // prebuilt, or a source build
 const client = await EngineClient.start(engine.command, engine.args);
-const session = await client.openSession({ permissions: ['view', 'control', 'clipboard'] });
+const session = await client.openSession({});
 
 // Everything the engine wants to tell the client arrives here, in order.
 client.drainEvents().forEach((event) => myChannel.send(event));
@@ -285,7 +288,8 @@ preserves existing behavior. See [the cursor protocol](docs/PROTOCOL.md#cursor-f
 
 `myChannel` is the application's own authenticated connection, whatever that is.
 There is no second identity system, no pairing ceremony and no account: the
-engine trusts the consumer's decision and enforces the scope it was given.
+engine trusts the consumer's pairing. A paired consumer gets all available
+view, input and clipboard access; missing OS backends fail per action.
 For the application's pairing, identity and signaling transport, see the
 [BYOKit integration guidance](../../README.md#why-desklink-exists).
 
@@ -310,7 +314,9 @@ source with its flag or environment; clients cannot choose or override it.
 
 Two things the bridge is honest about: `ws://` is plaintext, so keep it on a
 private network or put it behind TLS; and the token in the URL *is* the
-authorisation for that socket, so treat it as a credential.
+pairing credential for full view, input and clipboard, so treat it as a secret.
+Stopping the bridge closes live sessions and the listener. Restarting with a
+new token also prevents the old pairing from opening future sessions.
 
 ## Packaging
 

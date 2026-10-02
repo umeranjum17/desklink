@@ -311,7 +311,7 @@ try {
   owned.set(xvfb.pid, proc(xvfb.pid)?.started);
   await verifyOwnedXvfb(xvfb);
   // AXI desktop session on the private display (control input, OCR refs).
-  const start = await call('start', '--control', '--source', 'x11', '--display', display);
+  const start = await call('start', '--source', 'x11', '--display', display);
   assert.equal(start.code, 0, start.out);
 
   // Native task first: no Chromium, x11_target owns X input focus.

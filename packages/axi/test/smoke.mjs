@@ -115,7 +115,7 @@ try {
   await verifyOwnedXvfb(xvfb);
   remember(xvfb.pid, 'Xvfb');
 
-  assert.match(await run('start', '--control', '--source', 'x11', '--display', display), /permissions=view,control/);
+  assert.match(await run('start', '--source', 'x11', '--display', display), /session: open source=x11/);
   if (existsSync(pidFile)) for (const pid of readFileSync(pidFile, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number)) remember(pid, '--bridge');
   if (existsSync(enginePidFile)) for (const pid of readFileSync(enginePidFile, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number)) remember(pid, enginePath);
   const batched = await run('batch', JSON.stringify([['press', 'a'], ['type', 'smoke-batch'], ['wait', '50']]));

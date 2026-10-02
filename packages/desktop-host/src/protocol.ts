@@ -79,8 +79,8 @@ export interface OpenSessionRequest {
     /** Cursor-free frames with independent source-coordinate position events. */
     cursor?: 'embedded' | 'hidden';
     source?: SourceRequest;
-    /** `view` alone is capture-only; `control` needs a working input backend. */
-    permissions: Array<'view' | 'control' | 'clipboard'>;
+    /** @deprecated Pairing grants all available access; accepted and ignored. */
+    permissions?: Array<'view' | 'control' | 'clipboard'>;
     maxWidth?: number;
     maxHeight?: number;
     bitrateKbps?: number;
@@ -173,7 +173,7 @@ export class EngineRefused extends Error {
     }
 }
 
-/** A visual cue in selected-desktop pixels, independent of input permissions. */
+/** A visual cue in selected-desktop pixels, not input. */
 export type PointRequest = {
     x: number;
     y: number;

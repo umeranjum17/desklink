@@ -56,9 +56,9 @@ describe('Windows engine startup', () => {
         const hello = JSON.parse(child.stdin.read().toString());
         child.stdout.write(JSON.stringify({ id: hello.id, result: { protocol: 3 } }) + '\n');
         const client = await starting;
-        const opening = client.openSession({permissions:['view'],cursor:'hidden'});
+        const opening = client.openSession({cursor:'hidden'});
         const request = JSON.parse(child.stdin.read().toString());
-        expect(request.params).toEqual({permissions:['view'],cursor:'hidden'});
+        expect(request.params).toEqual({cursor:'hidden'});
         const result = {sessionId:'s',generation:1,cursor:{mode:'metadata',positions:true}};
         child.stdout.write(JSON.stringify({id:request.id,result}) + '\n');
         expect(await opening).toEqual(result);

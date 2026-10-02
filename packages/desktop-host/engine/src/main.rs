@@ -310,7 +310,7 @@ fn print_input_setup() {
             println!(
                 "To undo it: remove the rule, remove the user from the group, reload the rules."
             );
-            println!("Without it the engine still captures the desktop and reports view-only.");
+            println!("Without it the engine still captures the desktop; input actions are refused with input-unavailable.");
         }
     }
 }
@@ -645,7 +645,6 @@ async fn dispatch(
             let open = session::OpenRequest {
                 source: params.source,
                 cursor: params.cursor,
-                permissions: params.permissions,
                 max_width: params.max_width,
                 max_height: params.max_height,
                 bitrate_kbps: params.bitrate_kbps,

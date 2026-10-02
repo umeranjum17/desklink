@@ -14,7 +14,7 @@ if (process.argv[2] === '--bridge') {
   print('desklink-axi: desktop session available on request; run desklink-axi to check status');
 } else {
   const definitions: [string, string[], string[]][] = [
-    ['start', [], ['control','source','display','timeout','cursor']], ['stop', [], []], ['health', [], []], ['cursor', [], []],
+    ['start', [], ['source','display','timeout','cursor']], ['stop', [], []], ['health', [], []], ['cursor', [], []],
     ['screen', [], ['query','region','full','fields']], ['diff', [], ['include-animating','fields']],
     ['tree', [], ['query','full','fields']], ['marks', [], ['region','out']],
     ['point', [], ['label','timeout','clear']],
@@ -28,7 +28,7 @@ if (process.argv[2] === '--bridge') {
   const commands: Record<string, CommandModule> = {};
   Object.assign(commands, browserCommands());
   for (const [name, required, flags] of definitions) commands[name] = {
-    spec: { name, summary: `${name} on the live desktop`, args: name === 'point' ? [{name:'x,y',required:false,description:'selected desktop pixels; omit for --clear'}] : required.map(arg => ({name:arg,required:true,description:arg})), flags: flags.map(flag => ({name:flag,type: ['control','full','double','submit','include-animating','clear'].includes(flag) ? 'boolean' : 'string', values: flag === 'source' ? ['auto','portal','x11','display'] : flag === 'button' ? ['left','right'] : undefined, description:flag})), examples: name === 'point' ? ['desklink-axi point 400,300 --label "Here" --timeout 3000', 'desklink-axi point --clear'] : [`desklink-axi ${name} ${required.map(arg=>`<${arg}>`).join(' ')}`] },
+    spec: { name, summary: `${name} on the live desktop`, args: name === 'point' ? [{name:'x,y',required:false,description:'selected desktop pixels; omit for --clear'}] : required.map(arg => ({name:arg,required:true,description:arg})), flags: flags.map(flag => ({name:flag,type: ['full','double','submit','include-animating','clear'].includes(flag) ? 'boolean' : 'string', values: flag === 'source' ? ['auto','portal','x11','display'] : flag === 'button' ? ['left','right'] : undefined, description:flag})), examples: name === 'point' ? ['desklink-axi point 400,300 --label "Here" --timeout 3000', 'desklink-axi point --clear'] : [`desklink-axi ${name} ${required.map(arg=>`<${arg}>`).join(' ')}`] },
     async run(parsed) {
       if (name === 'scroll' && !['up','down'].includes(parsed.positionals[0]!)) throw new UsageError('scroll direction must be up or down');
       if (name === 'marks' && parsed.flags.region && !/^-?\d+,-?\d+,-?\d+,-?\d+$/.test(String(parsed.flags.region))) throw new UsageError('--region must be x,y,w,h integers');
@@ -42,5 +42,9 @@ if (process.argv[2] === '--bridge') {
     },
   };
   const registry: Registry = { tool: 'desklink-axi', root: homeCommand, rootHelp, commands };
-  process.exit(await dispatch(registry, process.argv.slice(2)));
+  // 0.3 scripts may still pass --control; paired sessions always have access.
+  const argv = process.argv.slice(2);
+  const flagsEnd = argv.indexOf('--');
+  process.exit(await dispatch(registry, argv.filter((arg, index) =>
+    !(argv[0] === 'start' && arg === '--control' && (flagsEnd < 0 || index < flagsEnd)))));
 }

@@ -213,7 +213,7 @@ window.__flow = {
         if (id === null) throw new Error('the web session could not be created');
         state.localId = id;
         const opened = await request('session.open', {
-            permissions: ['view'],
+
             max_fps: maxFps,
         });
         state.sessionId = opened.sessionId;

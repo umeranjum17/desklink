@@ -152,7 +152,7 @@ window.__flow = {
         state.localId = id;
         const opened = await request('session.open', {
             source: { kind: 'encoded', codec: 'h264', width: size.width, height: size.height },
-            permissions: ['view', 'control'],
+            permissions: ['view'],
         });
         state.sessionId = opened.sessionId;
         state.geometry = opened.geometry;
