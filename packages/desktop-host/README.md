@@ -63,7 +63,7 @@ The engine supports Linux desktop sessions, and macOS (preview) desktop sessions
 ## What it deliberately does not do
 
 - It does not decide *who* the user is. The consumer authorizes; the engine
-  enforces the scope it was given.
+  follows the [pairing trust contract](docs/PROTOCOL.md#opening-a-session).
 - It does not open a public listener, run as root, install udev rules, join
   groups or raise capabilities.
 - It does not carry audio, arbitrate between two controllers, or remember a
@@ -284,7 +284,8 @@ preserves existing behavior. See [the cursor protocol](docs/PROTOCOL.md#cursor-f
 
 `myChannel` is the application's own authenticated connection, whatever that is.
 There is no second identity system, no pairing ceremony and no account: the
-engine trusts the consumer's decision and enforces the scope it was given.
+engine trusts the consumer's decision; see the
+[pairing trust contract](docs/PROTOCOL.md#opening-a-session).
 For the application's pairing, identity and signaling transport, see the
 [BYOKit integration guidance](../../README.md#why-desklink-exists).
 

@@ -1,9 +1,9 @@
 //! One authorized desktop session: capture in, VP9 out, control channel in,
 //! desktop input out, and a bounded teardown.
 //!
-//! The engine trusts the consumer's local permission decision and enforces the
-//! resulting scope. It has no second identity system, no account and no notion
-//! of which application asked.
+//! The trust contract is defined in docs/PROTOCOL.md (Opening a session).
+//! The engine has no second identity system, no account and no notion of
+//! which application asked.
 
 use crate::capture::{self, Capture};
 use crate::clipboard;
@@ -15,9 +15,7 @@ use crate::peer::{
     h264_profile_level_id, PathReport, PeerEvent, TransportOptions, VideoCodec, VideoPeer,
 };
 use crate::portal::{self, SelectedSource};
-use crate::protocol::{
-    ControlMessage, ControlReply, EncodedCodec, PointerPhase, SourceRequest,
-};
+use crate::protocol::{ControlMessage, ControlReply, EncodedCodec, PointerPhase, SourceRequest};
 use crate::x11::X11Desktop;
 use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1257,7 +1255,9 @@ impl Session {
                     let devices = InputDevices::create(source_w as i32, source_h as i32);
                     #[cfg(any(target_os = "macos", target_os = "windows"))]
                     let devices = InputDevices::create_for_display(
-                        source_w as i32, source_h as i32, source.node_id,
+                        source_w as i32,
+                        source_h as i32,
+                        source.node_id,
                     );
                     Some(InputTarget {
                         applier: Applier::Uinput(devices.map_err(|error| {
@@ -1825,7 +1825,8 @@ impl Session {
         }
         let inner = self.inner.clone();
         clipboard_task(move || {
-            inner.write_clipboard_text(&text)
+            inner
+                .write_clipboard_text(&text)
                 .map(|()| String::new())
                 .map_err(|error| format!("{error:#}"))
         })
@@ -1932,32 +1933,50 @@ impl Inner {
             return None;
         }
         if self.source.source_type.as_deref() == Some("encoded") || !wayland_clipboard_available() {
-            return Some(("clipboard-unsupported", "clipboard is unavailable for this desktop source"));
+            return Some((
+                "clipboard-unsupported",
+                "clipboard is unavailable for this desktop source",
+            ));
         }
         None
     }
 
     fn read_clipboard_text(&self) -> std::result::Result<(String, bool), String> {
-        if let Some((_, reason)) = self.clipboard_refusal() { return Err(reason.to_owned()); }
+        if let Some((_, reason)) = self.clipboard_refusal() {
+            return Err(reason.to_owned());
+        }
         #[cfg(target_os = "linux")]
         if let PointDesktop::X11(display) = &self.point_desktop {
             let mut backend = lock(&self.x11_clipboard);
-            if self.closed.load(Ordering::SeqCst) { return Err(String::from("the session has ended")); }
-            if backend.is_none() {
-                *backend = Some(crate::clipboard_x11::Clipboard::connect(Some(display)).map_err(|error| format!("{error:#}"))?);
+            if self.closed.load(Ordering::SeqCst) {
+                return Err(String::from("the session has ended"));
             }
-            return backend.as_ref().unwrap().read(Some(display)).map_err(|error| format!("{error:#}"));
+            if backend.is_none() {
+                *backend = Some(
+                    crate::clipboard_x11::Clipboard::connect(Some(display))
+                        .map_err(|error| format!("{error:#}"))?,
+                );
+            }
+            return backend
+                .as_ref()
+                .unwrap()
+                .read(Some(display))
+                .map_err(|error| format!("{error:#}"));
         }
         clipboard::read_or_explain()
     }
 
     fn write_clipboard_text(&self, text: &str) -> Result<()> {
-        if let Some((_, reason)) = self.clipboard_refusal() { anyhow::bail!(reason); }
+        if let Some((_, reason)) = self.clipboard_refusal() {
+            anyhow::bail!(reason);
+        }
         #[cfg(target_os = "linux")]
         if let PointDesktop::X11(display) = &self.point_desktop {
             let mut backend = lock(&self.x11_clipboard);
             anyhow::ensure!(!self.closed.load(Ordering::SeqCst), "the session has ended");
-            if backend.is_none() { *backend = Some(crate::clipboard_x11::Clipboard::connect(Some(display))?); }
+            if backend.is_none() {
+                *backend = Some(crate::clipboard_x11::Clipboard::connect(Some(display))?);
+            }
             return backend.as_ref().unwrap().write(text);
         }
         clipboard::write(text)
@@ -2337,7 +2356,8 @@ impl Inner {
         tokio::spawn(async move {
             let backend = inner.clone();
             let error = clipboard_task(move || {
-                backend.write_clipboard_text(&text)
+                backend
+                    .write_clipboard_text(&text)
                     .map(|()| String::new())
                     .map_err(|error| format!("{error:#}"))
             })

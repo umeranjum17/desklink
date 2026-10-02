@@ -236,8 +236,10 @@ Pairing is the only trust boundary: owning this private channel grants all
 available view, input and clipboard operations. Legacy `permissions` fields
 are accepted and ignored. OS-forced capture consent and input device access
 still apply; unavailable input does not prevent viewing. Protocol version stays 3.
-Old clients work unchanged. New React Native clients send the legacy wire triple
-so they can also open sessions against 0.3.1 engines.
+Old clients work unchanged. New React Native clients always send the legacy
+wire triple `["view","control","clipboard"]`, regardless of caller options,
+so they can also open sessions against 0.3.1 engines, which require `view`.
+This compatibility field remains until 0.3.x hosts leave support.
 
 `max_fps` defaults to 60 and is bounded to 1–60. It caps the encoded frame
 rate and X11 capture loop; portal capture offers it as the preferred PipeWire
@@ -245,7 +247,7 @@ frame rate, and macOS sets its ScreenCaptureKit stream minimum frame interval.
 A source may still supply fewer frames.
 
 `agent_indicator` is opt-in local feedback for an agent controller; desklink-axi
-sets it for agent sessions, never for human phone control. It
+sets it with `start --control`, never for human phone control. It
 adds an eased pointer halo, click ripple, and typing pulse. On Wayland it uses
 a click-through layer-shell surface with an edge glow; its bounded area is
 masked before capture/diff (pixels behind the effect can remain briefly stale).

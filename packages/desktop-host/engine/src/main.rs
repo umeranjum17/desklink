@@ -16,14 +16,14 @@ mod capture;
 mod capture;
 #[cfg(target_os = "linux")]
 mod clipboard;
-#[cfg(target_os = "linux")]
-mod clipboard_x11;
 #[cfg(target_os = "macos")]
 #[path = "clipboard_mac.rs"]
 mod clipboard;
 #[cfg(target_os = "windows")]
 #[path = "clipboard_win.rs"]
 mod clipboard;
+#[cfg(target_os = "linux")]
+mod clipboard_x11;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod convert;
 #[cfg(target_os = "linux")]

@@ -173,7 +173,7 @@ export class EngineRefused extends Error {
     }
 }
 
-/** A visual cue in selected-desktop pixels, independent of input permissions. */
+/** A visual cue in selected-desktop pixels that does not inject input. */
 export type PointRequest = {
     x: number;
     y: number;
