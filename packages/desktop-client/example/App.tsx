@@ -16,7 +16,7 @@
  */
 import * as React from 'react';
 import * as Clipboard from 'expo-clipboard';
-import { Linking, Platform, Pressable, Settings, StatusBar, StyleSheet, Text, View } from 'react-native';
+import { Linking, Platform, Pressable, ScrollView, Settings, StatusBar, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
     ClipboardConfirmation,
@@ -213,11 +213,13 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
             {status !== 'live' && <View pointerEvents="none" style={styles.message}>
                 <Text style={styles.messageText}>{statusText(desktop.snapshot)}</Text>
             </View>}
-            <View pointerEvents="none" style={styles.confirmation}>
+            <View pointerEvents="box-none" style={styles.confirmation}>
                 {copyError ? (
-                    <View testID="desklink-copy-error" accessible accessibilityRole="alert" accessibilityLiveRegion="polite" style={styles.copyError}>
-                        <Text style={styles.copyErrorLabel}>{`Copy failed: ${copyError}`}</Text>
-                    </View>
+                    <ScrollView style={styles.copyErrorScroll}>
+                        <View testID="desklink-copy-error" accessible accessibilityRole="alert" accessibilityLiveRegion="polite" style={styles.copyError}>
+                            <Text style={styles.copyErrorLabel}>{`Copy failed: ${copyError}`}</Text>
+                        </View>
+                    </ScrollView>
                 ) : <ClipboardConfirmation transfer={desktop.clipboard} />}
             </View>
             <View style={styles.keys}>
@@ -238,6 +240,7 @@ const styles = StyleSheet.create({
     message: { position: 'absolute', left: 0, right: 0, bottom: 48, alignItems: 'center' },
     messageText: { color: '#fff', fontSize: 16 },
     confirmation: { minHeight: 48, justifyContent: 'center' },
+    copyErrorScroll: { maxHeight: 120, flexGrow: 0 },
     copyError: { marginHorizontal: 16, marginVertical: 8, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12, backgroundColor: '#521b24' },
     copyErrorLabel: { color: '#ffffff', fontSize: 14, fontWeight: '600' },
     keys: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingBottom: 24, backgroundColor: 'rgba(22, 23, 26, 0.94)' },

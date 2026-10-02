@@ -8,6 +8,7 @@ import TestRenderer, { act } from 'react-test-renderer';
 vi.mock('react-native', () => ({
     StyleSheet: { create: (styles: unknown) => styles },
     Pressable: 'Pressable',
+    ScrollView: 'ScrollView',
     Text: 'Text',
     View: 'View',
     Settings: { get: () => undefined },
