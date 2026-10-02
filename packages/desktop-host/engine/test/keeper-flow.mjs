@@ -15,6 +15,9 @@ import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import assert from 'node:assert/strict';
+import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../test/lab-safety.mjs';
+
+assertNoAmbientDesktop();
 
 const engineDir = resolve(import.meta.dirname, '..');
 const engineBin =
@@ -64,25 +67,18 @@ class Screen {
     const auth = spawnSync('xauth', ['-f', this.authority, 'add', this.display, '.', cookie], { encoding: 'utf8' });
     assert.equal(auth.status, 0, `xauth failed: ${auth.stderr}`);
     this.xvfb = spawn('Xvfb', [this.display, '-auth', this.authority, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], { stdio: 'ignore' });
+    trackOwnedXvfb(this.xvfb, this.display);
   }
   async ready() {
-    const socket = `/tmp/.X11-unix/X${this.number}`;
-    for (let i = 0; i < 100 && !existsSync(socket) && this.xvfb.exitCode === null; i++) await sleep(50);
-    assert(this.xvfb.exitCode === null && existsSync(socket), `Xvfb ${this.display} did not start`);
+    try { await verifyOwnedXvfb(this.xvfb); }
+    catch (error) { await this.stop(); throw error; }
   }
   env() {
-    return { ...process.env, DISPLAY: this.display, XAUTHORITY: this.authority };
+    return { ...process.env, DISPLAY: this.display, XAUTHORITY: this.authority, WAYLAND_DISPLAY: '' };
   }
   /** SIGTERM first so the socket is unlinked; SIGKILL only if it survives. */
   async stop() {
-    const pid = this.xvfb.pid;
-    if (pid && this.xvfb.exitCode === null) {
-      try { this.xvfb.kill('SIGTERM'); } catch { /* already gone */ }
-      for (let i = 0; i < 60 && this.xvfb.exitCode === null; i++) await sleep(50);
-      if (this.xvfb.exitCode === null) { try { this.xvfb.kill('SIGKILL'); } catch {} }
-      await sleep(50);
-    }
-    try { this.xvfb.kill('SIGKILL'); } catch { /* gone */ }
+    await stopOwnedXvfb(this.xvfb);
   }
 }
 

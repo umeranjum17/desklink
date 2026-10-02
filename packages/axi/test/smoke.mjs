@@ -10,6 +10,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
+import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
+
+assertNoAmbientDesktop();
 
 const axiRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = resolve(axiRoot, '../..');
@@ -41,12 +44,14 @@ const socket = `/tmp/.X11-unix/X${number}`;
 const authority = join(dir, 'Xauthority');
 assert.equal(spawnSync('xauth', ['-f', authority, 'add', display, '.', randomBytes(16).toString('hex')], { encoding: 'utf8' }).status, 0, 'xauth failed');
 const xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], { stdio: 'ignore' });
+trackOwnedXvfb(xvfb, display);
 
 const owned = new Map(); // PID -> /proc start time; never signal a reused PID.
-const marker = `DESKLINK_AXI_SESSION=smoke-${process.pid}`;
+const sessionName = `smoke-${process.pid}-${randomBytes(16).toString('hex')}`;
+const marker = `DESKLINK_AXI_SESSION=${sessionName}`;
 const pidFile = join(dir, 'bridges.pid');
 const enginePidFile = join(dir, 'engines.pid');
-const env = { ...process.env, DISPLAY: display, XAUTHORITY: authority, DESKLINK_AXI_SESSION: `smoke-${process.pid}`, DESKLINK_AXI_ENGINE: enginePath, DESKLINK_AXI_PID_FILE: pidFile, DESKLINK_AXI_ENGINE_PID_FILE: enginePidFile };
+const env = { ...process.env, DISPLAY: display, XAUTHORITY: authority, DESKLINK_AXI_SESSION: sessionName, DESKLINK_AXI_ENGINE: enginePath, DESKLINK_AXI_PID_FILE: pidFile, DESKLINK_AXI_ENGINE_PID_FILE: enginePidFile };
 
 function proc(pid) {
   try {
@@ -80,15 +85,8 @@ async function stopProcess(pid) {
   for (let i = 0; i < 40 && alive(); i++) await new Promise(r => setTimeout(r, 25));
   assert(!alive(), `task-owned process ${pid} survived cleanup`);
 }
-async function stopXvfb() {
-  const alive = () => { const state = proc(xvfb.pid); return state?.started === owned.get(xvfb.pid) && state.state !== 'Z'; };
-  if (!alive()) return;
-  try { xvfb.kill('SIGTERM'); } catch { /* already gone */ }
-  for (let i = 0; i < 40 && alive(); i++) await new Promise(r => setTimeout(r, 50));
-  if (alive()) await stopProcess(xvfb.pid); // Graceful exit unlinks the X socket; SIGKILL leaves it behind.
-}
-// Stray scan: catch session members that a stale dist (pre-pid-file) leaks.
-// The session marker embeds this run's PID, so it can only match this run.
+async function stopXvfb() { await stopOwnedXvfb(xvfb); }
+// Detect unrecorded session members without adopting them for cleanup.
 function sessionStrays() {
   const strays = [];
   for (const entry of readdirSync('/proc')) {
@@ -114,7 +112,7 @@ async function run(...args) {
 try {
   for (let i = 0; i < 100 && !existsSync(socket) && xvfb.exitCode === null; i++) await new Promise(r => setTimeout(r, 50));
   assert(xvfb.pid && xvfb.exitCode === null && existsSync(socket), 'private Xvfb did not start');
-  assert.equal(Number(readFileSync(`/tmp/.X${number}-lock`, 'utf8').trim()), xvfb.pid, 'X lock belongs to another server');
+  await verifyOwnedXvfb(xvfb);
   remember(xvfb.pid, 'Xvfb');
 
   assert.match(await run('start', '--control', '--source', 'x11', '--display', display), /permissions=view,control/);
@@ -134,7 +132,6 @@ try {
     } catch { /* Already exited. */ }
   }
   for (const pid of [...owned.keys()]) if (pid !== xvfb.pid) await goneOwned(pid);
-  for (const stray of sessionStrays()) await stopProcess((remember(stray.pid, stray.cmdline.slice(0, 48)), stray.pid));
   assert.equal(sessionStrays().length, 0, `stray session members: ${JSON.stringify(sessionStrays())}`);
   await stopXvfb();
   assert(!existsSync(socket) && !existsSync(`/tmp/.X${number}-lock`), 'private Xvfb socket survived');
@@ -142,5 +139,5 @@ try {
   console.log(`smoke: clean host+axi build; batch and click applied on private Xvfb :${number}; no survivors`);
 } finally {
   for (const pid of [...owned.keys()]) { try { await stopProcess(pid); } catch { /* reported by the try block */ } }
-  if (xvfb.pid && proc(xvfb.pid)) { try { xvfb.kill('SIGTERM'); await stopXvfb(); } catch { /* already gone */ } }
+  await stopOwnedXvfb(xvfb);
 }

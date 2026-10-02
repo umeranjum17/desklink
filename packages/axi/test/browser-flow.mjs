@@ -12,6 +12,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
+import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
+
+assertNoAmbientDesktop();
 
 const axiRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const dir = mkdtempSync(join(tmpdir(), 'desklink-axi-browser-flow-'));
@@ -43,18 +46,15 @@ assert(number !== undefined, 'no unclaimed high X display');
 const display = `:${number}`;
 const authority = join(dir, 'Xauthority');
 assert.equal(spawnSync('xauth', ['-f', authority, 'add', display, '.', randomBytes(16).toString('hex')], { encoding: 'utf8' }).status, 0, 'xauth failed');
-const xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], { stdio: 'ignore' });
-const socket = `/tmp/.X11-unix/X${number}`;
-for (let i = 0; i < 100 && !existsSync(socket) && xvfb.exitCode === null; i++) await new Promise(r => setTimeout(r, 50));
-assert(xvfb.pid && xvfb.exitCode === null && existsSync(socket), 'private Xvfb did not start');
-assert.equal(Number(readFileSync(`/tmp/.X${number}-lock`, 'utf8').trim()), xvfb.pid, 'X lock belongs to another server');
+let xvfb;
 
-const marker = `DESKLINK_AXI_SESSION=broflow-${process.pid}`;
+const sessionName = `broflow-${process.pid}-${randomBytes(16).toString('hex')}`;
+const marker = `DESKLINK_AXI_SESSION=${sessionName}`;
 // Chromium cannot start with an overridden XDG_RUNTIME_DIR; isolation comes
 // from the unique session name and the task-owned profile, like flow.mjs.
 const env = {
-  ...process.env, DISPLAY: display, XAUTHORITY: authority,
-  DESKLINK_AXI_SESSION: `broflow-${process.pid}`,
+  ...process.env, DISPLAY: display, XAUTHORITY: authority, WAYLAND_DISPLAY: '',
+  DESKLINK_AXI_SESSION: sessionName,
 };
 const owned = new Map(); // PID -> start time; never signal a reused PID.
 function proc(pid) {
@@ -108,6 +108,9 @@ const ref = (snapshot, pattern) => {
 };
 
 try {
+  xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], { stdio: 'ignore' });
+  trackOwnedXvfb(xvfb, display);
+  await verifyOwnedXvfb(xvfb);
 const indexOfUrl = async (urlPart) => {
   const tabs = await ok('browser', 'tabs');
   const position = new RegExp(`^  (\\d+),[^,]*,([^,]*${urlPart}[^,]*),`, 'm').exec(tabs)?.[1];
@@ -218,10 +221,7 @@ const indexOfUrl = async (urlPart) => {
   console.log(`browser-flow: open/form/two-tab fixture passed with semantic refs on private Xvfb :${number}; selected vs front distinguished; no screenshots`);
 } finally {
   for (const pid of [...owned.keys()]) { try { await stopProcess(pid); } catch { /* surfaced above */ } }
-  const strays = sessionStrays();
-  for (const stray of strays) { try { process.kill(stray.pid, 'SIGKILL'); } catch { /* gone */ } }
-  if (xvfb.pid && proc(xvfb.pid)) { try { xvfb.kill('SIGTERM'); } catch { /* gone */ } }
-  for (let i = 0; i < 40 && proc(xvfb.pid); i++) await new Promise(r => setTimeout(r, 50));
-  if (proc(xvfb.pid)) { try { process.kill(xvfb.pid, 'SIGKILL'); } catch { /* gone */ } }
+  if (xvfb) await stopOwnedXvfb(xvfb);
+  assert.equal(sessionStrays().length, 0, 'unrecorded session processes survived');
   rmSync(dir, { recursive: true, force: true });
 }

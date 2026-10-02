@@ -13,6 +13,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
+import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
+
+assertNoAmbientDesktop();
 
 const axiRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = resolve(axiRoot, '../..');
@@ -50,15 +53,13 @@ const display = `:${number}`;
 const socket = `/tmp/.X11-unix/X${number}`;
 const authority = join(dir, 'Xauthority');
 assert.equal(spawnSync('xauth', ['-f', authority, 'add', display, '.', randomBytes(16).toString('hex')], { encoding: 'utf8' }).status, 0, 'xauth failed');
-const xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], { stdio: 'ignore' });
-for (let i = 0; i < 100 && !existsSync(socket) && xvfb.exitCode === null; i++) await new Promise(r => setTimeout(r, 50));
-assert(xvfb.pid && xvfb.exitCode === null && existsSync(socket), 'private Xvfb did not start');
-assert.equal(Number(readFileSync(`/tmp/.X${number}-lock`, 'utf8').trim()), xvfb.pid, 'X lock belongs to another server');
+let xvfb;
 
-const marker = `DESKLINK_AXI_SESSION=bench-${process.pid}`;
+const sessionName = `bench-${process.pid}-${randomBytes(16).toString('hex')}`;
+const marker = `DESKLINK_AXI_SESSION=${sessionName}`;
 const owned = new Map(); // PID -> start time
-owned.set(xvfb.pid, proc(xvfb.pid)?.started);
-const env = { ...process.env, DISPLAY: display, XAUTHORITY: authority, DESKLINK_AXI_SESSION: `bench-${process.pid}`, DESKLINK_AXI_ENGINE: enginePath };
+const env = { ...process.env, DISPLAY: display, WAYLAND_DISPLAY: '', XAUTHORITY: authority, DESKLINK_AXI_SESSION: sessionName, DESKLINK_AXI_ENGINE: enginePath,
+  DESKLINK_AXI_PID_FILE: join(dir, 'bridges.pid'), DESKLINK_AXI_ENGINE_PID_FILE: join(dir, 'engines.pid') };
 function proc(pid) {
   try {
     const fields = readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ')[1].split(' ');
@@ -72,12 +73,6 @@ async function stopProcess(pid) {
   for (let i = 0; i < 60 && alive(pid); i++) await new Promise(r => setTimeout(r, 50));
   if (alive(pid)) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
   for (let i = 0; i < 40 && alive(pid); i++) await new Promise(r => setTimeout(r, 25));
-}
-async function stopXvfb() {
-  if (!alive(xvfb.pid)) return;
-  try { xvfb.kill('SIGTERM'); } catch { /* gone */ }
-  for (let i = 0; i < 40 && alive(xvfb.pid); i++) await new Promise(r => setTimeout(r, 50));
-  if (alive(xvfb.pid)) { try { process.kill(xvfb.pid, 'SIGKILL'); } catch { /* gone */ } }
 }
 function childrenOf(pid) {
   try { return readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number); }
@@ -96,8 +91,24 @@ function sessionStrays() {
   return strays;
 }
 function rememberTree(pid) {
-  owned.set(pid, proc(pid)?.started);
+  const state = proc(pid);
+  if (!state || state.state === 'Z') return;
+  if (owned.has(pid) && owned.get(pid) !== state.started) return;
+  owned.set(pid, state.started);
   for (const kid of childrenOf(pid)) if (!owned.has(kid)) rememberTree(kid);
+}
+function recordProcesses() {
+  // These files are written by this run's bridge, inside its fresh private dir.
+  for (const [file, command] of [[env.DESKLINK_AXI_PID_FILE, '--bridge'], [env.DESKLINK_AXI_ENGINE_PID_FILE, enginePath]]) {
+    if (!existsSync(file)) continue;
+    for (const pid of readFileSync(file, 'utf8').trim().split(/\s+/).filter(Boolean).map(Number)) {
+      if (!proc(pid)) continue;
+      assert(readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ').includes(command), 'unexpected recorded process');
+      assert(readFileSync(`/proc/${pid}/environ`).toString('latin1').split('\0').includes(marker), 'recorded process is outside our session');
+      rememberTree(pid);
+    }
+  }
+  for (const pid of owned.keys()) if (alive(pid)) rememberTree(pid);
 }
 
 const cli = resolve(axiRoot, 'bin/desklink-axi.js');
@@ -106,10 +117,13 @@ const CALL_TIMEOUT_MS = 20000;
 let runDeadline = Infinity;
 async function call(...args) {
   if (performance.now() > runDeadline) throw new Error('run-deadline exceeded');
+  recordProcesses();
   const started = performance.now();
   const child = spawn(process.execPath, [cli, ...args], { env, timeout: CALL_TIMEOUT_MS, killSignal: 'SIGKILL' });
+  rememberTree(child.pid);
   let out = ''; for await (const part of child.stdout) out += part;
-  const code = await new Promise(r => child.on('exit', r));
+  const code = child.exitCode ?? await new Promise(r => child.on('exit', r));
+  recordProcesses();
   return { ms: performance.now() - started, chars: out.length, out, code };
 }
 const tokenProxy = chars => Math.ceil(chars / 4); // labeled proxy, not a tokenizer
@@ -283,6 +297,10 @@ const tasks = {
 };
 
 try {
+  xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], { stdio: 'ignore' });
+  trackOwnedXvfb(xvfb, display);
+  owned.set(xvfb.pid, proc(xvfb.pid)?.started);
+  await verifyOwnedXvfb(xvfb);
   // AXI desktop session on the private display (control input, OCR refs).
   const start = await call('start', '--control', '--source', 'x11', '--display', display);
   assert.equal(start.code, 0, start.out);
@@ -347,15 +365,15 @@ try {
   }
   for (const key of notCompleted) console.log(`| ${key.split('|')[0]} | ${key.split('|')[1]} | not completed | - | - | - | - | run deadline hit |`);
   if (process.env.DESKLINK_AXI_BENCH_PATH) writeFileSync(process.env.DESKLINK_AXI_BENCH_PATH, JSON.stringify({ ...report, notCompleted }, null, 1));
-  // Overlay/engine children can outlive the bridge stop; reap ours by PID.
-  for (const stray of sessionStrays()) { owned.set(stray.pid, proc(stray.pid)?.started); await stopProcess(stray.pid); }
+  // Only recorded PID/start-time identities may be reaped; tags detect leaks.
   const strays = sessionStrays();
   assert.equal(strays.length, 0, `stray session members: ${JSON.stringify(strays)}`);
   console.log(`\nbench: ${RUNS}-run comparison recorded; no task-owned survivors on Xvfb :${number}`);
 } finally {
   if (browserProfile) await call('browser', 'detach').catch(() => { });
-  for (const pid of [...owned.keys()]) await stopProcess(pid);
-  for (const stray of sessionStrays()) { try { process.kill(stray.pid, 'SIGKILL'); } catch { /* gone */ } }
-  await stopXvfb();
+  recordProcesses();
+  for (const pid of [...owned.keys()]) if (pid !== xvfb.pid) await stopProcess(pid);
+  if (xvfb) await stopOwnedXvfb(xvfb);
+  assert.equal(sessionStrays().length, 0, 'unrecorded session processes survived');
   rmSync(dir, { recursive: true, force: true });
 }

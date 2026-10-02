@@ -10,7 +10,8 @@
         "build": "tsc --build packages/desktop-host && npm run build --workspace @desklink/axi",
         "smoke": "npm run smoke --workspace @desklink/axi",
         "test": "vitest run",
-        "test:engine": "cargo test --manifest-path packages/desktop-host/engine/Cargo.toml"
+        "test:engine": "cargo test --manifest-path packages/desktop-host/engine/Cargo.toml",
+        "test:lab-safety": "node packages/desktop-host/test/lab-safety-flow.mjs"
     },
     "devDependencies": {
         "@types/node": "22.20.4",

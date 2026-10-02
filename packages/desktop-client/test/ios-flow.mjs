@@ -28,8 +28,8 @@
  * a page on that display, the bridge with an `x11` source, and a relay in
  * front of the bridge that records the descriptions. The simulator side runs
  * on the Mac over ssh, inside one directory: the package and the example are
- * copied there, built, installed on a simulator named `desklink-ios-flow`
- * (created on first use and shut down after the run), launched with the
+ * copied there, built, installed on a uniquely named `desklink-ios-flow-*`
+ * simulator (created and deleted by this run), launched with the
  * relay's URL, read through its accessibility tree and tapped with `axe`.
  *
  * Usage:
@@ -71,6 +71,9 @@ import { fileURLToPath } from 'node:url';
 import { PNG } from 'pngjs';
 import { WebSocket, WebSocketServer } from 'ws';
 
+import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
+
+assertNoAmbientDesktop();
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '../../..');
 const MAC = process.env.DESKLINK_IOS_MAC ?? '';
@@ -83,7 +86,7 @@ const RUNTIME = process.env.DESKLINK_IOS_RUNTIME ?? '';
 const IPAD = process.env.DESKLINK_IOS_IPAD === '1';
 const POINTER_PROOF = process.env.DESKLINK_IOS_POINTER_PROOF;
 if (POINTER_PROOF) assert(['before', 'after'].includes(POINTER_PROOF));
-const DEVICE = ['desklink-ios-flow', IPAD ? 'ipad' : '', RUNTIME].filter(Boolean).join('-');
+const DEVICE = ['desklink-ios-flow', IPAD ? 'ipad' : '', RUNTIME, process.pid, randomBytes(8).toString('hex')].filter(Boolean).join('-');
 const DEVICE_TYPE = IPAD ? 'iPad-Pro-11-inch-M4-8GB' : 'iPhone-16';
 const DESKTOP = { width: 1280, height: 800 };
 const MARK = `DESKLINK_IOS_FLOW=${process.pid}`;
@@ -159,11 +162,6 @@ TEST_RUNNER_DESKLINK_POINTER='${JSON.stringify(steps)}' xcodebuild test -project
 }
 
 function simulator() {
-    const listed = JSON.parse(mac('xcrun simctl list -j devices available'));
-    for (const devices of Object.values(listed.devices)) {
-        const found = devices.find((device) => device.name === DEVICE);
-        if (found !== undefined) return found.udid;
-    }
     const runtimes = JSON.parse(mac('xcrun simctl list -j runtimes available')).runtimes
         .filter((runtime) => runtime.platform === 'iOS' && (RUNTIME === '' || runtime.version.startsWith(RUNTIME)));
     assert(runtimes.length > 0, `the Mac has no iOS simulator runtime ${RUNTIME}`);
@@ -308,13 +306,14 @@ function videoCodecs(sdp) {
 const out = process.env.DESKLINK_IOS_OUT ?? mkdtempSync(join(tmpdir(), 'desklink-ios-flow-'));
 mkdirSync(out, { recursive: true });
 const work = mkdtempSync(join(tmpdir(), 'desklink-ios-host-'));
-let xvfbPid = 0; let pagePid = 0; let bridgePid = 0; let enginePid = 0;
+let xvfbPid = 0; let xvfb; let pagePid = 0; let bridgePid = 0; let enginePid = 0;
 let relay = null; let page = null; let udid = null; let codec = null;
 
 async function cleanup() {
     if (udid !== null) {
         try {
-            mac(`xcrun simctl terminate ${udid} ${BUNDLE} || true; xcrun simctl shutdown ${udid} || true`);
+            mac(`xcrun simctl terminate ${udid} ${BUNDLE} || true; xcrun simctl shutdown ${udid} || true; xcrun simctl delete ${udid}`);
+            udid = null;
         } catch (error) { log('simulator cleanup:', error.message); }
     }
     page?.close();
@@ -323,14 +322,8 @@ async function cleanup() {
     // SIGTERM lets the bridge close its engine; the engine is reaped after it either way.
     if (bridgePid) await stopProcess(bridgePid, 'bridge');
     if (enginePid) await stopProcess(enginePid, 'engine');
-    if (xvfbPid) await stopProcess(xvfbPid, 'Xvfb');
-    // Chromium's crash handlers can outlive the browser. Only reap processes
-    // carrying this run's private environment marker, never another browser.
-    for (const stray of strays()) {
-        const pid = Number(stray.split(' ')[0]);
-        remember(pid);
-        await stopProcess(pid, 'task helper');
-    }
+    if (xvfb) await stopOwnedXvfb(xvfb);
+    // Environment tags detect leaks, not ownership; never adopt a stray PID.
     // The page's browser profile is about 100 MB; nothing here outlives the run.
     rmSync(work, { recursive: true, force: true });
     await sleep(200);
@@ -367,12 +360,13 @@ async function main() {
         ...process.env, DISPLAY: display, XAUTHORITY: authority, WAYLAND_DISPLAY: '',
         XDG_SESSION_TYPE: 'x11', DESKLINK_IOS_FLOW: String(process.pid),
     };
-    const xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', `${DESKTOP.width}x${DESKTOP.height}x24`, '-nolisten', 'tcp'],
+    xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', `${DESKTOP.width}x${DESKTOP.height}x24`, '-nolisten', 'tcp'],
         { env, stdio: 'ignore' });
+    trackOwnedXvfb(xvfb, display);
     xvfbPid = xvfb.pid; remember(xvfbPid);
     for (let i = 0; i < 100 && !existsSync(`/tmp/.X11-unix/X${number}`) && alive(xvfbPid); i++) await sleep(50);
     assert(alive(xvfbPid), 'the private Xvfb did not start');
-    assert.equal(Number(readFileSync(`/tmp/.X${number}-lock`, 'utf8').trim()), xvfbPid, 'the X lock belongs to another server');
+    await verifyOwnedXvfb(xvfb);
     log('xvfb', display, 'pid', xvfbPid);
 
     // ---- the desktop's page -------------------------------------------------------

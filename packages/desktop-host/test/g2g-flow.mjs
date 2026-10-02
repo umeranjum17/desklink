@@ -59,6 +59,9 @@ import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:net';
 import { WebSocket } from 'ws';
 
+import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from './lab-safety.mjs';
+
+assertNoAmbientDesktop();
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '../../..');
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -220,8 +223,7 @@ assert.equal(
     spawnSync('xauth', ['-f', authority, 'add', display, '.', randomBytes(16).toString('hex')], { encoding: 'utf8' }).status,
     0, 'xauth failed',
 );
-const xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', `${sizeW}x${sizeH}x24`, '-nolisten', 'tcp'], { stdio: 'ignore' });
-remember(xvfb.pid, 'Xvfb');
+let xvfb;
 
 function which(name) {
     const found = spawnSync('sh', ['-c', `command -v ${name}`], { encoding: 'utf8' });
@@ -393,15 +395,7 @@ assert.equal(
 const stampBinary = join(process.env.CARGO_TARGET_DIR ?? 'packages/desktop-host/engine/target', 'debug', 'examples', 'stamp_target');
 
 async function verifyXvfb() {
-    for (let i = 0; i < 100 && !existsSync(socket) && xvfb.exitCode === null; i++) await sleep(50);
-    assert(xvfb.pid && xvfb.exitCode === null && existsSync(socket), 'private Xvfb did not start');
-    assert.equal(Number(readFileSync(`/tmp/.X${number}-lock`, 'utf8').trim()), xvfb.pid, 'X lock belongs to another server');
-    const line = readFileSync('/proc/net/unix', 'utf8').split('\n').find((l) => l.endsWith(` ${socket}`));
-    assert(line, 'X socket missing from proc socket table');
-    const inode = line.trim().split(/\s+/)[6];
-    assert(readdirSync(`/proc/${xvfb.pid}/fd`).some((fd) => {
-        try { return readlinkSync(`/proc/${xvfb.pid}/fd/${fd}`) === `socket:[${inode}]`; } catch { return false; }
-    }), 'X server socket is not held by the spawned Xvfb PID');
+    await verifyOwnedXvfb(xvfb);
     const info = spawnSync(stampBinary, ['--probe'], {
         env: { ...process.env, DISPLAY: display, XAUTHORITY: authority, WAYLAND_DISPLAY: '' },
         encoding: 'utf8', timeout: 5000,
@@ -614,6 +608,9 @@ function checkGate(lines) {
 
 let vite = null;
 try {
+    xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', `${sizeW}x${sizeH}x24`, '-nolisten', 'tcp'], { stdio: 'ignore' });
+    trackOwnedXvfb(xvfb, display);
+    remember(xvfb.pid, 'Xvfb');
     await verifyXvfb();
     if (chromeBinary === null) {
         console.log('SKIPPED the browser half: no Chrome found (set DESKLINK_CHROME).');
@@ -636,13 +633,7 @@ try {
     }
     const strays = sessionStrays();
     assert.equal(strays.length, 0, `task-owned strays survived: ${JSON.stringify(strays)}`);
-    // Graceful Xvfb exit unlinks the X socket; SIGKILL leaves it behind.
-    if (alive(xvfb.pid)) {
-        try { process.kill(xvfb.pid, 'SIGTERM'); } catch { /* gone */ }
-        for (let i = 0; i < 40 && alive(xvfb.pid); i++) await sleep(50);
-        if (alive(xvfb.pid)) await stopProcess(xvfb.pid, 'SIGKILL');
-    }
-    assert(!alive(xvfb.pid), 'the private Xvfb survived cleanup');
+    if (xvfb) await stopOwnedXvfb(xvfb);
     await vite?.close().catch(() => undefined);
     rmSync(dir, { recursive: true, force: true });
 }

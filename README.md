@@ -145,6 +145,18 @@ npm test               # the TypeScript packages' tests
 npm run test:engine    # the Rust engine's tests; needs the native libraries CI installs
 ```
 
+Desktop integration checks refuse ambient `DISPLAY`/`WAYLAND_DISPLAY` before
+contact. They create authenticated private labs and verify Xvfb PID/socket
+ownership; cleanup never adopts an unknown session-tagged PID. Unit/compile
+checks need no desktop. On Linux, prove refusal and owned teardown with:
+
+```sh
+env -u DISPLAY -u WAYLAND_DISPLAY npm run test:lab-safety
+```
+
+Cached Linux browsers lacking the matching PID start-time recorded at launch
+are refused before browser contact or cleanup; use a fresh task session.
+
 Releasing, including the reproducible engine build, is in
 [packages/desktop-host/README.md](packages/desktop-host/README.md#building-and-packing-a-release).
 
