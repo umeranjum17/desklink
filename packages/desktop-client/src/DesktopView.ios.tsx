@@ -64,14 +64,18 @@ function loadRTCView(): React.ComponentType<Record<string, unknown>> | null {
     }
 }
 
-export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0, gestures = 'desktop' }: DesktopViewProps) {
+/** An offset that the edge clamp turns into the desktop's top-left corner. */
+const TOP_LEFT: Point = { x: Infinity, y: Infinity };
+
+export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0, insets, gestures = 'desktop' }: DesktopViewProps) {
     const [revision, refresh] = React.useReducer((n: number) => n + 1, 0);
     const [bounds, setBounds] = React.useState({ width: 0, height: 0 });
     const [size, setSize] = React.useState(() => getDesktopSize(sessionId) ?? { width: 0, height: 0 });
     const [keyboardHeight, setKeyboardHeight] = React.useState(0);
     /** Zoom over the whole-desktop fit; null fills the view, the default. */
     const [zoom, setZoom] = React.useState<number | null>(null);
-    const [offset, setOffset] = React.useState<Point>({ x: 0, y: 0 });
+    /** From the middle of the uncovered part of the view; clamped to the picture's edges when shown. */
+    const [offset, setOffset] = React.useState<Point>(TOP_LEFT);
     const [cursor, setCursor] = React.useState<Point | null>(null);
     const [keyboardText, setKeyboardText] = React.useState('');
     const keyboardTextRef = React.useRef('');
@@ -126,19 +130,26 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         });
     }, [sessionId]);
 
-    const visibleHeight = Math.max(1, bounds.height - (keyboardHeight ? keyboardHeight + keyboardClearance : 0));
-    const fit = size.width && size.height ? Math.min(bounds.width / size.width, visibleHeight / size.height) : 1;
-    // Filled, the picture covers the whole view (the keyboard moves it rather
-    // than shrinking it) and one finger moves around it; a pinch out still
-    // shows the whole desktop.
-    const fill = size.width && size.height ? Math.max(fit, Math.min(MAX_SCALE, Math.max(bounds.width / size.width, bounds.height / size.height))) : 1;
+    // The uncovered part of the view: inside what the system covers, and above the keyboard.
+    const top = insets?.top ?? 0;
+    const left = insets?.left ?? 0;
+    const safeWidth = Math.max(1, bounds.width - left - (insets?.right ?? 0));
+    const safeHeight = Math.max(1, bounds.height - top - (insets?.bottom ?? 0));
+    const visibleBottom = Math.min(top + safeHeight, bounds.height - (keyboardHeight ? keyboardHeight + keyboardClearance : 0));
+    const visibleHeight = Math.max(1, visibleBottom - top);
+    const fit = size.width && size.height ? Math.min(safeWidth / size.width, visibleHeight / size.height) : 1;
+    // Filled, the picture covers the uncovered part (the keyboard moves it
+    // rather than shrinking it) and one finger moves around it; a pinch out
+    // still shows the whole desktop.
+    const fill = size.width && size.height ? Math.max(fit, Math.min(MAX_SCALE, Math.max(safeWidth / size.width, safeHeight / size.height))) : 1;
     const scale = zoom === null ? fill : fit * zoom;
     /** The zoom over the whole-desktop fit the picture is at now. */
     const zoomed = fit > 0 ? scale / fit : 1;
-    // A new desktop size fills the view again; so does a new fill (a rotation), centred.
-    React.useEffect(() => { setZoom(null); setOffset({ x: 0, y: 0 }); }, [size.width, size.height]);
+    // A new desktop size fills the view again, and a new fill (a rotation)
+    // starts again, at the desktop's top-left corner, where a page's first words are.
+    React.useEffect(() => { setZoom(null); setOffset(TOP_LEFT); }, [size.width, size.height]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    React.useEffect(() => { if (zoom === null) setOffset({ x: 0, y: 0 }); }, [fill]);
+    React.useEffect(() => { if (zoom === null) setOffset(TOP_LEFT); }, [fill]);
     const pictureWidth = size.width * scale;
     const pictureHeight = size.height * scale;
     const point = (x: number, y: number, clamp = false): Point | null => {
@@ -150,14 +161,14 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
     };
     /** Hold the offset to the picture's edges at a zoom level. */
     const clampOffset = (x: number, y: number, atScale: number = scale): Point => {
-        const maxX = Math.max(0, (size.width * atScale - bounds.width) / 2);
+        const maxX = Math.max(0, (size.width * atScale - safeWidth) / 2);
         const maxY = Math.max(0, (size.height * atScale - visibleHeight) / 2);
         return { x: Math.max(-maxX, Math.min(maxX, x)), y: Math.max(-maxY, Math.min(maxY, y)) };
     };
     // A rotation or the keyboard can leave the offset past the picture's new edges.
     const shown = clampOffset(offset.x, offset.y);
-    const originX = (bounds.width - pictureWidth) / 2 + shown.x;
-    const originY = (visibleHeight - pictureHeight) / 2 + shown.y;
+    const originX = left + (safeWidth - pictureWidth) / 2 + shown.x;
+    const originY = top + (visibleHeight - pictureHeight) / 2 + shown.y;
     const send = (control: Record<string, unknown>) => { if (sessionId) nativeDesklink.sendControl(sessionId, JSON.stringify(control)); };
     const flushWheel = (force: boolean) => {
         const { x, y } = wheel.current;
@@ -246,8 +257,8 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
                 const nextScale = fit * next;
                 const ox = originX;
                 const oy = originY;
-                const baseX = (bounds.width - size.width * nextScale) / 2;
-                const baseY = (visibleHeight - size.height * nextScale) / 2;
+                const baseX = left + (safeWidth - size.width * nextScale) / 2;
+                const baseY = top + (visibleHeight - size.height * nextScale) / 2;
                 setZoom(next);
                 setOffset(clampOffset(
                     center.x - (center.x - ox) * applied - baseX + (center.x - g.focus.x),

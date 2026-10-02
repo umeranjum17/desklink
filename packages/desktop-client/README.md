@@ -128,8 +128,11 @@ heat and battery.
   applies; a host with an H.264 encoder then sends H.264, and one without sends
   VP9. Neither platform links a second WebRTC stack.
 - **A sharp, zoomable picture.** On a phone the picture fills the view by
-  default, with no black bars in either orientation (as far as the 2.5 zoom
-  limit allows), and one finger moves around it. A pinch zooms up to 2.5 view
+  default, starting at the desktop's top-left corner so lines read from their
+  first word (as far as the 2.5 zoom limit allows), and one finger moves around
+  it. Pass the screen's safe-area `insets` (for example from
+  `react-native-safe-area-context`) and the picture starts below the status bar
+  and beside a camera cutout instead of under them. A pinch zooms up to 2.5 view
   pixels per desktop pixel, or out to the whole desktop. On Android the decoded frame is copied once into the view's
   own texture and drawn with a multi-tap filter when it is shown smaller than
   its size, so a fitted 4K desktop does not alias and a pinch redraws at once.
@@ -137,7 +140,7 @@ heat and battery.
   its timestamp is new, and a receiver honouring the engine's zero playout delay
   stamps every frame alike, so the iOS peer declines that hint and keeps the
   receiver's usual jitter buffer. `fitToView()` shows the whole desktop; a new
-  desktop size fills the view again.
+  desktop size or a rotation fills the view again from the top-left.
 - **A pointer a phone can see.** Once a touch has sent the desktop's pointer
   somewhere, the view draws an outlined arrow there at a readable size, over a
   picture whose own cursor is a few pixels tall or not captured at all. On iOS,

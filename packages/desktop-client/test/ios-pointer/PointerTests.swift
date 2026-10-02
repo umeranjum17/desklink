@@ -2,7 +2,8 @@ import XCTest
 
 /**
  * The trackpad half of test/ios-flow.mjs: it drives the example app, already
- * running on an iPad simulator, with a pointer, which `axe` cannot. The flow
+ * running on an iPad simulator, with a pointer, which `axe` cannot. It also
+ * turns the simulator between portrait and landscape. The flow
  * passes the steps in screen points as TEST_RUNNER_DESKLINK_POINTER; the
  * desktop's page records what arrives.
  */
@@ -31,6 +32,8 @@ final class PointerTests: XCTestCase {
       case "drag": point.click(forDuration: 0.4, thenDragTo: at(step.toX ?? step.x, step.toY ?? step.y))
       case "rightClick": point.rightClick()
       case "scroll": point.scroll(byDeltaX: 0, deltaY: step.dy ?? 0)
+      case "landscape": XCUIDevice.shared.orientation = .landscapeLeft
+      case "portrait": XCUIDevice.shared.orientation = .portrait
       default: XCTFail("unknown step \(step.action)")
       }
       // The desktop's page records each step before the next begins.

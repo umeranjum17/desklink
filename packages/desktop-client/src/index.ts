@@ -10,7 +10,7 @@ export * from './protocol';
  */
 export type { NativeDesklinkModule, NativeSessionEvent } from './native';
 export { desktopAvailable } from './availability';
-export { DesktopView, type DesktopViewProps } from './DesktopView';
+export { DesktopView, type DesktopViewProps, type EdgeInsets } from './DesktopView';
 export { observeWebKeyboardMotion } from './webKeyboardMotion';
 export type { StickyModifier, StickyModifiers, StickyState } from './stickyModifiers';
 export {

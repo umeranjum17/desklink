@@ -66,7 +66,7 @@ const ORIGIN_Y = (BOUNDS.height - DESKTOP.height * SCALE) / 2;
 type Touch = { locationX: number; locationY: number; timestamp?: number };
 function touch(x: number, y: number, timestamp?: number): Touch { return { locationX: x, locationY: y, timestamp }; }
 
-async function openView(options: { gestures?: 'desktop' | 'browser' | 'device'; accessibilityLabel?: string; native?: boolean; whole?: boolean; bounds?: { width: number; height: number } } = {}) {
+async function openView(options: { gestures?: 'desktop' | 'browser' | 'device'; accessibilityLabel?: string; native?: boolean; whole?: boolean; bounds?: { width: number; height: number }; insets?: { top: number; left: number; bottom: number; right: number } } = {}) {
     nativeInput.installed = options.native === true;
     const { desktopInputEnabled, nativeDesklink } = await import('./native.ios');
     const { DesktopView } = await import('./DesktopView.ios');
@@ -81,7 +81,7 @@ async function openView(options: { gestures?: 'desktop' | 'browser' | 'device'; 
     let renderer: TestRenderer.ReactTestRenderer | null = null;
     TestRenderer.act(() => {
         renderer = TestRenderer.create(
-            <DesktopView sessionId={id} gestures={options.gestures} accessibilityLabel={options.accessibilityLabel} />,
+            <DesktopView sessionId={id} gestures={options.gestures} accessibilityLabel={options.accessibilityLabel} insets={options.insets} />,
         );
     });
     const outer = () => renderer!.root.findByType(options.native ? 'DesklinkInput' as never : 'View').props as {
@@ -133,45 +133,66 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('DesktopView.ios parity with DesktopView.kt', () => {
-    it('fills a portrait phone by default and pans it under one finger', async () => {
+    it('fills a portrait phone from the desktop\'s top-left corner and pans it under one finger', async () => {
         const { sent, rtcStyle, grant, move, release } = await openView({ whole: false });
-        // The picture covers the view's height, centred: no letterbox at all.
+        // The picture covers the view's height and starts at the desktop's
+        // top-left corner, where a page's first words are: no letterbox.
         const fill = BOUNDS.height / DESKTOP.height;
         expect(rtcStyle().height).toBeCloseTo(BOUNDS.height, 5);
         expect(rtcStyle().top).toBeCloseTo(0, 5);
-        expect(rtcStyle().left).toBeCloseTo((BOUNDS.width - DESKTOP.width * fill) / 2, 5);
+        expect(rtcStyle().left).toBeCloseTo(0, 5);
         // One finger moves around the picture rather than the desktop's pointer.
-        grant([touch(200, 400)]);
-        move([touch(260, 400)]);
+        grant([touch(260, 400)]);
+        move([touch(200, 400)]);
         release();
         expect(sent.filter((message) => message.kind === 'pointer')).toEqual([]);
-        const left = (BOUNDS.width - DESKTOP.width * fill) / 2 + 60;
-        expect(rtcStyle().left).toBeCloseTo(left, 5);
+        expect(rtcStyle().left).toBeCloseTo(-60, 5);
         // A tap clicks the desktop pixel under the finger.
         grant([touch(100, 300)]);
         release();
         expect(sent.filter((message) => message.kind === 'pointer')).toMatchObject([
-            { kind: 'pointer', phase: 'down', x: Math.floor((100 - left) / fill), y: Math.floor(300 / fill), button: 1 },
-            { kind: 'pointer', phase: 'up', x: Math.floor((100 - left) / fill), y: Math.floor(300 / fill), button: 1 },
+            { kind: 'pointer', phase: 'down', x: Math.floor(160 / fill), y: Math.floor(300 / fill), button: 1 },
+            { kind: 'pointer', phase: 'up', x: Math.floor(160 / fill), y: Math.floor(300 / fill), button: 1 },
         ]);
     });
 
-    it('re-centres the fill after a rotation, and keeps the whole desktop when the same size is reported again', async () => {
+    it('starts again at the top-left corner after a rotation, and keeps the whole desktop when the same size is reported again', async () => {
         const { id, nativeDesklink, outer, rtcStyle, grant, move, release } = await openView({ whole: false });
-        const centred = rtcStyle().left;
-        grant([touch(200, 400)]);
-        move([touch(260, 400)]);
+        grant([touch(260, 400)]);
+        move([touch(200, 400)]);
         release();
-        expect(rtcStyle().left).not.toBeCloseTo(centred, 5);
+        expect(rtcStyle().left).toBeCloseTo(-60, 5);
         const layout = (bounds: { width: number; height: number }) => TestRenderer.act(() => {
             (outer().onLayout as (event: unknown) => void)({ nativeEvent: { layout: bounds } });
         });
         layout({ width: BOUNDS.height, height: BOUNDS.width });
+        // Landscape crops the bottom, never the top.
+        expect(rtcStyle().top).toBeCloseTo(0, 5);
+        expect(rtcStyle().left).toBeCloseTo(0, 5);
         layout(BOUNDS);
-        expect(rtcStyle().left).toBeCloseTo(centred, 5);
+        expect(rtcStyle().left).toBeCloseTo(0, 5);
         TestRenderer.act(() => { nativeDesklink.fitToView(id); });
         TestRenderer.act(() => { nativeDesklink.setSurfaceSize(id, DESKTOP.width, DESKTOP.height); });
         expect(rtcStyle().width).toBeCloseTo(BOUNDS.width, 5);
+    });
+
+    it('starts and pans inside the insets while the picture still reaches under them', async () => {
+        const landscape = { width: 844, height: 390 };
+        const insets = { top: 0, left: 47, bottom: 21, right: 47 };
+        const { rtcStyle, grant, move, release } = await openView({ whole: false, bounds: landscape, insets });
+        const safe = { width: landscape.width - 94, height: landscape.height - 21 };
+        const fill = Math.max(safe.width / DESKTOP.width, safe.height / DESKTOP.height);
+        expect(rtcStyle().width).toBeCloseTo(DESKTOP.width * fill, 5);
+        // The desktop's top-left corner shows just inside the cutout's side.
+        expect(rtcStyle().left).toBeCloseTo(47, 5);
+        expect(rtcStyle().top).toBeCloseTo(0, 5);
+        // Panned all the way, the desktop's right and bottom edges reach the
+        // uncovered part's edges, not the screen's.
+        grant([touch(600, 300)]);
+        move([touch(-2000, -2000)]);
+        release();
+        expect(rtcStyle().left + rtcStyle().width).toBeCloseTo(landscape.width - 47, 5);
+        expect(rtcStyle().top + rtcStyle().height).toBeCloseTo(landscape.height - 21, 5);
     });
 
     it('leaves no black bars on a landscape phone, and fitToView shows the whole desktop', async () => {

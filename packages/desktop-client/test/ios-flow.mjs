@@ -14,9 +14,12 @@
  *    simulator shows the desktop, which a screenshot records;
  *  - a tap on the simulator's screen arrives at the host as a click at the
  *    desktop pixel under the finger: the page on the desktop records it;
- *  - the picture fills the phone and keeps following the desktop, a notes
- *    page: it shows the dots the page drew under those clicks, and the note's
- *    caret blinking;
+ *  - the picture fills the phone from the desktop's top-left corner, below the
+ *    status bar, and keeps following the desktop, a notes page: it shows the
+ *    dots the page drew under those clicks, and the note's caret blinking;
+ *  - one finger pans the picture without clicking; turned to landscape, black
+ *    bars stay under 15% of the screen, and turned back the picture starts at
+ *    the top-left corner again (screenshots of each are saved);
  *  - a hardware keyboard reaches the desktop through the package's native input
  *    view: arrows, Esc, Tab, a Command chord (the desktop's Meta) and typed text
  *    arrive at the page as the keys they are;
@@ -90,8 +93,8 @@ if (POINTER_PROOF) assert(['before', 'after'].includes(POINTER_PROOF));
 const DEVICE = ['desklink-ios-flow', IPAD ? 'ipad' : '', RUNTIME, process.pid, randomBytes(8).toString('hex')].filter(Boolean).join('-');
 const DEVICE_TYPE = IPAD ? 'iPad-Pro-11-inch-M4-8GB' : 'iPhone-16';
 const DESKTOP = { width: 1280, height: 800 };
-/** The middle of the desktop, which the filled picture shows on every simulator the flow runs on. */
-const COLUMN = { left: 480, right: 800 };
+/** The notes column, near the desktop's left edge: the filled picture shows it on every simulator the flow runs on. */
+const COLUMN = { left: 40, right: 340 };
 const MARK = `DESKLINK_IOS_FLOW=${process.pid}`;
 const browserSession = randomBytes(16).toString('hex');
 
@@ -242,8 +245,8 @@ function which(name) {
 }
 
 // ---- the desktop's page: it records every click it is given ------------------
-// A notes page, written in a column down the middle of the desktop: a filled
-// phone shows that middle in either orientation. Its caret blinks, so a live
+// A notes page, written in a column near the desktop's left edge: a filled
+// phone starts at the top-left corner in either orientation. Its caret blinks, so a live
 // picture changes on its own; typed keys land in the note.
 const PAGE = `<!doctype html><meta charset="utf-8"><title>Notes</title>
 <body style="margin:0;overflow:hidden;background:#fbfaf7;color:#1d1d1f;font:24px/1.5 system-ui,sans-serif">
@@ -504,17 +507,54 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // ---- taps -------------------------------------------------------------------------
     const geometry = crossed.opened?.geometry?.encoded;
     assert.deepEqual(geometry, DESKTOP, 'the desktop is encoded at its own size');
-    // The app's view fills the screen, and the picture fills the view: it
-    // covers it, centred, as far as the 2.5 zoom limit allows.
+    // The app's view fills the screen, and the picture fills the view from the
+    // desktop's top-left corner, inside the status bar and home indicator.
+    // Where it landed is read off a screenshot: the light paper on the app's black.
     const { width: screenWidth, height: screenHeight } = seen.frame;
-    const fit = Math.min(screenWidth / geometry.width, screenHeight / geometry.height);
-    const scale = Math.max(fit, Math.min(2.5, Math.max(screenWidth / geometry.width, screenHeight / geometry.height)));
-    const origin = { x: (screenWidth - geometry.width * scale) / 2, y: (screenHeight - geometry.height * scale) / 2 };
+    const rgb = (png, point) => {
+        const i = (Math.round(point.y * png.width / screenWidth) * png.width + Math.round(point.x * png.width / screenWidth)) * 4;
+        return [png.data[i], png.data[i + 1], png.data[i + 2]];
+    };
+    const pixel = (png, point) => rgb(png, point).reduce((sum, value) => sum + value);
+    const capture = (path) => {
+        mac(`xcrun simctl io ${udid} screenshot "$D/tmp/ios-flow.png" > /dev/null`);
+        assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${DIR}/tmp/ios-flow.png`, path]).status, 0, 'copy the screenshot back');
+        return PNG.sync.read(readFileSync(path));
+    };
+    /** The picture's top, left and bottom edge in points, scanning for the paper from the screen's edges. */
+    const pictureBox = (png) => {
+        const light = (x, y) => { const i = (y * png.width + x) * 4; return png.data[i] + png.data[i + 1] + png.data[i + 2] > 600; };
+        const middle = Math.round(png.width * 0.6);
+        let top = 0; while (top < png.height - 1 && !light(middle, top)) top++;
+        let bottom = png.height - 1; while (bottom > top && !light(middle, bottom)) bottom--;
+        let left = 0; while (left < png.width - 1 && !light(left, top + 4)) left++;
+        const density = png.width / screenWidth;
+        return { top: top / density, left: left / density, bottom: (bottom + 1) / density };
+    };
+    /** Share of the screen inside fully black rows or columns: the letterbox. */
+    const barShare = (png) => {
+        const dark = (x, y) => { const i = (y * png.width + x) * 4; return png.data[i] + png.data[i + 1] + png.data[i + 2] < 30; };
+        let rows = 0; for (let y = 0; y < png.height; y++) { let n = 0; for (let x = 0; x < png.width; x += 2) n += dark(x, y); if (n >= 0.98 * Math.ceil(png.width / 2)) rows++; }
+        let cols = 0; for (let x = 0; x < png.width; x++) { let n = 0; for (let y = 0; y < png.height; y += 2) n += dark(x, y); if (n >= 0.98 * Math.ceil(png.height / 2)) cols++; }
+        return (rows * png.width + cols * png.height - rows * cols) / (png.width * png.height);
+    };
+    // The first frame can trail the live status by a moment.
+    let box = { top: 0, left: 0, bottom: 0 };
+    for (let attempt = 0; attempt < 20 && box.bottom - box.top < screenHeight / 4; attempt++) {
+        if (attempt > 0) await sleep(500);
+        box = pictureBox(capture(join(out, 'desklink-receiver-fill-portrait.png')));
+    }
+    // Portrait fills by height, so the whole height shows: its height gives the scale.
+    const scale = (box.bottom - box.top) / geometry.height;
+    const origin = { x: box.left, y: box.top };
+    assert(box.left <= 1, `the picture starts at the screen's left edge, the desktop's left edge with it: ${box.left.toFixed(1)} pt`);
+    assert(box.top >= 20, `the status bar does not cover the picture: it starts ${box.top.toFixed(1)} pt down`);
+    assert(scale * geometry.width > screenWidth, `the picture fills the screen's width: ${(scale * geometry.width).toFixed(0)} pt`);
     const slack = Math.ceil(1 / scale) + 1;
     const shown = { left: -origin.x / scale, right: (screenWidth - origin.x) / scale };
     assert(shown.left <= COLUMN.left && shown.right >= COLUMN.right, `the screen shows the notes column: desktop x ${shown.left.toFixed(0)}-${shown.right.toFixed(0)}`);
-    log(`picture ${(geometry.width * scale).toFixed(0)}x${(geometry.height * scale).toFixed(0)} pt on a ${screenWidth}x${screenHeight} pt screen`);
-    const targets = [{ x: 560, y: 300 }, { x: 720, y: 560 }];
+    log(`picture ${(geometry.width * scale).toFixed(0)}x${(geometry.height * scale).toFixed(0)} pt at (${origin.x.toFixed(1)}, ${origin.y.toFixed(1)}) on a ${screenWidth}x${screenHeight} pt screen`);
+    const targets = [{ x: 120, y: 300 }, { x: 300, y: 560 }];
     for (const target of targets) {
         const at = { x: origin.x + (target.x + 0.5) * scale, y: origin.y + (target.y + 0.5) * scale };
         const before = await page.evaluate('clicks.length');
@@ -537,25 +577,15 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // desktop shows both. Each dot is sampled just up and left of its centre,
     // inside the dot and clear of the app's pointer mark.
     const shot = join(out, 'simulator.png');
-    const rgb = (png, point) => {
-        const i = (Math.round(point.y * png.width / screenWidth) * png.width + Math.round(point.x * png.width / screenWidth)) * 4;
-        return [png.data[i], png.data[i + 1], png.data[i + 2]];
-    };
-    const pixel = (png, point) => rgb(png, point).reduce((sum, value) => sum + value);
     const litShare = (png) => {
         let lit = 0; let total = 0;
-        for (let y = Math.max(0, origin.y) + 2; y < screenHeight - Math.max(0, origin.y) - 2; y += 2) {
-            for (let x = Math.max(0, origin.x) + 2; x < screenWidth - Math.max(0, origin.x) - 2; x += 2) {
+        for (let y = box.top + 2; y < box.bottom - 2; y += 2) {
+            for (let x = box.left + 2; x < screenWidth - 2; x += 2) {
                 total += 1;
                 if (pixel(png, { x, y }) > 150) lit += 1;
             }
         }
         return lit / total;
-    };
-    const capture = (path) => {
-        mac(`xcrun simctl io ${udid} screenshot "$D/tmp/ios-flow.png" > /dev/null`);
-        assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${DIR}/tmp/ios-flow.png`, path]).status, 0, 'copy the screenshot back');
-        return PNG.sync.read(readFileSync(path));
     };
     let png = null;
     let follows = false;
@@ -652,7 +682,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         const line = Math.round((top + bottom) / 2);
         const spots = {
             from: { x: Math.round(left) + 8, y: line }, to: { x: Math.round(right) - 8, y: line },
-            menu: { x: 640, y: 560 }, wheel: { x: 640, y: 400 },
+            menu: { x: 200, y: 560 }, wheel: { x: 200, y: 400 },
         };
         const steps = [
             { action: 'drag', ...screenAt(spots.from), toX: screenAt(spots.to).x, toY: screenAt(spots.to).y },
@@ -687,6 +717,41 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         assert(hovers > 1, `the pointer's hover moves the desktop's pointer with no button held: ${hovers} buttonless moves at the scroll`);
         log(`hover: ${hovers - 1} buttonless moves from the pointer's hover reports`);
     }
+    // ---- pan and rotation ----------------------------------------------------------------------
+    // One finger drags the picture left and up: it pans, and clicks nothing.
+    // The second click's dot is the widest dark run on its row; text strokes are thin.
+    const dotAt = (shot) => {
+        const y = origin.y + targets[1].y * scale;
+        let best = { length: 0, x: null }; let start = null;
+        for (let x = 0; x <= screenWidth; x += 0.5) {
+            const dark = x < screenWidth && pixel(shot, { x, y }) < 200;
+            if (dark && start === null) start = x;
+            if (!dark && start !== null) { if (x - start > best.length) best = { length: x - start, x: (start + x) / 2 }; start = null; }
+        }
+        return best.length >= 10 ? best.x : null;
+    };
+    const dotFirst = dotAt(capture(join(out, 'simulator-dot.png')));
+    const clicksBefore = await page.evaluate('clicks.length');
+    mac(`axe swipe --start-x ${(screenWidth * 0.8).toFixed(0)} --start-y ${(screenHeight * 0.6).toFixed(0)} --end-x ${(screenWidth * 0.2).toFixed(0)} --end-y ${(screenHeight * 0.45).toFixed(0)} --duration 0.6 --udid ${udid}`);
+    await sleep(1000);
+    const pannedShot = capture(join(out, 'desklink-receiver-fill-portrait-panned.png'));
+    const dotPanned = dotAt(pannedShot);
+    assert(dotFirst !== null, 'the second click\'s dot is on the screen before the pan');
+    assert(dotPanned === null || dotFirst - dotPanned > 40, `the pan moved the picture left: the dot at x ${dotFirst.toFixed(1)} pt, then ${dotPanned?.toFixed(1)} pt`);
+    assert.equal(await page.evaluate('clicks.length'), clicksBefore, 'a one-finger pan clicks nothing');
+    log(`panned: the second click's dot moved from x ${dotFirst.toFixed(1)} to ${dotPanned === null ? 'off the screen' : `${dotPanned.toFixed(1)} pt`}`);
+    pointerSteps(udid, [{ action: 'landscape', x: 0, y: 0 }]);
+    await sleep(1500);
+    const landscape = capture(join(out, 'desklink-receiver-fill-landscape.png'));
+    assert(landscape.width > landscape.height, `the simulator turned to landscape: ${landscape.width}x${landscape.height}`);
+    const bars = barShare(landscape);
+    assert(bars < 0.15, `black bars take under 15% of the landscape screen: ${(100 * bars).toFixed(1)}%`);
+    log(`landscape: ${(100 * bars).toFixed(1)}% black bars`);
+    pointerSteps(udid, [{ action: 'portrait', x: 0, y: 0 }]);
+    await sleep(1500);
+    const back = pictureBox(capture(join(out, 'desklink-receiver-fill-portrait-rotated-back.png')));
+    assert(Math.abs(back.top - box.top) <= 1 && back.left <= 1, `turned back, the picture starts at the top-left again: (${back.left.toFixed(1)}, ${back.top.toFixed(1)}) pt, first (${box.left.toFixed(1)}, ${box.top.toFixed(1)})`);
+    log('rotated back: the picture starts at the top-left again');
     console.log(`ok: the iOS receiver shows the live desktop, answers ${codec} with NACK, its taps click the host and its hardware input drives it${IPAD ? ', trackpad included' : ''} (${out})`);
 }
 

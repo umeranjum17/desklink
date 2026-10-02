@@ -155,6 +155,6 @@ function Desktop() {
 
 const styles = StyleSheet.create({
     root: { flex: 1, backgroundColor: '#000' },
-    bar: { position: 'absolute', left: 0, right: 0, bottom: 48, alignItems: 'center' },
+    bar: { position: 'absolute', left: 16, right: 16, bottom: 64, minHeight: 24, alignItems: 'center' },
     status: { color: '#fff', fontSize: 15, textAlign: 'center' },
 });
