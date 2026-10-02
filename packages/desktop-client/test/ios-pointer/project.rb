@@ -21,7 +21,10 @@ tests.add_dependency(host)
       'CODE_SIGN_STYLE' => 'Manual',
       'CODE_SIGN_IDENTITY' => '-',
     )
-    config.build_settings['TEST_TARGET_NAME'] = 'PointerHost' if target == tests
+    if target == tests
+      config.build_settings['TEST_TARGET_NAME'] = 'PointerHost'
+      config.build_settings['SWIFT_OBJC_BRIDGING_HEADER'] = File.join(dir, 'TouchEvents.h')
+    end
   end
 end
 project.save

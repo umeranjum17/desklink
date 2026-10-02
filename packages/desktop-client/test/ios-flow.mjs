@@ -715,27 +715,6 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         log(`hover: ${hovers - 1} buttonless moves from the pointer's hover reports`);
     }
     // ---- pan and rotation ----------------------------------------------------------------------
-    // The second click's dot is the widest dark run on its row; text strokes are thin.
-    const dotAt = (shot) => {
-        const y = origin.y + targets[1].y * scale;
-        let best = { length: 0, x: null }; let start = null;
-        for (let x = 0; x <= screenWidth; x += 0.5) {
-            const dark = x < screenWidth && pixel(shot, { x, y }) < 200;
-            if (dark && start === null) start = x;
-            if (!dark && start !== null) { if (x - start > best.length) best = { length: x - start, x: (start + x) / 2 }; start = null; }
-        }
-        return best.length >= 10 ? best.x : null;
-    };
-    const dotFirst = dotAt(capture(join(out, 'simulator-dot.png')));
-    const clicksBefore = await page.evaluate('clicks.length');
-    mac(`axe swipe --start-x ${(screenWidth * 0.8).toFixed(0)} --start-y ${(screenHeight * 0.6).toFixed(0)} --end-x ${(screenWidth * 0.2).toFixed(0)} --end-y ${(screenHeight * 0.45).toFixed(0)} --duration 0.6 --udid ${udid}`);
-    await sleep(1000);
-    const pannedShot = capture(join(out, 'desklink-receiver-fill-portrait-panned.png'));
-    const dotPanned = dotAt(pannedShot);
-    assert(dotFirst !== null, 'the second click\'s dot is on the screen before the pan');
-    assert(dotPanned !== null && Math.abs(dotFirst - dotPanned) <= 1, `fit-width keeps the whole desktop reachable after a pan: dot at x ${dotFirst.toFixed(1)} pt, then ${dotPanned?.toFixed(1)} pt`);
-    assert.equal(await page.evaluate('clicks.length'), clicksBefore, 'a one-finger pan clicks nothing');
-    log(`panned: the second click's dot moved from x ${dotFirst.toFixed(1)} to ${dotPanned === null ? 'off the screen' : `${dotPanned.toFixed(1)} pt`}`);
     pointerSteps(udid, [{ action: 'landscape', x: 0, y: 0 }]);
     await sleep(1500);
     // simctl saves the display's native portrait pixels; turned to landscapeLeft, the
@@ -764,6 +743,38 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     const back = pictureBox(capture(join(out, 'desklink-receiver-fill-portrait-rotated-back.png')));
     assert(Math.abs(back.top - box.top) <= 1 && back.left <= 1, `turned back, the picture starts at the top-left again: (${back.left.toFixed(1)}, ${back.top.toFixed(1)}) pt, first (${box.left.toFixed(1)}, ${box.top.toFixed(1)})`);
     log('rotated back: the picture starts at the top-left again');
+    const clicksBefore = await page.evaluate('clicks.length');
+    pointerSteps(udid, [{
+        action: 'pinch', x: screenWidth * 0.25, y: back.top + (back.bottom - back.top) * 0.5,
+        span: screenWidth * 0.24, scale: 2,
+    }]);
+    await sleep(1000);
+    const zoomedShot = capture(join(out, 'simulator-zoomed.png'));
+    const zoomedBox = pictureBox(zoomedShot);
+    const zoomedScale = (zoomedBox.bottom - zoomedBox.top) / geometry.height;
+    assert(zoomedScale > scale * 1.5, `the pinch visibly zooms to cropped content: ${zoomedScale / scale}x`);
+    assert(zoomedScale * geometry.width > screenWidth, 'the zoomed desktop has horizontal content to pan');
+    const dotAt = (shot) => {
+        const y = zoomedBox.top + targets[1].y * zoomedScale;
+        let best = { length: 0, x: null }; let start = null;
+        for (let x = 0; x <= screenWidth; x += 0.5) {
+            const dark = x < screenWidth && pixel(shot, { x, y }) < 200;
+            if (dark && start === null) start = x;
+            if (!dark && start !== null) { if (x - start > best.length) best = { length: x - start, x: (start + x) / 2 }; start = null; }
+        }
+        return best.length >= 10 ? best.x : null;
+    };
+    const dotFirst = dotAt(zoomedShot);
+    assert(dotFirst !== null, 'the marker is visible on the zoomed desktop before panning');
+    const panY = zoomedBox.top + (zoomedBox.bottom - zoomedBox.top) * 0.5;
+    mac(`axe swipe --start-x ${(screenWidth * 0.4).toFixed(1)} --start-y ${panY.toFixed(1)} --end-x ${(screenWidth * 0.55).toFixed(1)} --end-y ${panY.toFixed(1)} --duration 0.6 --udid ${udid}`);
+    await sleep(1000);
+    const pannedShot = capture(join(out, 'simulator-pan-candidate.png'));
+    const dotPanned = dotAt(pannedShot);
+    assert(dotPanned !== null && dotPanned - dotFirst > 40, `the pan visibly moves the marker right: ${dotFirst} → ${dotPanned} pt`);
+    assert.equal(await page.evaluate('clicks.length'), clicksBefore, 'zooming and one-finger panning click nothing');
+    writeFileSync(join(out, 'desklink-receiver-fill-portrait-panned.png'), PNG.sync.write(pannedShot));
+    log(`panned: the marker moved right from x ${dotFirst.toFixed(1)} to ${dotPanned.toFixed(1)} pt without a click`);
     console.log(`ok: the iOS receiver shows the live desktop, answers ${codec} with NACK, its taps click the host and its hardware input drives it${IPAD ? ', trackpad included' : ''} (${out})`);
 }
 
