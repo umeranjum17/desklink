@@ -220,6 +220,7 @@ const indexOfUrl = async (urlPart) => {
   assert.equal(strays.length, 0, `stray session members: ${JSON.stringify(strays)}`);
   console.log(`browser-flow: open/form/two-tab fixture passed with semantic refs on private Xvfb :${number}; selected vs front distinguished; no screenshots`);
 } finally {
+  try { await ok('browser', 'detach'); } catch {}
   for (const pid of [...owned.keys()]) { try { await stopProcess(pid); } catch { /* surfaced above */ } }
   if (xvfb) await stopOwnedXvfb(xvfb);
   assert.equal(sessionStrays().length, 0, 'unrecorded session processes survived');

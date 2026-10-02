@@ -64,7 +64,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -90,6 +90,7 @@ const DEVICE = ['desklink-ios-flow', IPAD ? 'ipad' : '', RUNTIME, process.pid, r
 const DEVICE_TYPE = IPAD ? 'iPad-Pro-11-inch-M4-8GB' : 'iPhone-16';
 const DESKTOP = { width: 1280, height: 800 };
 const MARK = `DESKLINK_IOS_FLOW=${process.pid}`;
+const browserSession = randomBytes(16).toString('hex');
 
 const log = (...args) => console.log(new Date().toISOString(), ...args);
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -198,6 +199,18 @@ function alive(pid) {
 }
 function remember(pid) {
     owned.set(pid, statOf(pid)?.started);
+}
+function rememberBrowserHelpers() {
+    for (const entry of readdirSync('/proc')) {
+        const pid = Number(entry);
+        if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid || owned.has(pid)) continue;
+        try {
+            const stat = statOf(pid);
+            if (!stat || stat.state === 'Z' || statSync(`/proc/${pid}`).uid !== process.getuid()) continue;
+            if (!readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').includes(`DESKLINK_IOS_BROWSER_SESSION=${browserSession}`)) continue;
+            if (statOf(pid)?.started === stat.started) owned.set(pid, stat.started);
+        } catch {}
+    }
 }
 async function stopProcess(pid, name) {
     if (!alive(pid)) return;
@@ -318,12 +331,16 @@ async function cleanup() {
     }
     page?.close();
     relay?.close();
+    rememberBrowserHelpers();
     if (pagePid) await stopProcess(pagePid, 'page browser');
+    rememberBrowserHelpers();
+    for (const pid of owned.keys()) {
+        if (pid !== pagePid && pid !== bridgePid && pid !== enginePid && pid !== xvfbPid) await stopProcess(pid, 'page browser helper');
+    }
     // SIGTERM lets the bridge close its engine; the engine is reaped after it either way.
     if (bridgePid) await stopProcess(bridgePid, 'bridge');
     if (enginePid) await stopProcess(enginePid, 'engine');
     if (xvfb) await stopOwnedXvfb(xvfb);
-    // Environment tags detect leaks, not ownership; never adopt a stray PID.
     // The page's browser profile is about 100 MB; nothing here outlives the run.
     rmSync(work, { recursive: true, force: true });
     await sleep(200);
@@ -378,7 +395,7 @@ async function main() {
         '--ozone-platform=x11', '--force-device-scale-factor=1', '--kiosk', `--window-size=${DESKTOP.width},${DESKTOP.height}`, '--window-position=0,0',
         `--user-data-dir=${profile}`, '--remote-debugging-port=0', '--no-first-run', '--no-default-browser-check',
         '--disable-dev-shm-usage', '--disable-extensions', `file://${join(work, 'page.html')}`,
-    ], { env: { ...env, GDK_SCALE: '' }, stdio: 'ignore' });
+    ], { env: { ...env, GDK_SCALE: '', DESKLINK_IOS_BROWSER_SESSION: browserSession }, stdio: 'ignore' });
     pagePid = browser.pid; remember(pagePid);
     page = await pageEvaluator(profile);
     for (let i = 0; i < 50 && (await page.evaluate('innerWidth')) < DESKTOP.width - 1; i++) await sleep(100);
