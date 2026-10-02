@@ -257,8 +257,8 @@ pointer, so it stays
 visible over windows that set their own cursor and never replaces the cursor.
 Its size follows `Xft.dpi` from 96–384 DPI, defaulting to 1x otherwise;
 the shaped cue reveals outward from the tip and retracts inward, while a
-compositing manager with alpha enables fading instead. The helper announces each state before drawing
-it, and X11 capture restores just
+compositing manager with alpha enables fading instead. The helper announces each
+state before drawing it, and X11 capture restores just
 the pixels the cue covers from the previous frame, so the halo's interior stays
 live; changes under the arrow and ring show once the cue moves away. Click and
 key feedback only recolour the cue, so a still cue never changes what is
