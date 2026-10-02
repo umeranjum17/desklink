@@ -66,9 +66,8 @@ function bridgeSignaling(address: string): Signaling & { close: () => void } {
 }
 
 /**
- * What the status line tells the person. It reads only the status and the
- * failure code: a failure's message is free text from the app, the host or the
- * engine, and may name the bridge address and its pairing token.
+ * What the status line tells the person. It uses status, frame readiness and
+ * failure code; see SessionSnapshot.failure for why raw messages stay hidden.
  */
 export function statusText({ status, presented, failure }: SessionSnapshot): string {
     switch (status) {

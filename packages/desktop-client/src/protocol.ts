@@ -155,7 +155,9 @@ export interface SessionSnapshot {
     presented: boolean;
     /**
      * `message` is free text from the app's `authorize()`, the host or the
-     * engine, kept for logs. Show people a state chosen from `code` instead.
+     * engine and may contain a bridge URL or pairing token. Never display it
+     * to people; redact sensitive data before logging it. Choose user-facing
+     * text from the session state and `code` instead.
      */
     failure: SessionFailure | null;
     /** Redacted diagnostics: codec, route, counters. Never identities. */
