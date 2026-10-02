@@ -22,7 +22,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   const request = JSON.parse(line);
   if (request.method === 'hello' && request.params.protocol !== 3) return out({ id: request.id, error: { code: 'unsupported-protocol', message: 'protocol 3 required' } });
   if (request.method === 'hello' || request.method === 'capabilities') return out({ id: request.id, result: {
-    protocol: 3, clipboard: { read: true, write: true, mime: [], maxBytes: 1024 },
+    protocol: 3, clipboard: { read: false, write: false, mime: [], maxBytes: 1024 },
   } });
   if (request.method === 'session.open') {
     out({ event: 'session.restoreToken', params: { sessionId: 'engine-1', token: 'test-private-grant' } });
@@ -143,7 +143,9 @@ describe('the bridge', () => {
         const portal = await startBridge('t', false);
         const portalSocket = await connect(portal.port, 'token=t');
         expect((await requestOn(portalSocket, 1, 'capabilities')).clipboard)
-            .toMatchObject({ read: true, write: true });
+            .toMatchObject({ read: false, write: false });
+        expect((await requestOn(portalSocket, 4, 'hello', { protocol: 3 })).clipboard)
+            .toMatchObject({ read: false, write: false });
         expect(await requestOn(portalSocket, 2, 'session.open', {}))
             .toMatchObject({ sessionId: 'engine-1' });
     }, 20_000);

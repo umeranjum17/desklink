@@ -868,7 +868,7 @@ pub fn capabilities() -> serde_json::Value {
     let x11 = crate::x11::X11Desktop::connect(None)
         .map(|desktop| serde_json::json!([desktop.screen_size().0, desktop.screen_size().1]))
         .unwrap_or(serde_json::Value::Null);
-    let clipboard = x11.is_array() || wayland_clipboard_available();
+    let clipboard = wayland_clipboard_available();
     let (input, grant_state, unavailable) = match crate::input::probe() {
         Ok(()) => (serde_json::json!(true), "granted", serde_json::Value::Null),
         Err(unavailable) => (
@@ -909,7 +909,7 @@ pub fn capabilities() -> serde_json::Value {
             "unavailable_reason": unavailable,
             "grant": grant_state,
         },
-        "clipboard": { "read": clipboard, "write": x11.is_array() || (clipboard && clipboard::writer_available()), "mime": ["text/plain;charset=utf-8"],
+        "clipboard": { "read": clipboard, "write": clipboard && clipboard::writer_available(), "mime": ["text/plain;charset=utf-8"],
                        "maxBytes": clipboard::MAX_CLIPBOARD_BYTES },
         // Video this engine does not capture or encode but can carry, so a
         // consumer can tell an old engine from one that takes `session.feed`

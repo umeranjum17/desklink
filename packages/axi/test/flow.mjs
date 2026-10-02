@@ -172,6 +172,22 @@ try {
   }
   if (process.env.DESKLINK_AXI_CAPABILITY_PROOF === '1' || noXtest) {
     const { PeerConnection, cleanup: cleanupPeers } = await import('node-datachannel');
+    const probeEnv = {...env, PATH:dir, XDG_SESSION_TYPE:'x11'};
+    delete probeEnv.WAYLAND_DISPLAY;
+    for (const [wayland,expected] of [[false,{read:false,write:false}],[true,{read:true,write:false}]]) {
+      await verifyXvfb();
+      client = await EngineClient.start(enginePath, ['serve'], {}, wayland
+        ? {...probeEnv, XDG_SESSION_TYPE:'wayland', WAYLAND_DISPLAY:'desklink-private-capability-probe'}
+        : probeEnv);
+      recordProcesses();
+      const capabilities = await client.capabilities();
+      assert.equal(capabilities.x11.available,true,'the private X display is reachable');
+      assert.deepEqual({read:capabilities.clipboard.read,write:capabilities.clipboard.write},expected,
+        'portal flags use only Wayland availability, with no wl-copy on the child PATH');
+      const hello = await client.request('hello',{protocol:3});
+      assert.deepEqual(hello.clipboard,capabilities.clipboard);
+      await client.stop(); client=undefined;
+    }
     const notices = [];
     client = await EngineClient.start(enginePath, ['serve'], {onEvent:event=>notices.push(event)}, {...env, DISPLAY:''});
     recordProcesses();
