@@ -14,8 +14,8 @@ export const CLIPBOARD_CONFIRMATION_MS = 1500;
 const PREVIEW_CHARS = 24;
 
 /**
- * A short pill confirming each clipboard transfer: where it went, the start of
- * the text and its size. Place it in reserved space outside the desktop
+ * A short pill confirming each clipboard transfer: where it went and the start
+ * of the text. Place it in reserved space outside the desktop
  * surface. It ignores touches and goes away on its own.
  */
 export function ClipboardConfirmation({ transfer, style }: ClipboardConfirmationProps) {
@@ -39,18 +39,13 @@ export function ClipboardConfirmation({ transfer, style }: ClipboardConfirmation
     );
 }
 
-/** "Copied to phone · “first words…” · 1.2 KB" */
-export function describeTransfer({ direction, text, truncated }: ClipboardTransfer): string {
+/** "Copied to phone · “first words…”" */
+export function describeTransfer({ direction, text }: ClipboardTransfer): string {
     const where = direction === 'to-phone' ? 'Copied to phone' : 'Sent to desktop';
     const flat = text.replace(/\s+/g, ' ').trim();
     const chars = [...flat];
     const preview = chars.length > PREVIEW_CHARS ? `${chars.slice(0, PREVIEW_CHARS).join('')}…` : flat;
-    const size = `${formatBytes(new TextEncoder().encode(text).length)}${truncated ? '+' : ''}`;
-    return preview === '' ? `${where} · ${size}` : `${where} · “${preview}” · ${size}`;
-}
-
-function formatBytes(bytes: number): string {
-    return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
+    return preview === '' ? `${where}` : `${where} · “${preview}”`;
 }
 
 export const PILL_COLORS = { backing: 'rgba(17, 18, 20, 0.94)', text: '#ffffff' };
