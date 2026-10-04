@@ -901,8 +901,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                         if (reply.kind === 'rejected') {
                             // These session-wide clipboard refusals have no request ID.
                             // A generic permission rejection can belong to other input.
-                            if (reply.seq === 0 && (reply.code === 'clipboard-unsupported'
-                                || (reply.code === 'permission' && reply.message === 'this session has no clipboard permission'))) {
+                            if (reply.seq === 0 && (reply.code === 'clipboard-unsupported' || reply.code === 'session')) {
                                 for (const resolve of pendingClipboard.current.values()) {
                                     resolve({ text: '', truncated: false, error: reply.message });
                                 }

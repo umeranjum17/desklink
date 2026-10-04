@@ -232,7 +232,7 @@ describe('the clipboard', () => {
 
     it.each([
         ['clipboard-unsupported', 'clipboard is unavailable for this desktop source'],
-        ['permission', 'this session has no clipboard permission'],
+        ['session', 'the session has ended'],
     ])('settles pending transfers promptly on clipboard refusal %s', async (code, message) => {
         const session = await liveSession();
         session.current.setInputEnabled(true);
