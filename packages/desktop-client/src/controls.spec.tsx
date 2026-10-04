@@ -6,12 +6,18 @@ import TestRenderer, { act } from 'react-test-renderer';
 
 /** The key row and the clipboard pill, rendered with `react-native` primitives as host strings. */
 vi.mock('react-native', () => ({
-    StyleSheet: { create: (styles: unknown) => styles },
+    StyleSheet: { create: (styles: unknown) => styles, absoluteFill: {} },
     Pressable: 'Pressable',
     ScrollView: 'ScrollView',
+    StatusBar: 'StatusBar',
     Text: 'Text',
     View: 'View',
     Settings: { get: () => undefined },
+}));
+
+vi.mock('react-native-safe-area-context', () => ({
+    SafeAreaProvider: ({ children }: { children: React.ReactNode }) => children,
+    useSafeAreaInsets: () => ({ top: 0, left: 0, bottom: 0, right: 0 }),
 }));
 
 const example = vi.hoisted(() => ({
