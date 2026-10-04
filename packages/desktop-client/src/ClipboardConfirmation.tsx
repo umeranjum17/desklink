@@ -20,8 +20,11 @@ const PREVIEW_CHARS = 24;
  */
 export function ClipboardConfirmation({ transfer, style }: ClipboardConfirmationProps) {
     const [shown, setShown] = React.useState<ClipboardTransfer | null>(null);
+    const seenId = React.useRef<number | null>(transfer?.id ?? null);
     React.useEffect(() => {
         if (transfer == null) return;
+        if (transfer.id === seenId.current) return;
+        seenId.current = transfer.id;
         setShown(transfer);
         const timer = setTimeout(() => setShown(null), CLIPBOARD_CONFIRMATION_MS);
         return () => clearTimeout(timer);
