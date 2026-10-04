@@ -10,8 +10,8 @@
  * Control is enabled as soon as the picture is live, so a tap on the picture
  * clicks the desktop. The picture fills the screen inside its safe area. The
  * key row arms Ctrl, Shift, Alt and Meta, and Copy brings the desktop's
- * clipboard over with its confirmation. The hidden accessibility status
- * carries `testID="desklink-status"` for test/ios-flow.mjs to read through
+ * clipboard over with its confirmation. The status line carries
+ * `testID="desklink-status"` for test/ios-flow.mjs to read through
  * the simulator's accessibility tree.
  */
 import * as React from 'react';

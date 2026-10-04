@@ -7,12 +7,14 @@ import TestRenderer, { act } from 'react-test-renderer';
 /** The key row and the clipboard pill, rendered with `react-native` primitives as host strings. */
 vi.mock('react-native', () => ({
     StyleSheet: { create: (styles: unknown) => styles, absoluteFill: {} },
+    Linking: { getInitialURL: async () => null, addEventListener: () => ({ remove: () => undefined }) },
+    Platform: { OS: 'ios' },
     Pressable: 'Pressable',
     ScrollView: 'ScrollView',
     StatusBar: 'StatusBar',
     Text: 'Text',
     View: 'View',
-    Settings: { get: () => undefined },
+    Settings: { get: () => 'ws://localhost/desktop?token=test' },
 }));
 
 vi.mock('react-native-safe-area-context', () => ({
