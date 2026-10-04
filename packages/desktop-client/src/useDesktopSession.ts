@@ -25,6 +25,14 @@ import {
     type StickyModifiers,
 } from './stickyModifiers';
 
+/** One clipboard transfer that reached its destination; `id` tells two equal transfers apart. */
+export interface ClipboardTransfer {
+    id: number;
+    direction: 'to-phone' | 'to-desktop';
+    text: string;
+    truncated: boolean;
+}
+
 /** How long a clipboard round trip may take before it is reported as lost. */
 const CLIPBOARD_TIMEOUT_MS = 4000;
 
@@ -199,8 +207,8 @@ export interface DesktopSession {
     close: (reason?: string) => Promise<void>;
     showKeyboard: () => void;
     hideKeyboard: () => void;
-    /** Copy the desktop's clipboard to the phone; the caller places it locally. */
-    copyRemoteToLocal: () => Promise<{ text: string; truncated: boolean }>;
+    /** Copy using the caller's local writer, which must reject if the write fails. */
+    copyRemoteToLocal: (writeLocal: (text: string) => Promise<void>) => Promise<{ text: string; truncated: boolean }>;
     /** Send the phone's clipboard text to the desktop. */
     pasteLocalToRemote: (text: string) => Promise<void>;
     /** Release anything the desktop is holding, without ending the session. */
@@ -221,6 +229,8 @@ export interface DesktopSession {
      * because the engine lets go of exactly the modifiers the message names.
      */
     pressKey: (name: string) => () => void;
+    /** The last clipboard transfer that completed, for the app to confirm; null until one does. */
+    clipboard: ClipboardTransfer | null;
 }
 
 const IDLE: SessionSnapshot = {
@@ -245,6 +255,8 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const [modifiers, setModifiers] = useState<StickyModifiers>(NO_MODIFIERS);
     /** Read by input as it arrives, which can be faster than a render. */
     const modifiersRef = useRef<StickyModifiers>(NO_MODIFIERS);
+    const [clipboard, setClipboard] = useState<ClipboardTransfer | null>(null);
+    const clipboardCount = useRef(0);
 
     const opened = useRef<SessionOpenResult | null>(null);
     const signaling = useRef<Signaling | null>(null);
@@ -887,6 +899,14 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                             return;
                         }
                         if (reply.kind === 'rejected') {
+                            // These session-wide clipboard refusals have no request ID.
+                            // A generic permission rejection can belong to other input.
+                            if (reply.seq === 0 && (reply.code === 'clipboard-unsupported' || reply.code === 'session')) {
+                                for (const resolve of pendingClipboard.current.values()) {
+                                    resolve({ text: '', truncated: false, error: reply.message });
+                                }
+                                pendingClipboard.current.clear();
+                            }
                             diagnostics.current.lastRejection = `${reply.code}: ${reply.message}`;
                             update({ diagnostics: { ...diagnostics.current } });
                             optionsRef.current.onRejected?.({ code: reply.code, message: reply.message });
@@ -937,7 +957,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         };
     }, [transportFailed, onTransportState, cancelRestart, spendRestartAttempt, notePing, teardown, update, pressKey, typeText]);
 
-    const copyRemoteToLocal = useCallback(async () => {
+    const copyRemoteToLocal = useCallback(async (writeLocal: (text: string) => Promise<void>) => {
         if (!inputEnabled.current) throw new Error('Desktop control is off.');
         const id = nativeRef.current;
         if (id == null || nativeDesklink == null) throw new Error('No desktop session is open.');
@@ -951,6 +971,8 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         nativeDesklink.sendControl(id, JSON.stringify({ kind: 'clipboard_read', request }));
         const reply = await answer;
         if (reply.error != null) throw new Error(reply.error);
+        await writeLocal(reply.text);
+        setClipboard({ id: ++clipboardCount.current, direction: 'to-phone', text: reply.text, truncated: reply.truncated });
         return { text: reply.text, truncated: reply.truncated };
     }, []);
 
@@ -968,6 +990,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         nativeDesklink.sendControl(id, JSON.stringify({ kind: 'clipboard_write', request, text }));
         const reply = await answer;
         if (reply.error != null) throw new Error(reply.error);
+        setClipboard({ id: ++clipboardCount.current, direction: 'to-desktop', text, truncated: false });
     }, []);
 
     const close = useCallback(async (reason = 'closed by the user') => {
@@ -1086,6 +1109,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         modifiers,
         tapModifier,
         pressKey,
+        clipboard,
     }), [
         snapshot,
         nativeId,
@@ -1104,6 +1128,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         modifiers,
         tapModifier,
         pressKey,
+        clipboard,
     ]);
 }
 

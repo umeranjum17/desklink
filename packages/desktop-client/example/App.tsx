@@ -9,13 +9,24 @@
  *
  * Control is enabled as soon as the picture is live, so a tap on the picture
  * clicks the desktop. The picture fills the screen inside its safe area. The
- * hidden accessibility status carries `testID="desklink-status"` for
- * test/ios-flow.mjs to read through the simulator's accessibility tree.
+ * key row arms Ctrl, Shift, Alt and Meta, and Copy brings the desktop's
+ * clipboard over with its confirmation. The status line carries
+ * `testID="desklink-status"` for test/ios-flow.mjs to read through
+ * the simulator's accessibility tree.
  */
 import * as React from 'react';
-import { Linking, Platform, Settings, StatusBar, StyleSheet, Text, View } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
+import { Linking, Platform, Pressable, ScrollView, Settings, StatusBar, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { DesktopView, useDesktopSession, type SessionEvent, type SessionSnapshot, type Signaling } from '@desklink/react-native';
+import {
+    ClipboardConfirmation,
+    DesktopView,
+    ModifierKeys,
+    useDesktopSession,
+    type SessionEvent,
+    type SessionSnapshot,
+    type Signaling,
+} from '@desklink/react-native';
 
 function connectionLink(link: string | null): { url: string; report: string | null; key: string } | null {
     if (!link) return null;
@@ -153,6 +164,18 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
         },
     });
     const { status } = desktop.snapshot;
+    const [copyError, setCopyError] = React.useState<string | null>(null);
+
+    async function copy() {
+        setCopyError(null);
+        try {
+            await desktop.copyRemoteToLocal(async (text) => {
+                if (!await Clipboard.setStringAsync(text)) throw new Error('The phone refused the clipboard write.');
+            });
+        } catch (error) {
+            setCopyError(error instanceof Error ? error.message : String(error));
+        }
+    }
 
     React.useEffect(() => {
         void desktop.connect();
@@ -182,14 +205,29 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
         <View style={styles.root}>
             <StatusBar hidden />
             <DesktopView sessionId={desktop.nativeId} style={StyleSheet.absoluteFill} insets={insets} accessibilityLabel="desktop" />
+
+            <View pointerEvents="box-none" style={styles.confirmation}>
+                {copyError ? (
+                    <ScrollView style={styles.copyErrorScroll}>
+                        <View testID="desklink-copy-error" accessible accessibilityRole="alert" accessibilityLiveRegion="polite" style={styles.copyError}>
+                            <Text style={styles.copyErrorLabel}>{`Copy failed: ${copyError}`}</Text>
+                        </View>
+                    </ScrollView>
+                ) : <ClipboardConfirmation transfer={desktop.clipboard} />}
+            </View>
+            <View pointerEvents="box-none" style={styles.bottom}>
             <View pointerEvents="none" style={styles.bar}>
                 <Text testID="desklink-status" style={styles.status}>
                     {statusText(desktop.snapshot)}
                 </Text>
             </View>
-            {status !== 'live' && <View pointerEvents="none" style={styles.message}>
-                <Text style={styles.messageText}>{statusText(desktop.snapshot)}</Text>
-            </View>}
+            <View style={styles.keys}>
+                <ModifierKeys modifiers={desktop.modifiers} onTap={desktop.tapModifier} style={styles.row} />
+                <Pressable testID="desklink-copy" accessibilityRole="button" onPress={() => void copy()} style={styles.copy}>
+                    <Text style={styles.copyLabel}>Copy</Text>
+                </Pressable>
+            </View>
+            </View>
         </View>
     );
 }
@@ -197,8 +235,16 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
 const styles = StyleSheet.create({
     root: { flex: 1, backgroundColor: '#000' },
     idle: { alignItems: 'center', justifyContent: 'center' },
-    bar: { position: 'absolute', width: 1, height: 1, overflow: 'hidden' },
-    status: { color: 'transparent', fontSize: 1 },
-    message: { position: 'absolute', left: 0, right: 0, bottom: 48, alignItems: 'center' },
     messageText: { color: '#fff', fontSize: 16 },
+    bottom: { position: 'absolute', left: 0, right: 0, bottom: 0 },
+    bar: { marginHorizontal: 16, marginBottom: 8, minHeight: 24, alignItems: 'center' },
+    status: { color: '#fff', fontSize: 15, textAlign: 'center' },
+    confirmation: { minHeight: 48, justifyContent: 'center' },
+    copyErrorScroll: { maxHeight: 120, flexGrow: 0 },
+    copyError: { marginHorizontal: 16, marginVertical: 8, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12, backgroundColor: '#521b24' },
+    copyErrorLabel: { color: '#ffffff', fontSize: 14, fontWeight: '600' },
+    keys: { paddingBottom: 24, backgroundColor: 'rgba(22, 23, 26, 0.94)' },
+    row: { backgroundColor: 'transparent' },
+    copy: { margin: 8, minHeight: 44, paddingHorizontal: 12, borderRadius: 8, justifyContent: 'center', backgroundColor: '#2b2d33' },
+    copyLabel: { color: '#c9ccd3', fontSize: 15, fontWeight: '500' },
 });

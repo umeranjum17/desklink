@@ -224,6 +224,103 @@ describe('control messages', () => {
     });
 });
 
+describe('the clipboard', () => {
+    function answer(id: string | null, kind: string, text: string, error?: string): void {
+        const { request } = JSON.parse(sent.find((message) => message.includes(kind))!) as { request: string };
+        nativeEvent('control', id, { message: JSON.stringify({ kind: 'clipboard', request, text, error }) });
+    }
+
+    it.each([
+        ['clipboard-unsupported', 'clipboard is unavailable for this desktop source'],
+        ['session', 'the session has ended'],
+    ])('settles pending transfers promptly on clipboard refusal %s', async (code, message) => {
+        const session = await liveSession();
+        session.current.setInputEnabled(true);
+        const writeLocal = vi.fn(async () => {});
+        let copyResult: unknown;
+        let pasteResult: unknown;
+        const copied = session.current.copyRemoteToLocal(writeLocal).catch((error) => { copyResult = error; });
+        const pasted = session.current.pasteLocalToRemote('phone text').catch((error) => { pasteResult = error; });
+
+        nativeEvent('control', session.current.nativeId, {
+            message: JSON.stringify({ kind: 'rejected', seq: 0, code, message }),
+        });
+        await TestRenderer.act(async () => {});
+        expect(copyResult).toBeInstanceOf(Error);
+        expect((copyResult as Error).message).toBe(message);
+        expect(pasteResult).toBeInstanceOf(Error);
+        expect((pasteResult as Error).message).toBe(message);
+        await Promise.all([copied, pasted]);
+        expect(writeLocal).not.toHaveBeenCalled();
+        expect(session.current.clipboard).toBeNull();
+    });
+
+    it('does not attribute unrelated control rejection to a pending Copy', async () => {
+        const session = await liveSession();
+        session.current.setInputEnabled(true);
+        const writeLocal = vi.fn(async () => {});
+        let settled = false;
+        const copied = session.current.copyRemoteToLocal(writeLocal).finally(() => { settled = true; });
+        nativeEvent('control', session.current.nativeId, {
+            message: JSON.stringify({ kind: 'rejected', seq: 0, code: 'permission', message: 'this session has no control permission' }),
+        });
+        await TestRenderer.act(async () => {});
+        expect(settled).toBe(false);
+        expect(writeLocal).not.toHaveBeenCalled();
+        answer(session.current.nativeId, 'clipboard_read', 'desktop text');
+        await TestRenderer.act(async () => { await copied; });
+        expect(writeLocal).toHaveBeenCalledWith('desktop text');
+        expect(session.current.clipboard?.text).toBe('desktop text');
+    });
+
+    it('reports each transfer that completed, and not one that failed', async () => {
+        const session = await liveSession();
+        session.current.setInputEnabled(true);
+        expect(session.current.clipboard).toBeNull();
+
+        sent.length = 0;
+        let copied!: Promise<unknown>;
+        let finishWrite!: () => void;
+        const writeLocal = vi.fn(() => new Promise<void>((resolve) => { finishWrite = resolve; }));
+        TestRenderer.act(() => { copied = session.current.copyRemoteToLocal(writeLocal); });
+        answer(session.current.nativeId, 'clipboard_read', 'from the desktop');
+        await TestRenderer.act(async () => {});
+        expect(writeLocal).toHaveBeenCalledWith('from the desktop');
+        expect(session.current.clipboard).toBeNull();
+        await TestRenderer.act(async () => { finishWrite(); await copied; });
+        expect(session.current.clipboard).toEqual({ id: 1, direction: 'to-phone', text: 'from the desktop', truncated: false });
+
+        sent.length = 0;
+        let pasted!: Promise<unknown>;
+        TestRenderer.act(() => { pasted = session.current.pasteLocalToRemote('from the phone'); });
+        answer(session.current.nativeId, 'clipboard_write', '');
+        await TestRenderer.act(async () => { await pasted; });
+        expect(session.current.clipboard).toEqual({ id: 2, direction: 'to-desktop', text: 'from the phone', truncated: false });
+
+        sent.length = 0;
+        TestRenderer.act(() => { pasted = session.current.pasteLocalToRemote('refused'); });
+        answer(session.current.nativeId, 'clipboard_write', '', 'the desktop refused');
+        await TestRenderer.act(async () => { await expect(pasted).rejects.toThrow('the desktop refused'); });
+        expect(session.current.clipboard?.id).toBe(2);
+
+        sent.length = 0;
+        TestRenderer.act(() => {
+            copied = session.current.copyRemoteToLocal(async () => { throw new Error('local write refused'); });
+        });
+        answer(session.current.nativeId, 'clipboard_read', 'not copied');
+        await TestRenderer.act(async () => { await expect(copied).rejects.toThrow('local write refused'); });
+        expect(session.current.clipboard?.id).toBe(2);
+
+        sent.length = 0;
+        writeLocal.mockClear();
+        TestRenderer.act(() => { copied = session.current.copyRemoteToLocal(writeLocal); });
+        answer(session.current.nativeId, 'clipboard_read', '', 'read refused');
+        await TestRenderer.act(async () => { await expect(copied).rejects.toThrow('read refused'); });
+        expect(writeLocal).not.toHaveBeenCalled();
+        expect(session.current.clipboard?.id).toBe(2);
+    });
+});
+
 describe('held input across a background transition', () => {
     it('releases a pointer that is still down when the app leaves the foreground', async () => {
         const session = await connectedSession();

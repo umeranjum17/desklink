@@ -10,6 +10,7 @@
         "@config-plugins/react-native-webrtc": "14.0.0",
         "@desklink/react-native": "file:..",
         "expo": "55.0.31",
+        "expo-clipboard": "~55.0.17",
         "react": "19.2.0",
         "react-native": "0.83.10",
         "react-native-safe-area-context": "5.6.2",
