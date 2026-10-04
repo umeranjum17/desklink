@@ -293,7 +293,7 @@ What the consuming app — not this package — must get right before review.
   disabling input on background; the engine releases held keys within
   seconds of the path dying, so nothing stays stuck.
 
-## iOS simulator proof
+## Example app proof
 
 `example/` is the smallest app that shows a desktop: a native (non-Expo Go)
 build with `react-native-webrtc`, connecting to `desklink-host bridge` with the
