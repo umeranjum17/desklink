@@ -65,7 +65,8 @@ private const val MIN_WHEEL_STEP = 0.05f
  *  - tap: click where the finger lands; two taps: a double click on the same spot;
  *  - press and hold: a right click on release, or drag after it to hold the left
  *    button (select text, move a window);
- *  - one finger: move around a zoomed-in desktop; on the whole desktop,
+ *  - one finger: move around a zoomed-in desktop — the picture starts filled,
+ *    covering the view, so this is the default; on the whole desktop,
  *    move its pointer, which follows the finger without pressing a button —
  *    unless `gestures` is `browser`, where it scrolls the page, or `device`,
  *    where it lands with the button down and drags with it held;
@@ -102,11 +103,23 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
 
   // The picture's placement: surface pixels per desktop pixel, and where the
   // desktop's top-left corner sits in this view. `fitted` keeps a picture that
-  // was showing the whole desktop showing it when the view changes size.
+  // was showing the whole desktop showing it when the view changes size;
+  // `filling` keeps the default, a picture covering the view, until the user
+  // zooms or asks for the whole desktop. `filledScale` is the fill it was last
+  // placed at, so a new fill (a rotation, a new surface) starts at the
+  // desktop's top-left corner again.
   private var scale = 1f
   private var originX = 0f
   private var originY = 0f
   private var fitted = true
+  private var filling = true
+  private var filledScale = 0f
+
+  /** What the system covers at each edge (bars, cutout), in pixels: left, top, right, bottom. */
+  private var insetLeft = 0f
+  private var insetTop = 0f
+  private var insetRight = 0f
+  private var insetBottom = 0f
 
   /**
    * How much of this view's bottom the phone's keyboard, and the app's own
@@ -254,6 +267,8 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
     surfaceWidth = width
     surfaceHeight = height
     fitted = true
+    filling = true
+    filledScale = 0f
     // A point on the old geometry says nothing about the new one.
     pointerAt = null
     layoutPicture()
@@ -296,6 +311,22 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
   /** Show the whole desktop again. */
   fun fitToView() {
     fitted = true
+    filling = false
+    layoutPicture()
+  }
+
+  /**
+   * What the system covers at each edge of the view, in points. The picture
+   * still reaches under it, but starts and pans inside it.
+   */
+  fun setInsets(top: Float, left: Float, bottom: Float, right: Float) {
+    val density = resources.displayMetrics.density
+    if (top * density == insetTop && left * density == insetLeft && bottom * density == insetBottom && right * density == insetRight) return
+    insetTop = top * density
+    insetLeft = left * density
+    insetBottom = bottom * density
+    insetRight = right * density
+    filledScale = 0f
     layoutPicture()
   }
 
@@ -347,9 +378,9 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
    */
   private fun coverBottom(next: Float) {
     if (abs(next - covered) < 0.5f) return
-    val before = visibleHeight()
+    val before = visibleBottom()
     covered = next
-    val visible = visibleHeight()
+    val visible = visibleBottom()
     val at = pointerAt
     if (at == null) {
       originY += (visible - before) / 2f
@@ -361,7 +392,13 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
     layoutPicture()
   }
 
-  private fun visibleHeight(): Float = max(1f, height - covered)
+  /** Where the uncovered part of the view ends: above the keyboard, or above what the system covers. */
+  private fun visibleBottom(): Float = max(insetTop + 1f, min(height - covered, height - insetBottom))
+
+  private fun safeWidth(): Float = max(1f, width - insetLeft - insetRight)
+
+  /** The whole uncovered height, keyboard or not: the keyboard moves the picture rather than shrinking it. */
+  private fun safeHeight(): Float = max(1f, height - insetTop - insetBottom)
 
   private fun inputMethods() = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
 
@@ -386,8 +423,10 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
 
   override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
     super.onSizeChanged(w, h, oldw, oldh)
-    // A rotation: keep what the user was looking at.
-    if (oldw > 0 && oldh > 0 && !fitted) {
+    // A rotation: a filled picture starts again at its top-left corner;
+    // a zoomed one keeps what the user was looking at.
+    if (filling) filledScale = 0f
+    else if (oldw > 0 && oldh > 0 && !fitted) {
       originX += (w - oldw) / 2f
       originY += (h - oldh) / 2f
     }
@@ -416,34 +455,54 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
    */
   private fun fitScale(): Float {
     if (width == 0 || height == 0 || surfaceWidth == 0 || surfaceHeight == 0) return 1f
-    return min(width.toFloat() / surfaceWidth, height.toFloat() / surfaceHeight)
+    return min(safeWidth() / surfaceWidth, safeHeight() / surfaceHeight)
   }
 
-  /** Re-derive the placement from `fitted`, the zoom limits and the edges. */
+  private fun fillScale(): Float {
+    val cover = if (width <= height) safeWidth() / surfaceWidth
+      else max(width.toFloat() / surfaceWidth, (height - insetTop) / surfaceHeight)
+    return max(fitScale(), min(cover, MAX_SCALE))
+  }
+
+  /** Re-derive the placement from `filling`, `fitted`, the zoom limits and the edges. */
   private fun layoutPicture() {
     if (surfaceWidth == 0 || surfaceHeight == 0 || width == 0 || height == 0) return
     val fit = fitScale()
-    scale = if (fitted) fit else scale.coerceIn(fit, max(fit, MAX_SCALE))
+    if (filling) {
+      val fill = fillScale()
+      if (fill != filledScale) {
+        scale = fill
+        filledScale = fill
+        // The desktop's top-left corner, where a page's first words are.
+        originX = insetLeft
+        originY = insetTop
+      }
+    } else {
+      scale = if (fitted) fit else scale.coerceIn(fit, max(fit, MAX_SCALE))
+    }
     fitted = scale <= fit * 1.001f
     clampOrigin()
     publishTransform()
   }
 
   /**
-   * A picture smaller than what is visible is centred on that axis; a larger
-   * one covers it. Above the keyboard, only the uncovered part counts.
+   * A picture smaller than the uncovered part of the view is centred in it on
+   * that axis; a larger one can move until either edge reaches that part's
+   * edge. Above the keyboard, only the part above it counts.
    */
   private fun clampOrigin() {
     val pictureWidth = surfaceWidth * scale
     val pictureHeight = surfaceHeight * scale
-    val visible = visibleHeight()
-    originX = if (pictureWidth <= width) (width - pictureWidth) / 2f else originX.coerceIn(width - pictureWidth, 0f)
-    originY = if (pictureHeight <= visible) (visible - pictureHeight) / 2f else originY.coerceIn(visible - pictureHeight, 0f)
+    val right = width - insetRight
+    val bottom = visibleBottom()
+    originX = if (pictureWidth <= right - insetLeft) insetLeft + (right - insetLeft - pictureWidth) / 2f else originX.coerceIn(right - pictureWidth, insetLeft)
+    originY = if (pictureHeight <= bottom - insetTop) insetTop + (if (filling) 0f else (bottom - insetTop - pictureHeight) / 2f) else originY.coerceIn(bottom - pictureHeight, insetTop)
   }
 
   private fun zoomAround(focusX: Float, focusY: Float, factor: Float) {
     val fit = fitScale()
     val next = (scale * factor).coerceIn(fit, max(fit, MAX_SCALE))
+    filling = false
     val applied = next / scale
     originX = focusX - (focusX - originX) * applied
     originY = focusY - (focusY - originY) * applied
@@ -623,7 +682,7 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
           }
           // The whole desktop has nowhere to move to, so the finger moves the
           // desktop's pointer instead, without a button.
-          gesture = if (!fitted) Gesture.PAN else if (downOnPicture) Gesture.HOVER else Gesture.LETTERBOX
+          gesture = if (filling || !fitted) Gesture.PAN else if (downOnPicture) Gesture.HOVER else Gesture.LETTERBOX
           lastX = event.x
           lastY = event.y
           if (gesture == Gesture.HOVER) hoverTo(active, event.x, event.y)

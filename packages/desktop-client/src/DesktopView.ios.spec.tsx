@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
 import TestRenderer from 'react-test-renderer';
+import { pictureBox } from '../test/picture-box.mjs';
 
 /** `act` refuses to flush state updates unless React is told this is a test. */
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -57,14 +58,16 @@ const required: string[] = [];
 
 const BOUNDS = { width: 390, height: 844 };
 const DESKTOP = { width: 1280, height: 720 };
-// fit = min(390/1280, 844/720); the picture is 390 wide, centred vertically.
+// Most of this spec works on the whole desktop (`whole: true`, as after
+// `fitToView()`): fit = min(390/1280, 844/720); the picture is 390 wide,
+// centred vertically.
 const SCALE = Math.min(BOUNDS.width / DESKTOP.width, BOUNDS.height / DESKTOP.height);
 const ORIGIN_Y = (BOUNDS.height - DESKTOP.height * SCALE) / 2;
 
 type Touch = { locationX: number; locationY: number; timestamp?: number };
 function touch(x: number, y: number, timestamp?: number): Touch { return { locationX: x, locationY: y, timestamp }; }
 
-async function openView(options: { gestures?: 'desktop' | 'browser' | 'device'; accessibilityLabel?: string; native?: boolean } = {}) {
+async function openView(options: { gestures?: 'desktop' | 'browser' | 'device'; accessibilityLabel?: string; native?: boolean; whole?: boolean; desktop?: { width: number; height: number }; bounds?: { width: number; height: number }; insets?: { top: number; left: number; bottom: number; right: number } } = {}) {
     nativeInput.installed = options.native === true;
     const { desktopInputEnabled, nativeDesklink } = await import('./native.ios');
     const { DesktopView } = await import('./DesktopView.ios');
@@ -79,7 +82,7 @@ async function openView(options: { gestures?: 'desktop' | 'browser' | 'device'; 
     let renderer: TestRenderer.ReactTestRenderer | null = null;
     TestRenderer.act(() => {
         renderer = TestRenderer.create(
-            <DesktopView sessionId={id} gestures={options.gestures} accessibilityLabel={options.accessibilityLabel} />,
+            <DesktopView sessionId={id} gestures={options.gestures} accessibilityLabel={options.accessibilityLabel} insets={options.insets} />,
         );
     });
     const outer = () => renderer!.root.findByType(options.native ? 'DesklinkInput' as never : 'View').props as {
@@ -90,10 +93,11 @@ async function openView(options: { gestures?: 'desktop' | 'browser' | 'device'; 
         [key: string]: unknown;
     };
     TestRenderer.act(() => {
-        outer().onLayout({ nativeEvent: { layout: { ...BOUNDS } } });
-        nativeDesklink.setSurfaceSize(id, DESKTOP.width, DESKTOP.height);
+        outer().onLayout({ nativeEvent: { layout: { ...(options.bounds ?? BOUNDS) } } });
+        nativeDesklink.setSurfaceSize(id, (options.desktop ?? DESKTOP).width, (options.desktop ?? DESKTOP).height);
         peer.ontrack!({ track: { kind: 'video' }, streams: [] });
     });
+    if (options.whole ?? true) TestRenderer.act(() => { nativeDesklink.fitToView(id); });
     const grant = (at: Touch[]) => TestRenderer.act(() => { outer().onResponderGrant({ nativeEvent: { touches: at } }); });
     const move = (at: Touch[]) => TestRenderer.act(() => { outer().onResponderMove({ nativeEvent: { touches: at } }); });
     const release = (at: Touch[] = []) => TestRenderer.act(() => { outer().onResponderRelease({ nativeEvent: { touches: at } }); });
@@ -130,6 +134,124 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('DesktopView.ios parity with DesktopView.kt', () => {
+    it('fits portrait width, then zooms and pans without distorting the desktop', async () => {
+        const { sent, rtcStyle, grant, move, release } = await openView({ whole: false });
+        expect(rtcStyle()).toMatchObject({ left: 0, top: 0, width: BOUNDS.width });
+        expect(rtcStyle().height).toBeCloseTo(DESKTOP.height * SCALE, 5);
+        grant([touch(100, 100)]);
+        move([touch(100, 100), touch(140, 100)]);
+        move([touch(80, 100), touch(160, 100)]);
+        release();
+        const before = rtcStyle();
+        expect(before.width / before.height).toBeCloseTo(DESKTOP.width / DESKTOP.height, 5);
+        grant([touch(260, 400)]);
+        move([touch(200, 400)]);
+        release();
+        expect(sent.filter((message) => message.kind === 'pointer')).toEqual([]);
+        expect(rtcStyle().left).toBeCloseTo(before.left - 60, 5);
+        const at = rtcStyle();
+        grant([touch(100, 300)]);
+        release();
+        expect(sent.filter((message) => message.kind === 'pointer')).toMatchObject([
+            { kind: 'pointer', phase: 'down', x: Math.floor((100 - at.left) / (SCALE * 2)), y: Math.floor((300 - at.top) / (SCALE * 2)), button: 1 },
+            { kind: 'pointer', phase: 'up', x: Math.floor((100 - at.left) / (SCALE * 2)), y: Math.floor((300 - at.top) / (SCALE * 2)), button: 1 },
+        ]);
+    });
+
+    it('pans a tall portrait desktop to both vertical edges at fit-width', async () => {
+        const insets = { top: 47, left: 0, bottom: 21, right: 0 };
+        const { rtcStyle, grant, move, release } = await openView({ whole: false, insets, desktop: { width: 720, height: 1800 } });
+        expect(rtcStyle().width).toBeCloseTo(390, 5);
+        expect(rtcStyle().top).toBeCloseTo(47, 5);
+        grant([touch(200, 400)]);
+        move([touch(200, -2000)]);
+        release();
+        expect(rtcStyle().top + rtcStyle().height).toBeCloseTo(823, 5);
+        grant([touch(200, 400)]);
+        move([touch(200, 2000)]);
+        release();
+        expect(rtcStyle().top).toBeCloseTo(47, 5);
+    });
+
+    it('starts again at the top-left corner after a rotation, and keeps the whole desktop when the same size is reported again', async () => {
+        const { id, nativeDesklink, outer, rtcStyle, grant, move, release } = await openView({ whole: false });
+        grant([touch(260, 400)]);
+        move([touch(200, 400)]);
+        release();
+        expect(rtcStyle().left).toBeCloseTo(0, 5);
+        const layout = (bounds: { width: number; height: number }) => TestRenderer.act(() => {
+            (outer().onLayout as (event: unknown) => void)({ nativeEvent: { layout: bounds } });
+        });
+        layout({ width: BOUNDS.height, height: BOUNDS.width });
+        // Landscape crops the bottom, never the top.
+        expect(rtcStyle().top).toBeCloseTo(0, 5);
+        expect(rtcStyle().left).toBeCloseTo(0, 5);
+        layout(BOUNDS);
+        expect(rtcStyle().left).toBeCloseTo(0, 5);
+        TestRenderer.act(() => { nativeDesklink.fitToView(id); });
+        TestRenderer.act(() => { nativeDesklink.setSurfaceSize(id, DESKTOP.width, DESKTOP.height); });
+        expect(rtcStyle().width).toBeCloseTo(BOUNDS.width, 5);
+    });
+
+    it('resets both default offsets on equal-scale layout and inset changes', async () => {
+        const { DesktopView } = await import('./DesktopView.ios');
+        const insets = { top: 0, left: 47, bottom: 21, right: 47 };
+        const { id, renderer, outer, rtcStyle, grant, move, release } = await openView({ whole: false, bounds: { width: 844, height: 390 }, insets });
+        const pan = () => {
+            grant([touch(400, 200)]);
+            move([touch(340, 140)]);
+            release();
+        };
+        const width = rtcStyle().width;
+        pan();
+        expect(rtcStyle().left).toBeLessThan(47);
+        expect(rtcStyle().top).toBeLessThan(0);
+        TestRenderer.act(() => { outer().onLayout({ nativeEvent: { layout: { width: 844, height: 400 } } }); });
+        expect(rtcStyle()).toMatchObject({ left: 47, top: 0, width });
+        pan();
+        TestRenderer.act(() => { renderer.update(<DesktopView sessionId={id} insets={{ top: 10, left: 50, right: 44, bottom: 21 }} />); });
+        expect(rtcStyle()).toMatchObject({ left: 50, top: 10, width });
+    });
+
+    it('starts and pans inside the insets while the picture still reaches under them', async () => {
+        const landscape = { width: 844, height: 390 };
+        const insets = { top: 0, left: 47, bottom: 21, right: 47 };
+        const { rtcStyle, grant, move, release } = await openView({ whole: false, bounds: landscape, insets });
+        const fill = Math.max(landscape.width / DESKTOP.width, landscape.height / DESKTOP.height);
+        expect(rtcStyle().width).toBeCloseTo(DESKTOP.width * fill, 5);
+        // The desktop's top-left corner shows just inside the cutout's side.
+        expect(rtcStyle().left).toBeCloseTo(47, 5);
+        expect(rtcStyle().top).toBeCloseTo(0, 5);
+        // Panned all the way, the desktop's right and bottom edges reach the
+        // uncovered part's edges, not the screen's.
+        grant([touch(600, 300)]);
+        move([touch(-2000, -2000)]);
+        release();
+        expect(rtcStyle().left + rtcStyle().width).toBeCloseTo(landscape.width - 47, 5);
+        expect(rtcStyle().top + rtcStyle().height).toBeCloseTo(landscape.height - 21, 5);
+        for (const x of [-2000, 2000]) for (const y of [-2000, 2000]) {
+            grant([touch(400, 200)]);
+            move([touch(x, y)]);
+            release();
+            const box = rtcStyle();
+            const width = Math.min(landscape.width, box.left + box.width) - Math.max(0, box.left);
+            const height = Math.min(landscape.height, box.top + box.height) - Math.max(0, box.top);
+            expect(1 - width * height / (landscape.width * landscape.height)).toBeLessThan(0.15);
+            expect(box.width / box.height).toBeCloseTo(DESKTOP.width / DESKTOP.height, 5);
+        }
+
+    });
+
+    it('leaves no black bars on a landscape phone, and fitToView shows the whole desktop', async () => {
+        const landscape = { width: 844, height: 390 };
+        const { id, nativeDesklink, rtcStyle } = await openView({ whole: false, bounds: landscape });
+        expect(rtcStyle().width).toBeCloseTo(landscape.width, 5);
+        expect(rtcStyle().left).toBeCloseTo(0, 5);
+        TestRenderer.act(() => { nativeDesklink.fitToView(id); });
+        expect(rtcStyle().height).toBeCloseTo(landscape.height, 5);
+        expect(rtcStyle().width).toBeCloseTo(DESKTOP.width * landscape.height / DESKTOP.height, 5);
+    });
+
     it('ignores a one-finger drag that starts in the letterbox', async () => {
         const { sent, grant, move, release } = await openView();
         // y = 10 is above the fitted picture (it starts at ORIGIN_Y).
@@ -148,7 +270,8 @@ describe('DesktopView.ios parity with DesktopView.kt', () => {
         const { rtcStyle, grant, move } = await openView();
         grant([touch(100, 400)]);
         move([touch(100, 400), touch(140, 400)]);
-        move([touch(80, 400), touch(160, 400)]);
+        // A finger's pinch spreads a few points per move, each step under the slop.
+        for (let step = 2; step <= 20; step += 2) move([touch(100 - step, 400), touch(140 + step, 400)]);
         expect(rtcStyle().width).toBeCloseTo(DESKTOP.width * SCALE * 2, 0);
         // The desktop point under the focus (120, 400) stays under it.
         expect(rtcStyle().left).toBeCloseTo(-120, 0);
@@ -360,5 +483,30 @@ describe('DesktopView.ios hardware keyboard and pointer', () => {
         expect(wheels[0].dy).toBeCloseTo(30 / SCALE / 120, 5);
         // What stayed below the send threshold goes out when the scroll ends.
         expect(wheels[1].dy).toBeCloseTo(0.01 / SCALE / 120, 5);
+    });
+});
+
+
+describe('iOS proof picture bounds', () => {
+    it('measures contiguous paper without including the disconnected home indicator', () => {
+        for (const density of [1, 3]) {
+            const png = { width: 390 * density, height: 844 * density, data: new Uint8Array(390 * 844 * density * density * 4) };
+            const paper = (left: number, top: number, right: number, bottom: number) => {
+                for (let y = top * density; y < bottom * density; y++) for (let x = left * density; x < right * density; x++) {
+                    const i = (y * png.width + x) * 4;
+                    png.data.set([251, 250, 247, 255], i);
+                }
+            };
+            paper(0, 47, 390, 266);
+            paper(125, 825, 265, 830);
+            expect(pictureBox(png, 390)).toEqual({ top: 47, left: 0, bottom: 266 });
+            png.data.fill(0);
+            paper(0, 203, 390, 642);
+            paper(125, 825, 265, 830);
+            expect(pictureBox(png, 390)).toEqual({ top: 203, left: 0, bottom: 642 });
+            png.data.fill(0);
+            paper(47, 0, 390, 844);
+            expect(pictureBox(png, 390)).toEqual({ top: 0, left: 47, bottom: 844 });
+        }
     });
 });

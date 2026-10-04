@@ -16,6 +16,8 @@ const MIN_WHEEL_STEP = 0.05;
 const MAX_WHEEL_STEP = 10;
 /** Desktop pixels one wheel detent stands for. */
 const PIXELS_PER_DETENT = 120;
+/** The closest the picture can be zoomed: view points per desktop pixel. */
+const MAX_SCALE = 2.5;
 /** Where the cursor mark's tip sits inside the mark, in points. */
 const CURSOR_HOTSPOT = 3;
 
@@ -62,13 +64,18 @@ function loadRTCView(): React.ComponentType<Record<string, unknown>> | null {
     }
 }
 
-export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0, gestures = 'desktop' }: DesktopViewProps) {
+/** An offset that the edge clamp turns into the desktop's top-left corner. */
+const TOP_LEFT: Point = { x: Infinity, y: Infinity };
+
+export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0, insets, gestures = 'desktop' }: DesktopViewProps) {
     const [revision, refresh] = React.useReducer((n: number) => n + 1, 0);
     const [bounds, setBounds] = React.useState({ width: 0, height: 0 });
     const [size, setSize] = React.useState(() => getDesktopSize(sessionId) ?? { width: 0, height: 0 });
     const [keyboardHeight, setKeyboardHeight] = React.useState(0);
-    const [zoom, setZoom] = React.useState(1);
-    const [offset, setOffset] = React.useState<Point>({ x: 0, y: 0 });
+    /** Zoom over the whole-desktop fit; null fills the view, the default. */
+    const [zoom, setZoom] = React.useState<number | null>(null);
+    /** From the middle of the uncovered part of the view; clamped to the picture's edges when shown. */
+    const [offset, setOffset] = React.useState<Point>(TOP_LEFT);
     const [cursor, setCursor] = React.useState<Point | null>(null);
     const [keyboardText, setKeyboardText] = React.useState('');
     const keyboardTextRef = React.useRef('');
@@ -123,13 +130,28 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         });
     }, [sessionId]);
 
-    const visibleHeight = Math.max(1, bounds.height - (keyboardHeight ? keyboardHeight + keyboardClearance : 0));
-    const fit = size.width && size.height ? Math.min(bounds.width / size.width, visibleHeight / size.height) : 1;
-    const scale = fit * zoom;
+    // The uncovered part of the view: inside what the system covers, and above the keyboard.
+    const top = insets?.top ?? 0;
+    const left = insets?.left ?? 0;
+    const safeWidth = Math.max(1, bounds.width - left - (insets?.right ?? 0));
+    const safeHeight = Math.max(1, bounds.height - top - (insets?.bottom ?? 0));
+    const visibleBottom = Math.min(top + safeHeight, bounds.height - (keyboardHeight ? keyboardHeight + keyboardClearance : 0));
+    const visibleHeight = Math.max(1, visibleBottom - top);
+    const fit = size.width && size.height ? Math.min(safeWidth / size.width, visibleHeight / size.height) : 1;
+    const defaultScale = bounds.width <= bounds.height
+        ? safeWidth / size.width
+        : Math.max(bounds.width / size.width, (bounds.height - top) / size.height);
+    const fill = size.width && size.height ? Math.max(fit, Math.min(MAX_SCALE, defaultScale)) : 1;
+    const scale = zoom === null ? fill : fit * zoom;
+    /** The zoom over the whole-desktop fit the picture is at now. */
+    const zoomed = fit > 0 ? scale / fit : 1;
+    // A new desktop size fills the view again, and a new fill (a rotation)
+    // starts again, at the desktop's top-left corner, where a page's first words are.
+    React.useEffect(() => { setZoom(null); setOffset(TOP_LEFT); }, [size.width, size.height]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    React.useEffect(() => { if (zoom === null) setOffset(TOP_LEFT); }, [fill, bounds.width, bounds.height, top, left, insets?.right, insets?.bottom]);
     const pictureWidth = size.width * scale;
     const pictureHeight = size.height * scale;
-    const originX = (bounds.width - pictureWidth) / 2 + offset.x;
-    const originY = (visibleHeight - pictureHeight) / 2 + offset.y;
     const point = (x: number, y: number, clamp = false): Point | null => {
         if (!size.width || !size.height || !scale) return null;
         const px = Math.floor((x - originX) / scale);
@@ -139,10 +161,14 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
     };
     /** Hold the offset to the picture's edges at a zoom level. */
     const clampOffset = (x: number, y: number, atScale: number = scale): Point => {
-        const maxX = Math.max(0, (size.width * atScale - bounds.width) / 2);
+        const maxX = Math.max(0, (size.width * atScale - safeWidth) / 2);
         const maxY = Math.max(0, (size.height * atScale - visibleHeight) / 2);
         return { x: Math.max(-maxX, Math.min(maxX, x)), y: Math.max(-maxY, Math.min(maxY, y)) };
     };
+    // A rotation or the keyboard can leave the offset past the picture's new edges.
+    const shown = clampOffset(offset.x, offset.y);
+    const originX = left + (safeWidth - pictureWidth) / 2 + shown.x;
+    const originY = top + (zoom === null && pictureHeight <= visibleHeight ? 0 : (visibleHeight - pictureHeight) / 2) + shown.y;
     const send = (control: Record<string, unknown>) => { if (sessionId) nativeDesklink.sendControl(sessionId, JSON.stringify(control)); };
     const flushWheel = (force: boolean) => {
         const { x, y } = wheel.current;
@@ -186,7 +212,7 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         // second one, and one finger alone is ignored. A zoomed picture pans
         // from anywhere, clamped to its edges.
         const onPicture = point(at.x, at.y) !== null;
-        gesture.current = { stamp, start: at, last: at, time: Date.now(), mode: onPicture || zoom > 1 ? 'pending' : 'letterbox', span: 0, focus: at };
+        gesture.current = { stamp, start: at, last: at, time: Date.now(), mode: onPicture || zoomed > 1.001 ? 'pending' : 'letterbox', span: 0, focus: at };
         stopTimer();
         longPress.current = setTimeout(() => {
             if (gesture.current?.mode === 'pending' && point(at.x, at.y)) gesture.current.mode = 'armed';
@@ -223,16 +249,16 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
                 }
             }
             if (g.mode === 'pinch' && g.span) {
-                const maxZoom = fit > 0 ? 2.5 / fit : 2.5;
-                const next = Math.max(1, Math.min(maxZoom, zoom * distance / g.span));
-                const applied = zoom > 0 ? next / zoom : 1;
+                const maxZoom = fit > 0 ? Math.max(1, MAX_SCALE / fit) : MAX_SCALE;
+                const next = Math.max(1, Math.min(maxZoom, zoomed * distance / g.span));
+                const applied = zoomed > 0 ? next / zoomed : 1;
                 // The desktop point under the focus stays under it while the
                 // offset follows the fingers, then everything clamps back.
                 const nextScale = fit * next;
-                const ox = (bounds.width - size.width * scale) / 2 + offset.x;
-                const oy = (visibleHeight - size.height * scale) / 2 + offset.y;
-                const baseX = (bounds.width - size.width * nextScale) / 2;
-                const baseY = (visibleHeight - size.height * nextScale) / 2;
+                const ox = originX;
+                const oy = originY;
+                const baseX = left + (safeWidth - size.width * nextScale) / 2;
+                const baseY = top + (visibleHeight - size.height * nextScale) / 2;
                 setZoom(next);
                 setOffset(clampOffset(
                     center.x - (center.x - ox) * applied - baseX + (center.x - g.focus.x),
@@ -245,7 +271,10 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
                 wheel.current.y += -(center.y - g.focus.y) / scale / PIXELS_PER_DETENT;
                 flushWheel(false);
             }
-            g.span = distance; g.focus = center; g.last = center;
+            // Undecided, the spread is measured from where the fingers landed:
+            // a slow pinch crosses the slop over many small moves.
+            if (g.mode !== 'two') g.span = distance;
+            g.focus = center; g.last = center;
             return;
         }
         if (touches.length !== 1 || g.mode === 'spent' || g.mode === 'letterbox' || g.mode === 'two' || g.mode === 'pinch' || (g.mode === 'scroll' && gestures !== 'browser')) return;
@@ -258,7 +287,7 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
                 g.mode = 'scroll';
                 const under = point(at.x, at.y);
                 if (under) pointer('move', under);
-            } else g.mode = zoom > 1 ? 'pan' : 'hover';
+            } else g.mode = zoom === null || zoomed > 1.001 ? 'pan' : 'hover';
         }
         if (g.mode === 'scroll') {
             // Content follows the finger: moving it up scrolls the page down.
@@ -271,7 +300,7 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         if (g.mode === 'pan') {
             const dx = at.x - g.last.x;
             const dy = at.y - g.last.y;
-            setOffset((current) => clampOffset(current.x + dx, current.y + dy));
+            setOffset((current) => { const from = clampOffset(current.x, current.y); return clampOffset(from.x + dx, from.y + dy); });
         }
         if (g.mode === 'armed' && Math.hypot(at.x - g.start.x, at.y - g.start.y) > 8) {
             const from = point(g.start.x, g.start.y, true);

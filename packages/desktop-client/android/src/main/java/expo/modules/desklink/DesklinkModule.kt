@@ -126,6 +126,14 @@ class DesklinkModule : Module() {
         view.setKeyboardClearance(clearance ?: 0f)
       }
 
+      Prop("insets") { view: DesktopView, insets: List<Double>? ->
+        val edges = insets.orEmpty()
+        view.setInsets(
+          edges.getOrNull(0)?.toFloat() ?: 0f, edges.getOrNull(1)?.toFloat() ?: 0f,
+          edges.getOrNull(2)?.toFloat() ?: 0f, edges.getOrNull(3)?.toFloat() ?: 0f,
+        )
+      }
+
       Prop("gestures") { view: DesktopView, gestures: String? ->
         view.setGestures(gestures ?: "desktop")
       }

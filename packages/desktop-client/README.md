@@ -127,15 +127,23 @@ heat and battery.
   so the iOS receiver asks for H.264 by putting it first in the offer it
   applies; a host with an H.264 encoder then sends H.264, and one without sends
   VP9. Neither platform links a second WebRTC stack.
-- **A sharp, zoomable picture.** The desktop fits the view by default; a pinch
-  zooms up to 2.5 view pixels per desktop pixel and one finger moves around the
-  zoomed desktop. On Android the decoded frame is copied once into the view's
+- **A sharp, zoomable picture.** In portrait the default is fit-width;
+  in landscape it covers the screen below the status bar (as far as the 2.5
+  zoom limit allows). The picture stays undistorted. One finger pans cropped
+  content; pinch to zoom before panning when the whole desktop already fits.
+  Pass the screen's safe-area `insets` (for example from
+  `react-native-safe-area-context`) so the default starts below the status bar
+  and beside a camera cutout. Panning brings each desktop edge inside the safe
+  area, while landscape coverage extends beneath the cutout and home indicator
+  to limit black bars. A pinch zooms up to 2.5 view
+  pixels per desktop pixel, or out to the whole desktop. On Android the decoded frame is copied once into the view's
   own texture and drawn with a multi-tap filter when it is shown smaller than
   its size, so a fitted 4K desktop does not alias and a pinch redraws at once.
   iOS uses `RTCView`'s native renderer. That renderer draws a frame only when
   its timestamp is new, and a receiver honouring the engine's zero playout delay
   stamps every frame alike, so the iOS peer declines that hint and keeps the
-  receiver's usual jitter buffer. `fitToView()` shows the whole desktop again.
+  receiver's usual jitter buffer. `fitToView()` shows the whole desktop; a new
+  desktop size or a rotation reapplies the orientation default from the top-left.
 - **A pointer a phone can see.** Once a touch has sent the desktop's pointer
   somewhere, the view draws an outlined arrow there at a readable size, over a
   picture whose own cursor is a few pixels tall or not captured at all. On iOS,
@@ -148,7 +156,7 @@ heat and battery.
   (`keyboardClearance`). Android follows the keyboard animation and keeps the
   pointer in sight; iOS follows the keyboard show/hide bounds.
 - **Contained geometry.** Touch maps through the picture's actual placement.
-  A one-finger drag starting in the letterbox does not move the pointer; a
+  On the whole desktop, a one-finger drag starting in the letterbox does not move the pointer; a
   second finger on the picture can still start a pinch or scroll. A drag that
   leaves the picture is held to its edge rather than released somewhere unseen.
 - **The gestures remote-desktop viewers settled on,** with a slop threshold:

@@ -5,6 +5,9 @@ import { StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
 import { desktopAvailable } from './native';
 import type { GestureProfile } from './protocol';
 
+/** Room at each edge of the view, in points; a missing edge is 0. */
+export type EdgeInsets = { top?: number; left?: number; bottom?: number; right?: number };
+
 export interface DesktopViewProps {
     /** The session handle from `useDesktopSession`. */
     sessionId: string | null;
@@ -20,6 +23,14 @@ export interface DesktopViewProps {
      */
     keyboardClearance?: number;
     /**
+     * What the system covers at each edge of the view — status and navigation
+     * bars, a camera cutout, the home indicator — in points, as a safe-area
+     * library reports it. The picture still reaches under these edges, but it
+     * starts and pans inside them: its top-left corner first shows just inside,
+     * and every edge of the desktop can be brought into the uncovered part.
+     */
+    insets?: EdgeInsets;
+    /**
      * Which touch meaning the surface uses: a desktop pointer, a browser page
      * (one finger scrolls), or a device screen (one finger presses and drags).
      */
@@ -32,6 +43,8 @@ interface NativeSurfaceProps {
     accessible?: boolean;
     accessibilityLabel?: string;
     keyboardClearance?: number;
+    /** `insets` as top, left, bottom, right. */
+    insets?: number[];
     gestures?: GestureProfile;
 }
 
@@ -49,7 +62,7 @@ const NativeSurface: React.ComponentType<NativeSurfaceProps> | null = desktopAva
  * belong to the application, which mounts this wherever it wants the desktop
  * to appear.
  */
-export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0, gestures = 'desktop' }: DesktopViewProps) {
+export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0, insets, gestures = 'desktop' }: DesktopViewProps) {
     if (NativeSurface == null || sessionId == null) {
         return (
             <View style={[styles.surface, style]}>
@@ -57,7 +70,8 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
             </View>
         );
     }
-    return <NativeSurface style={[styles.surface, style]} sessionId={sessionId} accessible={accessibilityLabel !== undefined} accessibilityLabel={accessibilityLabel} keyboardClearance={keyboardClearance} gestures={gestures} />;
+    return <NativeSurface style={[styles.surface, style]} sessionId={sessionId} accessible={accessibilityLabel !== undefined} accessibilityLabel={accessibilityLabel} keyboardClearance={keyboardClearance}
+        insets={[insets?.top ?? 0, insets?.left ?? 0, insets?.bottom ?? 0, insets?.right ?? 0]} gestures={gestures} />;
 }
 
 const styles = StyleSheet.create({

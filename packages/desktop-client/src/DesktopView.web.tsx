@@ -3,6 +3,9 @@ import { StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
 
 import type { GestureProfile } from './protocol';
 
+/** Room at each edge of the view, in points; a missing edge is 0. */
+export type EdgeInsets = { top?: number; left?: number; bottom?: number; right?: number };
+
 export interface DesktopViewProps {
     /** The session handle from `useDesktopSession`. */
     sessionId: string | null;
@@ -16,6 +19,15 @@ export interface DesktopViewProps {
      * controls, in points. While the keyboard is up the picture sits above both.
      */
     keyboardClearance?: number;
+    /**
+     * What the system covers at each edge of the view — status and navigation
+     * bars, a camera cutout, the home indicator — in points, as a safe-area
+     * library reports it. The picture still reaches under these edges, but it
+     * starts and pans inside them: its top-left corner first shows just inside,
+     * and every edge of the desktop can be brought into the uncovered part.
+     */
+    /** The browser surface fits its own box and ignores this. */
+    insets?: EdgeInsets;
     /**
      * Which touch meaning the surface uses: a desktop pointer, a browser page
      * (one finger scrolls), or a device screen (one finger presses and drags).
