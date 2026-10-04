@@ -270,7 +270,8 @@ describe('DesktopView.ios parity with DesktopView.kt', () => {
         const { rtcStyle, grant, move } = await openView();
         grant([touch(100, 400)]);
         move([touch(100, 400), touch(140, 400)]);
-        move([touch(80, 400), touch(160, 400)]);
+        // A finger's pinch spreads a few points per move, each step under the slop.
+        for (let step = 2; step <= 20; step += 2) move([touch(100 - step, 400), touch(140 + step, 400)]);
         expect(rtcStyle().width).toBeCloseTo(DESKTOP.width * SCALE * 2, 0);
         // The desktop point under the focus (120, 400) stays under it.
         expect(rtcStyle().left).toBeCloseTo(-120, 0);

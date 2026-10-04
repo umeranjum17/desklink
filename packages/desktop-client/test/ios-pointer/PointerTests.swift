@@ -47,7 +47,7 @@ final class PointerTests: XCTestCase {
             path.move(to: CGPoint(x: step.x + direction * span * factor / 2, y: step.y), at: 0.1 + Double(index) * 0.05)
           }
           path.lift(at: 0.7)
-          record.addPointerEventPath(path)
+          record.add(path)
         }
         try record.synthesize()
       case "landscape": XCUIDevice.shared.orientation = .landscapeLeft

@@ -271,7 +271,10 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
                 wheel.current.y += -(center.y - g.focus.y) / scale / PIXELS_PER_DETENT;
                 flushWheel(false);
             }
-            g.span = distance; g.focus = center; g.last = center;
+            // Undecided, the spread is measured from where the fingers landed:
+            // a slow pinch crosses the slop over many small moves.
+            if (g.mode !== 'two') g.span = distance;
+            g.focus = center; g.last = center;
             return;
         }
         if (touches.length !== 1 || g.mode === 'spent' || g.mode === 'letterbox' || g.mode === 'two' || g.mode === 'pinch' || (g.mode === 'scroll' && gestures !== 'browser')) return;
