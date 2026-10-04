@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.5.0
+
+Tester build of `@desklink/host`, `@desklink/host-linux-x64-gnu`,
+`@desklink/host-darwin-arm64`, `@desklink/react-native` and `@desklink/axi`.
+Everything published here already existed in 0.4.0 except the receiver changes
+below; the protocol is unchanged at version 3.
+
+### New
+
+- **The desktop fills the phone screen.** In portrait the picture fits the width;
+  in landscape it covers the screen below the status bar, within the 2.5x zoom
+  limit, and stays undistorted. Pass the screen's safe-area `insets` (for
+  example from `react-native-safe-area-context`) so the default starts below a
+  status bar and beside a camera cutout, panning brings each desktop edge inside
+  the safe area, and landscape coverage extends beneath the cutout and home
+  indicator to limit black bars. A new desktop size or a rotation reapplies the
+  orientation default from the top-left. `fitToView()` still shows the whole
+  desktop. [PR70](https://github.com/umeranjum17/desklink/pull/70)
+- **Android connection links and receiver diagnostics.** The Android receiver
+  accepts the connection link it is launched with, and
+  `desktop.getStats()` returns receiver-side video and codec counters (packets,
+  loss, frames decoded/dropped, fps, resolution, decoder implementation and
+  timing) for evidence about the picture. The snapshot deliberately excludes ICE
+  addresses and control content. [PR71](https://github.com/umeranjum17/desklink/pull/71)
+
+### Fixed
+
+- The default example no longer shows developer text such as
+  `live presented WxH`, `Desklink iOS QA` or raw channel JSON; the receiver's
+  status line stays plain user-facing copy. [PR70](https://github.com/umeranjum17/desklink/pull/70)
+- Reconnect flows accept an engine override through `DESKLINK_ENGINE`, so a
+  receiver test can use a locally built engine instead of an installed one.
+  [PR69](https://github.com/umeranjum17/desklink/pull/69)
+
+### Known issues and limits
+
+- Protocol 3 is unchanged, and 0.5.0 AXI requires its matching 0.5.0 engine.
+- The screen-fill default is qualified on the Android test phone. Physical iOS
+  picture fill, iOS simulator pointer and interactive macOS/Windows capture and
+  input are not established by this release. Wayland portal-producer journeys,
+  Wayland clipboard and a Windows or Linux arm64/musl native package remain
+  unfinished.
+- `getStats()` reports receiver-side counters only. It is not a latency
+  measurement, and it does not make a second WebRTC stack: neither platform
+  links one.
+- macOS arm64 remains an unsigned CLI, default-enabled **preview**, with Screen
+  Recording and Accessibility belonging to the app that launches it.
+
+### Install
+
+```sh
+npm install @desklink/host@0.5.0
+npm install @desklink/react-native@0.5.0
+npm install --global @desklink/axi@0.5.0
+```
+
+The host selects its exact-version optional native package automatically.
+
 ## 0.4.0
 
 Joint release of `@desklink/host`, `@desklink/host-linux-x64-gnu`,
