@@ -120,8 +120,8 @@ text[1 of 1]{ref,text,x,y}:
   "@26.21","Notes on remote desktops today",36,612
 help[1]:
   desklink-axi click @26.<n>
-$ desklink-axi look --region 32,600,880,110 --out /home/umer/lab-tmp/dl-pm-12/showcase.png
-image: /home/umer/lab-tmp/dl-pm-12/showcase.png
+$ desklink-axi look --region 32,600,880,110 --out showcase.png
+image: showcase.png
 region: 32,600,880,110 cost: ~129 tokens to view
 ```
 

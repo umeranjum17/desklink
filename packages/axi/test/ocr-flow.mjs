@@ -64,7 +64,8 @@ export async function ocrFlow({ run, env, dir, scale, verifyXvfb, remember }) {
       const found = await run('screen','--query',label);
       queries += `$ desklink-axi screen --query ${JSON.stringify(label)}\n${found}\n`;
       writeFileSync(join(evidence,`queries-${scale}.txt`),queries);
-      assert(!found.includes('0 items match'),found);
+      const foundItems = found.split('\n').filter(l=>/^  "@/.test(l)).map(l=>JSON.parse(`[${l.trim()}]`));
+      assert(foundItems.some(row=>row[1].includes(label)),found);
     }
     if (!showcaseOnly) writeFileSync(join(evidence,`query-result-${scale}.txt`),'PASS: 20/20 visible labels found\n');
     if (scale === 1) {
@@ -133,7 +134,7 @@ export async function ocrFlow({ run, env, dir, scale, verifyXvfb, remember }) {
     assert(barItems.some(row=>row[1].includes('a|b')),barQuery);
     const visible = await run('screen','--full');
     const visibleItems = visible.split('\n').filter(l=>/^  "@/.test(l)).map(l=>JSON.parse(`[${l.trim()}]`));
-    assert(visibleItems.every(row=>row[1] !== '|'),visible);
+    assert(visibleItems.every(row=>!row[1].endsWith('|')),visible);
     await run('stop');
   } finally { browser.kill('SIGTERM'); keeper.kill('SIGTERM'); }
 }
