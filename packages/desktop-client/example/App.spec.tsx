@@ -23,6 +23,7 @@ let nativeSessions = 0;
 
 vi.mock('react-native', () => ({
     AppState: { addEventListener: () => ({ remove: () => undefined }) },
+    Linking: { getInitialURL: async () => null, addEventListener: () => ({ remove: () => undefined }) },
     Platform: { OS: 'android' },
     Settings: { get: (key: string) => (key === 'desklinkUrl' ? BRIDGE_URL : undefined) },
     StatusBar: 'StatusBar',
