@@ -13,6 +13,8 @@
 // may never send one, so the revocation alone must drive the reopen. Last, a session
 // opened with a short lease must end when the lease expires, and stay ended.
 // Everything it starts is task-owned and reaped by recorded PID.
+// Needs a built engine: set DESKLINK_AXI_ENGINE to its binary path, or use
+// packages/desktop-host/engine/target/debug/desklink-host in this worktree.
 // NOTE: needs TMPDIR pointing at a volume with free quota (/tmp may be full).
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
