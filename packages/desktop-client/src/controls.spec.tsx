@@ -129,7 +129,7 @@ describe('ClipboardConfirmation', () => {
         const place = tree.toJSON() as TestRenderer.ReactTestRendererJSON;
         expect(place.props.pointerEvents).toBe('none');
         expect(flatten(place.props.style).position).toBeUndefined();
-        expect(JSON.stringify(place)).toContain('Sent to desktop · “hello world” · 11 B');
+        expect(JSON.stringify(place)).toContain('Sent to desktop · “hello world”');
 
         act(() => { vi.advanceTimersByTime(CLIPBOARD_CONFIRMATION_MS - 1); });
         expect(tree.toJSON()).not.toBeNull();
@@ -141,10 +141,10 @@ describe('ClipboardConfirmation', () => {
         expect(tree.toJSON()).not.toBeNull();
     });
 
-    it('describes where the text went, how it starts and how big it is', () => {
-        expect(describeTransfer({ id: 1, direction: 'to-phone', text: 'a\n  b', truncated: false })).toBe('Copied to phone · “a b” · 5 B');
-        expect(describeTransfer({ id: 1, direction: 'to-phone', text: 'x'.repeat(2048), truncated: true })).toBe(`Copied to phone · “${'x'.repeat(24)}…” · 2.0 KB+`);
-        expect(describeTransfer({ id: 1, direction: 'to-desktop', text: ' ', truncated: false })).toBe('Sent to desktop · 1 B');
+    it('describes where the text went and how it starts, with no byte count', () => {
+        expect(describeTransfer({ id: 1, direction: 'to-phone', text: 'a\n  b', truncated: false })).toBe('Copied to phone · “a b”');
+        expect(describeTransfer({ id: 1, direction: 'to-phone', text: 'x'.repeat(2048), truncated: true })).toBe(`Copied to phone · “${'x'.repeat(24)}…”`);
+        expect(describeTransfer({ id: 1, direction: 'to-desktop', text: ' ', truncated: false })).toBe('Sent to desktop');
     });
 
     it('reads at 4.5:1 or better over a white or a black desktop', () => {

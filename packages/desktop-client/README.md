@@ -256,7 +256,7 @@ heat and battery.
   records completion only after the desktop acknowledges the write.
   `clipboard` is the last transfer that completed, and
   `<ClipboardConfirmation transfer={desktop.clipboard} />` confirms each one
-  with a backed pill — where it went, the start of the text and its size —
+  with a backed pill — where it went and the start of the text —
   that ignores touches and leaves after 1.5 s. Place it in a reserved area
   outside `DesktopView`, keeping that area present when the pill is dismissed.
 
