@@ -1,0 +1,38 @@
+# no-mistakes repository config for desklink.
+#
+# The Test step's live-validation runbook is the repository verification skill
+# (merged with the executable desktop verification skill). Like every
+# test.instructions value it is honored only from the trusted default-branch
+# copy of this file, so it takes effect once this change reaches the default
+# branch. CI stays defined by .github/workflows/*.yml; nothing here regenerates
+# or overrides it.
+test:
+  instructions: |
+    Live validation runs this repository's verification skill, not ad-hoc
+    commands. First read .agents/skills/verify-desklink/SKILL.md and its
+    feature map .agents/skills/verify-desklink/features/README.md; the skill
+    owns Launch, Doctor, Drive, Evidence and Cleanup, and every pass claim must
+    name the feature-map journey it actually exercised.
+
+    Proof is the executable helper driving the real user journey, with ambient
+    desktop variables removed, into a new evidence directory that is never
+    reused and lives outside the worktree:
+
+      env -u DISPLAY -u WAYLAND_DISPLAY \
+        node .agents/skills/verify-desklink/prove-live-desktop.mjs "$EVIDENCE"
+
+    Exit 0 means the real locator-pointer click on #video reached the fixture
+    (independent numeric button edges), the painted marker returned in decoded
+    video pixels, a wrong-token handshake was refused without fixture change,
+    and owned teardown left zero survivors; on any failure inspect run.json and
+    stop at the first failed boundary instead of patching product code.
+    Evidence (01-before.png, 02-after.png, events.jsonl, run.json, logs) stays
+    private: never commit media, bridge tokens or evidence to the PR.
+
+    Platform limits, stated accurately: the desktop journey requires Linux with
+    Xvfb, xauth, an installed playwright-core and headless Chromium, and never
+    touches a person's display, browser profile or a shared browser; ambient
+    DISPLAY/WAYLAND_DISPLAY are refused and Chromium's XDG_RUNTIME_DIR is never
+    overridden. Keyboard/clipboard in the browser, mobile and portal surfaces
+    have no proof in the feature map: do not claim or infer them from a browser
+    click.
