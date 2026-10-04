@@ -1,6 +1,6 @@
 ---
 name: verify-desklink
-description: "Verify desklink's real browser desktop journey on an owned private Xvfb: launch the bridge, doctor the lab, click the reference client, save screenshots and fixture events, and prove cleanup. Use before declaring changes to host/client/reference-client behavior complete."
+description: "Verify desklink's real client journeys on an owned private Xvfb: launch the bridge, doctor the lab, drive the browser reference client and the phone client in every theme and form factor desklink ships, record motion where the change moves something, save screenshots, recordings and fixture events into one stable evidence folder, and prove cleanup. Use before declaring changes to host/client/reference-client behavior complete."
 ---
 
 # Verify desklink
@@ -51,11 +51,20 @@ Capabilities alone do not establish a healthy owned display.
 
 ## Drive
 
+One run covers both clients and lands in one directory:
+
 ```sh
-EVIDENCE="$HOME/lab-tmp/desklink-verify/$(date -u +%Y%m%dT%H%M%SZ)"
+EVIDENCE_ROOT="$HOME/lab-tmp/desklink-verify"
+EVIDENCE="$EVIDENCE_ROOT/runs/$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short HEAD)"
 env -u DISPLAY -u WAYLAND_DISPLAY \
-  node .agents/skills/verify-desklink/prove-live-desktop.mjs "$EVIDENCE"
+  node .agents/skills/verify-desklink/prove-live-desktop.mjs "$EVIDENCE" &&
+env -u DISPLAY -u WAYLAND_DISPLAY \
+  node .agents/skills/verify-desklink/prove-phone-form-factors.mjs "$EVIDENCE"
+ln -sfn "$EVIDENCE" "$EVIDENCE_ROOT/latest"
 ```
+
+The desktop helper runs first and creates the directory; the phone helper writes
+into the same one and refuses to overwrite its own evidence. Both must exit 0.
 
 `prove-live-desktop.mjs` is executable and uses installed Playwright with its own
 headless Chromium profile and `TMPDIR` under `~/.cache/desklink-verify/`.
@@ -70,22 +79,91 @@ black-border patch in decoded video before/after, plus trusted browser events,
 not engine self-reports. A wrong-token handshake must fail without fixture change.
 Stop at the first failed boundary; do not patch product code during verification.
 
+`prove-phone-form-factors.mjs` runs the same engine, bridge and fixture, then
+builds a page from the phone client's **own web source** (`useDesktopSession` plus
+`native.web.ts`, the exact two calls `DesktopView.web.tsx` makes) with vite, and
+drives it in Chromium at two phone viewports. It requires real decoded frames
+before it screenshots, and the fixture's own numeric button edge for the tap, so
+the phone captures are not pictures of a blank surface.
+
+## Coverage
+
+Every theme and form factor desklink ships is a named case with a capture in the
+run directory. Add a row the day a surface is added; never silently drop one.
+
+| Case | Surface | Proof | File |
+|---|---|---|---|
+| Desktop browser, dark theme | reference client, 1340×860 | real pointer click, fixture edges, marker pixels | `01-before.png`, `02-after.png` |
+| Desktop browser, light theme | reference client | measured, not asserted from a claim | `03-theme-light-emulated.png`, `run.json` → `theme` |
+| Desktop browser motion | reference client | recorded through the click | `desktop-motion.webm` |
+| Phone, portrait fit-width | `@desklink/react-native`, 390×844 | picture fills the width, letterboxed above and below | `phone-portrait.png` |
+| Phone, landscape fit | `@desklink/react-native`, 844×390 | whole desktop fitted to the short axis | `phone-landscape.png` |
+| Phone motion: tap, pinch zoom | `@desklink/react-native` | fixture button edge from the tap, picture width grows under the zoom, both recorded | `phone-motion.webm`, `phone-zoom.png` |
+
+**Light theme is not shipped, and the run proves that rather than asserting it.**
+The reference client declares `:root { color-scheme: dark }` and hard-codes its
+chrome colours; the phone client's chrome is `#000`/`#fff`. The helper reads the
+computed `color-scheme`, background and text colour under `prefers-color-scheme:
+dark` **and** `light`, and writes `theme.clientShipsLightTheme` to `run.json`.
+That boolean is `false`: the two schemes paint the same pixels, so a "light
+theme screenshot" would be the dark screenshot under another filename. When a
+light theme lands, this row becomes a real capture and that boolean turns `true`.
+
+Two more surfaces move, and neither is capturable in this harness, so neither is
+claimed: the example app's **key row** (`ModifierKeys`, drawn by
+`packages/desktop-client/example/App.tsx`) and the package's **clipboard
+confirmation pill** (`ClipboardConfirmation`) are React Native components with no
+DOM output under the RN stub. The harness mounts the client's picture surface,
+not an app screen. Prove those where the runtime is real:
+`packages/desktop-client/test/ios-flow.mjs` on a macOS simulator, or the example
+app on an emulator. Naming a case without a capture in the run directory is a
+false claim; naming it here with the reason is not.
+
+## Motion
+
+Record video for **every interaction the change under review moves**, not
+optionally. Both helpers already record their whole session, so a motion case is
+covered by keeping the run: the desktop recording spans the click and the marker
+appearing in decoded pixels; the phone recording spans the tap, the pointer
+appearing, and the pinch zoom in and back out. A change that adds or moves
+chrome in one of the surfaces this skill can drive needs no new harness — say in
+the report which recording shows it. A change in the RN-only surfaces named above
+cannot be recorded here; say that instead of attaching a recording that does not
+show the change.
+
 ## Evidence
 
-Use a **new** named output directory; existing evidence is never overwritten.
-It survives cleanup and contains:
+One stable folder holds every run and survives teardown:
 
-- `01-before.png`, `02-after.png`: complete page PNGs around the actual click;
-- `events.jsonl`: the fixture's independent pointer/button log;
-- `run.json`: source HEAD, engine/fixture/helper hashes, browser version, target
-  readback, trusted input, before/after pixel samples and owned cleanup receipt;
-- `capabilities.json`, `bridge.log`, `fixture.log`, `xvfb.log`: diagnostics.
+```
+~/lab-tmp/desklink-verify/            # stable root, never /tmp, never a lab path
+├── latest -> runs/20261004T150231Z-79693f1
+└── runs/20261004T150231Z-79693f1/
+    ├── 01-before.png  02-after.png   # desktop journey around the click
+    ├── 03-theme-light-emulated.png   # light-scheme reading of the chrome
+    ├── desktop-motion.webm           # the desktop interaction, recorded
+    ├── phone-portrait.png  phone-landscape.png  phone-zoom.png
+    ├── phone-motion.webm             # tap, pointer, pinch zoom, recorded
+    ├── events.jsonl  phone-events.jsonl   # each fixture's own pointer/button log
+    ├── run.json  phone.json          # per-helper receipts, see below
+    └── bridge.log  fixture.log  xvfb.log  phone-*.log  capabilities.json
+```
 
-Exit 0 means the entire input→desktop→returned-picture chain and teardown passed.
-Exit 1 is not partial success: inspect `run.json`. Raw URLs/logs contain temporary
-bridge tokens; keep them private. Never commit media, credentials or evidence to
-PR branches. A build, capabilities, a displayed video or a dispatched input alone
-is not the proof. Other map entries remain distinct journeys, not implied passes.
+A reviewer opens it with any file manager or browser
+(`xdg-open ~/lab-tmp/desklink-verify/latest/`, or open `desktop-motion.webm` /
+`phone-motion.webm` in a video player), then reads `run.json` and `phone.json`
+for what was actually measured. Both receipts carry the source HEAD, engine,
+fixture and helper hashes, browser version, target readbacks, trusted input,
+pixel samples and the owned cleanup receipt. Use a **new** named run directory
+each time; existing evidence is never overwritten, and `latest` only ever moves
+forward to the run that just passed.
+
+Exit 0 from both helpers means the entire input→desktop→returned-picture chain,
+both form factors and teardown passed. Exit 1 is not partial success: inspect
+`run.json` / `phone.json`. Raw URLs/logs contain temporary bridge tokens; keep
+them private. Never commit media, credentials or evidence to PR branches. A
+build, capabilities, a displayed video or a dispatched input alone is not the
+proof. Other map entries remain distinct journeys, not implied passes.
 
 ## Cleanup
 

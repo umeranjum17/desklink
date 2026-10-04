@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -88,6 +88,7 @@ try {
     assert(JSON.parse(caps.stdout).input.pointer, 'private lab pointer unavailable');
     context = await chromium.launchPersistentContext(join(scratch, 'profile'), { executablePath: browser, headless: true,
         viewport: { width: 1340, height: 860 }, env, timeout: 20000,
+        recordVideo: { dir: join(scratch, 'video'), size: { width: 1340, height: 860 } },
         args: ['--autoplay-policy=no-user-gesture-required', '--disable-backgrounding-occluded-windows'] });
     rememberTree(process.pid); page = context.pages()[0]; page.setDefaultTimeout(15000);
     result.browserVersion = context.browser()?.version();
@@ -116,12 +117,24 @@ try {
     for (let i = 0; i < 100; i++) { after = await page.evaluate(patch); if (after.every((v, j) => j % 4 === 3 || v < 30)) break; await sleep(100); }
     assert(after.every((v, i) => i % 4 === 3 || v < 30), 'fixture black marker did not return in decoded pixels');
     result.pixels = { before, after }; await page.screenshot({ path: join(out, '02-after.png'), timeout: 15000 });
+    // Theme coverage: the client's own chrome, under both schemes the browser can
+    // offer. Recorded either way, so the reviewer sees the reading, not a claim.
+    const chrome = () => page.evaluate(() => ({ declared: getComputedStyle(document.documentElement).colorScheme,
+        background: getComputedStyle(document.body).backgroundColor, color: getComputedStyle(document.body).color }));
+    await page.emulateMedia({ colorScheme: 'dark' }); const darkChrome = await chrome();
+    await page.emulateMedia({ colorScheme: 'light' }); const lightChrome = await chrome();
+    await page.screenshot({ path: join(out, '03-theme-light-emulated.png'), timeout: 15000 });
+    result.theme = { dark: darkChrome, lightEmulated: lightChrome, clientShipsLightTheme: darkChrome.background !== lightChrome.background };
+    await page.emulateMedia({ colorScheme: 'dark' });
     result.outcome = 'PASS';
 } catch (error) { result.error = String(error.stack ?? error); console.error(result.error); }
 finally {
     rememberTree(process.pid);
     const failures = [];
     if (context) try { await Promise.race([context.close(), sleep(10000).then(() => { throw Error('browser close timed out'); })]); } catch (e) { failures.push(String(e)); }
+    const videoDir = join(scratch, 'video');
+    const recording = existsSync(videoDir) ? readdirSync(videoDir).find(name => name.endsWith('.webm')) : null;
+    if (recording) try { renameSync(join(videoDir, recording), join(out, 'desktop-motion.webm')); } catch (e) { failures.push(String(e)); }
     if (bridge) bridge.kill('SIGTERM'); if (target) target.kill('SIGTERM'); await sleep(500);
     for (const signal of ['SIGTERM', 'SIGKILL']) {
         for (const [pid, started] of owned) if (pid !== xvfb?.pid && alive(pid, started)) try { process.kill(pid, signal); } catch (e) { failures.push(String(e)); }
@@ -138,5 +151,5 @@ finally {
     writeFileSync(join(out, 'run.json'), JSON.stringify(result, null, 2) + '\n');
 }
 assert.equal(result.outcome, 'PASS', `proof failed; inspect ${join(out, 'run.json')}`);
-for (const name of ['01-before.png', '02-after.png']) { const png = readFileSync(join(out, name)); assert(png.length > 1000 && png.readUInt32BE(0) === 0x89504e47, `incomplete PNG: ${name}`); }
+for (const name of ['01-before.png', '02-after.png', '03-theme-light-emulated.png']) { const png = readFileSync(join(out, name)); assert(png.length > 1000 && png.readUInt32BE(0) === 0x89504e47, `incomplete PNG: ${name}`); }
 console.log(`PASS: trusted browser click -> fixture edges -> decoded marker; evidence ${out}`);
