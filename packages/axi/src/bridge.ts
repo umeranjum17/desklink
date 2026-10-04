@@ -198,18 +198,51 @@ export async function serve(args: string[]): Promise<void> {
   };
   const ocr = async (frame: Awaited<ReturnType<typeof capture>>, box = [0,0,frame.width,frame.height]) => {
     const imagePath = join(dir, 'ocr.png');
-    await image(frame,box,imagePath);
-    const { spawnSync } = await import('node:child_process');
+    // UI glyphs at native size are often below Tesseract's useful x-height.
+    // Enlarge the captured pixels, rather than correcting recognized words.
+    const scale = 3;
+    const input = await cropBuffer(frame, box);
+    const { PNG } = await import('pngjs');
+    const enlarged = new PNG({ width: input.width * scale, height: input.height * scale });
+    for (let y = 0; y < enlarged.height; y++) {
+      const sy = Math.max(0, Math.min(input.height - 1, (y + 0.5) / scale - 0.5));
+      const top = Math.floor(sy), bottom = Math.min(input.height - 1, top + 1), fy = sy - top;
+      for (let x = 0; x < enlarged.width; x++) {
+        const sx = Math.max(0, Math.min(input.width - 1, (x + 0.5) / scale - 0.5));
+        const left = Math.floor(sx), right = Math.min(input.width - 1, left + 1), fx = sx - left;
+        const to = (y * enlarged.width + x) * 4;
+        for (let c = 0; c < 3; c++) {
+          const a = input.data[(top * input.width + left) * 4 + c]!;
+          const b = input.data[(top * input.width + right) * 4 + c]!;
+          const d = input.data[(bottom * input.width + left) * 4 + c]!;
+          const e = input.data[(bottom * input.width + right) * 4 + c]!;
+          enlarged.data[to + c] = Math.round((a * (1 - fx) + b * fx) * (1 - fy) + (d * (1 - fx) + e * fx) * fy);
+        }
+        enlarged.data[to + 3] = 255;
+      }
+    }
+    writeFileSync(imagePath, PNG.sync.write(enlarged));
     const homebrew = ['/opt/homebrew/bin/tesseract', '/usr/local/bin/tesseract'].find(existsSync);
-    const result = spawnSync(process.platform === 'darwin' && homebrew ? homebrew : 'tesseract', [imagePath, 'stdout', 'tsv'], { encoding: 'utf8' });
-    if (result.error || result.status !== 0) throw new Error('ocr-unavailable: install tesseract (brew install tesseract, sudo pacman -S tesseract or sudo apt install tesseract-ocr)');
+    // Keep receiving capture and input events while recognition is running.
+    const output = await new Promise<string>((resolve,reject) => {
+      const child = spawn(process.platform === 'darwin' && homebrew ? homebrew : 'tesseract', [imagePath, 'stdout', 'tsv'], { stdio: ['ignore','pipe','ignore'] });
+      let result = '';
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data',chunk => { result += chunk; });
+      const unavailable = () => reject(new Error('ocr-unavailable: install tesseract (brew install tesseract, sudo pacman -S tesseract or sudo apt install tesseract-ocr)'));
+      child.once('error',unavailable);
+      child.once('close',code => { if (code === 0) resolve(result); else unavailable(); });
+    });
     const lines = new Map<string, Item>();
-    for (const cols of result.stdout.split('\n').slice(1).map(line => line.split('\t'))) {
+    const rows = output.split('\n').slice(1).map(line => line.split('\t'));
+    for (const cols of rows) {
       if (cols.length < 12 || Number(cols[10]) < 0 || !cols[11]?.trim()) continue;
+      const token = cols[11]!.trim();
+      if (!token) continue;
       const key = cols.slice(1,5).join(':');
       if (!lines.has(key)) lines.set(key,{ref:`@${frame.seq}.${lines.size+1}`,text:'',x:Number(cols[6]),y:Number(cols[7]),conf:Number(cols[10]),line:key,words:[]});
       const item = lines.get(key)!;
-      const word = { text:cols[11]!.trim(),x:box[0]!+Number(cols[6]),y:box[1]!+Number(cols[7]),w:Number(cols[8]),h:Number(cols[9]) };
+      const word = { text:token,x:box[0]!+Math.floor(Number(cols[6])/scale),y:box[1]!+Math.floor(Number(cols[7])/scale),w:Math.ceil(Number(cols[8])/scale),h:Math.ceil(Number(cols[9])/scale) };
       if (!item.text) { item.x=word.x; item.y=word.y; }
       item.words.push(word); item.text += (item.text ? ' ' : '') + word.text;
     }
@@ -364,13 +397,13 @@ export async function serve(args: string[]): Promise<void> {
       const current = await capture(baseline);
       observed = undefined; // Validation must not consume the diff baseline.
       if (current.seq !== baseline) {
+        // Cropping through a widget border or a caret changes segmentation.
+        // Validate against the same full-screen context that produced the ref.
+        const currentText = await ocr(current);
         for (const ref of args.filter(arg => /^@\d+\.\d+$/.test(arg))) {
           const item = text.find(t => t.ref === ref);
           if (!item) throw new Error(`stale-ref: ${ref}; run screen --query`);
-          const x = Math.max(0,item.x-32), y = Math.max(0,item.y-32);
-          const right = Math.min(current.width,item.words.at(-1)!.x+item.words.at(-1)!.w+32);
-          const bottom = Math.min(current.height,Math.max(...item.words.map(w=>w.y+w.h))+32);
-          if (!(await ocr(current,[x,y,right-x,bottom-y])).some(t => t.text === item.text && Math.abs(t.x-item.x)<12 && Math.abs(t.y-item.y)<12)) throw new Error(`stale-ref: ${ref} moved or changed; run screen --query`);
+          if (!currentText.some(t => t.text === item.text && Math.abs(t.x-item.x)<12 && Math.abs(t.y-item.y)<12)) throw new Error(`stale-ref: ${ref} moved or changed; run screen --query`);
         }
       }
     }
@@ -581,12 +614,15 @@ export async function serve(args: string[]): Promise<void> {
       const prev = text;
       let kept = [...prev];
       const dirty: Item[] = [];
+      // Recognize complete lines in full context before selecting damage. A
+      // cropped caret or widget border must not turn unchanged words into fragments.
+      const currentText = await ocr(frame);
       for (const region of frame.damage) {
         const [rx,ry,rw,rh] = region.split(',').map(Number);
         const x=Math.max(0,rx!-32),y=Math.max(0,ry!-32);
         const right=Math.min(frame.width,rx!+rw!+32),bottom=Math.min(frame.height,ry!+rh!+32);
         kept = kept.filter(t=>!t.words.some(w=>w.x<right && w.x+w.w>x && w.y<bottom && w.y+w.h>y));
-        dirty.push(...await ocr(frame,[x,y,right-x,bottom-y]));
+        dirty.push(...currentText.filter(t=>t.words.some(w=>w.x<right && w.x+w.w>x && w.y<bottom && w.y+w.h>y)));
       }
       text = [...kept,...dirty.filter((t,i)=>!dirty.slice(0,i).some(p=>p.text===t.text && Math.abs(p.x-t.x)<12 && Math.abs(p.y-t.y)<12))]
         .map((t,i)=>({...t,ref:`@${frame.seq}.${i+1}`}));
@@ -609,7 +645,7 @@ export async function serve(args: string[]): Promise<void> {
         } else visible.push(region);
       }
       if (observed) observed.damage=visible;
-      const changed = visible.length ? `${visible.length} region since frame ${frame.previous}` : `none since frame ${frame.previous}`;
+      const changed = visible.length ? `${visible.length} region${visible.length === 1 ? '' : 's'} since frame ${frame.previous}` : `none since frame ${frame.previous}`;
       return `changed: ${changed}\nregions[${visible.length}]{ref,box}:\n${visible.map((d,i)=>`  @r${i+1},"${d}"`).join('\n')}\nappeared[${Math.min(appeared.length,20)} of ${appeared.length}]{${fields.join(',')}}:\n${appeared.slice(0,20).map(t=>`  ${fields.map(field=>JSON.stringify(field === 'w' ? t.words.at(-1)!.x+t.words.at(-1)!.w-t.x : field === 'h' ? Math.max(...t.words.map(w=>w.y+w.h))-t.y : t[field as keyof Item])).join(',')}`).join('\n')}\ngone: ${gone} text items${animating.length ? `\nanimating[${animating.length}]{box}:\n${animating.map(box=>`  "${box}"`).join('\n')}\nanimating: ${animating.join('; ')}` : ''}\nhelp[2]:\n  desklink-axi look @r1\n  desklink-axi screen --query "<words>"`; }
     return `changed: none since frame ${frame.seq} (still ${frame.still_ms}ms)\nhelp[1]:\n  desklink-axi screen --query "<words>"`;
   };

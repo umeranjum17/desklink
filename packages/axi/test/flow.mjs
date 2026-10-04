@@ -11,6 +11,7 @@ import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb 
 
 assertNoAmbientDesktop();
 const { EngineClient } = await import('@desklink/host');
+const ocrScale = process.env.DESKLINK_OCR_SCALE;
 const dir = mkdtempSync(join(tmpdir(), 'desklink-axi-flow-'));
 const enginePath = process.env.DESKLINK_AXI_ENGINE;
 assert(enginePath && existsSync(enginePath), 'set DESKLINK_AXI_ENGINE to this task’s built engine');
@@ -24,8 +25,8 @@ assert(number !== undefined, 'no unclaimed high X display');
 const display = `:${number}`;
 const evidenceScale = process.env.DESKLINK_INDICATOR_SCALE === '2' ? 2 : 1;
 const evidenceOnly = !!process.env.DESKLINK_INDICATOR_EVIDENCE_DIR;
-const width = evidenceOnly ? 1920 * evidenceScale : 1280;
-const height = evidenceOnly ? 1080 * evidenceScale : 720;
+const width = ocrScale === '1.5' ? 3840 : (evidenceOnly ? 1920 * evidenceScale : 1280);
+const height = ocrScale === '1.5' ? 2160 : (evidenceOnly ? 1080 * evidenceScale : 720);
 const noXtest = process.env.DESKLINK_AXI_NO_XTEST === '1';
 const socket = `/tmp/.X11-unix/X${number}`;
 const authority = join(dir,'Xauthority');
@@ -249,6 +250,12 @@ try {
     await run('stop');
     console.log(`private XTEST=${!noXtest}: capture, indicator, independent clipboard and all input paths passed`);
   } else {
+  if (ocrScale) {
+    const { ocrFlow } = await import('./ocr-flow.mjs');
+    await ocrFlow({ run, env, dir, scale: Number(ocrScale), verifyXvfb, remember });
+    await cleanup();
+    process.exit(0);
+  }
   const cursorEvents = [];
   client = await EngineClient.start(enginePath, ['serve'], { onEvent: event => cursorEvents.push(event) }, env);
   recordProcesses();
