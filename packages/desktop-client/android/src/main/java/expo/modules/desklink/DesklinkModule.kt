@@ -5,6 +5,7 @@ import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import expo.modules.kotlin.Promise
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -112,6 +113,12 @@ class DesklinkModule : Module() {
     }
 
     Function("isAvailable") { true }
+
+    AsyncFunction("getStats") { id: String, promise: Promise ->
+      val session = sessions[id]
+      if (session == null) promise.resolve("[]")
+      else session.getStats { promise.resolve(it) }
+    }
 
     View(DesktopView::class) {
       Name("DesklinkSurface")

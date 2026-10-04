@@ -76,6 +76,8 @@ desktop.setInputEnabled(true);
 desktop.showKeyboard();
 desktop.setOrientation('landscape');   // Android only; iOS apps configure supported orientations themselves
 await desktop.pasteLocalToRemote(await Clipboard.getStringAsync());
+// Optional receiver evidence: codec, decoder and video counters; no ICE addresses.
+const stats = await desktop.getStats();
 ```
 
 Pairing is the only trust boundary. `authorize` is the app's pairing check: it
@@ -291,11 +293,12 @@ What the consuming app — not this package — must get right before review.
   disabling input on background; the engine releases held keys within
   seconds of the path dying, so nothing stays stuck.
 
-## iOS simulator proof
+## Example app proof
 
 `example/` is the smallest app that shows a desktop: a native (non-Expo Go)
 build with `react-native-webrtc`, connecting to `desklink-host bridge` with the
-URL it is launched with. Its status line shows plain messages: `Connected`
+URL it is launched with on iOS, or the connection link it is opened with on
+Android. Its hidden accessibility status shows plain messages: `Connected`
 once a frame is presented, `Can’t reach your desktop. Reconnecting…` while
 retrying, and `Your desktop ended this session` after revocation. It never
 displays the bridge URL, pairing token, raw failure text or frame metrics.
@@ -334,6 +337,19 @@ To try the example by hand against any bridge:
 ```sh
 xcrun simctl launch <device> dev.desklink.example -desklinkUrl 'ws://HOST:PORT/desktop?token=TOKEN'
 ```
+
+On Android, build the same example with `npm run android` and open a connection
+link whose `url` query parameter is the URL-encoded bridge WebSocket address:
+`desklink-example://connect?url=ws%3A%2F%2FHOST%3APORT%2Fdesktop%3Ftoken%3DTOKEN`.
+The example allows the bridge's plaintext private-network connection; consumer
+apps choose their own transport policy. A new link replaces the open session.
+The live picture has no diagnostic overlay. Its accessibility status remains
+available as `desklink-status`.
+
+For device evidence, an optional `report` query parameter accepts a URL-encoded
+HTTP endpoint. While live, the example posts receiver statistics and connection
+and first-presentation timestamps once per second. Collection failures do not
+interrupt the session. Without that parameter, no evidence is posted.
 
 ## Licence
 

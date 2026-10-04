@@ -1,6 +1,7 @@
 import type { MediaStream, RTCPeerConnection } from 'react-native-webrtc';
 import type { NativeDesklinkModule, NativeSessionEvent } from './native';
 import { requireWebRTC } from './webrtc.ios';
+import { videoStats } from './videoStats';
 
 /** The WebRTC stack, loaded the first time a session opens rather than with this module. */
 function loadWebRTC(): { RTCPeerConnection: new (config: unknown) => RTCPeerConnection; MediaStream: new () => MediaStream } | null {
@@ -99,6 +100,10 @@ function failure(id: string, error: unknown) {
 }
 
 export const nativeDesklink: NativeDesklinkModule = {
+    async getStats(id) {
+        const session = sessions.get(id);
+        return session ? videoStats(await session.peer.getStats()) : '[]';
+    },
     createSession(iceServersJson) {
         const id = `desklink-${++nextId}`;
         try {
