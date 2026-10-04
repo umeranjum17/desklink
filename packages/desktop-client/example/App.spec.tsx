@@ -25,6 +25,8 @@ vi.mock('react-native', () => ({
     AppState: { addEventListener: () => ({ remove: () => undefined }) },
     Linking: { getInitialURL: async () => `desklink-example://connect?url=${encodeURIComponent(BRIDGE_URL)}`, addEventListener: () => ({ remove: () => undefined }) },
     Platform: { OS: 'android' },
+    Pressable: 'Pressable',
+    ScrollView: 'ScrollView',
     Settings: { get: (key: string) => (key === 'desklinkUrl' ? BRIDGE_URL : undefined) },
     StatusBar: 'StatusBar',
     StyleSheet: { create: (styles: unknown) => styles, absoluteFill: {} },
@@ -38,9 +40,13 @@ vi.mock('react-native-safe-area-context', () => ({
 }));
 
 vi.mock('@desklink/react-native', async () => ({
+    ClipboardConfirmation: 'ClipboardConfirmation',
     DesktopView: 'DesktopView',
+    ModifierKeys: 'ModifierKeys',
     useDesktopSession: (await import('../src/useDesktopSession')).useDesktopSession,
 }));
+
+vi.mock('expo-clipboard', () => ({ setStringAsync: async () => true }));
 
 // Android's native module, standing in under the package's own binding.
 vi.mock('expo-modules-core', () => ({
