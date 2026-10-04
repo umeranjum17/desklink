@@ -151,5 +151,5 @@ finally {
     writeFileSync(join(out, 'run.json'), JSON.stringify(result, null, 2) + '\n');
 }
 assert.equal(result.outcome, 'PASS', `proof failed; inspect ${join(out, 'run.json')}`);
-for (const name of ['01-before.png', '02-after.png', '03-theme-light-emulated.png']) { const png = readFileSync(join(out, name)); assert(png.length > 1000 && png.readUInt32BE(0) === 0x89504e47, `incomplete PNG: ${name}`); }
+for (const name of ['01-before.png', '02-after.png', '03-theme-light-emulated.png', 'desktop-motion.webm']) { const file = readFileSync(join(out, name)); assert(file.length > 1000, `incomplete capture: ${name}`); if (name.endsWith('.png')) assert(file.readUInt32BE(0) === 0x89504e47, `not a PNG: ${name}`); }
 console.log(`PASS: trusted browser click -> fixture edges -> decoded marker; evidence ${out}`);
