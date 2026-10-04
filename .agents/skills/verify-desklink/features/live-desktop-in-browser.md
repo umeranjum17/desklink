@@ -17,7 +17,7 @@ Xvfb source; never run the ambient desktop command unattended.
 After [Launch](../SKILL.md#launch), from the repo root:
 
 ```sh
-EVIDENCE="$HOME/lab-tmp/desklink-verify/$(date -u +%Y%m%dT%H%M%SZ)"
+EVIDENCE="$HOME/lab-tmp/desklink-verify/runs/$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short HEAD)"
 env -u DISPLAY -u WAYLAND_DISPLAY \
   node .agents/skills/verify-desklink/prove-live-desktop.mjs "$EVIDENCE"
 ```
