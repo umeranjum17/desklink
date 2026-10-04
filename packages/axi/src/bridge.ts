@@ -235,51 +235,9 @@ export async function serve(args: string[]): Promise<void> {
     });
     const lines = new Map<string, Item>();
     const rows = output.split('\n').slice(1).map(line => line.split('\t'));
-    const blinkingCaret = async (cols: string[]) => {
-      const x = box[0]! + Math.floor(Number(cols[6]) / scale);
-      const y = box[1]! + Math.floor(Number(cols[7]) / scale);
-      const width = Math.ceil(Number(cols[8]) / scale);
-      const height = Math.ceil(Number(cols[9]) / scale);
-      const firstX = x + Math.floor(width * 0.75);
-      const lastX = x + width;
-      const minimumRows = Math.ceil(height * 0.5);
-      const maxStroke = Math.max(2, Math.ceil(height * 0.18));
-      const changedStroke = (sample: Buffer) => {
-        const changingColumns: number[] = [];
-        for (let px = firstX; px < lastX; px++) {
-          let changingRows = 0;
-          for (let py = y; py < y + height; py++) {
-            const offset = (py * frame.width + px) * 4;
-            if (Math.abs(frame.raw[offset]! - sample[offset]!) + Math.abs(frame.raw[offset+1]! - sample[offset+1]!) + Math.abs(frame.raw[offset+2]! - sample[offset+2]!) > 80) changingRows++;
-          }
-          if (changingRows >= minimumRows) changingColumns.push(px);
-        }
-        let stroke = 0, widestStroke = 0;
-        for (let i = 0; i < changingColumns.length; i++) {
-          stroke = i === 0 || changingColumns[i] === changingColumns[i-1]! + 1 ? stroke + 1 : 1;
-          widestStroke = Math.max(widestStroke, stroke);
-        }
-        return widestStroke > 0 && widestStroke <= maxStroke;
-      };
-      let sequence = frame.seq;
-      const deadline = Date.now() + 1200;
-      while (Date.now() < deadline) {
-        const path = join(dir, `caret-${frame.seq}-${sequence}.raw`);
-        const sample = await engine.request<{seq:number;written:boolean}>('session.frame', {
-          session_id: opened.sessionId, after_seq: sequence, path,
-          timeout_ms: Math.max(1, deadline - Date.now()),
-        }).catch(() => undefined);
-        if (!sample?.written || sample.seq <= sequence) return false;
-        sequence = sample.seq;
-        if (changedStroke(readFileSync(path))) return true;
-      }
-      return false;
-    };
     for (const cols of rows) {
       if (cols.length < 12 || Number(cols[10]) < 0 || !cols[11]?.trim()) continue;
-      let token = cols[11]!.trim();
-      if (!token) continue;
-      if (token.endsWith('|') && await blinkingCaret(cols)) token = token.slice(0,-1);
+      const token = cols[11]!.trim();
       if (!token) continue;
       const key = cols.slice(1,5).join(':');
       if (!lines.has(key)) lines.set(key,{ref:`@${frame.seq}.${lines.size+1}`,text:'',x:Number(cols[6]),y:Number(cols[7]),conf:Number(cols[10]),line:key,words:[]});
