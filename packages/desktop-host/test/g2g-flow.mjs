@@ -13,6 +13,7 @@
  *   node packages/desktop-host/test/g2g-flow.mjs [--size 1920x1080] [--max-fps 60]
  *     [--seconds 15] [--scenarios typing,scroll,still] [--gate]
  *     [--baseline <file>] [--require-load-gate] [--netem '<netem args>'] [--codec vp9|h264]
+ *     [--record-reference <webm> [--record-document <existing-document>]]
  *
  * `--codec h264` has the page ask for H.264 the way the iOS receiver does (H.264
  * first in the offer it applies); the default applies the offer as it comes,
@@ -39,10 +40,21 @@
  *                         `encoded-flow.mjs`.
  *   DESKLINK_G2G_STAMP    prebuilt stamp_target example, to reuse a release
  *                         fixture across interleaved measurements.
+ *   CHROME_DEVTOOLS_AXI_MCP_PATH
+ *                         installed browser-kit entrypoint for document capture
+ *                         inside a private namespace without network bootstrap.
  *   G2G_TASKSET_ENGINE / G2G_TASKSET_CHROME
  *                         optional `taskset` CPU lists pinning the engine and
  *                         the browser on a loaded host (the plan's load gate
  *                         allows pinning instead of a quiet machine).
+ *
+ * Recording is separate from stamped qualification. --record-reference uses
+ * the existing reference client; --record-document shows an existing local
+ * document with three seconds still, six scrolling, four still. Browser setup
+ * and motion use a named chrome-devtools-axi session with actual listed tab IDs.
+ * The original browser PNG, engine codec counters and decoded VP8 recording
+ * are labelled separately. Latency sampling starts before first presentation
+ * and is never cleared at the fps window boundary.
  *
  * Safety (AGENTS.md): an explicit display >= 170 claimed only when both its
  * socket and lock file are absent, a fresh xauth cookie, the lock PID verified
@@ -53,7 +65,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -112,6 +124,10 @@ const baselineByScenario = (() => {
 })();
 assert(baselineByScenario === null || Object.keys(baselineByScenario).length > 0, `--baseline ${baselinePath} holds no scenario lines`);
 const netem = flag('netem', null);
+const recordingPath = flag('record-reference', null);
+const documentPath = flag('record-document', null);
+assert(documentPath === null || recordingPath !== null, '--record-document needs --record-reference');
+assert(recordingPath === null || (scenarios.length === 1 && scenarios[0] === 'scroll' && seconds === 10), '--record-reference requires a ten-second scroll run');
 
 // A constrained link: the whole run moves into a private user and network
 // namespace (`unshare -rn`, no root) whose loopback carries a netem qdisc, so
@@ -205,7 +221,7 @@ function sessionStrays() {
         if (!Number.isInteger(pid) || pid <= 1 || owned.has(pid) || pid === process.pid) continue;
         try {
             if (!readFileSync(`/proc/${pid}/environ`).toString('latin1').split('\0').includes(sessionMarker)) continue;
-            strays.push({ pid, cmdline: readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ') });
+            strays.push({ pid, started: proc(pid)?.started, cmdline: readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ') });
         } catch { /* vanished or not readable */ }
     }
     return strays;
@@ -274,13 +290,13 @@ function freePort() {
 }
 
 /** Chrome over CDP: launch, attach to a page target, evaluate in it. */
-async function startChrome(binary, pageUrl) {
+async function startChrome(binary, pageUrl, captured = false) {
     const profile = mkdtempSync(join(tmpdir(), 'desklink-g2g-chrome-'));
     const taskset = (process.env.G2G_TASKSET_CHROME ?? '').trim().split(/\s+/).filter(Boolean);
     const chrome = spawn(
         binary,
         [
-            '--headless=new',
+            ...(captured ? ['--ozone-platform=x11', '--start-fullscreen', '--force-device-scale-factor=1'] : ['--headless=new']),
             `--user-data-dir=${profile}`,
             '--remote-debugging-port=0',
             '--no-first-run',
@@ -292,7 +308,7 @@ async function startChrome(binary, pageUrl) {
             '--disable-background-timer-throttling',
             '--mute-audio',
             '--autoplay-policy=no-user-gesture-required',
-            `--window-size=${Math.min(sizeW, 1600)},${Math.min(sizeH, 1000)}`,
+            `--window-size=${captured ? sizeW : Math.min(sizeW, 1600)},${captured ? sizeH : Math.min(sizeH, 1000)}`,
             // Root inside the `--netem` namespace is the invoking user outside
             // it; Chromium refuses to start its sandbox as uid 0.
             ...(process.getuid?.() === 0 && netem !== null ? ['--no-sandbox'] : []),
@@ -302,7 +318,9 @@ async function startChrome(binary, pageUrl) {
             stdio: ['ignore', 'pipe', 'pipe'],
             // Headless Chromium needs no display; keep it off both servers so
             // it can never paint onto the captured Xvfb or the live desktop.
-            env: { ...process.env, DISPLAY: undefined, WAYLAND_DISPLAY: undefined },
+            env: captured
+                ? { ...process.env, DISPLAY: display, XAUTHORITY: authority, WAYLAND_DISPLAY: '', NO_AT_BRIDGE: '1', DESKLINK_G2G_SESSION: `g2g-${process.pid}` }
+                : { ...process.env, DISPLAY: undefined, WAYLAND_DISPLAY: undefined },
         },
     );
     if (taskset.length > 0) {
@@ -368,6 +386,7 @@ async function startChrome(binary, pageUrl) {
     return {
         evaluate,
         until,
+        browserUrl: `http://127.0.0.1:${port}`,
         close: async () => {
             if (closed) return;
             closed = true;
@@ -478,15 +497,84 @@ async function runScenario(scenario, vite) {
     }
     assert(bridgeUp, `bridge never listened: ${bridgeOut.slice(-500)}`);
 
-    const pageUrl = `${vite.url}packages/desktop-host/test/g2g-flow.html?engine=${encodeURIComponent(bridgeUrl)}&width=${sizeW}&height=${sizeH}&codec=${codec}`;
-    const chrome = await startChrome(chromeBinary, pageUrl);
+    const pageUrl = recordingPath !== null
+        ? `http://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`
+        : `${vite.url}packages/desktop-host/test/g2g-flow.html?engine=${encodeURIComponent(bridgeUrl)}&width=${sizeW}&height=${sizeH}&codec=${codec}`;
+    let chrome = null;
     let stamp = null;
+    let documentChrome = null;
+    let documentAxiEnv = null;
     try {
+        if (recordingPath !== null) {
+            if (documentPath === null) stamp = await startStamp(mode);
+            else {
+                documentChrome = await startChrome(chromeBinary, `file://${resolve(documentPath)}`, true);
+                await documentChrome.until("document.readyState === 'complete' && document.body.innerText.length > 100", 20_000, 'readable document fixture');
+                documentAxiEnv = { ...process.env, CHROME_DEVTOOLS_AXI_BROWSER_URL: documentChrome.browserUrl, CHROME_DEVTOOLS_AXI_SESSION: `dl-pm-10-doc-${process.pid}`, DESKLINK_G2G_SESSION: `g2g-${process.pid}` };
+                const adapter = (args, label) => {
+                    const result = spawnSync('chrome-devtools-axi', args, { env: documentAxiEnv, encoding: 'utf8', timeout: 60_000 });
+                    writeFileSync(`${recordingPath}.${label}.txt`, `${result.stdout ?? ''}\n${result.stderr ?? ''}`);
+                    assert.equal(result.status, 0, `document adapter ${label} failed: ${result.stderr} ${result.stdout.slice(-2000)}`);
+                    return result.stdout;
+                };
+                const documentUrl = `file://${resolve(documentPath)}`;
+                const ownedPage = text => text.split('\n').map(line => /^\s*(\d+),(.*),(?:true|false)$/.exec(line)).find(row => row?.[2] === documentUrl)?.[1];
+                let pageId = ownedPage(adapter(['pages'], 'pages'));
+                if (pageId === undefined) {
+                    adapter(['newpage', documentUrl, '--background'], 'newpage');
+                    pageId = ownedPage(adapter(['pages'], 'pages-after-newpage'));
+                }
+                assert(pageId !== undefined, 'adapter did not list the exact owned document tab');
+                adapter(['selectpage', pageId], 'selectpage');
+                adapter(['screenshot', `${recordingPath}.original.png`], 'original-capture');
+            }
+        }
+        chrome = await startChrome(chromeBinary, pageUrl);
+        if (recordingPath !== null) {
+            await chrome.until("document.querySelector('video')?.readyState >= 2 && window.__peer?.connectionState === 'connected'", 25_000, 'reference client video');
+            if (documentChrome !== null) {
+                const motion = spawnSync('chrome-devtools-axi', ['eval', `(() => { const started = performance.now(); function tick(now) { const t = (now-started)/1000; const y = t<3 ? 0 : t<9 ? Math.max(0,Math.sin((t-3)/6*Math.PI)*3500) : 0; window.scrollTo(0,y); if(t<13) requestAnimationFrame(tick); } requestAnimationFrame(tick); return 'scroll scheduled: still3s, motion6s, still4s'; })()`], { env: documentAxiEnv, encoding: 'utf8', timeout: 60_000 });
+                assert.equal(motion.status, 0, `document scrolling failed: ${motion.stderr}`);
+            }
+            const recorded = await chrome.evaluate(`(async () => {
+                document.title = 'Umer — constrained scrolling';
+                const video = document.querySelector('video');
+                const stream = video.captureStream();
+                const recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8', videoBitsPerSecond: 4000000 });
+                const chunks = [];
+                recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+                const stopped = new Promise(resolve => { recorder.onstop = resolve; });
+                recorder.start();
+                await new Promise(resolve => setTimeout(resolve, ${documentPath === null ? 10050 : 13050}));
+                recorder.stop();
+                await stopped;
+                stream.getTracks().forEach(track => track.stop());
+                const bytes = new Uint8Array(await new Blob(chunks).arrayBuffer());
+                let binary = '';
+                for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+                const engine = await window.__request('session.metrics', { session_id: window.__session.sessionId });
+                const stats = await window.__peer.getStats();
+                let receiver = null;
+                stats.forEach(row => { if (row.type === 'inbound-rtp' && row.kind === 'video') receiver = { codec: stats.get(row.codecId)?.mimeType, decoded: row.framesDecoded }; });
+                return { base64: btoa(binary), width: video.videoWidth, height: video.videoHeight, title: document.title, engine, receiver };
+            })()`);
+            writeFileSync(recordingPath, Buffer.from(recorded.base64, 'base64'));
+            const line = { recording: recordingPath, demo: 'Umer', client: 'examples/reference-client.html', fixture: documentPath ?? 'stamp_target', original_capture: documentPath === null ? null : `${recordingPath}.original.png`, engine: recorded.engine, receiver: recorded.receiver, recording_codec: 'video/webm;codecs=vp8', netem, seconds: documentPath === null ? 10 : 13, width: recorded.width, height: recorded.height, load: { before: loadBefore.one, after: load().one } };
+            console.log(JSON.stringify(line));
+            await chrome.evaluate("window.__request('session.close', { session_id: window.__session.sessionId })");
+            return line;
+        }
         await chrome.until('window.__flow?.ready === true', 20_000, 'the page to load');
         stamp = await startStamp(mode);
         const opened = await chrome.evaluate(`window.__flow.open(${maxFps})`);
         assert.equal(typeof opened.sessionId, 'string', 'session.open returned no session');
         await chrome.until('window.__flow.state.presented === true', 25_000, 'a first decoded frame');
+        const initial = await chrome.evaluate(`(async () => ({
+            metrics: await window.__flow.metrics(window.__flow.state.sessionId),
+            stats: await window.__flow.stats(),
+            startupSamples: window.__flow.state.g2g.length,
+        }))()`);
+        await chrome.evaluate('window.__flow.beginMeasurement()');
         const startedAt = Date.now();
         await sleep(seconds * 1000);
         const elapsed = (Date.now() - startedAt) / 1000;
@@ -505,12 +593,21 @@ async function runScenario(scenario, vite) {
 
         const g2g = [...result.g2g].sort((a, b) => a - b);
         const intervals = [...result.intervals].sort((a, b) => a - b);
-        const inbound = result.stats.inbound[0] ?? {};
+        const inbound = { ...(result.stats.inbound[0] ?? {}) };
+        const prior = initial.stats.inbound[0] ?? {};
+        for (const key of ['framesDecoded', 'framesDropped', 'totalDecodeTime', 'jitterBufferEmittedCount', 'jitterBufferDelay']) {
+            if (typeof inbound[key] === 'number' && typeof prior[key] === 'number') inbound[key] -= prior[key];
+        }
         const decodeMean = inbound.framesDecoded > 0 && inbound.totalDecodeTime != null
             ? (inbound.totalDecodeTime / inbound.framesDecoded) * 1000 : null;
         const jitterMean = inbound.jitterBufferEmittedCount > 0 && inbound.jitterBufferDelay != null
             ? (inbound.jitterBufferDelay / inbound.jitterBufferEmittedCount) * 1000 : null;
-        const m = result.metrics;
+        const m = { ...result.metrics };
+        for (const key of Object.keys(m)) {
+            if ((key.endsWith('_micros') || key.endsWith('_frames') || key === 'encoded_bytes' || key.startsWith('input_')) && typeof m[key] === 'number') {
+                m[key] -= initial.metrics[key] ?? 0;
+            }
+        }
         const line = {
             scenario,
             size: `${sizeW}x${sizeH}`,
@@ -521,6 +618,8 @@ async function runScenario(scenario, vite) {
             frame_interval_p95_ms: percentile(intervals, 95),
             frame_interval_max_ms: intervals.length > 0 ? intervals[intervals.length - 1] : null,
             g2g_ms: {
+                startup_samples_included: initial.startupSamples,
+                first_observed_frame_ms: result.g2g[0] ?? null,
                 p50: percentile(g2g, 50),
                 p95: percentile(g2g, 95),
                 max: g2g.length > 0 ? g2g[g2g.length - 1] : null,
@@ -554,13 +653,15 @@ async function runScenario(scenario, vite) {
         assert.equal(m.codec, codec, `the engine codes ${codec}`);
         return line;
     } finally {
-        await chrome.close().catch(() => undefined);
+        if (documentAxiEnv !== null) spawnSync('chrome-devtools-axi', ['stop'], { env: documentAxiEnv, stdio: 'ignore', timeout: 20_000 });
+        await documentChrome?.close().catch(() => undefined);
+        await chrome?.close().catch(() => undefined);
         // SIGTERM lets the bridge shut its engine child down gracefully; the
         // recorded engine PID is reaped either way, never orphaned.
         await stopProcess(bridge.pid, 'SIGTERM');
         recordPidFiles();
         for (const pid of [...owned.keys()]) {
-            if (pid === xvfb.pid) continue;
+            if (pid === xvfb?.pid) continue;
             await stopProcess(pid, 'SIGKILL');
         }
         if (stamp !== null) await stopProcess(stamp.pid, 'SIGTERM');
@@ -630,14 +731,20 @@ try {
 } finally {
     recordPidFiles();
     for (const pid of [...owned.keys()]) {
-        if (pid === xvfb.pid) continue;
+        if (pid === xvfb?.pid) continue;
         await stopProcess(pid, 'SIGKILL').catch(() => undefined);
     }
+    // Task-marked browser-adapter helpers can outlive their stop response.
+    // Reap only the exact recorded start times, then verify no marker remains.
+    for (const stray of sessionStrays()) {
+        owned.set(stray.pid, stray.started);
+        await stopProcess(stray.pid, 'SIGTERM');
+    }
     const strays = sessionStrays();
-    assert.equal(strays.length, 0, `task-owned strays survived: ${JSON.stringify(strays)}`);
     if (xvfb) await stopOwnedXvfb(xvfb);
     await vite?.close().catch(() => undefined);
     rmSync(dir, { recursive: true, force: true });
+    assert.equal(strays.length, 0, `task-owned strays survived: ${JSON.stringify(strays)}`);
 }
 // Every task-owned process is reaped above; a handle left open (a CDP socket,
 // a child's pipe) must not keep the run from reporting done.
