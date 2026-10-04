@@ -235,6 +235,7 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
 const styles = StyleSheet.create({
     root: { flex: 1, backgroundColor: '#000' },
     idle: { alignItems: 'center', justifyContent: 'center' },
+    messageText: { color: '#fff', fontSize: 16 },
     bottom: { position: 'absolute', left: 0, right: 0, bottom: 0 },
     bar: { marginHorizontal: 16, marginBottom: 8, minHeight: 24, alignItems: 'center' },
     status: { color: '#fff', fontSize: 15, textAlign: 'center' },
