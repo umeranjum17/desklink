@@ -746,7 +746,9 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     assert(zoomedScale > scale * 1.5, `the pinch visibly zooms to cropped content: ${zoomedScale / scale}x`);
     assert(zoomedScale * geometry.width > screenWidth, 'the zoomed desktop has horizontal content to pan');
     const dotAt = (shot) => {
-        const y = zoomedBox.top + targets[1].y * zoomedScale;
+        // Just above the click: the pointer arrow's outline, hanging from its
+        // tip at the click, would split the dot's dark run there.
+        const y = zoomedBox.top + targets[1].y * zoomedScale - 4;
         let best = { length: 0, x: null }; let start = null;
         for (let x = 0; x <= screenWidth; x += 0.5) {
             const dark = x < screenWidth && pixel(shot, { x, y }) < 200;
