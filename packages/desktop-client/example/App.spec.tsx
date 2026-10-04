@@ -25,9 +25,15 @@ vi.mock('react-native', () => ({
     AppState: { addEventListener: () => ({ remove: () => undefined }) },
     Platform: { OS: 'android' },
     Settings: { get: (key: string) => (key === 'desklinkUrl' ? BRIDGE_URL : undefined) },
+    StatusBar: 'StatusBar',
     StyleSheet: { create: (styles: unknown) => styles, absoluteFill: {} },
     Text: 'Text',
     View: 'View',
+}));
+
+vi.mock('react-native-safe-area-context', () => ({
+    SafeAreaProvider: ({ children }: { children: React.ReactNode }) => children,
+    useSafeAreaInsets: () => ({ top: 0, left: 0, bottom: 0, right: 0 }),
 }));
 
 vi.mock('@desklink/react-native', async () => ({
