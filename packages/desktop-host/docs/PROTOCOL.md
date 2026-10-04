@@ -450,8 +450,9 @@ runs at most about 60 ms of its rate target ahead of it, so frames never queue
 behind a burst. `refined_frames` counts refinement passes: a
 desktop that stops changing is coded once more at a fine quantizer, so it reads
 sharp. `halved_frames` counts motion frames coded at half width and height: when
-full-size frames that change much of the picture take longer to code than a
-frame interval while a newer frame is already waiting, several frames in a row,
+full-size frames that change much of the picture take longer to code or to
+drain at the current rate target than a frame interval while a newer frame is
+already waiting or send-budget debt is held, several frames in a row,
 motion is coded at half size until the desktop stops or its changes shrink to
 small ones that code in time; the refinement pass is always full size. Key
 frames are sent only for the first frame, when the receiver asks (RTCP PLI or
@@ -459,7 +460,9 @@ FIR), and when the coded size changes that way, so a receiver never has to scale
 references across a size change. `target_kbps` is the current rate target after
 any back-off: for a standing queue on the path, measured from the receiver's
 transport-wide congestion feedback (RTP `transport-cc`), and for the loss
-its receiver reports carry. `codec` is what frames go out in
+its receiver reports carry. It starts at the requested ceiling capped at
+3000 kbps on an unknown link, then grows toward the ceiling on clean
+loss/delay feedback. `codec` is what frames go out in
 (`vp9` or `h264`) and `encoder` what codes them (`libvpx`, `videotoolbox`,
 `nvenc`, `vaapi` or `openh264`); both are empty for an encoded source.
 

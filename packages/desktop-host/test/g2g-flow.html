@@ -62,6 +62,7 @@ const state = {
 };
 let nextId = 0;
 let lastPresentation = 0;
+let lastPresentedFrames = null;
 
 function request(method, params) {
     const id = ++nextId;
@@ -98,7 +99,6 @@ async function handle(event) {
             return;
         case 'presented':
             state.presented = true;
-            countFrames();
             return;
         case 'control': {
             const reply = JSON.parse(String(event.payload.message ?? '{}'));
@@ -140,7 +140,8 @@ function countFrames() {
     const video = document.querySelector('#surface video');
     if (video === null || typeof video.requestVideoFrameCallback !== 'function') return;
     video.requestVideoFrameCallback((_now, metadata) => {
-        state.frames += 1;
+        state.frames += lastPresentedFrames === null ? 1 : metadata.presentedFrames - lastPresentedFrames;
+        lastPresentedFrames = metadata.presentedFrames;
         const presented = Math.round(performance.timeOrigin + (metadata.expectedDisplayTime ?? 0));
         if (lastPresentation !== 0) state.intervals.push(presented - lastPresentation);
         lastPresentation = presented;
@@ -220,8 +221,15 @@ window.__flow = {
         state.geometry = opened.geometry;
         attachSurface(id, document.getElementById('surface'));
         const video = document.querySelector('#surface video');
+        countFrames();
         video?.play?.().catch(() => undefined);
         return opened;
+    },
+
+    beginMeasurement() {
+        state.frames = 0;
+        // Retain every latency sample and observed interval from first
+        // presentation, including startup; only fps uses the timed window.
     },
 
     async close() {

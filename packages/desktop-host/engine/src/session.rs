@@ -1319,7 +1319,7 @@ impl Session {
         let encoder = Encoder::new(
             width,
             height,
-            bitrate_kbps,
+            RateControl::starting(bitrate_kbps).target,
             max_fps,
             available_parallelism().min(8) as u32,
         )
@@ -2563,6 +2563,15 @@ struct RateControl {
 }
 
 impl RateControl {
+    /// Begin below an unknown weak link's capacity, then use the existing
+    /// loss/delay feedback growth to approach the requested ceiling.
+    fn starting(ceiling: u32) -> Self {
+        Self {
+            target: ceiling.min(3000),
+            ..Self::new(ceiling)
+        }
+    }
+
     fn new(ceiling: u32) -> Self {
         Self {
             ceiling,
@@ -2659,9 +2668,9 @@ impl SendBudget {
     }
 }
 
-/// Whether motion is coded at half size. A full-size frame is slow when it
-/// took longer to code than a frame interval and the source already had a
-/// newer frame waiting: the encoder, not the source, set the pace. Content that
+/// Whether motion is coded at half size. A full-size frame is slow when its
+/// encoding or constrained-link drain time exceeds a frame interval and a
+/// newer frame or send-budget debt is waiting. Content that
 /// arrives slower than the frame cap (30 fps into a 60 fps session) is never
 /// slow however long a frame takes, as long as it is done before the next one.
 /// Several slow frames that each change much of the picture (a packet over a
@@ -2677,15 +2686,31 @@ impl SendBudget {
 struct MotionSize {
     half: bool,
     run: u32,
+    link_run: u32,
 }
 
 impl MotionSize {
     const SLOW_RUN: u32 = 5;
     const SMALL_RUN: u32 = 30;
 
-    /// Account for a motion frame coded at the current size in `took`; `large`
+    /// Persistent send debt needs a quicker response than a transient slow
+    /// encode: every extra full-size motion frame extends the remote queue.
+    fn queued(&mut self, drain: Duration, debt: bool, interval: Duration) {
+        self.link_run = if !self.half && debt && drain > interval {
+            self.link_run + 1
+        } else {
+            0
+        };
+        if self.link_run >= 2 {
+            self.half = true;
+            self.run = 0;
+            self.link_run = 0;
+        }
+    }
+
+    /// Account for a motion frame serviced at the current size in `took`; `large`
     /// when its packet was over a quarter of the per-frame rate budget, `behind`
-    /// when a newer frame was already waiting once it was coded.
+    /// when a newer frame or send-budget debt was waiting once it was coded.
     fn coded(&mut self, took: Duration, large: bool, behind: bool, interval: Duration) {
         let slow = took > interval && behind;
         let (counts, needed) = if self.half {
@@ -2762,9 +2787,9 @@ fn spawn_pipeline(
         .name("desklink-encode".into())
         .spawn(move || {
             let interval = frame_interval(max_fps);
-            let mut rate = RateControl::new(bitrate_kbps);
+            let mut rate = RateControl::starting(bitrate_kbps);
             if let Ok(mut m) = inner.metrics.lock() {
-                m.target_kbps = bitrate_kbps;
+                m.target_kbps = rate.target;
                 (m.codec, m.encoder) = ("vp9", "libvpx");
             }
             // Whether motion may be coded at half size: VP9's alone.
@@ -2944,16 +2969,26 @@ fn spawn_pipeline(
                         Pass::Motion { half: false, .. } | Pass::Keepalive => {}
                     }
                 }
+                budget.sent(now, packet.data.len(), rate.target);
                 match pass {
                     Pass::Motion { .. } => {
                         pending = false;
                         keyframe = false;
                         refined = false;
                         still_since = now;
-                        let budget = rate.target as u64 * 1000 / 8 / max_fps.max(1) as u64;
-                        let large = packet.data.len() as u64 * 4 > budget;
+                        let frame_budget = rate.target as u64 * 1000 / 8 / max_fps.max(1) as u64;
+                        let large = packet.data.len() as u64 * 4 > frame_budget;
                         if halves {
+                            // A fast encoder can still outrun a constrained link.
+                            // Include the packet's drain time once the send
+                            // budget is holding frames, so sustained motion
+                            // reduces its size before a backlog builds.
+                            let drain = Duration::from_secs_f64(
+                                packet.data.len() as f64 * 8.0 / SendBudget::rate(rate.target),
+                            );
+                            let link_behind = !budget.wait(Instant::now(), rate.target).is_zero();
                             size.coded(took, large, frame_rx.waiting(), interval);
+                            size.queued(drain, link_behind, interval);
                         }
                     }
                     Pass::Refine => {
@@ -2964,7 +2999,6 @@ fn spawn_pipeline(
                 }
                 last_sent = Some(now);
                 cadence.sent(now);
-                budget.sent(now, packet.data.len(), rate.target);
                 // A new picture carries the moment it was captured, so the
                 // receiver paces playout by the desktop's clock rather than by
                 // encode time; a re-coded one (refinement, keepalive) is new
