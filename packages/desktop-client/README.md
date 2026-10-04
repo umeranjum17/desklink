@@ -297,7 +297,8 @@ What the consuming app — not this package — must get right before review.
 
 `example/` is the smallest app that shows a desktop: a native (non-Expo Go)
 build with `react-native-webrtc`, connecting to `desklink-host bridge` with the
-URL it is launched with. Its status line shows plain messages: `Connected`
+URL it is launched with on iOS, or the connection link it is opened with on
+Android. Its hidden accessibility status shows plain messages: `Connected`
 once a frame is presented, `Can’t reach your desktop. Reconnecting…` while
 retrying, and `Your desktop ended this session` after revocation. It never
 displays the bridge URL, pairing token, raw failure text or frame metrics.

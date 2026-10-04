@@ -178,7 +178,7 @@ function simulator() {
     return mac(`xcrun simctl create ${DEVICE} com.apple.CoreSimulator.SimDeviceType.${DEVICE_TYPE} ${runtime}`).trim();
 }
 
-/** The status line the app exposes as `testID="desklink-status"`, and the screen's size in points. */
+/** The hidden accessibility status the app exposes as `testID="desklink-status"`, and the screen's size in points. */
 function screen(udid) {
     const tree = JSON.parse(mac(`axe describe-ui --udid ${udid}`));
     let status = null;
