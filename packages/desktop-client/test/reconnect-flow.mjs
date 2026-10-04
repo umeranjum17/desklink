@@ -424,7 +424,7 @@ try {
     };
 
     // ---- engine binary ------------------------------------------------------
-    const engineBin = join(worktree, 'packages/desktop-host/engine/target/debug/desklink-host');
+    const engineBin = process.env.DESKLINK_AXI_ENGINE ?? join(worktree, 'packages/desktop-host/engine/target/debug/desklink-host');
     assert(existsSync(engineBin), 'build the engine first');
 
     // ---- bridge (child process, so it can freeze with the engine) ---------
