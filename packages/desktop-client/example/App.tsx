@@ -177,6 +177,21 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
         }
     }
 
+    /**
+     * The other direction: whatever the phone copied is sent to the desktop's
+     * clipboard, and the session's own confirmation pill says it arrived.
+     */
+    async function paste() {
+        setCopyError(null);
+        try {
+            const text = await Clipboard.getStringAsync();
+            if (!text) throw new Error('The phone’s clipboard is empty.');
+            await desktop.pasteLocalToRemote(text);
+        } catch (error) {
+            setCopyError(error instanceof Error ? error.message : String(error));
+        }
+    }
+
     React.useEffect(() => {
         void desktop.connect();
         return () => signaling.current?.close();
@@ -223,8 +238,14 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
             </View>
             <View style={styles.keys}>
                 <ModifierKeys modifiers={desktop.modifiers} onTap={desktop.tapModifier} style={styles.row} />
+                <Pressable testID="desklink-keyboard" accessibilityRole="button" onPress={() => desktop.showKeyboard()} style={styles.copy}>
+                    <Text style={styles.copyLabel}>Keys</Text>
+                </Pressable>
                 <Pressable testID="desklink-copy" accessibilityRole="button" onPress={() => void copy()} style={styles.copy}>
                     <Text style={styles.copyLabel}>Copy</Text>
+                </Pressable>
+                <Pressable testID="desklink-paste" accessibilityRole="button" onPress={() => void paste()} style={styles.copy}>
+                    <Text style={styles.copyLabel}>Paste</Text>
                 </Pressable>
             </View>
             </View>
