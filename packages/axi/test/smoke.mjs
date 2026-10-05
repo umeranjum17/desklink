@@ -10,7 +10,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
-import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
+import { assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
 
 assertNoAmbientDesktop();
 
@@ -36,10 +36,8 @@ assert(existsSync(join(axiRoot, 'dist/index.js')), 'axi dist was not produced by
 
 // 3. Task-owned private Xvfb on a verified high display.
 const dir = mkdtempSync(join(tmpdir(), 'desklink-axi-smoke-'));
-const number = Array.from({ length: 30 }, (_, i) => 170 + i).find(n =>
-  !existsSync(`/tmp/.X11-unix/X${n}`) && !existsSync(`/tmp/.X${n}-lock`));
-assert(number !== undefined, 'no unclaimed high X display');
-const display = `:${number}`;
+const claim = claimPrivateDisplay({ from: 170, count: 30 });
+const { number, display } = claim;
 const socket = `/tmp/.X11-unix/X${number}`;
 const authority = join(dir, 'Xauthority');
 assert.equal(spawnSync('xauth', ['-f', authority, 'add', display, '.', randomBytes(16).toString('hex')], { encoding: 'utf8' }).status, 0, 'xauth failed');
@@ -145,4 +143,5 @@ try {
 } finally {
   for (const pid of [...owned.keys()]) { try { await stopProcess(pid); } catch { /* reported by the try block */ } }
   await stopOwnedXvfb(xvfb);
+  claim.release();
 }

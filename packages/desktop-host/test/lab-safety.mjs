@@ -2,14 +2,90 @@
 // connection is made here; /proc proves the listener before any client starts.
 import assert from 'node:assert/strict';
 import { ChildProcess } from 'node:child_process';
-import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, unlinkSync } from 'node:fs';
-import { basename } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 export function assertNoAmbientDesktop(env = process.env) {
   for (const name of ['DISPLAY', 'WAYLAND_DISPLAY']) {
     assert(!env[name], `private lab refuses ambient ${name}; unset it before running this test`);
   }
+}
+
+// ---------------------------------------------------------------- lane paths
+// One family, one guard: a lane's artefacts live under its own task-scoped lab
+// directory and a lane's private display is claimed atomically, so two lanes
+// starting at the same moment can never read, overwrite or delete each other.
+
+/**
+ * The lane's own lab root, `~/lab-tmp/<lane>/`. `DESKLINK_LANE` is the task id
+ * a lane is dispatched under; with none, the lane is named for its own pid, so
+ * two lanes never share a root and never write a predictable shared name.
+ */
+export function laneRoot(env = process.env) {
+  const lane = env.DESKLINK_LANE ?? `pid-${process.pid}`;
+  assert.match(lane, /^[\w][\w.-]*$/, 'DESKLINK_LANE names this lane: letters, digits, . _ -');
+  return join(env.HOME ?? homedir(), 'lab-tmp', lane);
+}
+
+/**
+ * A fresh directory for one kind of artefact inside the lane's own root. It
+ * refuses an existing path, so a second run never lands on the first run's
+ * evidence. Returns the directory; the caller creates what goes in it.
+ */
+export function laneArtefactDir(purpose, env = process.env) {
+  assert.match(purpose, /^[\w][\w.-]*$/, 'an artefact kind is a plain name, never a path');
+  const parent = join(laneRoot(env), purpose);
+  mkdirSync(parent, { recursive: true, mode: 0o700 });
+  // Never a name another run holds: the timestamp carries this lane's pid, and
+  // two calls in the same millisecond take the next free suffix rather than
+  // landing on a directory that already has artefacts in it.
+  const stem = `${new Date().toISOString().replace(/:/g, '')}-${process.pid}`;
+  for (let attempt = 1; ; attempt++) {
+    const dir = join(parent, attempt === 1 ? stem : `${stem}-${attempt}`);
+    try { mkdirSync(dir, { mode: 0o700 }); return dir; }
+    catch (error) { if (error.code !== 'EEXIST') throw error; }
+  }
+}
+
+/**
+ * Claim one private X display for this lane, atomically. Reading
+ * `/tmp/.X<n>-lock` and then starting Xvfb on it is a race: two lanes starting
+ * at the same moment both saw the number free and only one server came up.
+ * The claim is a directory, because `mkdir` is the one atomic primitive here
+ * that does not collide with the X server's own lock file. Release it when the
+ * lane is done; a claim whose owner is gone is reclaimed automatically.
+ */
+export function claimPrivateDisplay({ from = 170, count = 30 } = {}) {
+  const root = join(tmpdir(), 'desklink-display-claims');
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  for (let number = from; number < from + count; number++) {
+    const claim = join(root, String(number));
+    let held = false;
+    try { mkdirSync(claim); held = true; }
+    catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      let owner = 0;
+      try { owner = Number(readFileSync(join(claim, 'pid'), 'utf8').trim()); } catch { /* half-written claim */ }
+      if (owner !== process.pid && proc(owner)) continue; // a live lane holds it
+      rmSync(claim, { recursive: true, force: true });
+      try { mkdirSync(claim); held = true; } catch { continue; } // lost the reclaim to another lane
+    }
+    writeFileSync(join(claim, 'pid'), String(process.pid));
+    // X claimed it first (a display outside this range, or a leftover server):
+    // give it back and take the next number.
+    if (existsSync(`/tmp/.X${number}-lock`) || existsSync(`/tmp/.X11-unix/X${number}`)) {
+      rmSync(claim, { recursive: true, force: true });
+      continue;
+    }
+    let released = false;
+    return {
+      number, display: `:${number}`,
+      release() { if (!released && held) { released = true; rmSync(claim, { recursive: true, force: true }); } },
+    };
+  }
+  throw new Error(`no unclaimed private X display in ${from}..${from + count - 1}`);
 }
 
 function proc(pid) {

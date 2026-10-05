@@ -12,7 +12,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
-import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
+import { assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
 
 assertNoAmbientDesktop();
 
@@ -40,10 +40,8 @@ writeFileSync(join(fixture, 'cobalt.html'), '<!doctype html><title>cobalt</title
 writeFileSync(join(fixture, 'heron.html'), '<!doctype html><title>heron</title><h1>heron answer</h1>');
 
 // Task-owned private Xvfb on a verified high display (never :0/wayland-1).
-const number = Array.from({ length: 30 }, (_, i) => 170 + i).find(n =>
-  !existsSync(`/tmp/.X11-unix/X${n}`) && !existsSync(`/tmp/.X${n}-lock`));
-assert(number !== undefined, 'no unclaimed high X display');
-const display = `:${number}`;
+const claim = claimPrivateDisplay({ from: 170, count: 30 });
+const { number, display } = claim;
 const authority = join(dir, 'Xauthority');
 assert.equal(spawnSync('xauth', ['-f', authority, 'add', display, '.', randomBytes(16).toString('hex')], { encoding: 'utf8' }).status, 0, 'xauth failed');
 let xvfb;
@@ -223,6 +221,7 @@ const indexOfUrl = async (urlPart) => {
   try { await ok('browser', 'detach'); } catch {}
   for (const pid of [...owned.keys()]) { try { await stopProcess(pid); } catch { /* surfaced above */ } }
   if (xvfb) await stopOwnedXvfb(xvfb);
+  claim.release();
   assert.equal(sessionStrays().length, 0, 'unrecorded session processes survived');
   rmSync(dir, { recursive: true, force: true });
 }

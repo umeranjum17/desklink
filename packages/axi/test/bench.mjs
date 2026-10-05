@@ -13,7 +13,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
-import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
+import { assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
 
 assertNoAmbientDesktop();
 
@@ -46,10 +46,8 @@ const indexUrl = `file://${join(fixture, 'index.html')}`;
 const build = spawnSync('cargo', ['build', '-q', '--manifest-path', 'packages/desktop-host/engine/Cargo.toml', '--example', 'x11_target'], { cwd: repoRoot, stdio: 'ignore', env: { ...process.env, CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR ?? join(repoRoot, '.bench-target') } });
 assert.equal(build.status, 0, 'x11_target example build failed');
 const example = join(process.env.CARGO_TARGET_DIR ?? join(repoRoot, '.bench-target'), 'debug', 'examples', 'x11_target');
-const number = Array.from({ length: 30 }, (_, i) => 170 + i).find(n =>
-  !existsSync(`/tmp/.X11-unix/X${n}`) && !existsSync(`/tmp/.X${n}-lock`));
-assert(number !== undefined, 'no unclaimed high X display');
-const display = `:${number}`;
+const claim = claimPrivateDisplay({ from: 170, count: 30 });
+const { number, display } = claim;
 const socket = `/tmp/.X11-unix/X${number}`;
 const authority = join(dir, 'Xauthority');
 assert.equal(spawnSync('xauth', ['-f', authority, 'add', display, '.', randomBytes(16).toString('hex')], { encoding: 'utf8' }).status, 0, 'xauth failed');
@@ -385,6 +383,7 @@ try {
   } finally {
     for (const pid of [...owned.keys()]) if (pid !== xvfb?.pid) await stopProcess(pid);
     if (xvfb) await stopOwnedXvfb(xvfb);
+    claim.release();
     assert.equal(sessionStrays().length, 0, 'unrecorded session processes survived');
     rmSync(dir, { recursive: true, force: true });
   }

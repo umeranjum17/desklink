@@ -40,7 +40,7 @@
  *                              10.0.2.2 on an emulator, the LAN address on a
  *                              phone
  *   DESKLINK_ANDROID_OUT      where the captures and logs go (default a fresh
- *                              directory under ~/lab-tmp/desklink-android-flow)
+ *                              directory under this lane's ~/lab-tmp root)
  *   DESKLINK_ANDROID_SKIP_BUILD  1 reuses the APK the last run built
  */
 import assert from 'node:assert/strict';
@@ -53,24 +53,27 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
-    assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb,
+    assertNoAmbientDesktop, claimPrivateDisplay, laneArtefactDir, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb,
 } from '../../desktop-host/test/lab-safety.mjs';
 
 assertNoAmbientDesktop();
 assert(process.platform === 'linux', 'this private-Xvfb proof requires Linux');
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
-const out = resolve(process.env.DESKLINK_ANDROID_OUT
-    ?? join(homedir(), 'lab-tmp', 'desklink-android-flow', `${new Date().toISOString().replace(/[:.]/g, '')}-${process.pid}`));
-assert(!existsSync(out), 'refusing to overwrite evidence');
-mkdirSync(out, { recursive: true });
+// This lane's own lab root, never a shared name two lanes could both pick. The
+// default is created by laneArtefactDir, which refuses an existing path; a
+// caller-supplied directory is created here, under the same refusal.
+const out = resolve(process.env.DESKLINK_ANDROID_OUT ?? laneArtefactDir('android-flow'));
+if (process.env.DESKLINK_ANDROID_OUT) {
+    assert(!existsSync(out), 'refusing to overwrite evidence');
+    mkdirSync(out, { recursive: true });
+}
 const scratch = mkdtempSync(join(homedir(), '.cache', 'desklink-android-flow-'));
 const engine = resolve(process.env.DESKLINK_ENGINE ?? join(repo, 'packages/desktop-host/engine/target/debug/desklink-host'));
 const fixture = resolve(process.env.DESKLINK_VERIFY_TARGET ?? join(repo, 'packages/desktop-host/engine/target/debug/examples/x11_target'));
 const example = join(repo, 'packages/desktop-client/example');
 const apk = join(example, 'android/app/build/outputs/apk/debug/app-debug.apk');
-const display = `:${[170, 180, 190, 200].flatMap(n => [n, n + 1, n + 2, n + 3, n + 4, n + 5, n + 6, n + 7, n + 8, n + 9])
-    .find(n => !existsSync(`/tmp/.X${n}-lock`) && !existsSync(`/tmp/.X11-unix/X${n}`))}`;
-assert(display, 'no free private X display left; clean up an old lab');
+const claim = claimPrivateDisplay({ from: 170, count: 40 });
+const display = claim.display;
 const host = process.env.DESKLINK_ANDROID_HOST;
 assert(host, 'set DESKLINK_ANDROID_HOST to this machine\'s address on the phone\'s network');
 const env = { ...process.env, WAYLAND_DISPLAY: '', TMPDIR: scratch, DESKLINK_ENGINE: engine };
@@ -218,6 +221,7 @@ try {
     for (const [, child] of children) { try { process.kill(child.pid, 0); child.kill('SIGKILL'); } catch { child.exitCode ??= 0; } }
     receiver?.close();
     if (xvfb) { try { await stopOwnedXvfb(xvfb); } catch (error) { receipt.cleanup = String(error); } }
+    claim.release();
     for (const name of ['bridge', 'fixture', 'metro']) writeFileSync(join(out, `${name}.log`), logs[name]);
     writeFileSync(join(out, 'run.json'), `${JSON.stringify(receipt, null, 2)}\n`);
 }
