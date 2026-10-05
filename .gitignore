@@ -11,3 +11,7 @@ dist-desklink/
 evidence/agent-cursor/
 .task-target/
 target-review/
+
+# the injector dexes and jars into its own directory at run time
+packages/desktop-client/test/inject/classes/
+packages/desktop-client/test/inject/dex/
