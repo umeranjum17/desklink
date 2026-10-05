@@ -171,6 +171,61 @@ the compositor for consent first; input needs [kernel input access](packages/des
 If the desktop does not appear, `npx @desklink/host capabilities` prints what this
 machine can do.
 
+### On a phone
+
+Start the bridge where the phone can reach it, on a private network:
+
+```sh
+npx @desklink/host bridge --listen 0.0.0.0:19400
+```
+
+Then make a new Expo app on SDK 55, the SDK the receiver is built and tested
+against. One `expo install` adds the view, its WebRTC binding, the
+[`@byokit/signaling`](https://www.npmjs.com/package/@byokit/signaling)
+WebSocket adapter for the bridge, and both config plugins to `app.json`:
+
+```sh
+npx create-expo-app@latest desklink-quickstart --template blank-typescript@sdk-55
+cd desklink-quickstart
+npx expo install @desklink/react-native react-native-webrtc @config-plugins/react-native-webrtc@14 @byokit/signaling@0.1.0
+```
+
+Replace `App.tsx` with this, putting in the computer's address and the token
+the bridge printed:
+
+```tsx
+import { useEffect } from 'react';
+import { Button, View } from 'react-native';
+import { authorizeBridge } from '@byokit/signaling';
+import { DesktopView, useDesktopSession } from '@desklink/react-native';
+
+const BRIDGE = 'ws://192.168.1.20:19400/desktop?token=PASTE_THE_TOKEN';
+const authorize = authorizeBridge(BRIDGE, {});
+
+export default function App() {
+  const desktop = useDesktopSession({ authorize });
+  const { status, failure } = desktop.snapshot;
+  useEffect(() => desktop.setInputEnabled(status === 'live'), [status]);
+  return (
+    <View style={{ flex: 1, backgroundColor: 'black', paddingVertical: 48 }}>
+      <DesktopView sessionId={desktop.nativeId} style={{ flex: 1 }} />
+      {status !== 'live' && (
+        <Button title={failure ? `Retry (${failure.code})` : status === 'idle' ? 'Connect' : status}
+          onPress={() => void desktop.connect()} />
+      )}
+    </View>
+  );
+}
+```
+
+Run it on the phone with `npx expo run:android` or `npx expo run:ios --device`;
+the view is native code, so it needs a development build, not Expo Go. Tap
+Connect, approve the screen-sharing prompt if the computer shows one, and the desktop
+appears; tap it to click. The [receiver README](packages/desktop-client/README.md#what-the-package-guarantees)
+lists every gesture, and the keyboard, clipboard and safe-area options.
+`ws://` is plaintext and the token is full access: keep it to a private network,
+or put the bridge behind TLS and use `wss://`.
+
 ## Develop
 
 ```sh
