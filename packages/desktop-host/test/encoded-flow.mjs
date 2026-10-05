@@ -35,10 +35,10 @@
  */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 
@@ -294,6 +294,15 @@ function startRelay(engine) {
     });
 }
 
+/** The browser build behind the binary, so a failure names what actually ran. */
+function chromeVersion(binary) {
+    try {
+        return basename(dirname(realpathSync(binary)));
+    } catch {
+        return 'unknown version';
+    }
+}
+
 /** Chrome over CDP: launch, attach to a page target, evaluate in it. */
 async function startChrome(binary, pageUrl) {
     const profile = mkdtempSync(join(tmpdir(), 'desklink-encoded-chrome-'));
@@ -326,16 +335,33 @@ async function startChrome(binary, pageUrl) {
         stderr += chunk;
     });
 
+    // The browser's own lifetime is the only signal that separates a slow
+    // start from a browser that never started: without it both read as a
+    // silent timeout, which is exactly what the runner hands us.
+    let stopped = null;
+    const exited = new Promise((done) => {
+        chrome.once('exit', (code, signal) => { stopped = `the browser exited, code ${code}, signal ${signal}`; done(); });
+        chrome.once('error', (error) => { stopped = `the browser never started: ${error.message}`; done(); });
+    });
+
     const portFile = join(profile, 'DevToolsActivePort');
-    const deadline = Date.now() + 20_000;
+    const started = Date.now();
+    const deadline = started + 20_000;
     let port = null;
-    while (Date.now() < deadline && port === null) {
+    while (Date.now() < deadline && port === null && stopped === null) {
         if (existsSync(portFile)) {
             port = Number.parseInt(readFileSync(portFile, 'utf8').split('\n')[0], 10) || null;
         }
         if (port === null) await sleep(100);
     }
-    if (port === null) throw new Error(`Chrome never opened a debugging port: ${stderr.slice(-400)}`);
+    if (port === null) {
+        throw new Error(
+            `Chrome never opened a debugging port in ${Date.now() - started}ms from ${binary} `
+            + `(build ${chromeVersion(binary)}): ${stopped ?? 'it was still running and said nothing'}; `
+            + `stderr: ${stderr.slice(-400)}`,
+        );
+    }
+    console.log(`debug port ${port} after ${Date.now() - started}ms`);
 
     const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
     const socket = new WebSocket(version.webSocketDebuggerUrl);
@@ -403,8 +429,9 @@ async function startChrome(binary, pageUrl) {
             }
             chrome.kill('SIGKILL');
             // The profile is the browser's, not ours: remove it only once the
-            // process is gone, so a restart of the flow never inherits it.
-            await new Promise((done) => chrome.once('exit', done));
+            // process is gone, so a restart of the flow never inherits it. A
+            // browser that already exited will not fire 'exit' a second time.
+            if (stopped === null) await exited;
             rmSync(profile, { recursive: true, force: true });
         },
     };
