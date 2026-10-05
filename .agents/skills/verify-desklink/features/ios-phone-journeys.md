@@ -54,6 +54,29 @@ modifier chords the next key and clears; the clipboard round-trips through the
 engine in both directions; and the drawn mark is an arrow (0.3 pt at its tip,
 13.9 pt at its widest) whose tip is within a point of the desktop's pointer.
 
+## What the run does not claim, and how it avoids fooling itself
+
+- **Portrait does not "fill" the phone.** The documented default is fit-width, so
+  a 16:9 desktop on a tall phone is a band at the top (measured: 401×226 pt on a
+  402×874 pt screen) with letterbox and the app's own chrome below. The step says
+  so and asserts the measured band against the predicted one; landscape, which
+  covers, is asserted separately at 0% bars. Changing the portrait default is a
+  product decision, not a test fix.
+- **The accessibility tree says some words twice.** React Native hands it a
+  wrapper and its inner text node at the same frame and pid: one word on screen,
+  two nodes. The flow collapses by frame, keeps the named node, records every
+  string with its frame in `visible-text.json`, and asserts the live status reads
+  `Connected` once. `DESKLINK_IOS_TREE=<path>` writes the raw tree when a reviewer
+  wants to see which node said what.
+- **Every step starts from a cleared desktop.** The page's `window.reset()` takes
+  the click dots and the event logs away before each step, so a capture carries
+  only what that step did.
+- **A keystroke arrives once.** The page's own key log is the truth: typing
+  `desklink` must produce exactly eight keydowns, the field must read `desklink`,
+  and the notes line's mirror must be unchanged. A fixture that mirrors every
+  printable key into a line *and* lets a focused field take it will look like
+  duplicate delivery when it is the fixture showing both.
+
 ## Gotchas
 
 - **A chord goes to the desktop, and the desktop reacts.** `Control+J` is Chrome's

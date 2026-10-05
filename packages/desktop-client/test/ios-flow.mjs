@@ -192,23 +192,65 @@ function simulator() {
     return { udid: mac(`xcrun simctl create ${DEVICE} com.apple.CoreSimulator.SimDeviceType.${DEVICE_TYPE} ${runtime}`).trim(), temporary: true };
 }
 
-/** Every string the simulator's own screen shows: no metrics, no URLs, no tokens. */
-function visibleText(udid) {
-    const texts = [];
+/**
+ * Every string the simulator's own screen shows, with the node it came from:
+ * no metrics, no URLs, no tokens, and no word counted twice for one node.
+ */
+function visibleNodes(udid) {
+    const entries = [];
+    let seen = 0;
     const walk = (node) => {
-        for (const key of ['AXLabel', 'AXValue']) {
-            const value = node[key];
-            if (typeof value === 'string' && value.trim() !== '') texts.push(value.trim());
-        }
-        for (const child of node.children ?? []) walk(child);
+        const own = [...new Set(['AXLabel', 'AXValue']
+            .map((field) => node[field])
+            .filter((value) => typeof value === 'string' && value.trim() !== '')
+            .map((value) => value.trim()))]
+            .map((value) => ({
+                text: value,
+                id: node.AXUniqueId ?? null,
+                frame: node.AXFrame ?? null,
+                pid: node.pid ?? null,
+                key: node.AXUniqueId ?? `node-${seen++}`,
+            }));
+        // A node whose label and value are the same string says it once, and a
+        // container whose whole string is its only child's is speaking for it:
+        // neither is a second word on the phone's screen.
+        // axe's tree spells its child list differently at different levels, so
+        // take whichever array of nodes the node carries.
+        const kids = Object.values(node).find((value) => Array.isArray(value) && value.length > 0 && value.every((item) => item && typeof item === 'object')) ?? [];
+        const below = kids.map((child) => walk(child));
+        const children = below.flatMap((result) => result.entries);
+        const echoes = own.length === 1 && kids.length === 1 ? children.filter((entry) => entry.text === own[0]) : [];
+        // An unnamed container reports its subtree's text as its own, at any
+        // depth. That is the accessibility tree echoing one word that is on the
+        // screen once, not a second label: a named control keeps its own.
+        const said = new Set(below.flatMap((result) => result.texts));
+        const mine = own.filter((entry) => entry.id !== null || !said.has(entry.text));
+        return {
+            entries: [...children.filter((entry) => !echoes.includes(entry)), ...mine],
+            texts: [...said, ...mine.map((entry) => entry.text)],
+        };
     };
-    for (const root of JSON.parse(mac(`axe describe-ui --udid ${udid}`))) walk(root);
-    return texts;
+    const tree = JSON.parse(mac(`axe describe-ui --udid ${udid}`));
+    if (process.env.DESKLINK_IOS_TREE) writeFileSync(process.env.DESKLINK_IOS_TREE, JSON.stringify(tree, null, 1));
+    for (const root of tree) entries.push(...walk(root).entries);
+    // React Native hands the accessibility tree a wrapper and its inner text
+    // node at the same frame in the same process: one word on the phone's
+    // screen, two nodes saying it. Collapse by frame, keeping the named node.
+    const byFrame = new Map();
+    for (const entry of entries) {
+        const same = `${entry.pid}|${entry.frame}|${entry.text}`;
+        const previous = byFrame.get(same);
+        if (previous === undefined || (previous.id === null && entry.id !== null)) byFrame.set(same, entry);
+    }
+    return [...byFrame.values()];
 }
+
+const visibleText = (udid) => visibleNodes(udid).map((entry) => entry.text);
 
 /** The hidden accessibility status the app exposes as `testID="desklink-status"`, and the screen's size in points. */
 function screen(udid) {
     const tree = JSON.parse(mac(`axe describe-ui --udid ${udid}`));
+    if (process.env.DESKLINK_IOS_TREE) writeFileSync(process.env.DESKLINK_IOS_TREE, JSON.stringify(tree, null, 1));
     let status = null;
     const walk = (node) => {
         if (node.AXUniqueId === 'desklink-status') status = node.AXLabel ?? node.AXValue ?? '';
@@ -221,6 +263,7 @@ function screen(udid) {
 /** The accessibility value the simulator's own screen carries for one identifier. */
 function byId(udid, id) {
     const tree = JSON.parse(mac(`axe describe-ui --udid ${udid}`));
+    if (process.env.DESKLINK_IOS_TREE) writeFileSync(process.env.DESKLINK_IOS_TREE, JSON.stringify(tree, null, 1));
     let found = null;
     const walk = (node) => {
         if (node.AXUniqueId === id) found = { label: node.AXLabel ?? null, value: node.AXValue ?? null };
@@ -306,6 +349,15 @@ window.clicks = [];
 window.keys = [];
 window.pointer = [];
 window.pastes = [];
+// Each step of the flow clears the desktop's marks first, so a capture shows
+// only what that step did.
+window.reset = () => {
+    for (const dot of document.querySelectorAll('.click-dot')) dot.remove();
+    window.clicks.length = 0;
+    window.keys.length = 0;
+    window.pointer.length = 0;
+    window.pastes.length = 0;
+};
 const caret = document.getElementById('caret');
 setInterval(() => { caret.style.visibility = caret.style.visibility === 'hidden' ? 'visible' : 'hidden'; }, 300);
 const pad = document.getElementById('pad');
@@ -326,12 +378,17 @@ document.getElementById('copy-out').addEventListener('click', async () => {
     window.copied = ok ? selection.toString() : null;
 });
 addEventListener('keydown', (event) => {
-    if (event.key.length === 1 && !event.metaKey && !event.ctrlKey) document.getElementById('typed').textContent += event.key;
+    // The mirror is for keys typed at the page itself: a focused field takes
+    // its own characters, so mirroring those too would double them on screen.
+    if (event.key.length === 1 && !event.metaKey && !event.ctrlKey && document.activeElement === document.body) {
+        document.getElementById('typed').textContent += event.key;
+    }
 });
 for (const type of ['mousedown', 'mouseup']) addEventListener(type, (event) => {
     clicks.push({ type, x: event.clientX, y: event.clientY, button: event.button });
     if (type !== 'mousedown') return;
     const dot = document.createElement('div');
+    dot.className = 'click-dot';
     dot.style.cssText = 'pointer-events:none;position:fixed;width:36px;height:36px;margin:-18px;border-radius:50%;background:#0b1020;left:' + event.clientX + 'px;top:' + event.clientY + 'px';
     document.body.append(dot);
 });
@@ -775,26 +832,43 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     const within = (event, spot) => event !== undefined && Math.abs(event.x - spot.x) <= slack && Math.abs(event.y - spot.y) <= slack;
     const tapDesktop = (spot) => mac(`axe tap -x ${screenPoint(spot).x.toFixed(1)} -y ${screenPoint(spot).y.toFixed(1)} --udid ${udid}`);
     const steps = [];
+    // Every step starts from a cleared desktop, so its capture carries only
+    // what that step did.
+    const clean = async () => { await page.evaluate('window.reset()'); return 0; };
     const step = async (name, note) => {
         const shot = join(out, `step-${name}.png`);
         capture(shot);
         steps.push({ step: name, capture: shot.split('/').pop(), result: note });
         log(`step ${name}: ${note} (${shot})`);
     };
-    // What the phone's screen says, with nothing diagnostic on it.
-    const onScreen = visibleText(udid);
-    const diagnostics = onScreen.filter((text) => /wss?:\/\/|[Tt]oken|key=|bearer|0x[0-9a-f]{6}|\bfps\b|\bms\b.*\bpixels?\b/i.test(text));
+    // What the phone's screen says, with nothing diagnostic on it and no word
+    // said twice by one node.
+    const onScreen = visibleNodes(udid);
+    const diagnostics = onScreen.filter((entry) => /wss?:\/\/|[Tt]oken|key=|bearer|0x[0-9a-f]{6}|\bfps\b|\bms\b.*\bpixels?\b/i.test(entry.text));
     assert.deepEqual(diagnostics, [], `the phone screen shows no addresses, tokens or metrics: ${JSON.stringify(diagnostics)}`);
+    const repeated = onScreen.map((entry) => entry.text).filter((text, index, all) => all.indexOf(text) !== index);
     writeFileSync(join(out, 'visible-text.json'), JSON.stringify(onScreen, null, 1));
-    log(`the phone screen carries ${onScreen.length} strings, none diagnostic: ${onScreen.join(' | ')}`);
-    await step('00-live-desktop', 'the desktop fills the phone, with no diagnostic text on the screen');
+    log(`the phone screen carries ${onScreen.length} strings, none diagnostic, no string twice: ${onScreen.map((entry) => `${entry.text}${entry.id ? ` [${entry.id}]` : ''}`).join(' | ')}`);
+    log(`every string is one thing on the screen: ${onScreen.map((entry) => `${entry.text}@${entry.frame}`).join(' | ')}`);
+    if (repeated.length > 0) log(`strings that appear on more than one node, each a real control: ${[...new Set(repeated)].join(', ')}`);
+    // The fit is the documented one, and it is not "fills": portrait fits the
+    // desktop to the screen's width, so a 16:9 desktop on a tall phone is a
+    // band at the top with the app's own chrome below it. Measure and say it.
+    const fitWidthHeight = screenWidth * geometry.height / geometry.width;
+    const pictureHeightPt = box.bottom - box.top;
+    assert(Math.abs(pictureHeightPt - fitWidthHeight) <= 2,
+        `portrait shows the whole desktop at the width fit: ${pictureHeightPt.toFixed(0)} pt tall against ${fitWidthHeight.toFixed(0)} pt predicted`);
+    assert(fitWidthHeight <= screenHeight, `the whole desktop fits a portrait phone without cropping: ${fitWidthHeight.toFixed(0)} pt of ${screenHeight} pt`);
+    assert.equal(onScreen.filter((entry) => entry.text === 'Connected').length, 1,
+        `the phone says its live status once, not twice: ${JSON.stringify(onScreen.filter((entry) => entry.text === 'Connected'))}`);
+    await step('00-live-desktop', `live desktop at the documented portrait fit: ${(geometry.width * scale).toFixed(0)}x${pictureHeightPt.toFixed(0)} pt band at the top of a ${screenWidth}x${screenHeight} pt screen (${(100 * pictureHeightPt / screenHeight).toFixed(0)}% of its height; the rest is letterbox and the app's own chrome), no diagnostic text on the phone`);
 
     // The whole phone-only journey as one screen recording on the Mac.
     mac(`nohup xcrun simctl io ${udid} recordVideo --codec=h264 "$D/tmp/phone-control.mp4" > "$D/tmp/record.log" 2>&1 < /dev/null & echo $! > "$D/tmp/record.pid"; sleep 3`);
 
     // 1. pointer and click
     const press = { x: 700, y: 460 };
-    let since = await page.evaluate('clicks.length');
+    let since = await clean();
     tapDesktop(press);
     let clicked = [];
     for (let i = 0; i < 50 && clicked.length < 2; i++) { await sleep(100); clicked = (await page.evaluate('clicks')).slice(since); }
@@ -807,7 +881,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         '(() => { const box = document.getElementById("line").getBoundingClientRect(); return [box.left, box.top, box.right, box.bottom]; })()');
     const from = { x: Math.round(lineLeft) + 6, y: Math.round((lineTop + lineBottom) / 2) };
     const to = { x: Math.round(lineRight) - 6, y: from.y };
-    since = await page.evaluate('pointer.length');
+    since = await clean();
     pointerSteps(udid, [{ action: IPAD ? 'drag' : 'dragTouch', ...screenPoint(from), toX: screenPoint(to).x, toY: screenPoint(to).y }]);
     await sleep(500);
     const dragged = (await page.evaluate('pointer')).slice(since);
@@ -822,25 +896,35 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     await step('02-drag', `press (${dragDown.x}, ${dragDown.y}) → ${held.length} held moves → release (${dragUp.x}, ${dragUp.y}), selected ${JSON.stringify(dragUp.selection)}`);
 
     // 3. two fingers scroll the desktop; a one finger would pan the picture
-    since = await page.evaluate('pointer.length');
+    since = await clean();
     pointerSteps(udid, [{ action: 'scrollTwo', ...screenPoint({ x: 700, y: 300 }), dy: 220 }]);
     const wheels = (await page.evaluate('pointer')).slice(since).filter((event) => event.type === 'wheel');
     const total = wheels.reduce((sum, event) => sum + event.dy, 0);
     assert(wheels.length > 0 && Math.abs(total) >= 100, `two fingers turn the desktop's wheel: ${wheels.length} wheel events, deltaY ${total}`);
     await step('03-scroll', `two-finger scroll → ${wheels.length} wheel events, deltaY ${total}`);
 
-    // 4. typing on the phone reaches the desktop's own field
+    // 4. typing on the phone reaches the desktop's own field, once per character
     const padSpot = { x: 150, y: 640 };
     tapDesktop(padSpot);
     await sleep(300);
-    since = await page.evaluate('document.getElementById("pad").value');
+    const padBefore = await page.evaluate('document.getElementById("pad").value');
+    const mirrorBefore = await page.evaluate('document.getElementById("typed").textContent');
+    since = await clean();
     mac(`axe type 'desklink' --udid ${udid}`);
-    let typed = since;
-    for (let i = 0; i < 50 && typed === since; i++) { await sleep(200); typed = await page.evaluate('document.getElementById("pad").value'); }
-    assert(typed.includes('desklink'), `what the phone typed is in the desktop's field: ${JSON.stringify(typed)}`);
-    await step('04-typing', `typed "desklink" → desktop field reads ${JSON.stringify(typed)}`);
+    let typed = padBefore;
+    for (let i = 0; i < 50 && typed === padBefore; i++) { await sleep(200); typed = await page.evaluate('document.getElementById("pad").value'); }
+    assert(typed === 'desklink', `what the phone typed is in the desktop's field, once: ${JSON.stringify(typed)}`);
+    // The page's own key log is the truth about delivery: one keydown per
+    // character, and the page's mirror untouched because the field took them.
+    const typedDowns = (await page.evaluate('keys')).slice(since).filter((key) => key.type === 'keydown');
+    assert.deepEqual(typedDowns.map((key) => key.key), [...'desklink'],
+        `the desktop received each character exactly once: ${JSON.stringify(typedDowns)}`);
+    assert.equal(await page.evaluate('document.getElementById("typed").textContent'), mirrorBefore,
+        'the notes line mirrors nothing: a focused field takes its own characters, so nothing is delivered twice');
+    await step('04-typing', `typed "desklink" → desktop field reads ${JSON.stringify(typed)}, ${typedDowns.length} keydowns, no second copy`);
 
     // 5. sticky modifiers: latch, chord, release
+    await clean();
     mac(`axe tap --id desklink-key-Control --udid ${udid}`);
     assert.equal(byId(udid, 'desklink-key-Control').value, 'latched', 'one tap arms Ctrl');
     since = await page.evaluate('keys.length');
@@ -865,7 +949,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // The page may have moved under an earlier scroll, so aim at where the
     // button is now rather than where it was authored.
     const buttonSpot = await page.evaluate('(() => { const box = document.getElementById("copy-out").getBoundingClientRect(); return { x: box.left + box.width / 2, y: box.top + box.height / 2 }; })()');
-    since = await page.evaluate('clicks.length');
+    since = await clean();
     tapDesktop(buttonSpot);
     let clickedOnButton = [];
     for (let i = 0; i < 30 && clickedOnButton.length < 2; i++) { await sleep(100); clickedOnButton = (await page.evaluate('clicks')).slice(since); }
@@ -885,6 +969,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // 7. and the phone's clipboard goes the other way, pasted into the focused field
     // The phone's clipboard holds what step 06 brought over, so this needs no
     // host pasteboard write and no operating system's paste consent prompt.
+    since = await clean();
     tapDesktop(padSpot);
     await sleep(300);
     mac(`axe tap --id desklink-paste --udid ${udid}`);
@@ -915,7 +1000,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // 8. the pointer mark: a real arrow, its tip where the desktop's pointer is
     // A one-finger drag on the whole desktop carries the pointer with no button,
     // so the mark can be read over bare paper, away from any click dot.
-    since = await page.evaluate('pointer.length');
+    since = await clean();
     // A finger travelling over bare paper, so the mark is read over clean
     // background: the press paints its dot 200 desktop pixels away.
     pointerSteps(udid, [{ action: 'dragTouch', ...screenPoint({ x: 700, y: 460 }), toX: screenPoint({ x: 900, y: 300 }).x, toY: screenPoint({ x: 900, y: 300 }).y }]);
