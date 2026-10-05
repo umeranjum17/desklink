@@ -187,7 +187,7 @@ WebSocket adapter for the bridge, and both config plugins to `app.json`:
 ```sh
 npx create-expo-app@latest desklink-quickstart --template blank-typescript@sdk-55
 cd desklink-quickstart
-npx expo install @desklink/react-native react-native-webrtc @config-plugins/react-native-webrtc@14 @byokit/signaling
+npx expo install @desklink/react-native react-native-webrtc @config-plugins/react-native-webrtc@14 @byokit/signaling@0.1.0
 ```
 
 Replace `App.tsx` with this, putting in the computer's address and the token
