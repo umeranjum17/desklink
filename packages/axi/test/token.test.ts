@@ -10,7 +10,8 @@ describe('portal restore token', () => {
     const path = join(dir, 'state', 'portal-token');
     try {
       saveToken(path, 'first-secret');
-      expect(statSync(path).mode & 0o777).toBe(0o600);
+      // Windows has no POSIX mode bits, so the file mode only means something off Windows.
+      if (process.platform !== 'win32') expect(statSync(path).mode & 0o777).toBe(0o600);
       expect(readFileSync(path, 'utf8')).toBe('first-secret');
       expect(takeToken(path)).toBe('first-secret');
       expect(takeToken(path)).toBeUndefined();

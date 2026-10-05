@@ -10,7 +10,8 @@ const root = fileURLToPath(new URL('../../../', import.meta.url));
 // The journey this covers: two lanes staging their artefacts at the same moment
 // on one host, neither able to read, overwrite or delete the other's, and one
 // ordinary lane alone still working exactly as before.
-it('keeps two lanes apart while they stage at the same moment', () => {
+// Lane isolation claims a private X display, which is Linux-only.
+it.skipIf(process.platform !== 'linux')('keeps two lanes apart while they stage at the same moment', () => {
   const out = mkdtempSync(join(tmpdir(), 'desklink-lane-lab-run-'));
   try {
     const run = spawnSync(process.execPath, [join(root, 'packages/desktop-host/test/lane-lab-flow.mjs'), out], {
