@@ -65,6 +65,7 @@ try {
     // What would be published, so an install that silently lost a file shows here.
     const packed = packJson(['--dry-run'], join(repo, 'packages', 'desktop-host'));
     const expected = new Set(packed.files.map((file) => file.path));
+    expected.add('dist/a-file-the-release-never-shipped.js'); // deliberate break: red-check only
 
     npm(['init', '-y'], project);
     npm(['install', '--ignore-scripts', '--no-audit', '--no-fund', ...tarballs.map((tarball) => tarball.file)], project);
