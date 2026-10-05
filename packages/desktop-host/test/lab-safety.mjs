@@ -26,6 +26,7 @@ export function assertNoAmbientDesktop(env = process.env) {
 export function laneRoot(env = process.env) {
   const lane = env.DESKLINK_LANE ?? `pid-${process.pid}`;
   assert.match(lane, /^[\w][\w.-]*$/, 'DESKLINK_LANE names this lane: letters, digits, . _ -');
+  assert(lane !== '.' && lane !== '..', 'DESKLINK_LANE names this lane: letters, digits, . _ -');
   return join(env.HOME ?? homedir(), 'lab-tmp', lane);
 }
 
@@ -36,6 +37,7 @@ export function laneRoot(env = process.env) {
  */
 export function laneArtefactDir(purpose, env = process.env) {
   assert.match(purpose, /^[\w][\w.-]*$/, 'an artefact kind is a plain name, never a path');
+  assert(purpose !== '.' && purpose !== '..', 'an artefact kind is a plain name, never a path');
   const parent = join(laneRoot(env), purpose);
   mkdirSync(parent, { recursive: true, mode: 0o700 });
   // Never a name another run holds: the timestamp carries this lane's pid, and
@@ -58,6 +60,7 @@ export function laneArtefactDir(purpose, env = process.env) {
  * lane is done; a claim whose owner is gone is reclaimed automatically.
  */
 export function claimPrivateDisplay({ from = 170, count = 30 } = {}) {
+  assert.equal(process.platform, 'linux', 'private display claims require Linux');
   const root = join(tmpdir(), 'desklink-display-claims');
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const identity = `${process.pid} ${proc(process.pid)?.started ?? ''}`;
