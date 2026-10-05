@@ -1,6 +1,6 @@
-// The package under test is this directory's parent, linked as `file:..`.
-// Its imports of the app's singletons resolve from this app, so a checkout's
-// own node_modules above the package cannot hand it a second React.
+// The package under test is this directory's parent, installed packed (see
+// .npmrc). Its imports of the app's singletons resolve from this app, so a
+// checkout's own node_modules above the package cannot hand it a second React.
 const path = require('node:path');
 const { getDefaultConfig } = require('expo/metro-config');
 

@@ -4,3 +4,6 @@ ios/
 android/
 .expo/
 build/
+# Written by `npm install` and by `expo start` in this app.
+package-lock.json
+tsconfig.json
