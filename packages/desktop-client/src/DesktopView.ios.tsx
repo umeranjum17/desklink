@@ -67,7 +67,7 @@ function loadRTCView(): React.ComponentType<Record<string, unknown>> | null {
 /** An offset that the edge clamp turns into the desktop's top-left corner. */
 const TOP_LEFT: Point = { x: Infinity, y: Infinity };
 
-export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0, insets, gestures = 'desktop' }: DesktopViewProps) {
+export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0, insets, gestures = 'desktop', onPictureFrame }: DesktopViewProps) {
     const [revision, refresh] = React.useReducer((n: number) => n + 1, 0);
     const [bounds, setBounds] = React.useState({ width: 0, height: 0 });
     const [size, setSize] = React.useState(() => getDesktopSize(sessionId) ?? { width: 0, height: 0 });
@@ -169,6 +169,16 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
     const shown = clampOffset(offset.x, offset.y);
     const originX = left + (safeWidth - pictureWidth) / 2 + shown.x;
     const originY = top + (zoom === null && pictureHeight <= visibleHeight ? 0 : (visibleHeight - pictureHeight) / 2) + shown.y;
+    // An application's controls can sit under the picture instead of over it,
+    // so it needs to know where the picture ended. Reported only when the
+    // picture moved: the callback sets state, and a fresh callback each render
+    // would otherwise loop.
+    const frame = React.useRef({ top: -1, height: -1 });
+    React.useEffect(() => {
+        if (frame.current.top === originY && frame.current.height === pictureHeight) return;
+        frame.current = { top: originY, height: pictureHeight };
+        onPictureFrame?.(frame.current);
+    }, [onPictureFrame, originY, pictureHeight]);
     const send = (control: Record<string, unknown>) => { if (sessionId) nativeDesklink.sendControl(sessionId, JSON.stringify(control)); };
     const flushWheel = (force: boolean) => {
         const { x, y } = wheel.current;

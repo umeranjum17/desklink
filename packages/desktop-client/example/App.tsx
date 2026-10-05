@@ -28,6 +28,11 @@ import {
     type Signaling,
 } from '@desklink/react-native';
 
+/** The height of controls a tablet's band takes, in points: status, a 96 pt modifier row and three 96 pt keys. */
+const DECK_TALL = 560;
+/** The shortest edge that makes a screen a tablet's rather than a phone's. */
+const TABLET_MIN = 500;
+
 function connectionLink(link: string | null): { url: string; report: string | null; key: string } | null {
     if (!link) return null;
     try {
@@ -165,6 +170,15 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
     });
     const { status } = desktop.snapshot;
     const [copyError, setCopyError] = React.useState<string | null>(null);
+    // Where the picture ended, and how tall the controls are: the deck fills the
+    // band between them, so a tall screen is controls rather than empty space.
+    const [pictureBottom, setPictureBottom] = React.useState(0);
+    const [deckHeight, setDeckHeight] = React.useState(0);
+    const [screen, setScreen] = React.useState({ width: 0, height: 0 });
+    // A tablet's band carries tablet-sized controls and starts under the picture.
+    // A phone's is left exactly as it was: its own keys, at the bottom edge.
+    const tablet = Math.min(screen.width, screen.height) >= TABLET_MIN;
+    const tallDeck = tablet && screen.height - (insets?.bottom ?? 0) - pictureBottom >= DECK_TALL;
 
     async function copy() {
         setCopyError(null);
@@ -217,9 +231,10 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
     }, [status, desktop.getStats, report]);
 
     return (
-        <View style={styles.root}>
+        <View style={styles.root} onLayout={(event) => setScreen(event.nativeEvent.layout)}>
             <StatusBar hidden />
-            <DesktopView sessionId={desktop.nativeId} style={StyleSheet.absoluteFill} insets={insets} accessibilityLabel="desktop" />
+            <DesktopView sessionId={desktop.nativeId} style={StyleSheet.absoluteFill} insets={insets} accessibilityLabel="desktop"
+                onPictureFrame={(frame) => setPictureBottom(frame.top + frame.height)} />
 
             <View pointerEvents="box-none" style={styles.confirmation}>
                 {copyError ? (
@@ -230,23 +245,31 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
                     </ScrollView>
                 ) : <ClipboardConfirmation transfer={desktop.clipboard} />}
             </View>
-            <View pointerEvents="box-none" style={styles.bottom}>
+            <View pointerEvents="box-none" style={[styles.bottom, {
+                // Under the picture on a tablet, where the band is the controls';
+                // at the bottom of the screen on a phone, and whenever the
+                // keyboard has taken the band, as it always was.
+                top: tallDeck ? pictureBottom : screen.height - deckHeight - insets.bottom,
+                paddingBottom: insets.bottom,
+            }]}>
+            <View style={[styles.deck, tallDeck && styles.deckTall]} onLayout={(event) => setDeckHeight(event.nativeEvent.layout.height)}>
             <View pointerEvents="none" style={styles.bar}>
                 <Text testID="desklink-status" style={styles.status}>
                     {statusText(desktop.snapshot)}
                 </Text>
             </View>
+            <ModifierKeys modifiers={desktop.modifiers} onTap={desktop.tapModifier} style={styles.row} grow={tallDeck} />
             <View style={styles.keys}>
-                <ModifierKeys modifiers={desktop.modifiers} onTap={desktop.tapModifier} style={styles.row} />
-                <Pressable testID="desklink-keyboard" accessibilityRole="button" onPress={() => desktop.showKeyboard()} style={styles.copy}>
+                <Pressable testID="desklink-keyboard" accessibilityRole="button" onPress={() => desktop.showKeyboard()} style={[styles.copy, tallDeck && styles.copyTall]}>
                     <Text style={styles.copyLabel}>Keys</Text>
                 </Pressable>
-                <Pressable testID="desklink-copy" accessibilityRole="button" onPress={() => void copy()} style={styles.copy}>
+                <Pressable testID="desklink-copy" accessibilityRole="button" onPress={() => void copy()} style={[styles.copy, tallDeck && styles.copyTall]}>
                     <Text style={styles.copyLabel}>Copy</Text>
                 </Pressable>
-                <Pressable testID="desklink-paste" accessibilityRole="button" onPress={() => void paste()} style={styles.copy}>
+                <Pressable testID="desklink-paste" accessibilityRole="button" onPress={() => void paste()} style={[styles.copy, tallDeck && styles.copyTall]}>
                     <Text style={styles.copyLabel}>Paste</Text>
                 </Pressable>
+            </View>
             </View>
             </View>
         </View>
@@ -257,15 +280,20 @@ const styles = StyleSheet.create({
     root: { flex: 1, backgroundColor: '#000' },
     idle: { alignItems: 'center', justifyContent: 'center' },
     messageText: { color: '#fff', fontSize: 16 },
-    bottom: { position: 'absolute', left: 0, right: 0, bottom: 0 },
+    // The deck is one block at the bottom of the band, where thumbs are; the
+    // band's slack is the single gap under the picture.
+    bottom: { position: 'absolute', left: 0, right: 0, bottom: 0, justifyContent: 'flex-end' },
+    deck: { width: '100%' },
+    deckTall: { flex: 1 },
     bar: { marginHorizontal: 16, marginBottom: 8, minHeight: 24, alignItems: 'center' },
     status: { color: '#fff', fontSize: 15, textAlign: 'center' },
     confirmation: { minHeight: 48, justifyContent: 'center' },
     copyErrorScroll: { maxHeight: 120, flexGrow: 0 },
     copyError: { marginHorizontal: 16, marginVertical: 8, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12, backgroundColor: '#521b24' },
     copyErrorLabel: { color: '#ffffff', fontSize: 14, fontWeight: '600' },
-    keys: { paddingBottom: 24, backgroundColor: 'rgba(22, 23, 26, 0.94)' },
+    keys: { backgroundColor: 'rgba(22, 23, 26, 0.94)', flexGrow: 1 },
     row: { backgroundColor: 'transparent' },
     copy: { margin: 8, minHeight: 44, paddingHorizontal: 12, borderRadius: 8, justifyContent: 'center', backgroundColor: '#2b2d33' },
+    copyTall: { flexGrow: 1, minHeight: 96 },
     copyLabel: { color: '#c9ccd3', fontSize: 15, fontWeight: '500' },
 });

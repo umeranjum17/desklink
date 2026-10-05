@@ -35,6 +35,13 @@ export interface DesktopViewProps {
      * (one finger scrolls), or a device screen (one finger presses and drags).
      */
     gestures?: GestureProfile;
+    /**
+     * Where the picture ended, in the view's own points, whenever it moves.
+     * A wide desktop on a tall screen leaves a band under the picture; this is
+     * how an application lays its own controls into that band instead of
+     * guessing the desktop's aspect.
+     */
+    onPictureFrame?: (frame: { top: number; height: number }) => void;
 }
 
 interface NativeSurfaceProps {
