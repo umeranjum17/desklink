@@ -109,18 +109,26 @@ cleans it.
   `node_modules` predates that, delete `package-lock.json`,
   `node_modules/.package-lock.json` and `node_modules/expo-modules-core` before
   installing again, or npm keeps the hoisted copy it already resolved.
-- **XCUITest's synthesized touch is not in screen points on an iPad simulator.**
-  The flow addresses the device in screen points, and `axe tap` honours that
-  exactly: a tap at (77.1, 224.2) pt on an 820x1180 pt screen lands on the
-  desktop's (120, 299). The same point synthesized by
-  `test/ios-pointer/` through `XCSynthesizedEventRecord` lands on (120, 349) -
-  one status-bar inset lower, measured on the desktop's own page. Every
-  XCUITest step (the drags, the two-finger scroll, the pointer mark) therefore
-  misses by that inset on an iPad simulator, while the same steps pass on an
-  iPhone. The steps before it - the live picture, its fit, the caret that proves
-  it advances, `axe` taps and the diagnostics-free screen - all hold on the iPad.
-  Until that offset is accounted for, `DESKLINK_IOS_IPAD=1` cannot complete on an
-  iPad simulator; `DESKLINK_IOS_DEVICE=<iPad>` without it is the iPad run.
+- **The iPad's "one inset low" miss was the flow's own stale picture, not
+  XCUITest's aim.** Measured on the `fm-iPad (A16)` simulator (820x1180 pt,
+  picture 819x461 pt at 0.64 screen pt per desktop pixel): the app starts with
+  the picture under the status bar, at (0, 32), and moves it to (0, 0) once the
+  session settles. The flow measured the picture once, up front, so every later
+  aimed step - XCUITest's presses and `axe` taps alike - aimed a picture that had
+  already moved, landing one status-bar inset (32 pt, about 50 desktop pixels)
+  off. XCUITest aims exactly: re-measured after the app settled, a coordinate
+  press and a pointer drag aimed at (150, 250) land on the desktop's (150, 249)
+  and (150, 250). The flow now re-reads the picture and re-measures each
+  instrument's miss at five positions before every section that aims, writes
+  `touch-inset-<section>.json`, and takes the measured offset off every
+  coordinate it hands a tool. Do not hard-code 32 pt anywhere.
+
+- **After several XCUITest runs the simulator's accessibility tree goes empty.**
+  `axe describe-ui` then returns one `AXApplication` node with no children and a
+  0x0 frame, whatever is in front, and the flow fails with
+  `the simulator never showed the desktop: status null`. `xcrun simctl shutdown`
+  and `boot` the device (bootstatus -b) and the tree comes back; nothing about the
+  app was wrong.
 
 - **A chord goes to the desktop, and the desktop reacts.** `Control+J` is Chrome's
   Downloads: the lab desktop navigates away and every later step sees a different

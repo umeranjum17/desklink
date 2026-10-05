@@ -31,6 +31,8 @@ final class PointerTests: XCTestCase {
       let point = at(step.x, step.y)
       switch step.action {
       case "hover": point.hover()
+      // A press in place: what the flow measures an instrument's aim with.
+      case "press": point.press(forDuration: step.dy ?? 0.15)
       case "drag":
         point.click(forDuration: 0.4, thenDragTo: at(step.toX ?? step.x, step.toY ?? step.y))
       case "dragTouch":
