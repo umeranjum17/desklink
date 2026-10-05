@@ -103,6 +103,7 @@ class Fixture:
         self.window = None
         self.view = None
         self.buffer = None
+        self.dragging = False
 
     def log(self, kind, **fields):
         row = {"kind": kind, "t": round(time.time(), 4)}
@@ -141,15 +142,22 @@ class Fixture:
     def pointer(self, _controller, x, y):
         gx, gy = self.at(x, y)
         self.log("pointer", x=gx, y=gy)
+        # A drag selects while the button is still down, and a release the
+        # device drops must not cost the record of it: the selection is read
+        # out of the buffer here, not only when the finger lifts.
+        if self.dragging:
+            self.dump()
         return False
 
     def primary_down(self, _controller, _n_press, x, y):
         gx, gy = self.at(x, y)
+        self.dragging = True
         self.log("button", x=gx, y=gy, button=1, phase="down")
         return True
 
     def primary_up(self, _controller, _n_press, x, y):
         gx, gy = self.at(x, y)
+        self.dragging = False
         self.log("button", x=gx, y=gy, button=1, phase="up")
         GLib.timeout_add(60, self.dump)
         return True
