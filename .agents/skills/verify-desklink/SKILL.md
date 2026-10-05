@@ -99,6 +99,9 @@ run directory. Add a row the day a surface is added; never silently drop one.
 | Phone, portrait fit-width | `@desklink/react-native`, 390×844 | picture fills the width, letterboxed above and below | `phone-portrait.png` |
 | Phone, landscape fit | `@desklink/react-native`, 844×390 | whole desktop fitted to the short axis | `phone-landscape.png` |
 | Phone motion: tap, pinch zoom | `@desklink/react-native` | fixture button edge from the tap, picture width grows under the zoom, both recorded | `phone-motion.webm`, `phone-zoom.png` |
+| iOS live desktop, portrait and landscape | `packages/desktop-client/test/ios-flow.mjs` on the Mac's own simulator | picture fits the agreed fit, decoded frames keep advancing, no diagnostic text on the phone's screen | `step-00-live-desktop.png`, `desklink-receiver-fill-*.png` |
+| iOS phone-only control | same flow, its phone-only control section | desktop-side click, held drag with selection, wheel, typed text, a modifier chord, clipboard both ways, all recorded | `phone-control.mp4`, `step-01-click.png` … `step-07-clipboard-in.png` |
+| iOS pointer mark | same flow, over bare paper | the drawn mark is an arrow, not a rectangle, and its tip is within 2 pt of the desktop's pointer | `step-08-pointer-arrow-4x.png`, `step-08-pointer.json` |
 
 **Light theme is not shipped, and the run proves that rather than asserting it.**
 The reference client declares `:root { color-scheme: dark }` and hard-codes its
@@ -115,9 +118,16 @@ claimed: the example app's **key row** (`ModifierKeys`, drawn by
 confirmation pill** (`ClipboardConfirmation`) are React Native components with no
 DOM output under the RN stub. The harness mounts the client's picture surface,
 not an app screen. Prove those where the runtime is real:
-`packages/desktop-client/test/ios-flow.mjs` on a macOS simulator, or the example
+`packages/desktop-client/test/ios-flow.mjs` on a macOS simulator, which drives the
+sticky modifiers, the clipboard pill and the whole phone-only control journey on
+the phone's own screen, or the example
 app on an emulator. Naming a case without a capture in the run directory is a
 false claim; naming it here with the reason is not.
+
+The iOS rows above are a separate run on the Mac, not part of one directory
+here: `packages/desktop-client/test/ios-flow.mjs` writes
+`~/lab-tmp/dl-pm-iphone/<run>/`, with a capture per step, the phone-only control
+recording and the receipts named above.
 
 ## Motion
 
