@@ -21,7 +21,7 @@ import android.view.MotionEvent;
  *
  *     verb x1 y1 x2 y2 param hold
  *
- * with verb one of tap, longpress, drag, twofinger; phone pixels; param a
+ * with verb one of tap, longpress, drag, twofinger, pinch; phone pixels; param a
  * millisecond count (hold, drag duration) or a frame count; and hold the
  * milliseconds a drag stays down before it first moves, or the pace between
  * two fingers' frames.
@@ -59,6 +59,7 @@ public class Touch extends UiAutomatorTestCase {
         else if ("twofinger".equals(verb)) twoFinger(x1, y1, x2, y2, param, hold);
         else if ("fingersdown".equals(verb)) fingersDown(x1, y1);
         else if ("fingersmove".equals(verb)) fingersMove(x1, y1, x2, y2, param, hold);
+        else if ("pinch".equals(verb)) pinch(x1, y1, param, hold);
         else throw new IllegalArgumentException("unknown gesture " + verb);
     }
 
@@ -155,6 +156,33 @@ public class Touch extends UiAutomatorTestCase {
         sleep(150);
         send(now, SystemClock.uptimeMillis(), UP, 1, new int[][]{{x, y}});
         sleep(400);
+    }
+
+    /**
+     * A pinch about (x1, y1): two fingers whose gap changes, which is the
+     * gesture that zooms a picture. `gap` is the distance in pixels between
+     * the two fingers at the end of the movement (they start 110 apart), so a
+     * smaller gap zooms out, `steps` the number of frames and the pace of
+     * those frames is fixed.
+     */
+    private void pinch(int x1, int y1, int gap, int steps) throws Exception {
+        int pace = 16;
+        int x2 = x1, y2 = y1;
+        int start = 110;
+        long down = SystemClock.uptimeMillis();
+        send(down, down, DOWN, 1, new int[][]{{x1, y1}});
+        sleep(16);
+        send(down, SystemClock.uptimeMillis(), POINTER_DOWN, 2, new int[][]{{x1, y1}, {x1 + start, y1}});
+        for (int step = 1; step < steps; step++) {
+            float t = (float) step / (steps - 1);
+            int ax = Math.round(x1 + (x2 - x1) * t), ay = Math.round(y1 + (y2 - y1) * t);
+            int now = Math.round(start + (gap - start) * t);
+            sleep(pace > 0 ? pace : 16);
+            send(down, SystemClock.uptimeMillis(), MOVE, 2, new int[][]{{ax, ay}, {ax + now, ay}});
+        }
+        send(down, SystemClock.uptimeMillis(), POINTER_UP, 2, new int[][]{{x2, y2}, {x2 + gap, y2}});
+        sleep(16);
+        release(down, x2 + gap, y2);
     }
 
     private void twoFinger(int x1, int y1, int x2, int y2, int steps, int stepMs) throws Exception {

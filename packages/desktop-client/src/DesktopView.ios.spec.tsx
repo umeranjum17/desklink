@@ -266,6 +266,23 @@ describe('DesktopView.ios parity with DesktopView.kt', () => {
         expect(sent.filter((message) => message.kind === 'pointer' && message.phase === 'move')).not.toEqual([]);
     });
 
+    it('carries a one-finger drag from the moment the picture exists, in portrait', async () => {
+        // The state a session starts in: the picture at its default fill, before
+        // anything has been zoomed. In portrait that fill is the fit, so the
+        // picture has nowhere to pan to and the finger belongs to the desktop.
+        const { sent, rtcStyle, grant, move, release } = await openView({ whole: false });
+        const before = rtcStyle();
+        grant([touch(100, 100)]);
+        move([touch(160, 120)]);
+        move([touch(220, 140)]);
+        release();
+        const moves = sent.filter((message) => message.kind === 'pointer' && message.phase === 'move');
+        expect(moves).toHaveLength(2);
+        expect(moves[1].x).toBeGreaterThan(moves[0].x);
+        expect(moves[1].y).toBeGreaterThan(moves[0].y);
+        expect(rtcStyle()).toEqual(before);
+    });
+
     it('zooms around the pinch focus and re-clamps after zooming out', async () => {
         const { rtcStyle, grant, move } = await openView();
         grant([touch(100, 400)]);
