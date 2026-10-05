@@ -141,6 +141,8 @@ A glass-to-glass lab runs the engine against a private X display showing a stamp
 
 Load moves these numbers, which is why every lab run records it: rerun for this page on a host at load 125–140, 1080p typing measured 26.5 fps and 95 ms p50, and full-screen motion 9.5 fps and 288 ms p50. [`portal-g2g-flow.mjs`](packages/desktop-host/test/portal-g2g-flow.mjs) measures the ScreenCast portal and PipeWire path the same way, inside a private namespace cage.
 
+Those are all same-host numbers. On a physical Android phone, [`phone-g2g-flow.mjs`](packages/desktop-client/test/phone-g2g-flow.mjs) reads the same stamp back out of the phone's own screen and records the phone's own decoded-frame counts: 59.9 fps typing and 59.8 fps scrolling at 1080p, with the latency it can and cannot resolve, and the two environment blockers (a host firewall that drops the phone, and no link-shaping authority for the 4 Mbit leg), written up in [phone Wi-Fi latency](docs/phone-wifi-latency.md).
+
 <p align="center">
   <picture><source srcset="docs/assets/readme/lab.webp" type="image/webp"><img src="docs/assets/readme/lab.jpg" alt="The lab's stamp window seen through the reference client: a top row of black and white clock blocks above a full-screen field of moving marks" width="560" /></picture>
 </p>

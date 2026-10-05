@@ -1,0 +1,202 @@
+{
+ "outcome": "PASS",
+ "transport": "usb",
+ "app_javascript_path": "adb reverse over USB (debug build loads its bundle from Metro)",
+ "media_path": "Wi-Fi, phone to this host",
+ "device": {
+  "model": "CPH2649",
+  "release": "16",
+  "sdk": "36",
+  "resolution": "1080x2376",
+  "wifi": "umerfarooq2030",
+  "refresh_hz": null,
+  "host_to_phone_ping_ms": null
+ },
+ "engine": "/home/umer/.cache/desklink-dl-pm-9-target/release/desklink-host",
+ "engine_sha256": "58ad04fbbddd848e7ab844d8f4dc565b2da258d64e51b937293935ecde811f21",
+ "stamp_sha256": "3815e3d4e0d5dfeb8832b3d818b97274be4e95fdf4769e94cd9ce183f8b0df31",
+ "apk_sha256": "b2ab277103e9e12f5b0f0f31a294adfe2f125a63a586739d35a009c9c3a2a3e4",
+ "source_head": "c98d882b8b68744b9cc1582b403c9a6d2240f313",
+ "phone_to_host_ping_ms": 5.4,
+ "costs": {
+  "capture_window_median_ms": 203,
+  "capture_window_p95_ms": 224,
+  "exec_median_ms": 16,
+  "grab_estimate_ms": 109.5,
+  "uncertainty_ms": 93.5
+ },
+ "clock_before": {
+  "samples": 21,
+  "offset_median_ms": -380,
+  "offset_p05_p95_ms": [
+   -381,
+   -380
+  ],
+  "return_trip_median_ms": 0
+ },
+ "clock_after": {
+  "samples": 21,
+  "offset_median_ms": -381,
+  "offset_p05_p95_ms": [
+   -381,
+   -380
+  ],
+  "return_trip_median_ms": 1
+ },
+ "load_before": {
+  "one": 8.09,
+  "five": 10.2,
+  "fifteen": 19.78,
+  "busy_cpu_percent": null
+ },
+ "load_after": {
+  "one": 9.85,
+  "five": 10.31,
+  "fifteen": 18.04,
+  "busy_cpu_percent": null
+ },
+ "timings": {
+  "apk-ready": 1,
+  "metro-ready": 14,
+  "apk-installed": 14,
+  "costs-measured": 19,
+  "clock-measured": 19,
+  "session-live": 30,
+  "typing-fps": 43,
+  "typing-captured": 61,
+  "typing-decoded": 123,
+  "scroll-fps": 139,
+  "scroll-captured": 155,
+  "scroll-decoded": 213
+ },
+ "legs": {
+  "typing": {
+   "fps": {
+    "windows": 11,
+    "fps_median": 59.9,
+    "fps_p05": 59,
+    "frames_decoded": 966,
+    "frames_dropped": 9,
+    "nack_count": 0,
+    "jitter_buffer_delay_s": 0.261486,
+    "frame_size": "1920x1080",
+    "codec": "CIT01_98_profile-id=0"
+   },
+   "latency": {
+    "decoded": true,
+    "samples": 74,
+    "unreadable": 0,
+    "capture_window_median_ms": 203,
+    "clock_offset_ms": -380,
+    "relative_p50_ms": 47,
+    "relative_p95_ms": 66,
+    "relative_min_ms": 0,
+    "uncertainty_ms": 93.5,
+    "absolute_p50_ms": null,
+    "absolute_p95_ms": null,
+    "absolute_usable": false,
+    "implied_clock_offset_ms": 1791236243033,
+    "absolute_note": "the phone's clock read -380 ms behind this host while the stamps and capture times imply 1791236243033 ms; the disagreement is larger than the latency being measured, so no absolute number is claimed"
+   },
+   "strip_geometry": {
+    "pitch": 26.5,
+    "x0": 0,
+    "config": {
+     "pitch": 26.5,
+     "x0": 0
+    },
+    "read_fraction": 1,
+    "advancing_fraction": 1,
+    "clustered_fraction": 1,
+    "band": {
+     "top": 120,
+     "bottom": 726
+    }
+   },
+   "clock_offset_ms": -380,
+   "clock_drift_ms": 0,
+   "load_before": {
+    "one": 7.98,
+    "five": 10.11,
+    "fifteen": 19.65,
+    "busy_cpu_percent": null
+   },
+   "load_after_latency": {
+    "one": 7.49,
+    "five": 9.49,
+    "fifteen": 18.55,
+    "busy_cpu_percent": null
+   },
+   "battery": [
+    "status: 4",
+    "level: 55",
+    "temperature: 300",
+    "Capacity level: 3"
+   ]
+  },
+  "scroll": {
+   "fps": {
+    "windows": 12,
+    "fps_median": 59.8,
+    "fps_p05": 59.3,
+    "frames_decoded": 6668,
+    "frames_dropped": 10,
+    "nack_count": 0,
+    "jitter_buffer_delay_s": 0.846706,
+    "frame_size": "1920x1080",
+    "codec": "CIT01_98_profile-id=0"
+   },
+   "latency": {
+    "decoded": true,
+    "samples": 74,
+    "unreadable": 0,
+    "capture_window_median_ms": 203,
+    "clock_offset_ms": -381,
+    "relative_p50_ms": 38,
+    "relative_p95_ms": 58,
+    "relative_min_ms": 0,
+    "uncertainty_ms": 93.5,
+    "absolute_p50_ms": null,
+    "absolute_p95_ms": null,
+    "absolute_usable": false,
+    "implied_clock_offset_ms": 1791236243043,
+    "absolute_note": "the phone's clock read -381 ms behind this host while the stamps and capture times imply 1791236243043 ms; the disagreement is larger than the latency being measured, so no absolute number is claimed"
+   },
+   "strip_geometry": {
+    "pitch": 26.5,
+    "x0": 0,
+    "config": {
+     "pitch": 26.5,
+     "x0": 0
+    },
+    "read_fraction": 1,
+    "advancing_fraction": 1,
+    "clustered_fraction": 1,
+    "band": {
+     "top": 120,
+     "bottom": 726
+    }
+   },
+   "clock_offset_ms": -381,
+   "clock_drift_ms": 0,
+   "load_before": {
+    "one": 9.37,
+    "five": 9.85,
+    "fifteen": 18.62,
+    "busy_cpu_percent": null
+   },
+   "load_after_latency": {
+    "one": 9.85,
+    "five": 10.31,
+    "fifteen": 18.04,
+    "busy_cpu_percent": null
+   },
+   "battery": [
+    "status: 4",
+    "level: 55",
+    "temperature: 300",
+    "Capacity level: 3"
+   ]
+  }
+ }
+}
