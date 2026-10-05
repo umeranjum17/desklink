@@ -12,6 +12,12 @@
 //! appears, else `--freeze-after` seconds after it starts (two by default), so
 //! a receiver can check that a still screen gets its sharp refine pass.
 //!
+//! `--cursor-fixture` is for a lab compositor with no input devices: it adds a
+//! virtual pointer to the seat, shows a 16 px magenta cursor whose hotspot is
+//! `CURSOR_HOTSPOT`, and with `--pointer-log` appends each pointer position the
+//! compositor delivers to the surface as a JSON line. `--background dark`
+//! paints the field dark instead of white.
+//!
 //! ```sh
 //! WAYLAND_DISPLAY=wayland-1 cargo run --example wl_stamp_target -- --mode scroll
 //! ```
@@ -33,6 +39,11 @@ use wayland_client::protocol::{
 use wayland_client::{Connection, Dispatch, QueueHandle};
 #[cfg(target_os = "linux")]
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+#[cfg(target_os = "linux")]
+use wayland_protocols_wlr::virtual_pointer::v1::client::{
+    zwlr_virtual_pointer_manager_v1 as virtual_pointer_manager,
+    zwlr_virtual_pointer_v1 as virtual_pointer,
+};
 
 #[cfg(target_os = "linux")]
 const BLOCK: usize = 48;
@@ -45,6 +56,10 @@ const BLACK: u32 = 0;
 /// Enough buffers that one is nearly always released by the next repaint.
 #[cfg(target_os = "linux")]
 const BUFFERS: usize = 4;
+#[cfg(target_os = "linux")]
+const CURSOR_HOTSPOT: (i32, i32) = (4, 6);
+#[cfg(target_os = "linux")]
+const DARK: u32 = 0x0020_2228;
 
 #[derive(PartialEq)]
 #[cfg(target_os = "linux")]
@@ -59,6 +74,7 @@ enum Mode {
 struct State {
     cursor_enabled: bool,
     cursor_surface: Option<wl_surface::WlSurface>,
+    pointer_log: Option<File>,
     compositor: Option<wl_compositor::WlCompositor>,
     shm: Option<wl_shm::WlShm>,
     wm_base: Option<xdg_wm_base::XdgWmBase>,
@@ -70,6 +86,9 @@ struct State {
     output_size: (usize, usize),
     busy: [bool; BUFFERS],
     closed: bool,
+    seat: Option<wl_seat::WlSeat>,
+    pointers: Option<virtual_pointer_manager::ZwlrVirtualPointerManagerV1>,
+    virtual_pointer: Option<virtual_pointer::ZwlrVirtualPointerV1>,
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -83,10 +102,24 @@ fn main() -> Result<()> {
     let mut rate = 120u64;
     let mut freeze_after = Duration::from_secs(2);
     let mut freeze_file: Option<String> = None;
+    let mut pointer_log = None;
+    let mut background = WHITE;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--cursor-fixture" => {}
+            "--pointer-log" => {
+                pointer_log = Some(File::create(
+                    args.next().context("--pointer-log needs a value")?,
+                )?)
+            }
+            "--background" => {
+                background = match args.next().as_deref() {
+                    Some("light") => WHITE,
+                    Some("dark") => DARK,
+                    other => bail!("--background must be light or dark, not {other:?}"),
+                }
+            }
             "--mode" => {
                 mode = match args.next().as_deref() {
                     Some("typing") => Mode::Typing,
@@ -117,6 +150,7 @@ fn main() -> Result<()> {
     connection.display().get_registry(&qh, ());
     let mut state = State {
         cursor_enabled: std::env::args().any(|a| a == "--cursor-fixture"),
+        pointer_log,
         ..State::default()
     };
     // Two round trips: the globals, then the output's mode events.
@@ -126,6 +160,9 @@ fn main() -> Result<()> {
     let shm = state.shm.clone().context("no wl_shm")?;
     let wm_base = state.wm_base.clone().context("no xdg_wm_base")?;
 
+    if let (Some(pointers), Some(seat)) = (&state.pointers, &state.seat) {
+        state.virtual_pointer = Some(pointers.create_virtual_pointer(Some(seat), &qh, ()));
+    }
     let cursor_file = memfd(16 * 16 * 4)?;
     if state.cursor_enabled {
         // Task-owned fixture: an unmistakable opaque magenta cursor.
@@ -175,7 +212,7 @@ fn main() -> Result<()> {
         })
         .collect();
     for pixel in map.chunks_exact_mut(4) {
-        pixel.copy_from_slice(&WHITE.to_le_bytes());
+        pixel.copy_from_slice(&background.to_le_bytes());
     }
 
     println!("{{\"ready\":true,\"width\":{width},\"height\":{height}}}");
@@ -362,7 +399,13 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                     state.compositor = Some(registry.bind(name, version.min(4), qh, ()))
                 }
                 "wl_seat" if state.cursor_enabled => {
-                    registry.bind::<wl_seat::WlSeat, _, _>(name, version.min(5), qh, ());
+                    let seat = registry.bind::<wl_seat::WlSeat, _, _>(name, version.min(5), qh, ());
+                    state.seat = Some(seat);
+                }
+                // The lab seat's only pointer device; the harness moves the
+                // cursor through the compositor, never through this.
+                "zwlr_virtual_pointer_manager_v1" if state.cursor_enabled => {
+                    state.pointers = Some(registry.bind(name, 1, qh, ()));
                 }
                 "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
                 "xdg_wm_base" => state.wm_base = Some(registry.bind(name, 1, qh, ())),
@@ -519,8 +562,27 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_pointer::Event::Enter { serial, .. } = event {
-            pointer.set_cursor(serial, state.cursor_surface.as_ref(), 0, 0);
+        let (x, y) = match event {
+            wl_pointer::Event::Enter {
+                serial,
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                let (hx, hy) = CURSOR_HOTSPOT;
+                pointer.set_cursor(serial, state.cursor_surface.as_ref(), hx, hy);
+                (surface_x, surface_y)
+            }
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => (surface_x, surface_y),
+            _ => return,
+        };
+        if let Some(log) = state.pointer_log.as_mut() {
+            use std::io::Write;
+            let _ = writeln!(log, "{{\"x\":{x},\"y\":{y}}}");
         }
     }
 }
@@ -536,3 +598,7 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for State {
     ) {
     }
 }
+#[cfg(target_os = "linux")]
+wayland_client::delegate_noop!(State: virtual_pointer_manager::ZwlrVirtualPointerManagerV1);
+#[cfg(target_os = "linux")]
+wayland_client::delegate_noop!(State: virtual_pointer::ZwlrVirtualPointerV1);

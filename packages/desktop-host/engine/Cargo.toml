@@ -38,11 +38,14 @@ wl-clipboard-rs = "0.9"
 openh264-sys2 = { version = "0.9.8", default-features = false, features = ["libloading"] }
 sha2 = "0.10"
 bzip2-rs = "0.1.2"
+# Hidden-cursor positions (ext-image-copy-capture-v1, a staging protocol);
+# already in the tree through wl-clipboard-rs.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-# The Wayland stamp example only; already in the tree through wl-clipboard-rs.
-wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = ["client"] }
+# The Wayland stamp example's lab pointer; already in the tree through wl-clipboard-rs.
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = "0.61.2"

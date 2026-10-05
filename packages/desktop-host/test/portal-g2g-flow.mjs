@@ -42,6 +42,15 @@
  *   node packages/desktop-host/test/portal-g2g-flow.mjs [--size 1920x1080]
  *     [--fps 60] [--scenario typing,scroll,still] [--seconds 15] [--gate]
  *     [--freeze-after 2]
+ *   node packages/desktop-host/test/portal-g2g-flow.mjs --cursor-proof
+ *     [--background light|dark] [--scale 2]
+ *
+ * `--cursor-proof` opens a hidden-cursor session, moves the cage's pointer
+ * through sway, and checks every session.cursor sample against where the
+ * compositor delivered the pointer to the stamp surface, with the hidden
+ * frames unchanged and a still cursor producing no new samples.
+ * `DESKLINK_CURSOR_EVIDENCE_DIR` keeps the samples and a hidden frame with
+ * the cursor redrawn from them.
  *
  * One JSON line per scenario, in the X11 lab's shape plus `source`, `load` and
  * `isolation`. A run counts only when the 1-minute load average is at most
@@ -166,7 +175,8 @@ async function cage(dir) {
             rmSync(command);
         }, 20);
     }
-    const stamp = spawn(config.stamp, ['--mode', config.scenario, '--freeze-file', join(dir, 'freeze'), ...(config.cursorProof ? ['--cursor-fixture'] : [])], {
+    const stamp = spawn(config.stamp, ['--mode', config.scenario, '--freeze-file', join(dir, 'freeze'),
+        ...(config.cursorProof ? ['--cursor-fixture', '--pointer-log', join(dir, 'pointer.log'), '--background', config.background] : [])], {
         stdio: ['ignore', 'pipe', 'ignore'], env: client,
     });
     children.push(stamp);
@@ -212,7 +222,8 @@ async function cage(dir) {
     };
     process.stdout.write(`${JSON.stringify({ cage: 'ready', isolation })}\n`);
 
-    const engine = spawn(config.engine, ['serve'], { stdio: 'inherit', env: { ...env, RUST_LOG: 'warn' } });
+    // The cursor proof's engine asks this cage's compositor for cursor positions.
+    const engine = spawn(config.engine, ['serve'], { stdio: 'inherit', env: { ...(config.cursorProof ? client : env), RUST_LOG: 'warn' } });
     const finish = () => {
         for (const child of children) child.kill('SIGKILL');
         process.exit(0);
@@ -290,7 +301,7 @@ async function main() {
         const result = await measure({
             engine, stamp, sway, portal, xdph, portalFile, chrome, renderNode, width, height, maxFps, seconds, scenario, freezeAfter,
             embeddedControl: process.argv.includes('--embedded-control'),
-            cursorProof: process.argv.includes('--cursor-proof'), swaymsg: process.env.DESKLINK_PORTAL_SWAYMSG || which('swaymsg'),
+            cursorProof: process.argv.includes('--cursor-proof'), background: option('background', 'light'), scale: Number(option('scale', '1')), swaymsg: process.env.DESKLINK_PORTAL_SWAYMSG || which('swaymsg'),
         });
         const after = loadavg()[0];
         result.load = {
@@ -456,7 +467,7 @@ function writeCage(dir, run) {
     }
     writeFileSync(join(dir, 'cage.json'), JSON.stringify({
         scenario: run.scenario, engine: realpathSync(run.engine), stamp: realpathSync(run.stamp), sway: run.sway,
-        portal: run.portal, xdph: run.xdph, cursorProof: run.cursorProof, swaymsg: run.swaymsg,
+        portal: run.portal, xdph: run.xdph, cursorProof: run.cursorProof, background: run.background, swaymsg: run.swaymsg,
         ambient: ambient.filter((path) => path && existsSync(path)).map((path) => {
             const { dev, ino } = statSync(path);
             return { path, dev, ino };
@@ -473,7 +484,7 @@ function writeCage(dir, run) {
 </busconfig>
 `);
     writeFileSync(join(dir, 'sway.conf'), [
-        `output HEADLESS-1 mode ${run.width}x${run.height}@60Hz position 0 0`,
+        `output HEADLESS-1 mode ${run.width}x${run.height}@60Hz position 0 0 scale ${run.scale}`,
         'default_border none',
         ...(run.cursorProof ? ['seat seat0 fallback true'] : []),
         'swaybg_command -',
@@ -729,33 +740,62 @@ async function cursorProof(engine, dir, run) {
         assert(after.seq>before.seq && !equal,'positive control: embedded cursor did not damage frames');
         return {source:'portal',embedded_pixels:'changed on pointer motion'};
     }
-    let hidden;
-    try {
-        hidden = await engine.request('session.open', {source:{kind:'portal'},cursor:'hidden',max_width:run.width,max_height:run.height}, 60000);
-    } catch (error) {
-        assert.match(error.message, /^cursor_positions_unavailable:/, 'portal without SPA cursor metadata must refuse hidden capture');
-        return {source:'portal',hidden_refused:'cursor_positions_unavailable'};
-    }
-    assert(['hidden','metadata'].includes(hidden.cursor.mode));
-    assert.equal(hidden.cursor.positions, true);
+    // Where the compositor actually delivers the pointer: the fullscreen stamp
+    // surface at the output origin logs each wl_pointer position it receives,
+    // in logical pixels; session.cursor speaks the source's own geometry.
+    const truth = () => {
+        const lines = readFileSync(join(dir, 'pointer.log'), 'utf8').trim().split('\n');
+        const {x, y} = JSON.parse(lines.at(-1));
+        const {width, height} = hidden.geometry.source;
+        return {x: Math.floor(x * width / logicalW), y: Math.floor(y * height / logicalH)};
+    };
+    const cursorEvents = () => events.filter(e => e.event === 'session.cursor' && e.params.sessionId === hidden.sessionId).map(e => e.params);
+    // Layout coordinates are logical: the output is its mode over its scale.
+    const [logicalW, logicalH] = [run.width / run.scale, run.height / run.scale];
+    const hidden = await engine.request('session.open', {source:{kind:'portal'},cursor:'hidden',max_width:run.width,max_height:run.height}, 60000);
+    assert.equal(hidden.cursor.source, 'ext-image-copy-capture-v1');
+    assert.equal(hidden.cursor.positions, true, JSON.stringify(hidden.cursor));
     writeFileSync(join(dir,'freeze'),'');
     await sleep(500);
     await move(100,100);
     const frame = await engine.request('session.frame',{session_id:hidden.sessionId,path:join(dir,'hidden-before.raw')});
-    for(const [x,y] of [[400,300],[700,500]]) {
+    const samples = [];
+    for(const [x,y] of [[400,300],[700,500]].map(([x,y]) => [x / run.scale, y / run.scale]).concat([[logicalW-60,logicalH-40]])) {
         await move(x,y);
         const after = await engine.request('session.frame',{session_id:hidden.sessionId,path:join(dir,'hidden-after.raw')});
         assert.equal(after.seq,frame.seq,'pointer motion damaged hidden frames');
         assert.deepEqual(readFileSync(join(dir,'hidden-before.raw')),readFileSync(join(dir,'hidden-after.raw')));
-        assert(events.some(e=>e.event==='session.cursor' && e.params.sessionId===hidden.sessionId && e.params.x===x && e.params.y===y && e.params.visible),'SPA cursor metadata did not follow pointer');
+        const actual = truth(), delivered = cursorEvents().at(-1);
+        assert(actual.x !== 0 && actual.y !== 0, 'the lab pointer never left the origin');
+        assert.deepEqual({x: delivered.x, y: delivered.y, visible: delivered.visible}, {...actual, visible: true}, 'delivered cursor is not where the compositor put the pointer');
+        // The stamp's cursor surface sets hotspot (4,6) in logical pixels.
+        const {width, height} = hidden.geometry.source;
+        assert.deepEqual(delivered.hotspot, {x: Math.floor(4 * width / logicalW), y: Math.floor(6 * height / logicalH)}, 'hotspot is not the one the cursor surface set');
+        samples.push({commanded:[x,y], actual, delivered});
     }
+    // Still cursor: the compositor goes quiet and the last position stands.
+    const before = cursorEvents().length;
+    await sleep(2000);
+    assert.equal(cursorEvents().length, before, 'a still cursor produced new positions');
+    const stamps = cursorEvents().map(e => e.timestamp_us);
+    assert(stamps.every((t, i) => i === 0 || stamps[i - 1] <= t), 'cursor timestamps went backwards');
     if(process.env.DESKLINK_CURSOR_EVIDENCE_DIR) {
+        const out = process.env.DESKLINK_CURSOR_EVIDENCE_DIR;
+        writeFileSync(join(out, `cursor-events-${run.background}-scale${run.scale}.json`), JSON.stringify({open: hidden.cursor, samples, events: cursorEvents()}, null, 1));
+        // The hidden frame, with the cursor redrawn as a crosshair from the
+        // last delivered sample: the pixels themselves never contain it.
         const {PNG}=await import('pngjs');
         const raw=readFileSync(join(dir,'hidden-before.raw'));
         const png=new PNG({width:frame.width,height:frame.height});
         for(let i=0;i<frame.width*frame.height;i++) {png.data[i*4]=raw[i*4+2];png.data[i*4+1]=raw[i*4+1];png.data[i*4+2]=raw[i*4];png.data[i*4+3]=255;}
-        writeFileSync(join(process.env.DESKLINK_CURSOR_EVIDENCE_DIR,'portal-hidden.png'),PNG.sync.write(png));
+        const last = samples.at(-1).delivered, {width, height} = hidden.geometry.source;
+        const sx = frame.width / width, sy = frame.height / height;
+        for (let d = -12; d <= 12; d++) for (const [px, py] of [[last.x + d, last.y], [last.x, last.y + d]]) {
+            const x = Math.floor(px * sx), y = Math.floor(py * sy);
+            if (x >= 0 && y >= 0 && x < frame.width && y < frame.height) png.data.set([255, 0, 160, 255], (y * frame.width + x) * 4);
+        }
+        writeFileSync(join(out,`portal-hidden-${run.background}-scale${run.scale}.png`),PNG.sync.write(png));
     }
     await engine.request('session.close',{session_id:hidden.sessionId});
-    return {source:'portal',cursor:hidden.cursor,cursor_events:events.filter(e=>e.event==='session.cursor').length,hidden_pixels:'unchanged on pointer motion'};
+    return {source:'portal',cursor:hidden.cursor,cursor_events:cursorEvents().length,samples,hidden_pixels:'unchanged on pointer motion'};
 }

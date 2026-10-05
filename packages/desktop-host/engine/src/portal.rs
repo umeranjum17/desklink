@@ -2,8 +2,8 @@
 //!
 //! The portal is the only capture path this engine asks the compositor for: it
 //! is what carries the user's consent, works across Wayland compositors, and
-//! hands back a PipeWire remote that [`crate::capture`] consumes. No
-//! compositor-private protocol is used.
+//! hands back a PipeWire remote that [`crate::capture`] consumes. Hidden-cursor
+//! positions come from the compositor itself, through [`crate::wl_cursor`].
 
 use anyhow::{Context, Result};
 use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
@@ -134,24 +134,29 @@ pub async fn open(
     })
 }
 
+/// Either mode keeps cursor pixels out of the stream; positions never come
+/// from the portal.
 fn choose_cursor_mode(available: BitFlags<CursorMode>) -> Result<CursorMode> {
-    if available.contains(CursorMode::Metadata) {
-        return Ok(CursorMode::Metadata);
-    }
-    anyhow::bail!("cursor_positions_unavailable: portal does not provide cursor metadata")
+    [CursorMode::Hidden, CursorMode::Metadata]
+        .into_iter()
+        .find(|mode| available.contains(*mode))
+        .context("cursor-unavailable: portal cannot leave the cursor out of capture")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn hidden_requires_metadata_and_refuses_hidden_only_portals() {
+    fn hidden_takes_any_cursor_free_mode_and_refuses_embedded_only_portals() {
         assert_eq!(
             choose_cursor_mode(CursorMode::Metadata | CursorMode::Hidden).unwrap(),
+            CursorMode::Hidden
+        );
+        assert_eq!(
+            choose_cursor_mode(CursorMode::Metadata.into()).unwrap(),
             CursorMode::Metadata
         );
-        let error = choose_cursor_mode(CursorMode::Hidden.into()).unwrap_err();
-        assert!(error.to_string().contains("cursor_positions_unavailable:"));
-        assert!(choose_cursor_mode(CursorMode::Embedded.into()).is_err());
+        let error = choose_cursor_mode(CursorMode::Embedded.into()).unwrap_err();
+        assert!(error.to_string().contains("cursor-unavailable:"));
     }
 }

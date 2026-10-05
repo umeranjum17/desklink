@@ -9,7 +9,7 @@ describe('cursor event delivery', () => {
 
     const batch = buffer.take('session-1');
     expect(formatCursorSamples(batch.samples, batch.dropped)).toBe(
-      'cursor[1] dropped:0 {sessionId,x,y,visible,timestamp_us}:\n  {"sessionId":"session-1","x":31,"y":47,"visible":true,"timestamp_us":1234}',
+      'cursor[1] dropped:0 {sessionId,x,y,visible,timestamp_us,hotspot?}:\n  {"sessionId":"session-1","x":31,"y":47,"visible":true,"timestamp_us":1234}',
     );
     expect(buffer.take('session-1')).toEqual({ samples: [], dropped: 0 });
   });

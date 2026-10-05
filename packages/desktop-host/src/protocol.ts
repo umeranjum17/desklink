@@ -27,7 +27,7 @@ export interface EngineCapabilities {
         formats: string[];
         cursor: string;
         cursor_modes?: Array<'embedded' | 'hidden'>;
-        cursor_positions?: { x11: boolean; portal: 'negotiated' };
+        cursor_positions?: { x11: boolean; wayland: 'ext-image-copy-capture-v1' };
         audio: boolean;
         displays?: Array<{
             id: number;
@@ -73,6 +73,10 @@ export type SourceRequest =
 export interface CursorInfo {
     mode: 'embedded' | 'hidden' | 'metadata' | 'unavailable';
     positions: boolean;
+    /** Where hidden-cursor positions come from on Wayland. */
+    source?: 'ext-image-copy-capture-v1';
+    /** Why a hidden session has no cursor positions (yet). */
+    limitation?: string;
 }
 
 export interface OpenSessionRequest {
@@ -116,7 +120,7 @@ export interface OpenedSession {
 }
 
 export type EngineEvent =
-    | { event: 'session.cursor'; params: { sessionId: string; x: number; y: number; visible: boolean; timestamp_us: number } }
+    | { event: 'session.cursor'; params: { sessionId: string; x: number; y: number; visible: boolean; timestamp_us: number; hotspot?: { x: number; y: number } } }
     | { event: 'session.description'; params: { sessionId: string; generation: number; description: { type: 'offer'; sdp: string } } }
     | {
           event: 'session.candidate';

@@ -59,7 +59,7 @@ export interface SessionOpenRequest {
 }
 
 export interface SessionOpenResult {
-    cursor?: { mode: 'embedded' | 'hidden' | 'metadata' | 'unavailable'; positions: boolean };
+    cursor?: { mode: 'embedded' | 'hidden' | 'metadata' | 'unavailable'; positions: boolean; source?: 'ext-image-copy-capture-v1'; limitation?: string };
     sessionId: string;
     generation: number;
     source: { kind: string; width: number; height: number; origin: { x: number; y: number } };
@@ -83,6 +83,7 @@ export interface CursorSample {
     y: number;
     visible: boolean;
     timestamp_us: number;
+    hotspot?: { x: number; y: number };
 }
 
 /**

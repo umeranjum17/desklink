@@ -563,6 +563,7 @@ dependencies = [
  "tokio",
  "wayland-client",
  "wayland-protocols",
+ "wayland-protocols-wlr",
  "webrtc",
  "windows-sys 0.61.2",
  "wl-clipboard-rs",
