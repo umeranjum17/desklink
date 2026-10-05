@@ -235,8 +235,7 @@ function visibleNodes(udid) {
             texts: [...said, ...mine.map((entry) => entry.text)],
         };
     };
-    const tree = JSON.parse(mac(`axe describe-ui --udid ${udid}`));
-    if (process.env.DESKLINK_IOS_TREE) writeFileSync(process.env.DESKLINK_IOS_TREE, JSON.stringify(tree, null, 1));
+    const tree = describeTree(udid);
     for (const root of tree) entries.push(...walk(root).entries);
     // React Native hands the accessibility tree a wrapper and its inner text
     // node at the same frame in the same process: one word on the phone's
@@ -252,6 +251,18 @@ function visibleNodes(udid) {
 
 const visibleText = (udid) => visibleNodes(udid).map((entry) => entry.text);
 
+function describeTree(udid) {
+    let last = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            const tree = JSON.parse(mac(`axe describe-ui --udid ${udid}`));
+            if (process.env.DESKLINK_IOS_TREE) writeFileSync(process.env.DESKLINK_IOS_TREE, JSON.stringify(tree, null, 1));
+            return tree;
+        } catch (error) { last = error; }
+    }
+    throw last;
+}
+
 /** Whichever array of nodes an axe tree node carries its children under. */
 function kidsOf(node) {
     return Object.values(node).find((value) => Array.isArray(value) && value.length > 0 && value.every((item) => item && typeof item === 'object')) ?? [];
@@ -259,8 +270,7 @@ function kidsOf(node) {
 
 /** The hidden accessibility status the app exposes as `testID="desklink-status"`, and the screen's size in points. */
 function screen(udid) {
-    const tree = JSON.parse(mac(`axe describe-ui --udid ${udid}`));
-    if (process.env.DESKLINK_IOS_TREE) writeFileSync(process.env.DESKLINK_IOS_TREE, JSON.stringify(tree, null, 1));
+    const tree = describeTree(udid);
     let status = null;
     const walk = (node) => {
         if (node.AXUniqueId === 'desklink-status') status = node.AXLabel ?? node.AXValue ?? '';
@@ -272,8 +282,7 @@ function screen(udid) {
 
 /** The accessibility value the simulator's own screen carries for one identifier. */
 function byId(udid, id) {
-    const tree = JSON.parse(mac(`axe describe-ui --udid ${udid}`));
-    if (process.env.DESKLINK_IOS_TREE) writeFileSync(process.env.DESKLINK_IOS_TREE, JSON.stringify(tree, null, 1));
+    const tree = describeTree(udid);
     let found = null;
     const walk = (node) => {
         if (node.AXUniqueId === id) found = { label: node.AXLabel ?? null, value: node.AXValue ?? null };
@@ -286,12 +295,13 @@ function byId(udid, id) {
 
 /**
  * Read until the read says the value has settled. Every step in the journey
- * answers a moment after the tap that moved it, and the read itself can fail
- * for a moment too — a dropped ssh connection, an axe that comes back with no
- * such node yet — so both are retried to one deadline. Nothing polls on its
- * own: a step that samples once is a step that needs someone at the keyboard.
- * `what` names the reason it never settled, so a genuinely stuck value fails
- * with that reason instead of hanging.
+ * answers a moment after the tap that moved it, and the read itself can fail for
+ * a moment too — a dropped ssh connection, an axe that comes back with no such
+ * node yet — so both are retried to one deadline. Nothing polls on its own: a
+ * step that samples once, or that spins its own loop, is the pattern that puts a
+ * worker at the keyboard every time the harness runs. `what` names the reason it
+ * never settled, so a value that genuinely cannot settle fails with that reason
+ * instead of hanging or throwing something unlabelled.
  */
 async function until(what, read, settled, timeoutMs = 15_000) {
     const deadline = Date.now() + timeoutMs;
@@ -489,13 +499,13 @@ let relay = null; let page = null; let udid = null; let codec = null; let tempor
 let recorderPid = null;
 
 /**
- * The Mac's screen recording of the phone, started before the journey and
- * stopped wherever the run ends. One owner: `cleanup` stops it too, so an
- * assertion that throws finalises the file instead of leaving a recorder
- * running on the Mac.
+ * The Mac's screen recording of the phone's screen. One owner: `cleanup` stops
+ * it too, so an assertion that throws finalises the file instead of leaving a
+ * recorder running on the Mac. `startRecording` also proves the recorder is
+ * really running — a run that recorded nothing used to copy the previous run's
+ * mp4 forward as its own proof — and removes that stale file first.
  */
 function startRecording() {
-    // The last run's file must not be mistaken for this one's proof.
     mac(`rm -f "$D/tmp/phone-control.mp4"`);
     recorderPid = mac(`nohup xcrun simctl io ${udid} recordVideo --codec=h264 "$D/tmp/phone-control.mp4" > "$D/tmp/record.log" 2>&1 < /dev/null & echo $!`).trim();
     mac('sleep 3');
@@ -514,7 +524,7 @@ function stopRecording() {
 async function cleanup() {
     try {
         stopRecording();
-    } catch (error) { log('recorder cleanup:', error.message); }
+    } catch (error) { log('recording cleanup:', error.message); }
     if (udid !== null && temporarySimulator) {
         try {
             mac(`xcrun simctl terminate ${udid} ${BUNDLE} || true; xcrun simctl shutdown ${udid} || true; xcrun simctl delete ${udid}`);
@@ -917,9 +927,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         `the phone says its live status once, not twice: ${JSON.stringify(onScreen.filter((entry) => entry.text === 'Connected'))}`);
     await step('00-live-desktop', `live desktop at the documented portrait fit: ${(geometry.width * scale).toFixed(0)}x${pictureHeightPt.toFixed(0)} pt band at the top of a ${screenWidth}x${screenHeight} pt screen (${(100 * pictureHeightPt / screenHeight).toFixed(0)}% of its height; the rest is letterbox and the app's own chrome), no diagnostic text on the phone`);
 
-    // The whole phone-only journey as one screen recording on the Mac. Its
-    // lifetime belongs to `stopRecording`, which cleanup runs too, so a failed
-    // step finalises the file instead of leaving a recorder running.
+    // The whole phone-only journey as one screen recording on the Mac.
     startRecording();
 
     // 1. pointer and click
@@ -940,7 +948,8 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     since = await clean();
     pointerSteps(udid, [{ action: IPAD ? 'drag' : 'dragTouch', ...screenPoint(from), toX: screenPoint(to).x, toY: screenPoint(to).y }]);
     const dragged = await until('the finger dragging over the line arrived as a drag',
-        async () => (await page.evaluate('pointer')).slice(since), (seen) => seen.some((event) => event.type === 'mouseup' && event.button === 0));
+        async () => (await page.evaluate('pointer')).slice(since),
+        (seen) => seen.some((event) => event.type === 'mouseup' && event.button === 0));
     writeFileSync(join(out, 'step-02-drag-events.json'), JSON.stringify(dragged, null, 1));
     const held = dragged.filter((event) => event.type === 'mousemove' && (event.buttons & 1) === 1);
     const dragDown = dragged.find((event) => event.type === 'mousedown' && event.button === 0);
@@ -955,7 +964,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     since = await clean();
     pointerSteps(udid, [{ action: 'scrollTwo', ...screenPoint({ x: 700, y: 300 }), dy: 220 }]);
     // The wheel arrives as a burst the finger is still making, so it is read
-    // until the whole gesture has turned the wheel, not sampled once.
+    // until the whole gesture has turned the wheel, not until the first event.
     const wheelDelta = (seen) => seen.filter((event) => event.type === 'wheel').reduce((sum, event) => sum + event.dy, 0);
     const scrolled = await until("two fingers turn the desktop's wheel",
         async () => (await page.evaluate('pointer')).slice(since), (seen) => Math.abs(wheelDelta(seen)) >= 100);
@@ -1014,13 +1023,16 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     tapDesktop(buttonSpot);
     const clickedOnButton = await until('the tap on the copy button reached the desktop',
         async () => (await page.evaluate('clicks')).slice(since), (seen) => seen.length >= 2);
-    assert.equal(await page.evaluate('window.copied'), 'select this line',
+    const copied = await until('the page put its selection on the desktop clipboard',
+        () => page.evaluate('window.copied'), (seen) => seen === 'select this line');
+    assert.equal(copied, 'select this line',
         `the page put its selection on the desktop clipboard: ${await page.evaluate('window.copyAttempts ?? 0')} clicks on the button, ${JSON.stringify(clickedOnButton)} at the tap`);
     mac(`axe tap --id desklink-copy --udid ${udid}`);
     // The phone confirms the transfer with a pill on its own screen; the
     // simulator shares the Mac's pasteboard, so that pill is the phone's proof.
     const pill = await until('the phone\'s screen confirmed the desktop\'s clipboard',
-        async () => visibleText(udid).find((text) => text.startsWith('Copied to phone')) ?? '', (seen) => seen.includes('select this line'));
+        async () => visibleText(udid).find((text) => text.startsWith('Copied to phone')) ?? '',
+        (seen) => seen.includes('select this line'));
     assert(pill.includes('select this line'), `the phone's own screen confirms the desktop's clipboard and its text: ${JSON.stringify(pill)}; on screen now: ${JSON.stringify(visibleText(udid))}`);
     await step('06-clipboard-out', `desktop → phone, confirmed on screen: ${pill}`);
 
@@ -1045,8 +1057,9 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         return texts;
     };
     const sent = await until('the phone\'s screen confirmed what it sent to the desktop',
-        async () => (await screenAllowingPaste()).find((text) => text.startsWith('Sent to desktop')) ?? '', (seen) => seen.includes('select this line'));
-    assert(sent.includes('select this line'), `the phone's own screen confirms what it sent: ${JSON.stringify(sent)}; on screen now: ${JSON.stringify(visibleText(udid))}`);
+        async () => (await screenAllowingPaste()).find((text) => text.startsWith('Sent to desktop')) ?? '',
+        (seen) => seen.includes('select this line'));
+    assert(sent.includes('select this line'),`the phone's own screen confirms what it sent: ${JSON.stringify(sent)}; on screen now: ${JSON.stringify(visibleText(udid))}`);
     mac(`axe key-combo --modifiers 224 --key 25 --udid ${udid}`);
     const pastes = await until('the desktop pasted the phone\'s clipboard',
         () => page.evaluate('window.pastes'), (seen) => seen.length > 0);
@@ -1062,11 +1075,13 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // A finger travelling over bare paper, so the mark is read over clean
     // background: the press paints its dot 200 desktop pixels away.
     pointerSteps(udid, [{ action: 'dragTouch', ...screenPoint({ x: 700, y: 460 }), toX: screenPoint({ x: 900, y: 300 }).x, toY: screenPoint({ x: 900, y: 300 }).y }]);
+    const landedAt = { x: 900, y: 300 };
     const travelled = await until('a finger travelling over the picture arrived on the desktop',
-        async () => (await page.evaluate('pointer')).slice(since).filter((event) => event.x !== undefined), (seen) => seen.length > 0);
-    assert(travelled.length > 0, `a finger travelling over the picture carries the desktop's pointer: ${JSON.stringify(travelled)}`);
+        async () => (await page.evaluate('pointer')).slice(since).filter((event) => event.x !== undefined),
+        (seen) => seen.some((event) => within(event, landedAt)));
+    assert(travelled.length > 0,`a finger travelling over the picture carries the desktop's pointer: ${JSON.stringify(travelled)}`);
     const landed = travelled.at(-1);
-    assert(within(landed, { x: 900, y: 300 }), `the pointer ends where the finger did: ${JSON.stringify(landed)}`);
+    assert(within(landed, landedAt), `the pointer ends where the finger did: ${JSON.stringify(landed)}`);
     const tip = screenPoint({ x: landed.x, y: landed.y });
     const frame = capture(join(out, 'step-08-pointer-frame.png'));
     const density = frame.width / screenWidth;
