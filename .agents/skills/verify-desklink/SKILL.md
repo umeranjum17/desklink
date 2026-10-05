@@ -102,6 +102,15 @@ run directory. Add a row the day a surface is added; never silently drop one.
 | iOS live desktop, portrait and landscape | `packages/desktop-client/test/ios-flow.mjs` on the Mac's own simulator | picture fits the agreed fit, decoded frames keep advancing, no diagnostic text on the phone's screen | `step-00-live-desktop.png`, `desklink-receiver-fill-*.png` |
 | iOS phone-only control | same flow, its phone-only control section | desktop-side click, held drag with selection, wheel, typed text, a modifier chord, clipboard both ways, all recorded | `phone-control.mp4`, `step-01-click.png` … `step-07-clipboard-in.png` |
 | iOS pointer mark | same flow, over bare paper | the drawn mark is an arrow, not a rectangle, and its tip is within 2 pt of the desktop's pointer | `step-08-pointer-arrow-4x.png`, `step-08-pointer.json` |
+| Network drop mid-session, and recovery | `packages/desktop-client/test/link-drop-flow.mjs`, its own run dir | four stages — live, throttled, dropped, recovered — with a capture each | `01-live.png` … `04-recovered.png`, `receipt.json`, `video/*.webm` |
+
+**The link-drop row shapes a userspace-shaped link, and must always be
+reported that way.** The run's shaping is a `dgram` relay in the flow's own
+process, between Chromium's ICE agent and the engine's. It is not kernel netem,
+not `tc`, not an iptables or nftables rule, and it runs with no sudo, no root
+and no firewall change. A report that calls it netem is wrong. The signalling
+WebSocket is deliberately not cut; the WebRTC link is, media and data channel
+both.
 
 **Light theme is not shipped, and the run proves that rather than asserting it.**
 The reference client declares `:root { color-scheme: dark }` and hard-codes its

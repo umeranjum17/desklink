@@ -11,11 +11,16 @@ use the ownership-verified private lab.
 | [iOS phone journeys](ios-phone-journeys.md) | Example app on the Mac's own simulator, driven by `test/ios-flow.mjs` | Readable live desktop with frames advancing; phone-only click, drag, scroll, typing, sticky modifiers, clipboard both ways; measured arrow tip |
 | [Machine capabilities](capabilities-report.md) | `desklink-host capabilities` | Actual capability JSON and engine child exit; helper Doctor |
 | [Desktop control from the agent CLI](agent-cli-desktop-as-text.md) | Existing private-lab CLI flow | Independent X11 click/typing/clipboard effects; separate journey |
+| [Recovery from a dropped link](link-drop-recovery.md) | Private lab, Chromium, `test/link-drop-flow.mjs` | Userspace-shaped link throttled, cut and restored; `reconnecting` inside the cut with the last picture held, frames and control back after |
 
 The browser input journey and both phone form factors are the executed seed
 proofs, and one run covers both in `~/lab-tmp/desklink-verify/latest/`: the
 skill's coverage table names every theme and form factor, with a capture for
 each and the reason written down where a surface cannot be captured here. The
+link-drop proof is its own flow and its own run directory, because it needs a
+shaped link rather than a live desktop: it writes to
+`~/lab-tmp/dl-pm-8-recovery/<run>/`. The shaping is a **userspace-shaped
+link**, never kernel netem. The
 iOS journeys run separately on the Mac (`~/lab-tmp/dl-pm-iphone/<run>/`),
 because the phone-only control and the pointer mark exist only on the real iOS
 runtime. The capability command is also exercised within its Doctor. The
