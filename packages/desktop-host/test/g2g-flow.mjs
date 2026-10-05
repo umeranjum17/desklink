@@ -73,7 +73,7 @@ import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:net';
 import { WebSocket } from 'ws';
 
-import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from './lab-safety.mjs';
+import { assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from './lab-safety.mjs';
 
 assertNoAmbientDesktop();
 const here = dirname(fileURLToPath(import.meta.url));
@@ -230,11 +230,8 @@ function sessionStrays() {
 // --- display ownership: explicit high display, own cookie, lock-PID verified.
 // The range runs past flow.mjs's 170-199 because sibling lanes hold live
 // servers there on this shared host; the plan's bound is >= 170 either way.
-const number = Array.from({ length: 80 }, (_, i) => 170 + i).find(
-    (n) => !existsSync(`/tmp/.X11-unix/X${n}`) && !existsSync(`/tmp/.X${n}-lock`),
-);
-assert(number !== undefined, 'no unclaimed high X display');
-const display = `:${number}`;
+const claim = claimPrivateDisplay({ from: 170, count: 80 });
+const { number, display } = claim;
 const socket = `/tmp/.X11-unix/X${number}`;
 const authority = join(dir, 'Xauthority');
 assert.equal(
@@ -742,6 +739,7 @@ try {
     }
     const strays = sessionStrays();
     if (xvfb) await stopOwnedXvfb(xvfb);
+    claim.release();
     await vite?.close().catch(() => undefined);
     rmSync(dir, { recursive: true, force: true });
     assert.equal(strays.length, 0, `task-owned strays survived: ${JSON.stringify(strays)}`);

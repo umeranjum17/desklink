@@ -24,7 +24,7 @@ import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 
-import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
+import { assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
 
 assertNoAmbientDesktop();
 const worktree = new URL('../../..', import.meta.url).pathname.replace(/\/$/, '');
@@ -306,7 +306,7 @@ async function expectPointerSoft(cdp, evaluate, env, x, y, what, timeoutMs = 800
     }
 }
 
-let xvfbPid = 0; let xvfb; let fixturePid = 0; let clientPid = 0; let bridgePid = 0; let enginePid = 0;
+let xvfbPid = 0; let xvfb; let claim = null; let fixturePid = 0; let clientPid = 0; let bridgePid = 0; let enginePid = 0;
 let staticServer = null; let cdpPort = 0;
 async function cleanup() {
     try {
@@ -316,6 +316,7 @@ async function cleanup() {
         if (bridgePid) await stopProcess(bridgePid, 'bridge');
         if (enginePid && alive(enginePid)) await stopProcess(enginePid, 'engine');
         if (xvfb) await stopOwnedXvfb(xvfb);
+        claim?.release();
         staticServer?.close();
     } catch (error) { log('cleanup error:', String(error)); }
     const strays = [];
@@ -405,10 +406,8 @@ async function pollProbe(cdp, timeoutMs, want) {
 
 try {
     // ---- private Xvfb -------------------------------------------------------
-    const number = Array.from({ length: 30 }, (_, i) => 220 + i).find((n) =>
-        !existsSync(`/tmp/.X11-unix/X${n}`) && !existsSync(`/tmp/.X${n}-lock`));
-    assert(number !== undefined, 'no unclaimed high X display');
-    const display = `:${number}`;
+    claim = claimPrivateDisplay({ from: 220, count: 30 });
+    const { number, display } = claim;
     const authority = join(dir, 'Xauthority');
     assert.equal(spawnSync('xauth', ['-f', authority, 'add', display, '.', randomBytes(16).toString('hex')]).status, 0);
     xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', '1280x800x24', '-nolisten', 'tcp'], { stdio: 'ignore' });

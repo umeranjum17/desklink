@@ -3,8 +3,13 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+// Scoped by the session, exactly like the socket and the browser state beside
+// it: one shared name per user let a second lane's grant overwrite the first
+// lane's single-use token, and each lane's consumer then read the other's.
 export function tokenPath(): string {
-  return process.env.DESKLINK_AXI_RESTORE_TOKEN_FILE ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'desklink-axi', 'portal-token');
+  return process.env.DESKLINK_AXI_RESTORE_TOKEN_FILE
+    ?? join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'desklink-axi',
+      `${process.env.DESKLINK_AXI_SESSION ?? 'default'}.portal-token`);
 }
 
 // A portal token is single-use. Remove it from the reusable name before open;

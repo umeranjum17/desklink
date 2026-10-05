@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
+import { assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
 
 assertNoAmbientDesktop();
 
@@ -43,10 +43,8 @@ const enginePath = process.env.DESKLINK_AXI_ENGINE;
 assert(enginePath && existsSync(enginePath), 'set DESKLINK_AXI_ENGINE to this task’s built engine');
 assert(existsSync(resolve('packages/axi/bin/desklink-axi.js')), 'run from the repository root');
 
-const number = Array.from({ length: 29 }, (_, i) => 171 + i).find(n =>
-  !existsSync(`/tmp/.X11-unix/X${n}`) && !existsSync(`/tmp/.X${n}-lock`));
-assert(number !== undefined, 'no unclaimed high X display');
-const display = `:${number}`;
+const claim = claimPrivateDisplay({ from: 171, count: 29 });
+const { number, display } = claim;
 const socket = `/tmp/.X11-unix/X${number}`;
 const authority = join(dir, 'Xauthority');
 assert.equal(spawnSync('xauth', ['-f', authority, 'add', display, '.', randomBytes(16).toString('hex')], { encoding: 'utf8' }).status, 0);
@@ -90,7 +88,7 @@ async function stopProcess(pid) {
   assert(!alive(), `task-owned process ${pid} survived cleanup`);
 }
 // SIGTERM lets Xvfb remove its own lock and socket; SIGKILL only as fallback.
-async function stopXvfb() { await stopOwnedXvfb(xvfb); }
+async function stopXvfb() { await stopOwnedXvfb(xvfb); claim.release(); }
 function daemonFromPrinted(text, token) {
   const lines = text.trim().split('\n').filter(Boolean);
   const address = lines[0].split(',')[0]; // unix:path=..., strips the guid

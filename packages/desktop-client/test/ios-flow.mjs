@@ -87,7 +87,7 @@ import { macLane, CLEAN_SCRIPT } from './mac-lane.mjs';
 import { pictureBox } from './picture-box.mjs';
 import { WebSocket, WebSocketServer } from 'ws';
 
-import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
+import { assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
 
 assertNoAmbientDesktop();
 const here = dirname(fileURLToPath(import.meta.url));
@@ -508,7 +508,7 @@ function videoCodecs(sdp) {
 const out = process.env.DESKLINK_IOS_OUT ?? mkdtempSync(join(tmpdir(), 'desklink-ios-flow-'));
 mkdirSync(out, { recursive: true });
 const work = mkdtempSync(join(tmpdir(), 'desklink-ios-host-'));
-let xvfbPid = 0; let xvfb; let pagePid = 0; let bridgePid = 0; let enginePid = 0;
+let xvfbPid = 0; let xvfb; let claim = null; let pagePid = 0; let bridgePid = 0; let enginePid = 0;
 let relay = null; let page = null; let udid = null; let codec = null; let temporarySimulator = false;
 let recorderPid = null;
 
@@ -557,6 +557,7 @@ async function cleanup() {
     if (bridgePid) await stopProcess(bridgePid, 'bridge');
     if (enginePid) await stopProcess(enginePid, 'engine');
     if (xvfb) await stopOwnedXvfb(xvfb);
+    claim?.release();
     // The page's browser profile is about 100 MB; nothing here outlives the run.
     rmSync(work, { recursive: true, force: true });
     // Reclaim the lane's disk, and only the lane's own directory.
@@ -587,10 +588,8 @@ async function main() {
         'the config plugin set UIApplicationSupportsIndirectInputEvents');
 
     // ---- private Xvfb -------------------------------------------------------------
-    const number = Array.from({ length: 60 }, (_, i) => 170 + i)
-        .find((n) => !existsSync(`/tmp/.X11-unix/X${n}`) && !existsSync(`/tmp/.X${n}-lock`));
-    assert(number !== undefined, 'no unclaimed X display at or above :170');
-    const display = `:${number}`;
+    claim = claimPrivateDisplay({ from: 170, count: 60 });
+    const { number, display } = claim;
     const authority = join(work, 'Xauthority');
     assert.equal(spawnSync('xauth', ['-f', authority, 'add', display, '.', randomBytes(16).toString('hex')]).status, 0);
     const env = {

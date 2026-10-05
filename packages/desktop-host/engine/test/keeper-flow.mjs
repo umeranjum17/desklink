@@ -15,7 +15,7 @@ import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import assert from 'node:assert/strict';
-import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../test/lab-safety.mjs';
+import { assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../test/lab-safety.mjs';
 
 assertNoAmbientDesktop();
 
@@ -41,26 +41,12 @@ function record(name, pass, evidence, detail) {
   note(`      evidence: ${evidence}`);
 }
 
-/** A high display nobody owns; never the ambient desktop's low numbers. */
-function freeDisplay() {
-  const sockets = '/tmp/.X11-unix';
-  const used = new Set(
-    existsSync(sockets)
-      ? spawnSync('ls', [sockets]).stdout.toString().trim().split('\n')
-          .filter((n) => /^X\d+$/.test(n)).map((n) => Number(n.slice(1)))
-      : [],
-  );
-  for (let n = 170; n < 250; n++) {
-    if (!used.has(n) && !existsSync(`/tmp/.X${n}-lock`)) return n;
-  }
-  throw new Error('no free high X display');
-}
-
 /** One private Xvfb, its own cookie, its own temp dir. */
 class Screen {
   constructor() {
-    this.number = freeDisplay();
-    this.display = `:${this.number}`;
+    this.claim = claimPrivateDisplay({ from: 170, count: 80 });
+    this.number = this.claim.number;
+    this.display = this.claim.display;
     this.dir = mkdtempSync(join(tmpdir(), 'keeper-flow-'));
     this.authority = join(this.dir, 'Xauthority');
     const cookie = randomBytes(16).toString('hex');
@@ -79,6 +65,7 @@ class Screen {
   /** SIGTERM first so the socket is unlinked; SIGKILL only if it survives. */
   async stop() {
     await stopOwnedXvfb(this.xvfb);
+    this.claim.release();
   }
 }
 

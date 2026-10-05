@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { connect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
-import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
+import { assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
 
 assertNoAmbientDesktop();
 const { EngineClient } = await import('@desklink/host');
@@ -19,10 +19,8 @@ const build = spawnSync('cargo', ['build','-q','--manifest-path','packages/deskt
 assert.equal(build.status,0,'X client builds');
 const example = join(process.env.CARGO_TARGET_DIR ?? 'packages/desktop-host/engine/target','debug','examples','x11_target');
 const clipboardExample = join(process.env.CARGO_TARGET_DIR ?? 'packages/desktop-host/engine/target','debug','examples','x11_clip');
-const number = Array.from({length:30},(_,i)=>170+i).find(n =>
-  !existsSync(`/tmp/.X11-unix/X${n}`) && !existsSync(`/tmp/.X${n}-lock`));
-assert(number !== undefined, 'no unclaimed high X display');
-const display = `:${number}`;
+const claim = claimPrivateDisplay({ from: 170, count: 30 });
+const { number, display } = claim;
 const evidenceScale = process.env.DESKLINK_INDICATOR_SCALE === '2' ? 2 : 1;
 const evidenceOnly = !!process.env.DESKLINK_INDICATOR_EVIDENCE_DIR;
 const width = ocrScale === '1.5' ? 3840 : (evidenceOnly ? 1920 * evidenceScale : 1280);
@@ -103,7 +101,7 @@ async function stopProcess(pid) {
   for (let i=0;i<40 && alive();i++) await new Promise(r=>setTimeout(r,25));
   assert(!alive(), `task-owned process ${pid} survived cleanup`);
 }
-async function stopXvfbGracefully() { await stopOwnedXvfb(xvfb); }
+async function stopXvfbGracefully() { await stopOwnedXvfb(xvfb); claim.release(); }
 async function verifyXvfb() {
   if (!xvfbReady) {
     for (let i=0;i<200 && proc(xvfb.pid)?.state!=='T' && xvfb.pid && xvfb.exitCode===null && xvfb.signalCode===null;i++) await new Promise(r=>setTimeout(r,50));

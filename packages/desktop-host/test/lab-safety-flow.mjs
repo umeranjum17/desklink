@@ -5,15 +5,13 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from './lab-safety.mjs';
+import { assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from './lab-safety.mjs';
 
 assertNoAmbientDesktop();
 assert.equal(process.platform, 'linux', 'owned-Xvfb proof requires Linux');
 const dir = mkdtempSync(join(tmpdir(), 'desklink-lab-safety-'));
-const number = Array.from({ length: 30 }, (_, i) => 170 + i).find(n =>
-  !existsSync(`/tmp/.X11-unix/X${n}`) && !existsSync(`/tmp/.X${n}-lock`));
-assert(number !== undefined, 'no unclaimed high X display');
-const display = `:${number}`, socket = `/tmp/.X11-unix/X${number}`, lock = `/tmp/.X${number}-lock`;
+const claim = claimPrivateDisplay({ from: 170, count: 30 });
+const { number, display } = claim, socket = `/tmp/.X11-unix/X${number}`, lock = `/tmp/.X${number}-lock`;
 const authority = join(dir, 'Xauthority'), children = [];
 
 async function start() {
@@ -71,5 +69,6 @@ try {
     cases: ['failure cleanup', 'SIGKILL fallback', 'replacement preserved', 'unrecorded PID refused', 'wrong lock refused'] }));
 } finally {
   for (const child of children) await stopOwnedXvfb(child);
+  claim.release();
   rmSync(dir, { recursive: true, force: true });
 }
