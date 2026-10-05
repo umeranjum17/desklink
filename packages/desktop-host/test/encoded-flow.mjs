@@ -354,8 +354,11 @@ async function startChrome(binary, pageUrl) {
     const deadline = started + 20_000;
     let port = null;
     while (Date.now() < deadline && port === null && stopped === null) {
-        if (existsSync(portFile)) {
-            port = Number.parseInt(readFileSync(portFile, 'utf8').split('\n')[0], 10) || null;
+        try {
+            if (existsSync(portFile)) {
+                port = Number.parseInt(readFileSync(portFile, 'utf8').split('\n')[0], 10) || null;
+            }
+        } catch {
         }
         if (port === null) await sleep(100);
     }
@@ -368,7 +371,10 @@ async function startChrome(binary, pageUrl) {
             chrome.kill('SIGKILL');
         } catch {
         }
-        rmSync(profile, { recursive: true, force: true });
+        try {
+            rmSync(profile, { recursive: true, force: true });
+        } catch {
+        }
         throw new Error(
             `Chrome never opened a debugging port in ${Date.now() - started}ms from ${binary} `
             + `(${chromeVersion(binary)}): ${fate()}; `
@@ -414,7 +420,10 @@ async function startChrome(binary, pageUrl) {
             chrome.kill('SIGKILL');
         } catch {
         }
-        rmSync(profile, { recursive: true, force: true });
+        try {
+            rmSync(profile, { recursive: true, force: true });
+        } catch {
+        }
         throw new Error(
             `Chrome's debugging handshake failed from ${binary} (${chromeVersion(binary)}): ${error.message}; ${fate()}; `
             + `stderr: ${stderr.slice(-400)}`,
