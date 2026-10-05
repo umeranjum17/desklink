@@ -915,6 +915,31 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     assert(fitWidthHeight <= screenHeight, `the whole desktop fits a portrait phone without cropping: ${fitWidthHeight.toFixed(0)} pt of ${screenHeight} pt`);
     assert.equal(onScreen.filter((entry) => entry.text === 'Connected').length, 1,
         `the phone says its live status once, not twice: ${JSON.stringify(onScreen.filter((entry) => entry.text === 'Connected'))}`);
+    // What the band under the picture carries. The picture cannot grow on a tall
+    // screen without distorting it, so on a tablet the band is the app's own
+    // controls, big enough to hit and reaching the bottom edge; on a phone the
+    // deck is still the phone's 44 pt strip at the bottom, exactly as it was.
+    const frames = onScreen.filter((entry) => entry.id).map((entry) => {
+        const [, x, y, width, height] = /\{\{(-?[\d.]+),\s*(-?[\d.]+)\},\s*\{([\d.]+),\s*([\d.]+)\}\}/.exec(entry.frame ?? '') ?? [];
+        return x === undefined ? null : { id: entry.id, x: Number(x), y: Number(y), width: Number(width), height: Number(height) };
+    }).filter(Boolean);
+    const controls = frames.filter((entry) => entry.id !== 'desklink-status');
+    const controlTop = Math.min(...controls.map((entry) => entry.y));
+    const controlBottom = Math.max(...controls.map((entry) => entry.y + entry.height));
+    const keyHeight = Math.min(...controls.filter((entry) => /^desklink-key-(Control|Shift|Alt|Meta)$/.test(entry.id)).map((entry) => entry.height));
+    if (Math.min(screenWidth, screenHeight) >= 500) {
+        assert(controlTop - box.bottom <= 200,
+            `a tablet's controls start in the band under the picture, not 200 pt below it: the first control is at ${controlTop.toFixed(0)} pt, the picture ends at ${box.bottom.toFixed(0)} pt`);
+        assert(screenHeight - controlBottom <= 100,
+            `a tablet's controls reach the bottom of the screen: the last one ends at ${controlBottom.toFixed(0)} pt of ${screenHeight} pt`);
+        assert(keyHeight >= 90,
+            `a tablet's keys are tablet-sized, not 44 pt phone keys: the shortest is ${keyHeight.toFixed(0)} pt`);
+        log(`a tablet's band is controls: ${controls.length} controls from ${controlTop.toFixed(0)} pt to ${controlBottom.toFixed(0)} pt, the picture ends at ${box.bottom.toFixed(0)} pt, keys ${keyHeight.toFixed(0)} pt tall`);
+    } else {
+        assert(screenHeight - controlBottom <= 100,
+            `a phone's controls are still at the bottom of the screen: the last one ends at ${controlBottom.toFixed(0)} pt of ${screenHeight} pt`);
+        assert(keyHeight <= 48, `a phone's keys are still 44 pt: the tallest measure is ${keyHeight.toFixed(0)} pt`);
+    }
     await step('00-live-desktop', `live desktop at the documented portrait fit: ${(geometry.width * scale).toFixed(0)}x${pictureHeightPt.toFixed(0)} pt band at the top of a ${screenWidth}x${screenHeight} pt screen (${(100 * pictureHeightPt / screenHeight).toFixed(0)}% of its height; the rest is letterbox and the app's own chrome), no diagnostic text on the phone`);
 
     // The whole phone-only journey as one screen recording on the Mac.

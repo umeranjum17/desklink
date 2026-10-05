@@ -30,6 +30,8 @@ import {
 
 /** The height of controls a tablet's band takes, in points: status, a 96 pt modifier row and three 96 pt keys. */
 const DECK_TALL = 480;
+/** The shortest edge that makes a screen a tablet's rather than a phone's. */
+const TABLET_MIN = 500;
 
 function connectionLink(link: string | null): { url: string; report: string | null; key: string } | null {
     if (!link) return null;
@@ -172,10 +174,11 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
     // band between them, so a tall screen is controls rather than empty space.
     const [pictureBottom, setPictureBottom] = React.useState(0);
     const [deckHeight, setDeckHeight] = React.useState(0);
-    const [screenHeight, setScreenHeight] = React.useState(0);
-    // A band this tall carries tablet-sized controls; a short one — a phone in
-    // landscape, or a screen with the keyboard up — keeps the phone's own.
-    const tallDeck = screenHeight - (insets?.bottom ?? 0) - pictureBottom >= DECK_TALL;
+    const [screen, setScreen] = React.useState({ width: 0, height: 0 });
+    // A tablet's band carries tablet-sized controls and starts under the picture.
+    // A phone's is left exactly as it was: its own keys, at the bottom edge.
+    const tablet = Math.min(screen.width, screen.height) >= TABLET_MIN;
+    const tallDeck = tablet && screen.height - (insets?.bottom ?? 0) - pictureBottom >= DECK_TALL;
 
     async function copy() {
         setCopyError(null);
@@ -228,7 +231,7 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
     }, [status, desktop.getStats, report]);
 
     return (
-        <View style={styles.root} onLayout={(event) => setScreenHeight(event.nativeEvent.layout.height)}>
+        <View style={styles.root} onLayout={(event) => setScreen(event.nativeEvent.layout)}>
             <StatusBar hidden />
             <DesktopView sessionId={desktop.nativeId} style={StyleSheet.absoluteFill} insets={insets} accessibilityLabel="desktop"
                 onPictureFrame={(frame) => setPictureBottom(frame.top + frame.height)} />
@@ -243,10 +246,10 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
                 ) : <ClipboardConfirmation transfer={desktop.clipboard} />}
             </View>
             <View pointerEvents="box-none" style={[styles.bottom, {
-                // Under the picture when there is room for the whole deck, and at
-                // the bottom of the screen — as it always was — when the keyboard
-                // has taken the band.
-                top: Math.min(pictureBottom, screenHeight - deckHeight - insets.bottom),
+                // Under the picture on a tablet, where the band is the controls';
+                // at the bottom of the screen on a phone, and whenever the
+                // keyboard has taken the band, as it always was.
+                top: tallDeck ? pictureBottom : screen.height - deckHeight - insets.bottom,
                 paddingBottom: insets.bottom,
             }]}>
             <View style={styles.deck} onLayout={(event) => setDeckHeight(event.nativeEvent.layout.height)}>
