@@ -64,9 +64,9 @@ export const KEY_COLORS = {
 
 const styles = StyleSheet.create({
     row: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, padding: 8, backgroundColor: KEY_COLORS.backing },
-    grown: { width: '100%', flexGrow: 1 },
+    grown: { width: '100%', flexGrow: 1, maxHeight: 160 },
     key: { minWidth: 56, maxWidth: '100%', minHeight: 44, paddingHorizontal: 12, borderRadius: 8, borderWidth: 2, alignItems: 'center', justifyContent: 'center' },
-    keyGrown: { flexGrow: 1, minHeight: 96, maxHeight: 96, paddingHorizontal: 24 },
+    keyGrown: { flexGrow: 1, minHeight: 96, paddingHorizontal: 24 },
     off: { backgroundColor: KEY_COLORS.off, borderColor: '#4b4e57' },
     on: { backgroundColor: KEY_COLORS.on, borderColor: KEY_COLORS.on },
     lock: { borderColor: '#ffffff' },

@@ -29,7 +29,7 @@ import {
 } from '@desklink/react-native';
 
 /** The height of controls a tablet's band takes, in points: status, a 96 pt modifier row and three 96 pt keys. */
-const DECK_TALL = 480;
+const DECK_TALL = 560;
 /** The shortest edge that makes a screen a tablet's rather than a phone's. */
 const TABLET_MIN = 500;
 
@@ -283,16 +283,16 @@ const styles = StyleSheet.create({
     // The deck is one block at the bottom of the band, where thumbs are; the
     // band's slack is the single gap under the picture.
     bottom: { position: 'absolute', left: 0, right: 0, bottom: 0, justifyContent: 'flex-end' },
-    deck: { width: '100%' },
+    deck: { width: '100%', flex: 1 },
     bar: { marginHorizontal: 16, marginBottom: 8, minHeight: 24, alignItems: 'center' },
     status: { color: '#fff', fontSize: 15, textAlign: 'center' },
     confirmation: { minHeight: 48, justifyContent: 'center' },
     copyErrorScroll: { maxHeight: 120, flexGrow: 0 },
     copyError: { marginHorizontal: 16, marginVertical: 8, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12, backgroundColor: '#521b24' },
     copyErrorLabel: { color: '#ffffff', fontSize: 14, fontWeight: '600' },
-    keys: { backgroundColor: 'rgba(22, 23, 26, 0.94)' },
+    keys: { backgroundColor: 'rgba(22, 23, 26, 0.94)', flexGrow: 1 },
     row: { backgroundColor: 'transparent' },
     copy: { margin: 8, minHeight: 44, paddingHorizontal: 12, borderRadius: 8, justifyContent: 'center', backgroundColor: '#2b2d33' },
-    copyTall: { minHeight: 96 },
+    copyTall: { flexGrow: 1, minHeight: 96 },
     copyLabel: { color: '#c9ccd3', fontSize: 15, fontWeight: '500' },
 });
