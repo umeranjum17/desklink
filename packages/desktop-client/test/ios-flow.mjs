@@ -247,6 +247,11 @@ function visibleNodes(udid) {
 
 const visibleText = (udid) => visibleNodes(udid).map((entry) => entry.text);
 
+/** Whichever array of nodes an axe tree node carries its children under. */
+function kidsOf(node) {
+    return Object.values(node).find((value) => Array.isArray(value) && value.length > 0 && value.every((item) => item && typeof item === 'object')) ?? [];
+}
+
 /** The hidden accessibility status the app exposes as `testID="desklink-status"`, and the screen's size in points. */
 function screen(udid) {
     const tree = JSON.parse(mac(`axe describe-ui --udid ${udid}`));
@@ -254,7 +259,7 @@ function screen(udid) {
     let status = null;
     const walk = (node) => {
         if (node.AXUniqueId === 'desklink-status') status = node.AXLabel ?? node.AXValue ?? '';
-        for (const child of node.children ?? []) walk(child);
+        for (const child of kidsOf(node)) walk(child);
     };
     for (const root of tree) walk(root);
     return { status, frame: tree[0].frame };
@@ -267,11 +272,22 @@ function byId(udid, id) {
     let found = null;
     const walk = (node) => {
         if (node.AXUniqueId === id) found = { label: node.AXLabel ?? null, value: node.AXValue ?? null };
-        for (const child of node.children ?? []) walk(child);
+        for (const child of kidsOf(node)) walk(child);
     };
     for (const root of tree) walk(root);
     assert(found, `the screen has no ${id}`);
     return found;
+}
+
+async function waitForId(udid, id, want) {
+    const deadline = Date.now() + 15_000;
+    let seen = null;
+    while (Date.now() < deadline) {
+        seen = byId(udid, id);
+        if (seen.value === want) return seen;
+        await sleep(500);
+    }
+    assert.equal(seen?.value, want, `the screen never showed ${id} as ${want}`);
 }
 
 // ---- processes on this machine ---------------------------------------------
@@ -926,7 +942,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // 5. sticky modifiers: latch, chord, release
     await clean();
     mac(`axe tap --id desklink-key-Control --udid ${udid}`);
-    assert.equal(byId(udid, 'desklink-key-Control').value, 'latched', 'one tap arms Ctrl');
+    assert.equal((await waitForId(udid, 'desklink-key-Control', 'latched')).value, 'latched', 'one tap arms Ctrl');
     since = await page.evaluate('keys.length');
     mac(`axe key 4 --udid ${udid}`);
     let chorded = [];
@@ -939,11 +955,12 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     assert(chorded.some((key) => key.type === 'keyup' && key.key === 'a'), 'the chorded key is released, not left held');
     assert.equal(await page.evaluate('document.title'), 'Notes',
         'the desktop is still the page the phone was driving, chord and all');
-    assert.equal(byId(udid, 'desklink-key-Control').value, 'off', 'the latch clears after the one key it was armed for');
+    assert.equal((await waitForId(udid, 'desklink-key-Control', 'off')).value, 'off', 'the latch clears after the one key it was armed for');
     mac(`axe tap --id desklink-key-Control --udid ${udid}; axe tap --id desklink-key-Control --udid ${udid}`);
-    assert.equal(byId(udid, 'desklink-key-Control').value, 'locked', 'a second tap locks Ctrl');
+    assert.equal((await waitForId(udid, 'desklink-key-Control', 'locked')).value, 'locked', 'a second tap locks Ctrl');
     await step('05-sticky-modifier', 'Ctrl latched → next key sent as Control+A → latch cleared; two taps lock it');
-    mac(`axe tap --id desklink-key-Control --udid ${udid}`); // unlock again before the next step
+    mac(`axe tap --id desklink-key-Control --udid ${udid}`);
+    await waitForId(udid, 'desklink-key-Control', 'off');
 
     // 6. the desktop's clipboard comes over to the phone
     // The page may have moved under an earlier scroll, so aim at where the
