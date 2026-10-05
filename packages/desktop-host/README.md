@@ -126,10 +126,13 @@ libvpx's licence and patent grant in `prefix/THIRD_PARTY_LICENSES.txt`.
 Without that prefix the compile seam still builds and refuses `serve`.
 Hosted Windows CI resolves the opt-in engine through the published Node API
 and completes a `serve` hello/capabilities handshake with clean shutdown; it
-also checks Chrome decode and input relay, and DLL
-dependencies. Dedicated Windows rig qualification of
-capture, input, mixed DPI, GPU encoding and elevation is pending; signing and
-packaging are later lanes.
+also installs the packed packages into an empty project, checks the installed
+`@desklink/host` tree against its pack manifest, starts the engine from that
+install, and checks Chrome decode and input relay, and DLL
+dependencies. That install proof is installation and startup on a hosted
+machine: the engine still comes from a source build, because Windows platform
+packages are not published, and capture, input, encoding quality, mixed DPI, GPU
+encoding and elevation stay with the dedicated rig lanes.
 
 ### macOS (preview)
 
