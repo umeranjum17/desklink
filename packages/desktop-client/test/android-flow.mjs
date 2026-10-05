@@ -10,9 +10,8 @@
  *    module is the first thing a session needs, and a build that cannot reach
  *    it refuses before it ever contacts a host: the app's own status line reads
  *    "This phone can't show your desktop." Here it must instead present a frame;
- *  - the picture is live, not a first frame: the fixture repaints on a timer, so
- *    two captures taken seconds apart differ, and the app's own inbound video
- *    statistics keep counting frames;
+ *  - the picture is live, not a first frame: the app's own inbound video
+ *    statistics keep counting decoded frames across the capture window;
  *  - the cursor is real: a swipe across the picture moves the desktop's
  *    pointer, the fixture records where it landed, and the capture after the
  *    swipe shows the pointer there.
@@ -88,6 +87,10 @@ const adb = (...args) => {
     assert.equal(done.status, 0, `adb ${args.join(' ')} failed: ${done.stderr}`);
     return done.stdout;
 };
+// A package installed moments ago can take a while to answer the resolver, so
+// the link that opens the app is retried rather than failed on.
+const tryAdb = (...args) =>
+    spawnSync('adb', ['-s', serial, ...args], { encoding: 'utf8', timeout: 120000 }).status === 0;
 const capture = name => {
     const path = join(out, name);
     const shot = spawnSync('sh', ['-c', `adb -s ${serial} exec-out screencap -p > ${path}`]);
@@ -101,8 +104,8 @@ const receipt = {
 const children = [];
 let xvfb, target, bridge, metro, receiver;
 
-const start = (name, cmd, args, childEnv) => {
-    const child = spawn(cmd, args, { cwd: repo, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+const start = (name, cmd, args, childEnv, cwd = repo) => {
+    const child = spawn(cmd, args, { cwd, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.on('data', c => { logs[name] += c; });
     child.stderr.on('data', c => { logs[name] += c; });
     children.push([name, child]);
@@ -176,13 +179,16 @@ try {
 
     // A debug build loads its JavaScript from this machine's Metro, which the
     // device reaches on its own loopback through adb rather than over the air.
-    metro = start('metro', 'npx', ['expo', 'start', '--port', '8081'], { ...env, CI: '1' });
+    // Metro serves the example app, so it runs where that app's own `expo`
+    // lives: the repository root is not an Expo project and has no SDK to read.
+    metro = start('metro', 'npx', ['expo', 'start', '--port', '8081'], { ...env, CI: '1' }, example);
     await waitFor(() => /Waiting on http/.test(logs.metro), 'Metro');
     adb('install', '-r', '-g', apk);
     adb('reverse', 'tcp:8081', 'tcp:8081');
 
     // The journey.
-    adb('shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', `"${link}"`);
+    await waitFor(() => tryAdb('shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', `"${link}"`),
+    'the app to answer its connection link', 120000);
     await waitFor(() => reports.length > 0, "the app's own report", 180000);
     await waitFor(() => {
         const last = JSON.parse(reports[reports.length - 1] ?? '{}');
@@ -192,13 +198,26 @@ try {
     const first = capture('01-live-desktop.png');
     await sleep(6000);
     const second = capture('02-live-desktop-later.png');
-    assert.notEqual(hash(first), hash(second), 'two captures seconds apart were identical: the picture is not live');
+
+    // Liveness comes from the app's own inbound video statistics, which keep
+    // counting decoded frames while the picture is live. Comparing the two
+    // captures pixel-by-pixel cannot prove this: the fixture's only motion
+    // is a 32-pixel square blinking every 80ms, so captures seconds apart
+    // land on the same blink phase about one time in six and fail by luck.
+    const decoded = report => (JSON.parse(report).stats ?? [])
+        .filter(stat => stat.type === 'inbound-rtp')
+        .reduce((total, stat) => total + (stat.framesDecoded ?? 0), 0);
+    await waitFor(() => reports.length > 1 && decoded(reports[reports.length - 1]) > decoded(reports[0]),
+        'the app to decode further video frames', 60000);
 
     // The cursor: a swipe across the picture moves the desktop's pointer, and
-    // the fixture records where it landed.
+    // the fixture records where it landed. Both ends must start inside the
+    // picture: on SDK 57 the fit-width picture is top-anchored (about y 110-717
+    // on a 1080x2400 screen), so a swipe beginning below it never reaches the
+    // desktop and the fixture sees nothing.
     const pointers = () => logs.fixture.split('\n').filter(line => line.includes('"pointer"')).length;
     const before = pointers();
-    adb('shell', 'input', 'swipe', String(Math.round(1080 * 0.2)), String(Math.round(2400 * 0.38)),
+    adb('shell', 'input', 'swipe', String(Math.round(1080 * 0.2)), String(Math.round(2400 * 0.2)),
         String(Math.round(1080 * 0.75)), String(Math.round(2400 * 0.13)), '600');
     await waitFor(() => pointers() > before, 'the fixture pointer to move');
     const cursor = logs.fixture.split('\n').filter(line => line.includes('"pointer"')).pop();
