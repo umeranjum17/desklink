@@ -52,7 +52,7 @@ holds the button through its moves and selects the text it passed; two fingers
 turn the wheel; typed characters land in the desktop's own field; a latched
 modifier chords the next key and clears; the clipboard round-trips through the
 engine in both directions; and the drawn mark is an arrow (0.3 pt at its tip,
-13.9 pt at its widest) whose tip is within a point of the desktop's pointer.
+13.9 pt at its widest) whose tip is within 2 pt of the desktop's pointer.
 
 ## What the run does not claim, and how it avoids fooling itself
 

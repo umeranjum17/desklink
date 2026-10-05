@@ -33,7 +33,8 @@
  * front of the bridge that records the descriptions. The simulator side runs
  * on the Mac over ssh, inside one directory: the package and the example are
  * copied there, built, installed on a uniquely named `desklink-ios-flow-*`
- * simulator (created and deleted by this run), launched with the
+ * simulator (created and deleted by this run), or on one of the Mac's own
+ * simulators with DESKLINK_IOS_DEVICE (left in place), launched with the
  * relay's URL, read through its accessibility tree and tapped with `axe`.
  *
  * Usage:
@@ -51,6 +52,10 @@
  *                           no iOS simulator platform installed
  *   DESKLINK_IOS_RUNTIME    iOS runtime version to run on, e.g. 18.6 (default: the
  *                           newest the Mac has)
+ *   DESKLINK_IOS_DEVICE     name or udid of one of the Mac's own simulators to
+ *                           run on instead, left in place (default: a throwaway
+ *                           simulator this run creates and deletes)
+ *   DESKLINK_IOS_TREE       path receiving the raw accessibility tree JSON
  *   DESKLINK_IOS_IPAD       1 runs on an iPad simulator and adds the trackpad checks
  *   DESKLINK_IOS_HOST_ADDR  address the simulator reaches this machine on
  *                           (default: this machine's address as the Mac's ssh
