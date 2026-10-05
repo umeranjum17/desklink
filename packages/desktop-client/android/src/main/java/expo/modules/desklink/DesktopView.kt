@@ -681,8 +681,10 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
             return true
           }
           // The whole desktop has nowhere to move to, so the finger moves the
-          // desktop's pointer instead, without a button.
-          gesture = if (filling || !fitted) Gesture.PAN else if (downOnPicture) Gesture.HOVER else Gesture.LETTERBOX
+          // desktop's pointer instead, without a button. A fill that landed on
+          // the fit scale has nowhere to move to either, portrait most of all,
+          // and it is `fitted`, not the fill, that says there is room.
+          gesture = if (!fitted) Gesture.PAN else if (downOnPicture) Gesture.HOVER else Gesture.LETTERBOX
           lastX = event.x
           lastY = event.y
           if (gesture == Gesture.HOVER) hoverTo(active, event.x, event.y)
