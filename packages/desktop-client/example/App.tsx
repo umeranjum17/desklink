@@ -252,7 +252,7 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
                 top: tallDeck ? pictureBottom : screen.height - deckHeight - insets.bottom,
                 paddingBottom: insets.bottom,
             }]}>
-            <View style={styles.deck} onLayout={(event) => setDeckHeight(event.nativeEvent.layout.height)}>
+            <View style={[styles.deck, tallDeck && styles.deckTall]} onLayout={(event) => setDeckHeight(event.nativeEvent.layout.height)}>
             <View pointerEvents="none" style={styles.bar}>
                 <Text testID="desklink-status" style={styles.status}>
                     {statusText(desktop.snapshot)}
@@ -283,7 +283,8 @@ const styles = StyleSheet.create({
     // The deck is one block at the bottom of the band, where thumbs are; the
     // band's slack is the single gap under the picture.
     bottom: { position: 'absolute', left: 0, right: 0, bottom: 0, justifyContent: 'flex-end' },
-    deck: { width: '100%', flex: 1 },
+    deck: { width: '100%' },
+    deckTall: { flex: 1 },
     bar: { marginHorizontal: 16, marginBottom: 8, minHeight: 24, alignItems: 'center' },
     status: { color: '#fff', fontSize: 15, textAlign: 'center' },
     confirmation: { minHeight: 48, justifyContent: 'center' },
