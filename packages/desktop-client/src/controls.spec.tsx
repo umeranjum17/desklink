@@ -166,7 +166,7 @@ describe('example Copy', () => {
         example.copy.mockRejectedValueOnce(new Error('clipboard is unavailable for this desktop source'));
         await act(async () => { tap(); });
         expect(tree.root.findByProps({ testID: 'desklink-copy-error' }).findByType('Text').props.children)
-            .toBe('Copy failed: clipboard is unavailable for this desktop source');
+            .toBe('Clipboard failed: clipboard is unavailable for this desktop source');
         expect(example.write).not.toHaveBeenCalled();
 
         example.write.mockResolvedValue(false);
@@ -180,7 +180,7 @@ describe('example Copy', () => {
         expect(style.paddingHorizontal).toBeGreaterThan(0);
         expect(style.paddingVertical).toBeGreaterThan(0);
         expect(contrast('#ffffff', style.backgroundColor as string)).toBeGreaterThanOrEqual(4.5);
-        expect(error.findByType('Text').props.children).toBe('Copy failed: The phone refused the clipboard write.');
+        expect(error.findByType('Text').props.children).toBe('Clipboard failed: The phone refused the clipboard write.');
         expect(tree.root.findAllByProps({ testID: 'desklink-clipboard' })).toHaveLength(0);
 
         vi.useFakeTimers();
@@ -191,7 +191,7 @@ describe('example Copy', () => {
 
         example.write.mockRejectedValue(new Error('native write refused'));
         await act(async () => { tap(); });
-        expect(tree.root.findByProps({ testID: 'desklink-copy-error' }).findByType('Text').props.children).toBe('Copy failed: native write refused');
+        expect(tree.root.findByProps({ testID: 'desklink-copy-error' }).findByType('Text').props.children).toBe('Clipboard failed: native write refused');
 
         let finish!: (written: boolean) => void;
         example.write.mockImplementation(() => new Promise<boolean>((resolve) => { finish = resolve; }));

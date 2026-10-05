@@ -225,7 +225,7 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
                 {copyError ? (
                     <ScrollView style={styles.copyErrorScroll}>
                         <View testID="desklink-copy-error" accessible accessibilityRole="alert" accessibilityLiveRegion="polite" style={styles.copyError}>
-                            <Text style={styles.copyErrorLabel}>{`Copy failed: ${copyError}`}</Text>
+                            <Text style={styles.copyErrorLabel}>{`Clipboard failed: ${copyError}`}</Text>
                         </View>
                     </ScrollView>
                 ) : <ClipboardConfirmation transfer={desktop.clipboard} />}
