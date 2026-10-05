@@ -142,3 +142,12 @@ cleans it.
 - **The committed `target/debug/desklink-host` can be stale**, and a stale engine
   refuses X11 clipboard transfers that the current source offers. Build it before
   a run.
+- **A first run against a new simulator used to lose the session.** On a
+  simulator the flow had never run on, `xcodebuild test` had to install the
+  XCUITest runner first, and the app under test came back saying `Your desktop
+  ended this session` — the drag step then got nothing from the desktop, not
+  because the touch failed. After #84 and #85 it did not reproduce: three cold
+  runs, each on a simulator the flow created for itself, passed end to end. What
+  fixed it is not isolated. Reusing one named simulator
+  (`DESKLINK_IOS_DEVICE`) is still the cheaper path, and the flow reports the
+  loss by that reason rather than as a missing drag.
