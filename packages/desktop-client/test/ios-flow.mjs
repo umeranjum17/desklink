@@ -84,10 +84,14 @@ const repo = resolve(here, '../../..');
 const MAC = process.env.DESKLINK_IOS_MAC ?? '';
 const DIR = process.env.DESKLINK_IOS_DIR ?? 'desklink-ios';
 const BUILD = process.env.DESKLINK_IOS_SKIP_BUILD !== '1';
-const APP = process.env.DESKLINK_IOS_APP ?? 'DerivedData/Build/Products/Release-iphonesimulator/desklinkexample.app';
-assert.match(APP, /^[\w.-]+(\/[\w.-]+)*$/, 'DESKLINK_IOS_APP is a plain path under the task directory');
+// Expo names the built app after the app, not after the package; an explicit
+// DESKLINK_IOS_APP overrides what the build products hold.
+const APP = process.env.DESKLINK_IOS_APP ?? '';
+if (APP !== '') assert.match(APP, /^[\w.-]+(\/[\w.-]+)*$/, 'DESKLINK_IOS_APP is a plain path under the task directory');
 const BUNDLE = 'dev.desklink.example';
 const RUNTIME = process.env.DESKLINK_IOS_RUNTIME ?? '';
+/** Run on one of the Mac's own named simulators instead of a throwaway one. */
+const REUSE = process.env.DESKLINK_IOS_DEVICE ?? '';
 const IPAD = process.env.DESKLINK_IOS_IPAD === '1';
 const POINTER_PROOF = process.env.DESKLINK_IOS_POINTER_PROOF;
 if (POINTER_PROOF) assert(['before', 'after'].includes(POINTER_PROOF));
@@ -150,7 +154,9 @@ if [ ! -f ios/Podfile.lock ] || [ -n "$(find package.json app.json ../expo-modul
     (cd ios && pod install)
 fi
 cd ios
-xcodebuild -workspace desklinkexample.xcworkspace -scheme desklinkexample -configuration Release \\
+# Expo names the generated project after the app, which is not the package's name.
+WS="$(ls -d *.xcworkspace | head -1)"
+xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configuration Release \\
     -destination "platform=iOS Simulator,id=${udid}" -derivedDataPath "$D/DerivedData" \\
     CODE_SIGNING_ALLOWED=NO build > "$D/build.log" 2>&1 || { tail -60 "$D/build.log"; exit 1; }`, 40 * 60_000);
 }
@@ -170,12 +176,34 @@ TEST_RUNNER_DESKLINK_POINTER='${JSON.stringify(steps)}' xcodebuild test -project
 }
 
 function simulator() {
+    if (REUSE !== '') {
+        const named = Object.values(JSON.parse(mac('xcrun simctl list devices -j')).devices).flat()
+            .filter((device) => device.isAvailable !== false);
+        const found = named.find((device) => device.name === REUSE || device.udid === REUSE);
+        assert(found, `the Mac has no available simulator named ${REUSE}`);
+        log(`using the Mac's own simulator ${found.name} (${found.udid}); this run leaves it in place`);
+        return { udid: found.udid, temporary: false };
+    }
     const runtimes = JSON.parse(mac('xcrun simctl list -j runtimes available')).runtimes
         .filter((runtime) => runtime.platform === 'iOS' && (RUNTIME === '' || runtime.version.startsWith(RUNTIME)));
     assert(runtimes.length > 0, `the Mac has no iOS simulator runtime ${RUNTIME}`);
     const runtime = runtimes.at(-1).identifier;
     log(`creating simulator ${DEVICE} on ${runtime}`);
-    return mac(`xcrun simctl create ${DEVICE} com.apple.CoreSimulator.SimDeviceType.${DEVICE_TYPE} ${runtime}`).trim();
+    return { udid: mac(`xcrun simctl create ${DEVICE} com.apple.CoreSimulator.SimDeviceType.${DEVICE_TYPE} ${runtime}`).trim(), temporary: true };
+}
+
+/** Every string the simulator's own screen shows: no metrics, no URLs, no tokens. */
+function visibleText(udid) {
+    const texts = [];
+    const walk = (node) => {
+        for (const key of ['AXLabel', 'AXValue']) {
+            const value = node[key];
+            if (typeof value === 'string' && value.trim() !== '') texts.push(value.trim());
+        }
+        for (const child of node.children ?? []) walk(child);
+    };
+    for (const root of JSON.parse(mac(`axe describe-ui --udid ${udid}`))) walk(root);
+    return texts;
 }
 
 /** The hidden accessibility status the app exposes as `testID="desklink-status"`, and the screen's size in points. */
@@ -188,6 +216,19 @@ function screen(udid) {
     };
     for (const root of tree) walk(root);
     return { status, frame: tree[0].frame };
+}
+
+/** The accessibility value the simulator's own screen carries for one identifier. */
+function byId(udid, id) {
+    const tree = JSON.parse(mac(`axe describe-ui --udid ${udid}`));
+    let found = null;
+    const walk = (node) => {
+        if (node.AXUniqueId === id) found = { label: node.AXLabel ?? null, value: node.AXValue ?? null };
+        for (const child of node.children ?? []) walk(child);
+    };
+    for (const root of tree) walk(root);
+    assert(found, `the screen has no ${id}`);
+    return found;
 }
 
 // ---- processes on this machine ---------------------------------------------
@@ -257,13 +298,33 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>Notes</title>
 <p style="margin:0 0 12px"><span id="line">select this line</span></p>
 <p style="margin:0 0 12px">Call about the shelf on Friday</p>
 <p style="margin:0"><span id="typed"></span><span id="caret" style="display:inline-block;width:3px;height:30px;vertical-align:-6px;background:#1d1d1f"></span></p>
+<textarea id="pad" aria-label="notes pad" style="position:fixed;left:${COLUMN.left}px;top:600px;width:280px;height:96px;font:20px/1.4 system-ui,sans-serif;border:1px solid #b9b6ae;border-radius:8px;background:#fff;padding:6px"></textarea>
+<button id="copy-out" style="position:fixed;left:400px;top:600px;width:170px;height:44px;font:17px system-ui,sans-serif;border-radius:8px;background:#1d1d1f;color:#fbfaf7">Copy this line</button>
 </main>
 <script>
 window.clicks = [];
 window.keys = [];
 window.pointer = [];
+window.pastes = [];
 const caret = document.getElementById('caret');
 setInterval(() => { caret.style.visibility = caret.style.visibility === 'hidden' ? 'visible' : 'hidden'; }, 300);
+const pad = document.getElementById('pad');
+pad.addEventListener('paste', (event) => {
+    window.pastes.push({ text: event.clipboardData ? event.clipboardData.getData('text') : '', value: pad.value });
+});
+document.getElementById('copy-out').addEventListener('click', async () => {
+    window.copyAttempts = (window.copyAttempts ?? 0) + 1;
+    const range = document.createRange();
+    range.selectNodeContents(document.getElementById('line'));
+    const selection = getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    let ok = document.execCommand('copy');
+    if (!ok && navigator.clipboard) {
+        try { await navigator.clipboard.writeText(selection.toString()); ok = true; } catch (error) { window.copyError = String(error); }
+    }
+    window.copied = ok ? selection.toString() : null;
+});
 addEventListener('keydown', (event) => {
     if (event.key.length === 1 && !event.metaKey && !event.ctrlKey) document.getElementById('typed').textContent += event.key;
 });
@@ -289,7 +350,7 @@ for (const type of ['mousemove', 'mousedown', 'mouseup', 'contextmenu', 'wheel']
 /** Evaluate in the page over the browser's debugging port. */
 async function pageEvaluator(profile) {
     const portFile = join(profile, 'DevToolsActivePort');
-    for (let i = 0; i < 100 && !existsSync(portFile); i++) await sleep(100);
+    for (let i = 0; i < 300 && !existsSync(portFile); i++) await sleep(100);
     const port = Number.parseInt(readFileSync(portFile, 'utf8'), 10);
     const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     const target = targets.find((candidate) => candidate.type === 'page');
@@ -330,10 +391,10 @@ const out = process.env.DESKLINK_IOS_OUT ?? mkdtempSync(join(tmpdir(), 'desklink
 mkdirSync(out, { recursive: true });
 const work = mkdtempSync(join(tmpdir(), 'desklink-ios-host-'));
 let xvfbPid = 0; let xvfb; let pagePid = 0; let bridgePid = 0; let enginePid = 0;
-let relay = null; let page = null; let udid = null; let codec = null;
+let relay = null; let page = null; let udid = null; let codec = null; let temporarySimulator = false;
 
 async function cleanup() {
-    if (udid !== null) {
+    if (udid !== null && temporarySimulator) {
         try {
             mac(`xcrun simctl terminate ${udid} ${BUNDLE} || true; xcrun simctl shutdown ${udid} || true; xcrun simctl delete ${udid}`);
             udid = null;
@@ -368,9 +429,9 @@ async function main() {
     assert(hostAddr !== '', 'cannot tell which address the Mac reaches this machine on');
 
     // ---- simulator app (built first: the host needs nothing from it) ------------
-    udid = simulator();
+    ({ udid, temporary: temporarySimulator } = simulator());
     if (BUILD) buildApp(udid);
-    const app = mac(`echo "$D/${APP}"`).trim();
+    const app = (APP === '' ? mac('ls -d "$D/DerivedData/Build/Products/Release-iphonesimulator/"*.app | head -1').trim() : mac(`echo "$D/${APP}"`).trim());
     mac(`test -d "${app}"`);
     // The example opts in to the package's config plugin, so the trackpad's presses carry their buttons.
     assert.equal(mac(`plutil -extract UIApplicationSupportsIndirectInputEvents raw "${app}/Info.plist"`).trim(), 'true',
@@ -475,7 +536,8 @@ async function main() {
     log(`relay on ${hostAddr}:${relay.address().port}`);
 
     // ---- launch on the simulator ---------------------------------------------------
-    mac(`xcrun simctl boot ${udid} 2>/dev/null || true; xcrun simctl bootstatus ${udid} -b > /dev/null
+    mac(`mkdir -p "$D/tmp"
+xcrun simctl boot ${udid} 2>/dev/null || true; xcrun simctl bootstatus ${udid} -b > /dev/null
 xcrun simctl install ${udid} "${app}"
 xcrun simctl terminate ${udid} ${BUNDLE} 2>/dev/null || true
 xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
@@ -705,6 +767,217 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         assert(hovers > 1, `the pointer's hover moves the desktop's pointer with no button held: ${hovers} buttonless moves at the scroll`);
         log(`hover: ${hovers - 1} buttonless moves from the pointer's hover reports`);
     }
+    // ---- phone-only control --------------------------------------------------------
+    // Every step below reaches the desktop from the phone's own screen. Nothing in
+    // this run sends input to the lab display from here: the page's event log is
+    // the only record of the desktop's side of it.
+    const screenPoint = (point) => ({ x: origin.x + (point.x + 0.5) * scale, y: origin.y + (point.y + 0.5) * scale });
+    const within = (event, spot) => event !== undefined && Math.abs(event.x - spot.x) <= slack && Math.abs(event.y - spot.y) <= slack;
+    const tapDesktop = (spot) => mac(`axe tap -x ${screenPoint(spot).x.toFixed(1)} -y ${screenPoint(spot).y.toFixed(1)} --udid ${udid}`);
+    const steps = [];
+    const step = async (name, note) => {
+        const shot = join(out, `step-${name}.png`);
+        capture(shot);
+        steps.push({ step: name, capture: shot.split('/').pop(), result: note });
+        log(`step ${name}: ${note} (${shot})`);
+    };
+    // What the phone's screen says, with nothing diagnostic on it.
+    const onScreen = visibleText(udid);
+    const diagnostics = onScreen.filter((text) => /wss?:\/\/|[Tt]oken|key=|bearer|0x[0-9a-f]{6}|\bfps\b|\bms\b.*\bpixels?\b/i.test(text));
+    assert.deepEqual(diagnostics, [], `the phone screen shows no addresses, tokens or metrics: ${JSON.stringify(diagnostics)}`);
+    writeFileSync(join(out, 'visible-text.json'), JSON.stringify(onScreen, null, 1));
+    log(`the phone screen carries ${onScreen.length} strings, none diagnostic: ${onScreen.join(' | ')}`);
+    await step('00-live-desktop', 'the desktop fills the phone, with no diagnostic text on the screen');
+
+    // The whole phone-only journey as one screen recording on the Mac.
+    mac(`nohup xcrun simctl io ${udid} recordVideo --codec=h264 "$D/tmp/phone-control.mp4" > "$D/tmp/record.log" 2>&1 < /dev/null & echo $! > "$D/tmp/record.pid"; sleep 3`);
+
+    // 1. pointer and click
+    const press = { x: 700, y: 460 };
+    let since = await page.evaluate('clicks.length');
+    tapDesktop(press);
+    let clicked = [];
+    for (let i = 0; i < 50 && clicked.length < 2; i++) { await sleep(100); clicked = (await page.evaluate('clicks')).slice(since); }
+    assert.deepEqual(clicked.map((click) => click.type), ['mousedown', 'mouseup'], `a tap on the phone is one click on the desktop: ${JSON.stringify(clicked)}`);
+    assert(within(clicked[0], press) && clicked[0].button === 0, `the click lands under the finger: ${JSON.stringify(clicked[0])}`);
+    await step('01-click', `tap → mousedown+mouseup at desktop (${clicked[0].x}, ${clicked[0].y})`);
+
+    // 2. drag: hold the button and move, and let go where the finger lifted
+    const [lineLeft, lineTop, lineRight, lineBottom] = await page.evaluate(
+        '(() => { const box = document.getElementById("line").getBoundingClientRect(); return [box.left, box.top, box.right, box.bottom]; })()');
+    const from = { x: Math.round(lineLeft) + 6, y: Math.round((lineTop + lineBottom) / 2) };
+    const to = { x: Math.round(lineRight) - 6, y: from.y };
+    since = await page.evaluate('pointer.length');
+    pointerSteps(udid, [{ action: IPAD ? 'drag' : 'dragTouch', ...screenPoint(from), toX: screenPoint(to).x, toY: screenPoint(to).y }]);
+    await sleep(500);
+    const dragged = (await page.evaluate('pointer')).slice(since);
+    writeFileSync(join(out, 'step-02-drag-events.json'), JSON.stringify(dragged, null, 1));
+    const held = dragged.filter((event) => event.type === 'mousemove' && (event.buttons & 1) === 1);
+    const dragDown = dragged.find((event) => event.type === 'mousedown' && event.button === 0);
+    const dragUp = dragged.find((event) => event.type === 'mouseup' && event.button === 0);
+    assert(within(dragDown, from), `the drag presses where the finger went down: ${JSON.stringify(dragDown)}`);
+    assert(within(dragUp, to), `the drag lets go where the finger lifted: ${JSON.stringify(dragUp)}`);
+    assert(held.length > 0, `the button is held while the finger travels: ${held.length} moves with it down`);
+    assert.match(dragUp.selection ?? '', /this/, `the drag selected the page's text: ${JSON.stringify(dragUp.selection)}`);
+    await step('02-drag', `press (${dragDown.x}, ${dragDown.y}) → ${held.length} held moves → release (${dragUp.x}, ${dragUp.y}), selected ${JSON.stringify(dragUp.selection)}`);
+
+    // 3. two fingers scroll the desktop; a one finger would pan the picture
+    since = await page.evaluate('pointer.length');
+    pointerSteps(udid, [{ action: 'scrollTwo', ...screenPoint({ x: 700, y: 300 }), dy: 220 }]);
+    const wheels = (await page.evaluate('pointer')).slice(since).filter((event) => event.type === 'wheel');
+    const total = wheels.reduce((sum, event) => sum + event.dy, 0);
+    assert(wheels.length > 0 && Math.abs(total) >= 100, `two fingers turn the desktop's wheel: ${wheels.length} wheel events, deltaY ${total}`);
+    await step('03-scroll', `two-finger scroll → ${wheels.length} wheel events, deltaY ${total}`);
+
+    // 4. typing on the phone reaches the desktop's own field
+    const padSpot = { x: 150, y: 640 };
+    tapDesktop(padSpot);
+    await sleep(300);
+    since = await page.evaluate('document.getElementById("pad").value');
+    mac(`axe type 'desklink' --udid ${udid}`);
+    let typed = since;
+    for (let i = 0; i < 50 && typed === since; i++) { await sleep(200); typed = await page.evaluate('document.getElementById("pad").value'); }
+    assert(typed.includes('desklink'), `what the phone typed is in the desktop's field: ${JSON.stringify(typed)}`);
+    await step('04-typing', `typed "desklink" → desktop field reads ${JSON.stringify(typed)}`);
+
+    // 5. sticky modifiers: latch, chord, release
+    mac(`axe tap --id desklink-key-Control --udid ${udid}`);
+    assert.equal(byId(udid, 'desklink-key-Control').value, 'latched', 'one tap arms Ctrl');
+    since = await page.evaluate('keys.length');
+    mac(`axe key 4 --udid ${udid}`);
+    let chorded = [];
+    for (let i = 0; i < 50 && !chorded.some((key) => key.type === 'keyup' && key.key === 'a'); i++) {
+        await sleep(100);
+        chorded = (await page.evaluate('keys')).slice(since);
+    }
+    const chordDown = chorded.find((key) => key.type === 'keydown' && key.key === 'a');
+    assert(chordDown?.ctrl, `Ctrl then A reaches the desktop as Control+A: ${JSON.stringify(chorded)}`);
+    assert(chorded.some((key) => key.type === 'keyup' && key.key === 'a'), 'the chorded key is released, not left held');
+    assert.equal(await page.evaluate('document.title'), 'Notes',
+        'the desktop is still the page the phone was driving, chord and all');
+    assert.equal(byId(udid, 'desklink-key-Control').value, 'off', 'the latch clears after the one key it was armed for');
+    mac(`axe tap --id desklink-key-Control --udid ${udid}; axe tap --id desklink-key-Control --udid ${udid}`);
+    assert.equal(byId(udid, 'desklink-key-Control').value, 'locked', 'a second tap locks Ctrl');
+    await step('05-sticky-modifier', 'Ctrl latched → next key sent as Control+A → latch cleared; two taps lock it');
+    mac(`axe tap --id desklink-key-Control --udid ${udid}`); // unlock again before the next step
+
+    // 6. the desktop's clipboard comes over to the phone
+    // The page may have moved under an earlier scroll, so aim at where the
+    // button is now rather than where it was authored.
+    const buttonSpot = await page.evaluate('(() => { const box = document.getElementById("copy-out").getBoundingClientRect(); return { x: box.left + box.width / 2, y: box.top + box.height / 2 }; })()');
+    since = await page.evaluate('clicks.length');
+    tapDesktop(buttonSpot);
+    let clickedOnButton = [];
+    for (let i = 0; i < 30 && clickedOnButton.length < 2; i++) { await sleep(100); clickedOnButton = (await page.evaluate('clicks')).slice(since); }
+    assert.equal(await page.evaluate('window.copied'), 'select this line',
+        `the page put its selection on the desktop clipboard: ${await page.evaluate('window.copyAttempts ?? 0')} clicks on the button, ${JSON.stringify(clickedOnButton)} at the tap`);
+    mac(`axe tap --id desklink-copy --udid ${udid}`);
+    // The phone confirms the transfer with a pill on its own screen; the
+    // simulator shares the Mac's pasteboard, so that pill is the phone's proof.
+    let pill = '';
+    for (let i = 0; i < 30 && !pill.includes('select this line'); i++) {
+        await sleep(120);
+        pill = visibleText(udid).find((text) => text.startsWith('Copied to phone')) ?? '';
+    }
+    assert(pill.includes('select this line'), `the phone's own screen confirms the desktop's clipboard and its text: ${JSON.stringify(pill)}; on screen now: ${JSON.stringify(visibleText(udid))}`);
+    await step('06-clipboard-out', `desktop → phone, confirmed on screen: ${pill}`);
+
+    // 7. and the phone's clipboard goes the other way, pasted into the focused field
+    // The phone's clipboard holds what step 06 brought over, so this needs no
+    // host pasteboard write and no operating system's paste consent prompt.
+    tapDesktop(padSpot);
+    await sleep(300);
+    mac(`axe tap --id desklink-paste --udid ${udid}`);
+    // The confirmation pill lives about a second and a half, so poll for it and
+    // for the system's own paste consent in the same breath: the grant is to
+    // the app under test, on this task's simulator, and to nothing else.
+    let sent = '';
+    let allowed = false;
+    for (let i = 0; i < 30 && !sent.includes('select this line'); i++) {
+        await sleep(120);
+        const texts = visibleText(udid);
+        sent = texts.find((text) => text.startsWith('Sent to desktop')) ?? '';
+        if (sent === '' && !allowed && texts.includes('Allow Paste')) {
+            mac(`axe tap --label "Allow Paste" --udid ${udid}`);
+            allowed = true;
+            log('allowed the app under test its own paste prompt on this simulator');
+        }
+    }
+    assert(sent.includes('select this line'), `the phone's own screen confirms what it sent: ${JSON.stringify(sent)}; on screen now: ${JSON.stringify(visibleText(udid))}`);
+    mac(`axe key-combo --modifiers 224 --key 25 --udid ${udid}`);
+    let pastes = [];
+    for (let i = 0; i < 40 && pastes.length === 0; i++) { await sleep(250); pastes = await page.evaluate('window.pastes'); }
+    assert.equal(pastes.at(-1)?.text, 'select this line', `the desktop pasted the phone's clipboard: ${JSON.stringify(pastes)}`);
+    const filled = await page.evaluate('document.getElementById("pad").value');
+    assert(filled.endsWith('select this line'), `the desktop's field holds the phone's text: ${JSON.stringify(filled)}`);
+    await step('07-clipboard-in', `phone → desktop: pasted ${JSON.stringify(filled)}`);
+
+    // 8. the pointer mark: a real arrow, its tip where the desktop's pointer is
+    // A one-finger drag on the whole desktop carries the pointer with no button,
+    // so the mark can be read over bare paper, away from any click dot.
+    since = await page.evaluate('pointer.length');
+    // A finger travelling over bare paper, so the mark is read over clean
+    // background: the press paints its dot 200 desktop pixels away.
+    pointerSteps(udid, [{ action: 'dragTouch', ...screenPoint({ x: 700, y: 460 }), toX: screenPoint({ x: 900, y: 300 }).x, toY: screenPoint({ x: 900, y: 300 }).y }]);
+    await sleep(600);
+    const travelled = (await page.evaluate('pointer')).slice(since).filter((event) => event.x !== undefined);
+    assert(travelled.length > 0, `a finger travelling over the picture carries the desktop's pointer: ${JSON.stringify(travelled)}`);
+    const landed = travelled.at(-1);
+    assert(within(landed, { x: 900, y: 300 }), `the pointer ends where the finger did: ${JSON.stringify(landed)}`);
+    const tip = screenPoint({ x: landed.x, y: landed.y });
+    const frame = capture(join(out, 'step-08-pointer-frame.png'));
+    const density = frame.width / screenWidth;
+    const half = Math.round(24 * density);
+    const crop = new PNG({ width: half * 8, height: half * 8 });
+    for (let cy = 0; cy < crop.height; cy++) {
+        for (let cx = 0; cx < crop.width; cx++) {
+            const sx = Math.round(tip.x * density) - half + Math.floor(cx / 4);
+            const sy = Math.round(tip.y * density) - half + Math.floor(cy / 4);
+            if (sx < 0 || sy < 0 || sx >= frame.width || sy >= frame.height) continue;
+            const source = (sy * frame.width + sx) * 4;
+            frame.data.copy(crop.data, (cy * crop.width + cx) * 4, source, source + 4);
+        }
+    }
+    writeFileSync(join(out, 'step-08-pointer-arrow-4x.png'), PNG.sync.write(crop));
+    // The page under the mark is warm paper; the arrow's ink is dark and its core white.
+    const rows = [];
+    for (let y = 0; y < crop.height; y++) {
+        let first = -1; let last = -1;
+        for (let x = 0; x < crop.width; x++) {
+            const i = (y * crop.width + x) * 4;
+            if (Math.abs(crop.data[i] - 251) + Math.abs(crop.data[i + 1] - 250) + Math.abs(crop.data[i + 2] - 247) > 90) {
+                if (first < 0) first = x;
+                last = x;
+            }
+        }
+        if (first >= 0) rows.push([first, last, y]);
+    }
+    assert(rows.length >= 8, `the phone draws a pointer mark over the picture: ${rows.length} inked rows of 4x`);
+    // The crop is 4x the device's own pixels, and the device is `density` points.
+    const perPoint = 4 * density;
+    const widthsPt = rows.map(([first, last]) => (last - first) / perPoint);
+    const widest = Math.max(...widthsPt);
+    const edge = (pick) => (Math.max(...rows.map(pick)) - Math.min(...rows.map(pick))) / perPoint;
+    // A rectangle keeps one width and one straight edge from row to row; an
+    // arrow starts at its tip and opens out to its widest row.
+    assert(widest >= 3 * widthsPt[0] + 3, `the mark opens out from its tip: ${widthsPt[0].toFixed(1)} pt at the tip, ${widest.toFixed(1)} pt at its widest`);
+    assert(edge((row) => row[1]) >= 4, `the mark's trailing edge runs diagonally, as an arrow's does: ${edge((row) => row[1]).toFixed(1)} pt, a rectangle's runs straight`);
+    // The arrow's hotspot is 3 pt in from its own top-left corner.
+    const tipPt = { x: tip.x - 24 + rows[0][0] / 4 / density, y: tip.y - 24 + rows[0][2] / 4 / density };
+    assert(Math.abs(tipPt.x - tip.x) <= 2 && Math.abs(tipPt.y - tip.y) <= 2,
+        `the arrow's tip is where the desktop's pointer is: ${(tipPt.x - tip.x).toFixed(1)} pt across, ${(tipPt.y - tip.y).toFixed(1)} pt down`);
+    writeFileSync(join(out, 'step-08-pointer.json'), JSON.stringify({
+        density, tip, markOrigin: tipPt, inkRows: rows.length, tipErrorPt: [tipPt.x - tip.x, tipPt.y - tip.y],
+        widestPt: widest, trailingEdgeSpreadPt: edge((row) => row[1]), pointer: landed,
+    }, null, 1));
+    await step('08-pointer-arrow', `arrow over bare paper: ${widthsPt[0].toFixed(1)} pt at the tip, ${widest.toFixed(1)} pt at its widest, tip ${(tipPt.x - tip.x).toFixed(1)}/${(tipPt.y - tip.y).toFixed(1)} pt from the desktop pointer`);
+
+    mac(`kill -INT "$(cat "$D/tmp/record.pid")" 2>/dev/null || true; sleep 2`);
+    assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${DIR}/tmp/phone-control.mp4`, join(out, 'phone-control.mp4')]).status, 0,
+        'copy the screen recording back');
+    writeFileSync(join(out, 'phone-control.json'), JSON.stringify({ device: seen.frame, udid, steps, recording: 'phone-control.mp4' }, null, 1));
+    log(`phone-only control proven over ${steps.length} steps, recorded as phone-control.mp4`);
+
     // ---- pan and rotation ----------------------------------------------------------------------
     pointerSteps(udid, [{ action: 'landscape', x: 0, y: 0 }]);
     await sleep(1500);
