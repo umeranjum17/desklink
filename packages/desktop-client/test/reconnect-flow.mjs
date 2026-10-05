@@ -306,7 +306,7 @@ async function expectPointerSoft(cdp, evaluate, env, x, y, what, timeoutMs = 800
     }
 }
 
-let xvfbPid = 0; let xvfb; let fixturePid = 0; let clientPid = 0; let bridgePid = 0; let enginePid = 0;
+let xvfbPid = 0; let xvfb; let claim = null; let fixturePid = 0; let clientPid = 0; let bridgePid = 0; let enginePid = 0;
 let staticServer = null; let cdpPort = 0;
 async function cleanup() {
     try {
@@ -316,7 +316,7 @@ async function cleanup() {
         if (bridgePid) await stopProcess(bridgePid, 'bridge');
         if (enginePid && alive(enginePid)) await stopProcess(enginePid, 'engine');
         if (xvfb) await stopOwnedXvfb(xvfb);
-        claim.release();
+        claim?.release();
         staticServer?.close();
     } catch (error) { log('cleanup error:', String(error)); }
     const strays = [];
@@ -406,7 +406,7 @@ async function pollProbe(cdp, timeoutMs, want) {
 
 try {
     // ---- private Xvfb -------------------------------------------------------
-    const claim = claimPrivateDisplay({ from: 220, count: 30 });
+    claim = claimPrivateDisplay({ from: 220, count: 30 });
     const { number, display } = claim;
     const authority = join(dir, 'Xauthority');
     assert.equal(spawnSync('xauth', ['-f', authority, 'add', display, '.', randomBytes(16).toString('hex')]).status, 0);

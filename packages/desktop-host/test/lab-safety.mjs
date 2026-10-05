@@ -60,19 +60,24 @@ export function laneArtefactDir(purpose, env = process.env) {
 export function claimPrivateDisplay({ from = 170, count = 30 } = {}) {
   const root = join(tmpdir(), 'desklink-display-claims');
   mkdirSync(root, { recursive: true, mode: 0o700 });
+  const identity = `${process.pid} ${proc(process.pid)?.started ?? ''}`;
   for (let number = from; number < from + count; number++) {
     const claim = join(root, String(number));
     let held = false;
     try { mkdirSync(claim); held = true; }
     catch (error) {
       if (error.code !== 'EEXIST') throw error;
-      let owner = 0;
-      try { owner = Number(readFileSync(join(claim, 'pid'), 'utf8').trim()); } catch { /* half-written claim */ }
-      if (owner !== process.pid && proc(owner)) continue; // a live lane holds it
+      let raw = null;
+      try { raw = readFileSync(join(claim, 'pid'), 'utf8').trim().split(/\s+/); } catch { continue; }
+      const owner = Number(raw[0]);
+      if (!Number.isInteger(owner) || owner <= 1) continue;
+      if (owner === process.pid) continue;
+      const state = proc(owner);
+      if (state && state.state !== 'Z' && (raw.length < 2 || raw[1] === '' || String(state.started) === raw[1])) continue;
       rmSync(claim, { recursive: true, force: true });
-      try { mkdirSync(claim); held = true; } catch { continue; } // lost the reclaim to another lane
+      try { mkdirSync(claim); held = true; } catch { continue; }
     }
-    writeFileSync(join(claim, 'pid'), String(process.pid));
+    writeFileSync(join(claim, 'pid'), identity);
     // X claimed it first (a display outside this range, or a leftover server):
     // give it back and take the next number.
     if (existsSync(`/tmp/.X${number}-lock`) || existsSync(`/tmp/.X11-unix/X${number}`)) {
@@ -82,7 +87,17 @@ export function claimPrivateDisplay({ from = 170, count = 30 } = {}) {
     let released = false;
     return {
       number, display: `:${number}`,
-      release() { if (!released && held) { released = true; rmSync(claim, { recursive: true, force: true }); } },
+      release() {
+        if (!released && held) {
+          released = true;
+          try {
+            const raw = readFileSync(join(claim, 'pid'), 'utf8').trim().split(/\s+/);
+            if (Number(raw[0]) !== process.pid) return;
+            if (raw[1] !== undefined && raw[1] !== '' && String(proc(process.pid)?.started) !== raw[1]) return;
+          } catch { return; }
+          rmSync(claim, { recursive: true, force: true });
+        }
+      },
     };
   }
   throw new Error(`no unclaimed private X display in ${from}..${from + count - 1}`);
