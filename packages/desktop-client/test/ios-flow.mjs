@@ -283,8 +283,12 @@ async function waitForId(udid, id, want) {
     const deadline = Date.now() + 15_000;
     let seen = null;
     while (Date.now() < deadline) {
-        seen = byId(udid, id);
-        if (seen.value === want) return seen;
+        try {
+            seen = byId(udid, id);
+            if (seen.value === want) return seen;
+        } catch (error) {
+            if (!String(error?.message ?? error).includes(`the screen has no ${id}`)) throw error;
+        }
         await sleep(500);
     }
     assert.equal(seen?.value, want, `the screen never showed ${id} as ${want}`);
