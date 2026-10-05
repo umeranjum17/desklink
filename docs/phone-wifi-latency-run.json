@@ -1,0 +1,617 @@
+{
+ "note": "Two runs, both USB transport. Per-capture sample arrays are omitted here; the full receipts are in the private evidence folder ~/lab-tmp/dl-pm-9/.",
+ "unshaped_1920x1080": {
+  "outcome": "PASS",
+  "serial": "a4b93ea2",
+  "host": "192.168.1.144",
+  "display": ":170",
+  "engine": "/home/umer/.cache/desklink-dl-pm-9-target/release/desklink-host",
+  "engineSha256": "58ad04fbbddd848e7ab844d8f4dc565b2da258d64e51b937293935ecde811f21",
+  "stampBinary": "/home/umer/.cache/desklink-dl-pm-9-target/release/examples/stamp_target",
+  "apkSha256": "b2ab277103e9e12f5b0f0f31a294adfe2f125a63a586739d35a009c9c3a2a3e4",
+  "scenarios": [
+   "typing",
+   "scroll"
+  ],
+  "fpsSeconds": 10,
+  "latencySeconds": 15,
+  "timings": {
+   "apk-ready": 1,
+   "metro-ready": 14,
+   "apk-installed": 14,
+   "costs-measured": 19,
+   "clock-measured": 19,
+   "session-live": 30,
+   "typing-fps": 43,
+   "typing-captured": 61,
+   "typing-decoded": 123,
+   "scroll-fps": 139,
+   "scroll-captured": 155,
+   "scroll-decoded": 213
+  },
+  "transport": "usb",
+  "app_javascript_path": "adb reverse over USB (debug build loads its bundle from Metro)",
+  "media_path": "Wi-Fi, phone to this host",
+  "stampSha256": "3815e3d4e0d5dfeb8832b3d818b97274be4e95fdf4769e94cd9ce183f8b0df31",
+  "sourceHead": "c98d882b8b68744b9cc1582b403c9a6d2240f313",
+  "bridgePort": 36485,
+  "reportPort": 41561,
+  "link": "desklink-example://connect?url=ws%3A%2F%2F127.0.0.1%3A36485%2Fdesktop%3Ftoken%3D<bridge-token>&report=http%3A%2F%2F127.0.0.1%3A41561%2Freport",
+  "metroPort": 37411,
+  "apk_install": "already installed, same sha256",
+  "device": {
+   "model": "CPH2649",
+   "release": "16",
+   "sdk": "36",
+   "resolution": "1080x2376",
+   "wifi": "umerfarooq2030",
+   "refresh_hz": null,
+   "host_to_phone_ping_ms": null
+  },
+  "phone_to_host_ping_ms": 5.4,
+  "costs": {
+   "capture_window_median_ms": 203,
+   "capture_window_p95_ms": 224,
+   "exec_median_ms": 16,
+   "grab_estimate_ms": 109.5,
+   "uncertainty_ms": 93.5
+  },
+  "clock_before": {
+   "samples": 21,
+   "offset_median_ms": -380,
+   "offset_p05_p95_ms": [
+    -381,
+    -380
+   ],
+   "return_trip_median_ms": 0
+  },
+  "load_before": {
+   "one": 8.09,
+   "five": 10.2,
+   "fifteen": 19.78,
+   "busy_cpu_percent": null
+  },
+  "first_frame": {
+   "presented_at_device_ms": 1791238953455,
+   "started_at_device_ms": 1791238952537
+  },
+  "reports_sample": [
+   {
+    "at": 1791239080877,
+    "startedAt": 1791238952537,
+    "presentedAt": 1791238953455,
+    "stats": [
+     {
+      "payloadType": 98,
+      "mimeType": "video/VP9",
+      "clockRate": 90000,
+      "id": "CIT01_98_profile-id=0",
+      "type": "codec",
+      "timestampUs": 1791239080874321
+     },
+     {
+      "kind": "video",
+      "codecId": "CIT01_98_profile-id=0",
+      "packetsLost": 0,
+      "packetsReceived": 22714,
+      "bytesReceived": "19465791",
+      "jitterBufferDelay": 1.115623,
+      "framesReceived": 7575,
+      "frameWidth": 1920,
+      "frameHeight": 1080,
+      "framesPerSecond": 59,
+      "framesDecoded": 7575,
+      "keyFramesDecoded": 1,
+      "framesDropped": 10,
+      "totalDecodeTime": 40.318,
+      "decoderImplementation": "c2.qti.vp9.decoder",
+      "firCount": 0,
+      "pliCount": 0,
+      "nackCount": 0,
+      "id": "IT01V858970316",
+      "type": "inbound-rtp",
+      "timestampUs": 1791239080874321
+     }
+    ]
+   },
+   {
+    "at": 1791239081889,
+    "startedAt": 1791238952537,
+    "presentedAt": 1791238953455,
+    "stats": [
+     {
+      "payloadType": 98,
+      "mimeType": "video/VP9",
+      "clockRate": 90000,
+      "id": "CIT01_98_profile-id=0",
+      "type": "codec",
+      "timestampUs": 1791239081885771
+     },
+     {
+      "kind": "video",
+      "codecId": "CIT01_98_profile-id=0",
+      "packetsLost": 0,
+      "packetsReceived": 23292,
+      "bytesReceived": "20121264",
+      "jitterBufferDelay": 1.132807,
+      "framesReceived": 7636,
+      "frameWidth": 1920,
+      "frameHeight": 1080,
+      "framesPerSecond": 60,
+      "framesDecoded": 7636,
+      "keyFramesDecoded": 1,
+      "framesDropped": 10,
+      "totalDecodeTime": 40.678,
+      "decoderImplementation": "c2.qti.vp9.decoder",
+      "firCount": 0,
+      "pliCount": 0,
+      "nackCount": 0,
+      "id": "IT01V858970316",
+      "type": "inbound-rtp",
+      "timestampUs": 1791239081885771
+     }
+    ]
+   },
+   {
+    "at": 1791239082898,
+    "startedAt": 1791238952537,
+    "presentedAt": 1791238953455,
+    "stats": [
+     {
+      "payloadType": 98,
+      "mimeType": "video/VP9",
+      "clockRate": 90000,
+      "id": "CIT01_98_profile-id=0",
+      "type": "codec",
+      "timestampUs": 1791239082896997
+     },
+     {
+      "kind": "video",
+      "codecId": "CIT01_98_profile-id=0",
+      "packetsLost": 0,
+      "packetsReceived": 23844,
+      "bytesReceived": "20742069",
+      "jitterBufferDelay": 1.144144,
+      "framesReceived": 7696,
+      "frameWidth": 1920,
+      "frameHeight": 1080,
+      "framesPerSecond": 59,
+      "framesDecoded": 7696,
+      "keyFramesDecoded": 1,
+      "framesDropped": 10,
+      "totalDecodeTime": 41.019,
+      "decoderImplementation": "c2.qti.vp9.decoder",
+      "firCount": 0,
+      "pliCount": 0,
+      "nackCount": 0,
+      "id": "IT01V858970316",
+      "type": "inbound-rtp",
+      "timestampUs": 1791239082896997
+     }
+    ]
+   }
+  ],
+  "clock_after": {
+   "samples": 21,
+   "offset_median_ms": -381,
+   "offset_p05_p95_ms": [
+    -381,
+    -380
+   ],
+   "return_trip_median_ms": 1
+  },
+  "load_after": {
+   "one": 9.85,
+   "five": 10.31,
+   "fifteen": 18.04,
+   "busy_cpu_percent": null
+  },
+  "legs": {
+   "typing": {
+    "fps": {
+     "windows": 11,
+     "fps_median": 59.9,
+     "fps_p05": 59,
+     "frames_decoded": 966,
+     "frames_dropped": 9,
+     "nack_count": 0,
+     "jitter_buffer_delay_s": 0.261486,
+     "frame_size": "1920x1080",
+     "codec": "CIT01_98_profile-id=0"
+    },
+    "latency": {
+     "decoded": true,
+     "samples": 74,
+     "unreadable": 0,
+     "capture_window_median_ms": 203,
+     "clock_offset_ms": -380,
+     "relative_p50_ms": 47,
+     "relative_p95_ms": 66,
+     "relative_min_ms": 0,
+     "uncertainty_ms": 93.5,
+     "absolute_p50_ms": null,
+     "absolute_p95_ms": null,
+     "absolute_usable": false,
+     "implied_clock_offset_ms": 1791236243033,
+     "absolute_note": "the phone's clock read -380 ms behind this host while the stamps and capture times imply 1791236243033 ms; the disagreement is larger than the latency being measured, so no absolute number is claimed"
+    },
+    "strip_geometry": {
+     "pitch": 26.5,
+     "x0": 0,
+     "config": {
+      "pitch": 26.5,
+      "x0": 0
+     },
+     "read_fraction": 1,
+     "advancing_fraction": 1,
+     "clustered_fraction": 1,
+     "band": {
+      "top": 120,
+      "bottom": 726
+     }
+    },
+    "clock_offset_ms": -380,
+    "clock_drift_ms": 0,
+    "load_before": {
+     "one": 7.98,
+     "five": 10.11,
+     "fifteen": 19.65,
+     "busy_cpu_percent": null
+    },
+    "load_after_latency": {
+     "one": 7.49,
+     "five": 9.49,
+     "fifteen": 18.55,
+     "busy_cpu_percent": null
+    },
+    "battery": [
+     "status: 4",
+     "level: 55",
+     "temperature: 300",
+     "Capacity level: 3"
+    ],
+    "raw_samples": 74
+   },
+   "scroll": {
+    "fps": {
+     "windows": 12,
+     "fps_median": 59.8,
+     "fps_p05": 59.3,
+     "frames_decoded": 6668,
+     "frames_dropped": 10,
+     "nack_count": 0,
+     "jitter_buffer_delay_s": 0.846706,
+     "frame_size": "1920x1080",
+     "codec": "CIT01_98_profile-id=0"
+    },
+    "latency": {
+     "decoded": true,
+     "samples": 74,
+     "unreadable": 0,
+     "capture_window_median_ms": 203,
+     "clock_offset_ms": -381,
+     "relative_p50_ms": 38,
+     "relative_p95_ms": 58,
+     "relative_min_ms": 0,
+     "uncertainty_ms": 93.5,
+     "absolute_p50_ms": null,
+     "absolute_p95_ms": null,
+     "absolute_usable": false,
+     "implied_clock_offset_ms": 1791236243043,
+     "absolute_note": "the phone's clock read -381 ms behind this host while the stamps and capture times imply 1791236243043 ms; the disagreement is larger than the latency being measured, so no absolute number is claimed"
+    },
+    "strip_geometry": {
+     "pitch": 26.5,
+     "x0": 0,
+     "config": {
+      "pitch": 26.5,
+      "x0": 0
+     },
+     "read_fraction": 1,
+     "advancing_fraction": 1,
+     "clustered_fraction": 1,
+     "band": {
+      "top": 120,
+      "bottom": 726
+     }
+    },
+    "clock_offset_ms": -381,
+    "clock_drift_ms": 0,
+    "load_before": {
+     "one": 9.37,
+     "five": 9.85,
+     "fifteen": 18.62,
+     "busy_cpu_percent": null
+    },
+    "load_after_latency": {
+     "one": 9.85,
+     "five": 10.31,
+     "fifteen": 18.04,
+     "busy_cpu_percent": null
+    },
+    "battery": [
+     "status: 4",
+     "level: 55",
+     "temperature: 300",
+     "Capacity level: 3"
+    ],
+    "raw_samples": 74
+   }
+  }
+ },
+ "userspace_shaped_4mbit": {
+  "outcome": "PASS",
+  "serial": "a4b93ea2",
+  "host": "192.168.1.144",
+  "display": ":171",
+  "engine": "/home/umer/.cache/desklink-dl-pm-9-target/release/desklink-host",
+  "engineSha256": "58ad04fbbddd848e7ab844d8f4dc565b2da258d64e51b937293935ecde811f21",
+  "stampBinary": "/home/umer/.cache/desklink-dl-pm-9-target/release/examples/stamp_target",
+  "apkSha256": "b2ab277103e9e12f5b0f0f31a294adfe2f125a63a586739d35a009c9c3a2a3e4",
+  "scenarios": [
+   "scroll"
+  ],
+  "fpsSeconds": 25,
+  "latencySeconds": 12,
+  "timings": {
+   "apk-ready": 1,
+   "metro-ready": 2,
+   "apk-installed": 2,
+   "costs-measured": 7,
+   "clock-measured": 7,
+   "session-live": 18,
+   "scroll-fps": 48,
+   "scroll-captured": 61,
+   "scroll-decoded": 105
+  },
+  "transport": "usb",
+  "app_javascript_path": "adb reverse over USB (debug build loads its bundle from Metro)",
+  "media_path": "this host to the phone over adb reverse (USB), because no Wi-Fi path exists from the phone to this host",
+  "stampSha256": "3815e3d4e0d5dfeb8832b3d818b97274be4e95fdf4769e94cd9ce183f8b0df31",
+  "sourceHead": "a14dd1718a16aab897a1e8dd1e550fc49832e51e",
+  "bridgePort": 32827,
+  "reportPort": 45733,
+  "relay": {
+   "kind": "userspace token bucket (not kernel netem)",
+   "bits_per_second": 4000000,
+   "port": 40645
+  },
+  "link": "desklink-example://connect?url=ws%3A%2F%2F127.0.0.1%3A32827%2Fdesktop%3Ftoken%3D<bridge-token>&report=http%3A%2F%2F127.0.0.1%3A45733%2Freport",
+  "metroPort": 44827,
+  "apk_install": "already installed, same sha256",
+  "device": {
+   "model": "CPH2649",
+   "release": "16",
+   "sdk": "36",
+   "resolution": "1080x2376",
+   "wifi": "umerfarooq2030",
+   "refresh_hz": null,
+   "host_to_phone_ping_ms": null
+  },
+  "phone_to_host_ping_ms": 8.7,
+  "costs": {
+   "capture_window_median_ms": 207,
+   "capture_window_p95_ms": 213,
+   "exec_median_ms": 10,
+   "grab_estimate_ms": 108.5,
+   "uncertainty_ms": 98.5
+  },
+  "clock_before": {
+   "samples": 21,
+   "offset_median_ms": -381,
+   "offset_p05_p95_ms": [
+    -381,
+    -381
+   ],
+   "return_trip_median_ms": 0
+  },
+  "load_before": {
+   "one": 6.4,
+   "five": 6.63,
+   "fifteen": 8.87,
+   "busy_cpu_percent": null
+  },
+  "first_frame": {
+   "presented_at_device_ms": 1791240840153,
+   "started_at_device_ms": 1791240839087
+  },
+  "reports_sample": [
+   {
+    "at": 1791240885554,
+    "startedAt": 1791240839087,
+    "presentedAt": 1791240840153,
+    "stats": [
+     {
+      "payloadType": 98,
+      "mimeType": "video/VP9",
+      "clockRate": 90000,
+      "id": "CIT01_98_profile-id=0",
+      "type": "codec",
+      "timestampUs": 1791240885550512
+     },
+     {
+      "kind": "video",
+      "codecId": "CIT01_98_profile-id=0",
+      "packetsLost": 0,
+      "packetsReceived": 19311,
+      "bytesReceived": "21254018",
+      "jitterBufferDelay": 0.63634,
+      "framesReceived": 2615,
+      "frameWidth": 960,
+      "frameHeight": 540,
+      "framesPerSecond": 59,
+      "framesDecoded": 2615,
+      "keyFramesDecoded": 2,
+      "framesDropped": 11,
+      "totalDecodeTime": 17.781696,
+      "decoderImplementation": "libvpx (fallback from: c2.qti.vp9.decoder)",
+      "firCount": 0,
+      "pliCount": 1,
+      "nackCount": 0,
+      "id": "IT01V914496109",
+      "type": "inbound-rtp",
+      "timestampUs": 1791240885550512
+     }
+    ]
+   },
+   {
+    "at": 1791240884539,
+    "startedAt": 1791240839087,
+    "presentedAt": 1791240840153,
+    "stats": [
+     {
+      "payloadType": 98,
+      "mimeType": "video/VP9",
+      "clockRate": 90000,
+      "id": "CIT01_98_profile-id=0",
+      "type": "codec",
+      "timestampUs": 1791240884536700
+     },
+     {
+      "kind": "video",
+      "codecId": "CIT01_98_profile-id=0",
+      "packetsLost": 0,
+      "packetsReceived": 18778,
+      "bytesReceived": "20662976",
+      "jitterBufferDelay": 0.624559,
+      "framesReceived": 2555,
+      "frameWidth": 960,
+      "frameHeight": 540,
+      "framesPerSecond": 60,
+      "framesDecoded": 2555,
+      "keyFramesDecoded": 2,
+      "framesDropped": 11,
+      "totalDecodeTime": 17.384650999999998,
+      "decoderImplementation": "libvpx (fallback from: c2.qti.vp9.decoder)",
+      "firCount": 0,
+      "pliCount": 1,
+      "nackCount": 0,
+      "id": "IT01V914496109",
+      "type": "inbound-rtp",
+      "timestampUs": 1791240884536700
+     }
+    ]
+   },
+   {
+    "at": 1791240886562,
+    "startedAt": 1791240839087,
+    "presentedAt": 1791240840153,
+    "stats": [
+     {
+      "payloadType": 98,
+      "mimeType": "video/VP9",
+      "clockRate": 90000,
+      "id": "CIT01_98_profile-id=0",
+      "type": "codec",
+      "timestampUs": 1791240886560077
+     },
+     {
+      "kind": "video",
+      "codecId": "CIT01_98_profile-id=0",
+      "packetsLost": 0,
+      "packetsReceived": 19937,
+      "bytesReceived": "21959582",
+      "jitterBufferDelay": 0.65057,
+      "framesReceived": 2676,
+      "frameWidth": 960,
+      "frameHeight": 540,
+      "framesPerSecond": 60,
+      "framesDecoded": 2676,
+      "keyFramesDecoded": 2,
+      "framesDropped": 11,
+      "totalDecodeTime": 18.149995999999998,
+      "decoderImplementation": "libvpx (fallback from: c2.qti.vp9.decoder)",
+      "firCount": 0,
+      "pliCount": 1,
+      "nackCount": 0,
+      "id": "IT01V914496109",
+      "type": "inbound-rtp",
+      "timestampUs": 1791240886560077
+     }
+    ]
+   }
+  ],
+  "clock_after": {
+   "samples": 21,
+   "offset_median_ms": -381,
+   "offset_p05_p95_ms": [
+    -382,
+    -380
+   ],
+   "return_trip_median_ms": 1
+  },
+  "load_after": {
+   "one": 8.1,
+   "five": 7.35,
+   "fifteen": 8.91,
+   "busy_cpu_percent": null
+  },
+  "legs": {
+   "scroll": {
+    "fps": {
+     "windows": 26,
+     "fps_median": 59.8,
+     "fps_p05": 59.3,
+     "frames_decoded": 1889,
+     "frames_dropped": 11,
+     "nack_count": 0,
+     "jitter_buffer_delay_s": 0.44871999999999995,
+     "frame_size": "960x540",
+     "codec": "CIT01_98_profile-id=0"
+    },
+    "latency": {
+     "decoded": true,
+     "samples": 58,
+     "unreadable": 0,
+     "capture_window_median_ms": 207,
+     "clock_offset_ms": -381,
+     "relative_p50_ms": 45,
+     "relative_p95_ms": 57,
+     "relative_min_ms": 0,
+     "uncertainty_ms": 98.5,
+     "absolute_p50_ms": null,
+     "absolute_p95_ms": null,
+     "absolute_usable": false,
+     "implied_clock_offset_ms": -410,
+     "absolute_note": "the phone's own clock put it 381 ms behind this host, while its capture times and the stamps in its picture imply 410 ms; the disagreement is larger than the latency being measured, so no absolute number is claimed"
+    },
+    "strip_geometry": {
+     "pitch": 13.5,
+     "x0": 0,
+     "config": {
+      "pitch": 13.5,
+      "x0": 0
+     },
+     "read_fraction": 1,
+     "advancing_fraction": 1,
+     "clustered_fraction": 1,
+     "band": {
+      "top": 120,
+      "bottom": 423
+     }
+    },
+    "clock_offset_ms": -381,
+    "clock_drift_ms": 0,
+    "load_before": {
+     "one": 8.25,
+     "five": 7.05,
+     "fifteen": 8.97,
+     "busy_cpu_percent": null
+    },
+    "load_after_latency": {
+     "one": 8.1,
+     "five": 7.35,
+     "fifteen": 8.91,
+     "busy_cpu_percent": null
+    },
+    "battery": [
+     "status: 4",
+     "level: 55",
+     "temperature: 281",
+     "Capacity level: 3"
+    ],
+    "raw_samples": 58
+   }
+  }
+ }
+}
