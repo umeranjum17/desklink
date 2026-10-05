@@ -327,20 +327,31 @@ bridge, and checks that the first frame is presented, that the answer puts
 H.264 first with NACK when the host offers it (VP9 otherwise; both descriptions
 are written out), that a tap clicks the host, that
 the picture keeps following the desktop afterwards, and that hardware keys
-pressed on the simulator reach the desktop. With `DESKLINK_IOS_IPAD=1` it runs on
+pressed on the simulator reach the desktop. It then drives the whole
+**phone-only control** journey from the phone's own screen, with no input sent
+to the desktop from this machine: a click, a drag that holds the button and
+selects, a two-finger scroll, typed text, a sticky modifier that chords the next
+key and clears, the clipboard in both directions, and the drawn pointer mark's
+shape and tip. Every step has its own capture, the journey is recorded as one
+screen recording on the simulator, and the phone's own screen is read to prove it
+carries no diagnostic text.
+With `DESKLINK_IOS_IPAD=1` it runs on
 an iPad simulator and also drives a trackpad through XCUITest
 (`test/ios-pointer/`): hover, a click-drag that selects text, a right click and
 a scroll:
 
 ```sh
 npm run build && cargo build --manifest-path packages/desktop-host/engine/Cargo.toml
-env -u DISPLAY -u WAYLAND_DISPLAY DESKLINK_IOS_MAC=user@mac npm run test:ios --workspace @desklink/react-native
+env -u DISPLAY -u WAYLAND_DISPLAY DESKLINK_IOS_MAC=user@mac \
+  DESKLINK_IOS_DEVICE='fm-iPhone 17 Pro' npm run test:ios --workspace @desklink/react-native
 ```
 
 The Mac needs Xcode with an iOS simulator runtime, CocoaPods, node and
 [`axe`](https://github.com/cameroncooke/AXe) on its login `PATH`; everything
 the run builds or caches stays in `~/desklink-ios` there. The run creates a
-uniquely named simulator and deletes it during cleanup. For host desktop isolation, see the
+uniquely named simulator and deletes it during cleanup. Set
+`DESKLINK_IOS_DEVICE` to the name or udid of one of the Mac's own simulators to
+run on that instead and leave it in place. For host desktop isolation, see the
 [private-lab guidance](../../README.md#develop). When the selected
 Xcode has no simulator platform, point `DESKLINK_IOS_XCODE` at one that does;
 `DESKLINK_IOS_RUNTIME` picks the iOS version (for example `18.6`); the
@@ -363,7 +374,9 @@ link whose `url` query parameter is the URL-encoded bridge WebSocket address:
 The example allows the bridge's plaintext private-network connection; consumer
 apps choose their own transport policy. A new link replaces the open session.
 The live picture has no diagnostic overlay. Its accessibility status remains
-available as `desklink-status`.
+available as `desklink-status`. The key row (`Ctrl`, `Shift`, `Alt`, `Meta`) and
+the `Copy` and `Paste` buttons are the app's own chrome over the picture, and a
+clipboard transfer is confirmed by a pill above them.
 
 For device evidence, an optional `report` query parameter accepts a URL-encoded
 HTTP endpoint. While live, the example posts receiver statistics and connection
