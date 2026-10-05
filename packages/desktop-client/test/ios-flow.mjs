@@ -495,6 +495,8 @@ let recorderPid = null;
  * running on the Mac.
  */
 function startRecording() {
+    // The last run's file must not be mistaken for this one's proof.
+    mac(`rm -f "$D/tmp/phone-control.mp4"`);
     recorderPid = mac(`nohup xcrun simctl io ${udid} recordVideo --codec=h264 "$D/tmp/phone-control.mp4" > "$D/tmp/record.log" 2>&1 < /dev/null & echo $!`).trim();
     mac('sleep 3');
     if (mac(`kill -0 ${recorderPid} 2>/dev/null && echo running || true`).trim() !== 'running') {
@@ -806,12 +808,10 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     const [caretX, caretY] = await page.evaluate('(() => { const box = document.getElementById("caret").getBoundingClientRect(); return [box.left + box.width / 2, box.top + box.height / 2]; })()');
     const caret = { x: origin.x + caretX * scale, y: origin.y + caretY * scale };
     const before = rgb(png, caret);
-    let after = before;
-    for (let attempt = 0; attempt < 6 && before.every((value, i) => Math.abs(value - after[i]) <= 8); attempt++) {
-        await sleep(250);
-        after = rgb(capture(join(out, 'simulator-later.png')), caret);
-    }
-    assert(before.some((value, i) => Math.abs(value - after[i]) > 8),
+    const moved = (after) => before.some((value, i) => Math.abs(value - after[i]) > 8);
+    const after = await until('the picture keeps changing with the desktop',
+        async () => rgb(capture(join(out, 'simulator-later.png')), caret), moved);
+    assert(moved(after),
         `the picture keeps changing with the desktop: caret rgb(${before}), then rgb(${after})`);
     log(`the picture follows the desktop: both clicks shown, caret rgb(${before}) → rgb(${after})`);
 
@@ -852,8 +852,9 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         const pointerBefore = await page.evaluate('pointer.length');
         log('driving the trackpad with XCUITest');
         pointerSteps(udid, steps);
-        await sleep(500);
-        const seen = (await page.evaluate('pointer')).slice(pointerBefore);
+        const seen = await until('the trackpad press, drag and scroll reached the desktop',
+            async () => (await page.evaluate('pointer')).slice(pointerBefore),
+            (all) => all.some((event) => event.type === 'mouseup' && event.button === 0));
         writeFileSync(join(out, 'pointer-events.json'), JSON.stringify(seen, null, 1));
         log(`page pointer events: ${seen.filter((event) => event.type !== 'mousemove').map((event) => `${event.type}/${event.button}@${event.x},${event.y}`).join(' ')}; ${seen.filter((event) => event.type === 'mousemove' && event.buttons === 0).length} buttonless moves`);
         const near = (event, spot) => Math.abs(event.x - spot.x) <= slack && Math.abs(event.y - spot.y) <= slack;
