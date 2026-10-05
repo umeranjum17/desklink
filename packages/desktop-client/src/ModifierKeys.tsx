@@ -9,6 +9,12 @@ export interface ModifierKeysProps {
     /** The session's `tapModifier`. */
     onTap: (name: StickyModifier) => void;
     style?: StyleProp<ViewStyle>;
+    /**
+     * Tablet targets: the keys share the width and take the height the row is
+     * given, instead of sitting at 44 pt in a row of a phone's. A row shorter
+     * than the keys' minimum keeps the minimum.
+     */
+    grow?: boolean;
 }
 
 const LABELS: Record<StickyModifier, string> = { Control: 'Ctrl', Shift: 'Shift', Alt: 'Alt', Meta: 'Meta' };
@@ -23,9 +29,9 @@ export const STATE_NAMES: Record<StickyState, string> = { off: 'off', once: 'lat
  * in shape as well as colour. The row carries its own backing, so it reads
  * the same over a light desktop as over a dark one.
  */
-export function ModifierKeys({ modifiers, onTap, style }: ModifierKeysProps) {
+export function ModifierKeys({ modifiers, onTap, style, grow }: ModifierKeysProps) {
     return (
-        <View style={[styles.row, style]}>
+        <View style={[styles.row, grow && styles.grown, style]}>
             {(['Control', 'Shift', 'Alt', 'Meta'] as const).map((name) => {
                 const state = modifiers[name];
                 return (
@@ -37,7 +43,7 @@ export function ModifierKeys({ modifiers, onTap, style }: ModifierKeysProps) {
                         accessibilityState={{ selected: state !== 'off' }}
                         accessibilityValue={{ text: STATE_NAMES[state] }}
                         onPress={() => onTap(name)}
-                        style={[styles.key, state === 'off' ? styles.off : styles.on, state === 'lock' && styles.lock]}
+                        style={[styles.key, grow && styles.keyGrown, state === 'off' ? styles.off : styles.on, state === 'lock' && styles.lock]}
                     >
                         <Text style={state === 'off' ? styles.offLabel : styles.onLabel}>{LABELS[name]}</Text>
                         <View style={[styles.bar, state === 'lock' && styles.barShown]} />
@@ -58,7 +64,9 @@ export const KEY_COLORS = {
 
 const styles = StyleSheet.create({
     row: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, padding: 8, backgroundColor: KEY_COLORS.backing },
+    grown: { width: '100%', flexGrow: 1 },
     key: { minWidth: 56, maxWidth: '100%', minHeight: 44, paddingHorizontal: 12, borderRadius: 8, borderWidth: 2, alignItems: 'center', justifyContent: 'center' },
+    keyGrown: { flexGrow: 1, minHeight: 96, maxHeight: 96, paddingHorizontal: 24 },
     off: { backgroundColor: KEY_COLORS.off, borderColor: '#4b4e57' },
     on: { backgroundColor: KEY_COLORS.on, borderColor: KEY_COLORS.on },
     lock: { borderColor: '#ffffff' },

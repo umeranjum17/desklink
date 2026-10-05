@@ -139,7 +139,9 @@ heat and battery.
   content; pinch to zoom before panning when the whole desktop already fits.
   Pass the screen's safe-area `insets` (for example from
   `react-native-safe-area-context`) so the default starts below the status bar
-  and beside a camera cutout. Panning brings each desktop edge inside the safe
+  and beside a camera cutout. `onPictureFrame` reports where the picture
+  ended whenever it moves, so a tall screen's band below it can carry the
+  application's own controls instead of empty space. Panning brings each desktop edge inside the safe
   area, while landscape coverage extends beneath the cutout and home indicator
   to limit black bars. A pinch zooms up to 2.5 view
   pixels per desktop pixel, or out to the whole desktop. On Android the decoded frame is copied once into the view's
@@ -200,7 +202,9 @@ heat and battery.
   `<ModifierKeys modifiers={desktop.modifiers} onTap={desktop.tapModifier} />`
   draws them as a backed key row: off is an outlined key, latched a filled
   one, locked a filled one with a white rim and a bar under its label, and a
-  screen reader hears off, latched or locked. An app may draw its own keys
+  screen reader hears off, latched or locked. Its `grow` prop makes it a
+  tablet's row: the keys take the width and the height the row is given
+  instead of sitting at 44 pt. An app may draw its own keys
   from `modifiers` instead.
 - **Readiness is a rendered frame.** Android marks the first draw; iOS marks
   the first `RTCView` video-dimensions callback and ignores later ones, so a

@@ -28,6 +28,9 @@ import {
     type Signaling,
 } from '@desklink/react-native';
 
+/** The height of controls a tablet's band takes, in points: status, a 96 pt modifier row and three 96 pt keys. */
+const DECK_TALL = 480;
+
 function connectionLink(link: string | null): { url: string; report: string | null; key: string } | null {
     if (!link) return null;
     try {
@@ -165,6 +168,14 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
     });
     const { status } = desktop.snapshot;
     const [copyError, setCopyError] = React.useState<string | null>(null);
+    // Where the picture ended, and how tall the controls are: the deck fills the
+    // band between them, so a tall screen is controls rather than empty space.
+    const [pictureBottom, setPictureBottom] = React.useState(0);
+    const [deckHeight, setDeckHeight] = React.useState(0);
+    const [screenHeight, setScreenHeight] = React.useState(0);
+    // A band this tall carries tablet-sized controls; a short one — a phone in
+    // landscape, or a screen with the keyboard up — keeps the phone's own.
+    const tallDeck = screenHeight - (insets?.bottom ?? 0) - pictureBottom >= DECK_TALL;
 
     async function copy() {
         setCopyError(null);
@@ -217,9 +228,10 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
     }, [status, desktop.getStats, report]);
 
     return (
-        <View style={styles.root}>
+        <View style={styles.root} onLayout={(event) => setScreenHeight(event.nativeEvent.layout.height)}>
             <StatusBar hidden />
-            <DesktopView sessionId={desktop.nativeId} style={StyleSheet.absoluteFill} insets={insets} accessibilityLabel="desktop" />
+            <DesktopView sessionId={desktop.nativeId} style={StyleSheet.absoluteFill} insets={insets} accessibilityLabel="desktop"
+                onPictureFrame={(frame) => setPictureBottom(frame.top + frame.height)} />
 
             <View pointerEvents="box-none" style={styles.confirmation}>
                 {copyError ? (
@@ -230,23 +242,31 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
                     </ScrollView>
                 ) : <ClipboardConfirmation transfer={desktop.clipboard} />}
             </View>
-            <View pointerEvents="box-none" style={styles.bottom}>
+            <View pointerEvents="box-none" style={[styles.bottom, {
+                // Under the picture when there is room for the whole deck, and at
+                // the bottom of the screen — as it always was — when the keyboard
+                // has taken the band.
+                top: Math.min(pictureBottom, screenHeight - deckHeight - insets.bottom),
+                paddingBottom: insets.bottom,
+            }]}>
+            <View style={styles.deck} onLayout={(event) => setDeckHeight(event.nativeEvent.layout.height)}>
             <View pointerEvents="none" style={styles.bar}>
                 <Text testID="desklink-status" style={styles.status}>
                     {statusText(desktop.snapshot)}
                 </Text>
             </View>
+            <ModifierKeys modifiers={desktop.modifiers} onTap={desktop.tapModifier} style={styles.row} grow={tallDeck} />
             <View style={styles.keys}>
-                <ModifierKeys modifiers={desktop.modifiers} onTap={desktop.tapModifier} style={styles.row} />
-                <Pressable testID="desklink-keyboard" accessibilityRole="button" onPress={() => desktop.showKeyboard()} style={styles.copy}>
+                <Pressable testID="desklink-keyboard" accessibilityRole="button" onPress={() => desktop.showKeyboard()} style={[styles.copy, tallDeck && styles.copyTall]}>
                     <Text style={styles.copyLabel}>Keys</Text>
                 </Pressable>
-                <Pressable testID="desklink-copy" accessibilityRole="button" onPress={() => void copy()} style={styles.copy}>
+                <Pressable testID="desklink-copy" accessibilityRole="button" onPress={() => void copy()} style={[styles.copy, tallDeck && styles.copyTall]}>
                     <Text style={styles.copyLabel}>Copy</Text>
                 </Pressable>
-                <Pressable testID="desklink-paste" accessibilityRole="button" onPress={() => void paste()} style={styles.copy}>
+                <Pressable testID="desklink-paste" accessibilityRole="button" onPress={() => void paste()} style={[styles.copy, tallDeck && styles.copyTall]}>
                     <Text style={styles.copyLabel}>Paste</Text>
                 </Pressable>
+            </View>
             </View>
             </View>
         </View>
@@ -257,15 +277,17 @@ const styles = StyleSheet.create({
     root: { flex: 1, backgroundColor: '#000' },
     idle: { alignItems: 'center', justifyContent: 'center' },
     messageText: { color: '#fff', fontSize: 16 },
-    bottom: { position: 'absolute', left: 0, right: 0, bottom: 0 },
+    bottom: { position: 'absolute', left: 0, right: 0, bottom: 0, justifyContent: 'space-evenly' },
+    deck: { width: '100%' },
     bar: { marginHorizontal: 16, marginBottom: 8, minHeight: 24, alignItems: 'center' },
     status: { color: '#fff', fontSize: 15, textAlign: 'center' },
     confirmation: { minHeight: 48, justifyContent: 'center' },
     copyErrorScroll: { maxHeight: 120, flexGrow: 0 },
     copyError: { marginHorizontal: 16, marginVertical: 8, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12, backgroundColor: '#521b24' },
     copyErrorLabel: { color: '#ffffff', fontSize: 14, fontWeight: '600' },
-    keys: { paddingBottom: 24, backgroundColor: 'rgba(22, 23, 26, 0.94)' },
+    keys: { backgroundColor: 'rgba(22, 23, 26, 0.94)' },
     row: { backgroundColor: 'transparent' },
     copy: { margin: 8, minHeight: 44, paddingHorizontal: 12, borderRadius: 8, justifyContent: 'center', backgroundColor: '#2b2d33' },
+    copyTall: { minHeight: 96 },
     copyLabel: { color: '#c9ccd3', fontSize: 15, fontWeight: '500' },
 });
