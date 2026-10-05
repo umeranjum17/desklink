@@ -296,16 +296,15 @@ function byId(udid, id) {
 async function waitForId(udid, id, want) {
     const deadline = Date.now() + 15_000;
     let seen = null;
+    let lastError = null;
     while (Date.now() < deadline) {
         try {
             seen = byId(udid, id);
             if (seen.value === want) return seen;
-        } catch (error) {
-            if (!String(error?.message ?? error).includes(`the screen has no ${id}`)) throw error;
-        }
+        } catch (error) { lastError = error; }
         await sleep(500);
     }
-    assert.equal(seen?.value, want, `the screen never showed ${id} as ${want}`);
+    assert.equal(seen?.value, want, `the screen never showed ${id} as ${want}: ${lastError?.message ?? lastError}`);
 }
 
 // ---- processes on this machine ---------------------------------------------
@@ -1008,7 +1007,11 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     let pill = '';
     for (let i = 0; i < 30 && !pill.includes('select this line'); i++) {
         await sleep(120);
-        pill = visibleText(udid).find((text) => text.startsWith('Copied to phone')) ?? '';
+        try {
+            pill = visibleText(udid).find((text) => text.startsWith('Copied to phone')) ?? '';
+        } catch {
+            pill = '';
+        }
     }
     assert(pill.includes('select this line'), `the phone's own screen confirms the desktop's clipboard and its text: ${JSON.stringify(pill)}; on screen now: ${JSON.stringify(visibleText(udid))}`);
     await step('06-clipboard-out', `desktop → phone, confirmed on screen: ${pill}`);
@@ -1027,7 +1030,12 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     let allowed = false;
     for (let i = 0; i < 30 && !sent.includes('select this line'); i++) {
         await sleep(120);
-        const texts = visibleText(udid);
+        let texts;
+        try {
+            texts = visibleText(udid);
+        } catch {
+            continue;
+        }
         sent = texts.find((text) => text.startsWith('Sent to desktop')) ?? '';
         if (sent === '' && !allowed && texts.includes('Allow Paste')) {
             mac(`axe tap --label "Allow Paste" --udid ${udid}`);
