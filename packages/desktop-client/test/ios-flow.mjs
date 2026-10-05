@@ -27,6 +27,12 @@
  *    hover moves the desktop's pointer without a button, a click-drag selects
  *    text, a secondary click is a right click and a scroll turns the wheel. The
  *    pointer is driven by XCUITest (test/ios-pointer/), which `axe` cannot do.
+ *  - every XCUITest step aims at the picture where it is *now*: the app moves it
+ *    once the session settles - one status-bar inset - so each section that aims
+ *    re-reads the picture and re-measures its instrument's miss at five
+ *    positions, and carries that measured offset on every coordinate it hands a
+ *    tool. The measurement is written to `touch-inset-<section>.json`, and a miss
+ *    that moves with the position fails the run instead of being averaged away.
  *
  * The host side runs here, on a private Xvfb (display >= 170, its own cookie):
  * a page on that display, the bridge with an `x11` source, and a relay in
@@ -743,8 +749,26 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         if (attempt > 0) await sleep(500);
         box = pictureBox(capture(join(out, 'desklink-receiver-fill-portrait.png')), screenWidth);
     }
-    const scale = (box.bottom - box.top) / geometry.height;
-    const origin = { x: box.left, y: box.top };
+    let scale = (box.bottom - box.top) / geometry.height;
+    let origin = { x: box.left, y: box.top };
+    /**
+     * Where the picture is now. The app moves it once the session settles - the
+     * status bar inset it started under goes away, one inset, 32 pt on an iPad
+     * simulator - so every section that aims at the picture re-reads it here
+     * instead of aiming at a geometry the app has already left behind.
+     */
+    const pictureNow = async (why) => {
+        const was = { origin, scale };
+        const fresh = pictureBox(capture(join(out, 'picture-now.png')), screenWidth);
+        if (fresh.bottom - fresh.top < screenWidth * geometry.height / geometry.width - 2) return was;
+        box = fresh;
+        scale = (box.bottom - box.top) / geometry.height;
+        origin = { x: box.left, y: box.top };
+        if (Math.abs(was.origin.y - origin.y) > 1 || Math.abs(was.scale - scale) > 0.01) {
+            log(`the picture moved before ${why}: (${was.origin.y.toFixed(1)}, ${was.scale.toFixed(3)}) → (${origin.y.toFixed(1)}, ${scale.toFixed(3)})`);
+        }
+        return { origin, scale };
+    };
     assert(box.left <= 1, `the picture starts at the screen's left edge, the desktop's left edge with it: ${box.left.toFixed(1)} pt`);
     assert(box.top >= 20, `the status bar does not cover the picture: it starts ${box.top.toFixed(1)} pt down`);
     assert(Math.abs(scale * geometry.width - screenWidth) <= 3, `portrait fits the screen's width: ${(scale * geometry.width).toFixed(0)} pt`);
@@ -859,11 +883,77 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         assert(keys.some((key) => key.type === 'keyup' && key.key === down.key), `${down.key} is released, not left held`);
     }
 
+    /** A desktop point as a point on the simulator's screen. */
+    const screenPoint = (point) => ({ x: origin.x + (point.x + 0.5) * scale, y: origin.y + (point.y + 0.5) * scale });
+    const within = (event, spot) => event !== undefined && Math.abs(event.x - spot.x) <= slack && Math.abs(event.y - spot.y) <= slack;
+    const clean = async () => { await page.evaluate('window.reset()'); return 0; };
+    /** How far each XCUITest instrument lands from where it was aimed, in points. */
+    const aimMiss = {};
+    /** The measured miss of an instrument, to take off a raw screen point. */
+    const correction = (action) => aimMiss[action] ?? { x: 0, y: 0 };
+    /** A desktop point aimed with an instrument's measured miss taken out. */
+    const aim = (action, point) => {
+        const at = screenPoint(point);
+        const miss = correction(action);
+        return { x: at.x - miss.x, y: at.y - miss.y };
+    };
+    /**
+     * Aim for the section that follows: where the picture is now, and where each
+     * XCUITest instrument lands when it is aimed at a known point. `axe tap` aims
+     * exactly - it is a real finger on the screen, and step 01 proves it - while
+     * this app answers XCUITest's press differently: on an iPad simulator a press
+     * lands one status-bar inset away from where it was aimed, and by how much
+     * depends on when the app last settled its picture. So the miss is measured
+     * per section, at five positions across the picture, and every coordinate
+     * that section aims carries it. A miss that moves with the position is
+     * reported, not averaged away.
+     */
+    const aimFor = async (why) => {
+        await pictureNow(why);
+        const instruments = IPAD
+            ? { press: 'a coordinate press', drag: 'a pointer drag' }
+            : { dragTouch: 'a synthesized touch' };
+        const measurement = { section: why, device: IPAD ? 'iPad simulator' : 'iPhone simulator', udid, screen: seen.frame, desktop: geometry, picture: { origin, scale }, instruments: {} };
+        // Spread across the picture and clear of its lower edge, which a miss can push out of.
+        const probes = [{ x: 150, y: 200 }, { x: 650, y: 200 }, { x: 150, y: 450 }, { x: 650, y: 450 }, { x: 410, y: 320 }];
+        for (const [action, what] of Object.entries(instruments)) {
+            const misses = [];
+            for (const probe of probes) {
+                let down;
+                // The app can swallow the first press after the picture settles, so a
+                // probe that lands nothing is asked once more before it counts.
+                for (let attempt = 0; attempt < 2 && down === undefined; attempt++) {
+                    const since = await clean();
+                    const at = screenPoint(probe);
+                    // Press on the point and let go a few points away: a finger that never
+                    // moves is a pan, not a click, and would measure nothing.
+                    pointerSteps(udid, [{ action, x: at.x, y: at.y, toX: at.x + 6, toY: at.y + 6 }]);
+                    for (let i = 0; i < 30 && down === undefined; i++) {
+                        await sleep(100);
+                        // A finger tap arrives as a click, a pointer press as a pointer event.
+                        down = [...(await page.evaluate('pointer')), ...(await page.evaluate('clicks'))].slice(since)
+                            .find((event) => event.type === 'mousedown' && (event.button ?? 0) === 0);
+                    }
+                }
+                misses.push({ probe, landed: down ?? null, dx: down === undefined ? null : down.x - probe.x, dy: down === undefined ? null : down.y - probe.y });
+            }
+            assert(misses.every((miss) => miss.landed !== null), `${what} reaches the desktop everywhere it was aimed: ${JSON.stringify(misses)}`);
+            const miss = { x: Math.round(misses[0].dx), y: Math.round(misses[0].dy) };
+            assert(misses.every((entry) => Math.abs(entry.dx - miss.x) <= 1 && Math.abs(entry.dy - miss.y) <= 1),
+                `${what} misses by one fixed offset, not one that moves with the position: ${JSON.stringify(misses)}`);
+            aimMiss[action] = { x: miss.x * scale, y: miss.y * scale };
+            measurement.instruments[action] = { what, misses, fixedOffsetPt: aimMiss[action] };
+            log(`${what} on the ${measurement.device} ${udid}, aimed for ${why}: ${probes.map((probe, i) => `(${probe.x},${probe.y}) → desktop (${misses[i].landed.x},${misses[i].landed.y})`).join('; ')}`
+                + ` - one fixed offset, ${(aimMiss[action].y).toFixed(1)} pt ${aimMiss[action].y < 0 ? 'up' : 'down'} and ${(aimMiss[action].x).toFixed(1)} pt ${aimMiss[action].x < 0 ? 'left' : 'right'}, the same at all ${probes.length} positions`);
+        }
+        writeFileSync(join(out, `touch-inset-${why.replace(/\W+/g, '-')}.json`), JSON.stringify(measurement, null, 1));
+    };
     // ---- the trackpad (iPad) ----------------------------------------------------------------
     if (!IPAD) {
         log('trackpad checks skipped: set DESKLINK_IOS_IPAD=1 to run on an iPad simulator');
     } else {
-        const screenAt = (desktop) => ({ x: origin.x + (desktop.x + 0.5) * scale, y: origin.y + (desktop.y + 0.5) * scale });
+        await aimFor('the trackpad steps');
+        const screenAt = (desktop) => aim('drag', desktop);
         const [left, top, right, bottom] = await page.evaluate(
             '(() => { const box = document.getElementById("line").getBoundingClientRect(); return [box.left, box.top, box.right, box.bottom]; })()');
         const line = Math.round((top + bottom) / 2);
@@ -906,16 +996,14 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         log(`hover: ${hovers - 1} buttonless moves from the pointer's hover reports`);
     }
     // ---- phone-only control --------------------------------------------------------
+    await aimFor('the phone-only steps');
     // Every step below reaches the desktop from the phone's own screen. Nothing in
     // this run sends input to the lab display from here: the page's event log is
     // the only record of the desktop's side of it.
-    const screenPoint = (point) => ({ x: origin.x + (point.x + 0.5) * scale, y: origin.y + (point.y + 0.5) * scale });
-    const within = (event, spot) => event !== undefined && Math.abs(event.x - spot.x) <= slack && Math.abs(event.y - spot.y) <= slack;
     const tapDesktop = (spot) => mac(`axe tap -x ${screenPoint(spot).x.toFixed(1)} -y ${screenPoint(spot).y.toFixed(1)} --udid ${udid}`);
     const steps = [];
     // Every step starts from a cleared desktop, so its capture carries only
     // what that step did.
-    const clean = async () => { await page.evaluate('window.reset()'); return 0; };
     const step = async (name, note) => {
         const shot = join(out, `step-${name}.png`);
         capture(shot);
@@ -988,7 +1076,8 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     const from = { x: Math.round(lineLeft) + 6, y: Math.round((lineTop + lineBottom) / 2) };
     const to = { x: Math.round(lineRight) - 6, y: from.y };
     since = await clean();
-    pointerSteps(udid, [{ action: IPAD ? 'drag' : 'dragTouch', ...screenPoint(from), toX: screenPoint(to).x, toY: screenPoint(to).y }]);
+    const dragAction = IPAD ? 'drag' : 'dragTouch';
+    pointerSteps(udid, [{ action: dragAction, ...aim(dragAction, from), toX: aim(dragAction, to).x, toY: aim(dragAction, to).y }]);
     const dragged = await until('the finger dragging over the line arrived as a drag',
         async () => (await page.evaluate('pointer')).slice(since),
         (seen) => seen.some((event) => event.type === 'mouseup' && event.button === 0));
@@ -1004,7 +1093,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
 
     // 3. two fingers scroll the desktop; a one finger would pan the picture
     since = await clean();
-    pointerSteps(udid, [{ action: 'scrollTwo', ...screenPoint({ x: 700, y: 300 }), dy: 220 }]);
+    pointerSteps(udid, [{ action: 'scrollTwo', ...aim('dragTouch', { x: 700, y: 300 }), dy: 220 }]);
     // The wheel arrives as a burst the finger is still making, so it is read
     // until the whole gesture has turned the wheel, not until the first event.
     const wheelDelta = (seen) => seen.filter((event) => event.type === 'wheel').reduce((sum, event) => sum + event.dy, 0);
@@ -1116,7 +1205,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     since = await clean();
     // A finger travelling over bare paper, so the mark is read over clean
     // background: the press paints its dot 200 desktop pixels away.
-    pointerSteps(udid, [{ action: 'dragTouch', ...screenPoint({ x: 700, y: 460 }), toX: screenPoint({ x: 900, y: 300 }).x, toY: screenPoint({ x: 900, y: 300 }).y }]);
+    pointerSteps(udid, [{ action: 'dragTouch', ...aim('dragTouch', { x: 700, y: 460 }), toX: aim('dragTouch', { x: 900, y: 300 }).x, toY: aim('dragTouch', { x: 900, y: 300 }).y }]);
     const landedAt = { x: 900, y: 300 };
     const travelled = await until('a finger travelling over the picture arrived on the desktop',
         async () => (await page.evaluate('pointer')).slice(since).filter((event) => event.x !== undefined),
@@ -1209,7 +1298,8 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     log('rotated back: the picture starts at the top-left again');
     const clicksBefore = await page.evaluate('clicks.length');
     pointerSteps(udid, [{
-        action: 'pinch', x: screenWidth * 0.25, y: back.top + (back.bottom - back.top) * 0.5,
+        action: 'pinch', x: screenWidth * 0.25 - correction('dragTouch').x,
+        y: back.top + (back.bottom - back.top) * 0.5 - correction('dragTouch').y,
         span: screenWidth * 0.24, scale: 2,
     }]);
     await sleep(1000);
