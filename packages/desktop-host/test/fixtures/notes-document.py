@@ -20,6 +20,9 @@ compared with the desktop pixel a caller asked for without knowing where the
 view sits inside the window. It owns no clipboard: `examples/x11_clip.rs` holds
 CLIPBOARD for the clipboard journey, and two owners would make the readback
 ambiguous.
+
+The 30-minute self-exit below resets the buffer: a journey longer than that must
+pin the document itself rather than read this fixture.
 """
 
 import argparse
@@ -131,10 +134,12 @@ class Fixture:
         with open(self.text_path, "w") as handle:
             handle.write(text)
         bounds = self.buffer.get_selection_bounds()
-        # PyGObject returns (has_selection, start, end), and an empty tuple
-        # when it cannot say; unpacking two names raises on the first.
-        has_selection = len(bounds) == 3 and bool(bounds[0])
-        selected = self.buffer.get_text(bounds[1], bounds[2], False) if has_selection else ""
+        # PyGObject hands back (start, end), and an empty tuple when nothing is
+        # selected - not the C signature's (has_selection, start, end). Testing
+        # the tuple's length meant selection.txt was never written with any text
+        # at all, so get_has_selection() is the honest question to ask.
+        has_selection = self.buffer.get_has_selection() and len(bounds) == 2
+        selected = self.buffer.get_text(bounds[0], bounds[1], False) if has_selection else ""
         with open(self.selection_path, "w") as handle:
             handle.write(selected)
 
@@ -189,7 +194,6 @@ class Fixture:
     def key(self, _controller, keyval, _code, state):
         modifiers = [name for name, mask in MODIFIER_MASKS if mask and state & mask]
         self.log("key", keyval=int(keyval), character=printable(keyval), modifiers=modifiers)
-        self.dump()
         return False
 
 
@@ -247,6 +251,15 @@ def main():
         view.grab_focus()
         fixture.log("ready", width=WIDTH, height=HEIGHT)
         fixture.dump()
+        # A focused text view consumes every printable key, so the bubble-phase
+        # controller above never sees the ones a phone types and a dump from
+        # inside key() always lags the buffer by one key (and cannot see a
+        # chord's own key press at all). Dumping on a timer keeps both files
+        # current whichever widget has focus, so a journey reading them reads
+        # the real buffer.
+        # A returning True is what keeps it repeating: a timeout callback that
+        # returns None is removed after its first call, which would dump once.
+        GLib.timeout_add(100, lambda: (fixture.dump(), True)[1])
         # A lab fixture must never outlive its journey: if the harness dies,
         # this leaves on its own rather than spinning under a display forever.
         GLib.timeout_add(1_800_000, lambda: (loop.quit(), False)[1])
