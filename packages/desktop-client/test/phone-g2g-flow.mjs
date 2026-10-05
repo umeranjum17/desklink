@@ -59,6 +59,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
+import { connect, createServer as createNetServer } from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -96,6 +97,8 @@ const latencySeconds = Number(arg('latency-seconds', 30));
 // `adb reverse`, which proves the harness end to end but measures the USB, not
 // the network, so its numbers are never a J4 result.
 const transport = arg('transport', 'wifi');
+// `--relay-rate 4mbit` puts a userspace token bucket in front of the bridge.
+const relayRate = arg('relay-rate', null);
 // `--keep-captures` leaves the raw captures on the device for offline study.
 const keepCaptures = process.argv.includes('--keep-captures');
 const env = { ...process.env, WAYLAND_DISPLAY: '', TMPDIR: scratch, DESKLINK_ENGINE: engine };
@@ -137,7 +140,7 @@ const adbTry = (...args) => spawnSync('adb', ['-s', serial, ...args],
 const adbBin = (...args) => spawnSync('adb', ['-s', serial, ...args], { encoding: 'buffer', timeout: 600000, maxBuffer: 256 * 1024 * 1024 });
 
 const children = [];
-let xvfb, bridge, metro, receiver, stampChild;
+let xvfb, bridge, metro, receiver, stampChild, relayPort;
 const logs = { bridge: '', metro: '' };
 const receipt = {
     outcome: 'FAIL', serial, host, display, engine, engineSha256: null, stampBinary,
@@ -145,7 +148,7 @@ const receipt = {
     // The app's JavaScript arrives over USB through `adb reverse`; only the
     // WebRTC media path (engine, network, decoder, display) is Wi-Fi.
     app_javascript_path: 'adb reverse over USB (debug build loads its bundle from Metro)',
-    media_path: 'Wi-Fi, phone to this host',
+    media_path: transport === 'usb' ? 'this host to the phone over adb reverse (USB), because no Wi-Fi path exists from the phone to this host' : 'Wi-Fi, phone to this host',
 };
 const start = (name, cmd, args, childEnv, cwd = repo) => {
     const child = spawn(cmd, args, { cwd, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -383,6 +386,37 @@ const driveInput = async (scenario, seconds) => {
     }
 };
 
+/**
+ * A userspace token bucket in front of the bridge, for a slow-link leg without
+ * root. It is a plain TCP relay with a rate limit, NOT kernel netem: it shapes
+ * the connection between the device and this host (which on a phone reached over
+ * `adb reverse` is also where the media rides), and every result it produces is
+ * labelled `userspace-shaped` wherever it is published.
+ */
+const startRelay = (upstreamPort, bitsPerSecond) => {
+    const bytesPerMs = bitsPerSecond / 8 / 1000;
+    let due = Date.now();
+    const pump = (from, to) => {
+        from.on('data', chunk => {
+            // Each chunk is admitted when the bucket has earned its bytes.
+            due = Math.max(due, Date.now()) + chunk.length / bytesPerMs;
+            const wait = due - Date.now();
+            const write = () => to.write(chunk);
+            if (wait > 1) setTimeout(write, wait);
+            else write();
+        });
+        from.on('end', () => to.end());
+        from.on('error', () => to.destroy());
+        to.on('error', () => from.destroy());
+    };
+    const server = createNetServer(client => {
+        const upstream = connect({ host: '127.0.0.1', port: upstreamPort });
+        pump(client, upstream);
+        pump(upstream, client);
+    });
+    return server;
+};
+
 const reports = [];
 try {
     for (const path of [engine, stampBinary]) assert(existsSync(path), `missing binary: ${path}: build the engine first`);
@@ -420,9 +454,22 @@ try {
     });
     await new Promise(ok => receiver.listen(0, '0.0.0.0', ok));
     receipt.reportPort = receiver.address().port;
-    const phoneHost = transport === 'usb' ? '127.0.0.1' : host;
-    if (transport === 'usb') {
-        for (const port of [bridgePort, receiver.address().port]) adb('reverse', `tcp:${port}`, `tcp:${port}`);
+    if (relayRate !== null) {
+        const bits = Number(/^([\d.]+)([kmg]?)bit$/i.exec(relayRate)?.[1] ?? relayRate) * (relayRate.includes('k') ? 1e3 : relayRate.includes('m') ? 1e6 : relayRate.includes('g') ? 1e9 : 1);
+        assert(Number.isFinite(bits) && bits > 0, `--relay-rate wants a rate like 4mbit, not ${relayRate}`);
+        const probeRelay = createNetServer();
+        await new Promise(ok => probeRelay.listen(0, '127.0.0.1', ok));
+        relayPort = probeRelay.address().port;
+        await new Promise(ok => probeRelay.close(ok));
+        receipt.relay = { kind: 'userspace token bucket (not kernel netem)', bits_per_second: bits, port: relayPort };
+        await new Promise(ok => startRelay(bridgePort, bits).listen(relayPort, '127.0.0.1', ok));
+    }
+    const phoneHost = transport === 'usb' || relayRate !== null ? '127.0.0.1' : host;
+    if (transport === 'usb' || relayRate !== null) {
+        // The device reaches this host at the bridge's own port; with a relay in
+        // front, that port is the relay, so the shape actually applies.
+        adb('reverse', `tcp:${bridgePort}`, `tcp:${relayPort ?? bridgePort}`);
+        adb('reverse', `tcp:${receiver.address().port}`, `tcp:${receiver.address().port}`);
     } else {
         // Preflight: if the phone cannot open this port the run would spend
         // minutes waiting for a session that can never start.
