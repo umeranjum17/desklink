@@ -26,7 +26,7 @@ over ssh and serves the desktop from a private Xvfb here.
 
 ```sh
 env -u DISPLAY -u WAYLAND_DISPLAY \
-  DESKLINK_IOS_MAC=user@mac DESKLINK_IOS_DIR=fm-desklink-ios \
+  DESKLINK_IOS_MAC=user@mac DESKLINK_IOS_DIR=fm-desklink-ios DESKLINK_IOS_LANE=dl-ios-harness-polling \
   DESKLINK_IOS_DEVICE="fm-iPhone 17 Pro" \
   DESKLINK_IOS_OUT="$HOME/lab-tmp/dl-pm-iphone/run" \
   node packages/desktop-client/test/ios-flow.mjs
@@ -76,6 +76,27 @@ engine in both directions; and the drawn mark is an arrow (0.3 pt at its tip,
   and the notes line's mirror must be unchanged. A fixture that mirrors every
   printable key into a line *and* lets a focused field take it will look like
   duplicate delivery when it is the fixture showing both.
+
+## One directory per lane, and who may delete what
+
+The Mac lab disk is shared with other projects, so every Mac lane has to give
+its space back when it finishes - but they all build under `~/fm-desklink-ios`.
+Each lane therefore builds in its own subdirectory named for the task, through
+`DESKLINK_IOS_DIR` (the shared root) and `DESKLINK_IOS_LANE` (required, this
+lane's name). Two lanes can build at the same time; when a run finishes it
+deletes **only its own lane directory**, and `test/mac-lane.mjs`'s `CLEAN_SCRIPT`
+refuses to delete the shared root or anything outside it rather than guessing.
+`DESKLINK_IOS_KEEP=1` keeps the directory instead (implied by
+`DESKLINK_IOS_SKIP_BUILD=1`, which reuses what the lane last built).
+
+Shared on purpose, under the root and never deleted by a lane's cleanup:
+`.npm`, `.cocoapods` and `.cocoapods-cache`. Two lanes writing package caches
+at once is safe; one lane deleting them mid-install is not. Everything a lane
+builds - `node_modules`, `Pods`, `DerivedData`, its `TMPDIR`, its copy of this
+checkout - is inside its own lane directory.
+
+`~/fm-desklink-mac` is a separate preserved directory: no lane reads, writes or
+cleans it.
 
 ## Gotchas
 

@@ -46,8 +46,13 @@
  *
  *   DESKLINK_IOS_MAC        ssh destination of a Mac with Xcode, CocoaPods, node
  *                           and axe on its login PATH; unset skips the flow
- *   DESKLINK_IOS_DIR        directory under the Mac's home that holds everything
- *                           the flow builds and caches (default desklink-ios)
+ *   DESKLINK_IOS_DIR        shared directory under the Mac's home that holds every
+ *                           lane's work (default fm-desklink-ios)
+ *   DESKLINK_IOS_LANE        this lane's name, required: the flow builds in
+ *                           DESKLINK_IOS_DIR/DESKLINK_IOS_LANE so two lanes can build
+ *                           at once and either may clean up without touching the other
+ *   DESKLINK_IOS_KEEP        1 keeps the lane directory after the run instead of
+ *                           deleting it (default: delete it, the Mac disk is tight)
  *   DESKLINK_IOS_XCODE      DEVELOPER_DIR on the Mac, when the selected Xcode has
  *                           no iOS simulator platform installed
  *   DESKLINK_IOS_RUNTIME    iOS runtime version to run on, e.g. 18.6 (default: the
@@ -62,7 +67,7 @@
  *                           session sees it)
  *   DESKLINK_IOS_OUT        where the descriptions and the screenshot go
  *                           (default: a fresh temporary directory)
- *   DESKLINK_IOS_SKIP_BUILD 1 reuses the app the last run built
+ *   DESKLINK_IOS_SKIP_BUILD 1 reuses the app this lane last built (implies keeping the lane directory)
  *   DESKLINK_IOS_APP        saved app path relative to DESKLINK_IOS_DIR
  *   DESKLINK_IOS_POINTER_PROOF before/after saves a 4x pointer crop and a
  *                           host click log proving a tap at the arrow tip
@@ -78,6 +83,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PNG } from 'pngjs';
+import { macLane, CLEAN_SCRIPT } from './mac-lane.mjs';
 import { pictureBox } from './picture-box.mjs';
 import { WebSocket, WebSocketServer } from 'ws';
 
@@ -87,8 +93,13 @@ assertNoAmbientDesktop();
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '../../..');
 const MAC = process.env.DESKLINK_IOS_MAC ?? '';
-const DIR = process.env.DESKLINK_IOS_DIR ?? 'desklink-ios';
+// One lane, one subdirectory: two lanes building on the Mac at the same time
+// must not be able to delete each other's products when they tidy up.
+const LANE = macLane(process.env);
 const BUILD = process.env.DESKLINK_IOS_SKIP_BUILD !== '1';
+// Reusing the last build means keeping its directory; a full run reclaims the
+// lane's disk when it finishes, which is the rule every Mac lane is given.
+const KEEP = process.env.DESKLINK_IOS_KEEP === '1' || !BUILD;
 // Expo names the built app after the app, not after the package; an explicit
 // DESKLINK_IOS_APP overrides what the build products hold.
 const APP = process.env.DESKLINK_IOS_APP ?? '';
@@ -115,7 +126,7 @@ if (MAC === '') {
     console.log('SKIPPED: set DESKLINK_IOS_MAC to a Mac with Xcode to run the iOS simulator flow.');
     process.exit(0);
 }
-assert.match(DIR, /^[\w.-]+(\/[\w.-]+)*$/, 'DESKLINK_IOS_DIR is a plain path under the Mac home');
+
 // A first build compiles React Native and WebRTC's pods; a rebuild is minutes.
 setTimeout(() => {
     console.error('OVERALL TIMEOUT: the flow did not finish');
@@ -124,9 +135,10 @@ setTimeout(() => {
 
 // ---- the Mac ---------------------------------------------------------------
 const PRELUDE = `set -euo pipefail
-D="$HOME/${DIR}"
+R="$HOME/${LANE.base}"
+D="$R/${LANE.lane}"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
-export TMPDIR="$D/tmp/" npm_config_cache="$D/.npm" CP_HOME_DIR="$D/.cocoapods" EXPO_NO_TELEMETRY=1 CI=1
+export TMPDIR="$D/tmp/" npm_config_cache="$R/.npm" CP_HOME_DIR="$R/.cocoapods" EXPO_NO_TELEMETRY=1 CI=1
 ${process.env.DESKLINK_IOS_XCODE ? `export DEVELOPER_DIR=${JSON.stringify(process.env.DESKLINK_IOS_XCODE)}` : ''}
 `;
 function mac(script, timeout = 120_000) {
@@ -140,12 +152,14 @@ function mac(script, timeout = 120_000) {
 }
 
 function buildApp(udid) {
-    mac('mkdir -p "$D/tmp" "$D/.cocoapods" && printf "cache_root: %s\\n" "$D/.cocoapods-cache" > "$D/.cocoapods/config.yaml"');
+    // The package caches are shared on purpose, under the root: two lanes
+    // writing them at once is fine, a lane deleting one while another installs is not.
+    mac('mkdir -p "$D/tmp" "$R/.cocoapods" && printf "cache_root: %s\\n" "$R/.cocoapods-cache" > "$R/.cocoapods/config.yaml"');
     // Everything the app needs from this checkout: the package, not its tests.
     const copy = spawnSync('rsync', [
         '-a', '--delete', '--exclude', 'node_modules', '--exclude', 'example/ios', '--exclude', 'example/.expo',
         '--exclude', 'android', '--exclude', 'test', '--exclude', '*.spec.ts',
-        `${join(repo, 'packages/desktop-client')}/`, `${MAC}:${DIR}/desktop-client/`,
+        `${join(repo, 'packages/desktop-client')}/`, `${MAC}:${LANE.dir}/desktop-client/`,
     ], { encoding: 'utf8', timeout: 120_000 });
     assert.equal(copy.status, 0, `rsync to the Mac failed: ${copy.stderr}`);
     log('building the example app on the Mac (the first build takes a while)');
@@ -168,7 +182,7 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
 
 /** Run the XCUITest pointer steps (test/ios-pointer/) against the running app. */
 function pointerSteps(udid, steps) {
-    const copy = spawnSync('rsync', ['-a', '--delete', `${join(here, 'ios-pointer')}/`, `${MAC}:${DIR}/ios-pointer/`], { encoding: 'utf8', timeout: 60_000 });
+    const copy = spawnSync('rsync', ['-a', '--delete', `${join(here, 'ios-pointer')}/`, `${MAC}:${LANE.dir}/ios-pointer/`], { encoding: 'utf8', timeout: 60_000 });
     assert.equal(copy.status, 0, `rsync to the Mac failed: ${copy.stderr}`);
     mac(`cd "$D/ios-pointer"
 # The project is generated with the xcodeproj gem CocoaPods carries, run on CocoaPods' own Ruby.
@@ -545,6 +559,10 @@ async function cleanup() {
     if (xvfb) await stopOwnedXvfb(xvfb);
     // The page's browser profile is about 100 MB; nothing here outlives the run.
     rmSync(work, { recursive: true, force: true });
+    // Reclaim the lane's disk, and only the lane's own directory.
+    if (!KEEP) {
+        try { mac(CLEAN_SCRIPT); } catch (error) { log('lane cleanup:', error.message); }
+    }
     await sleep(200);
     assert.deepEqual(strays(), [], 'task processes survived cleanup');
 }
@@ -710,7 +728,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     const pixel = (png, point) => rgb(png, point).reduce((sum, value) => sum + value);
     const capture = (path) => {
         mac(`xcrun simctl io ${udid} screenshot "$D/tmp/ios-flow.png" > /dev/null`);
-        assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${DIR}/tmp/ios-flow.png`, path]).status, 0, 'copy the screenshot back');
+        assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/tmp/ios-flow.png`, path]).status, 0, 'copy the screenshot back');
         return PNG.sync.read(readFileSync(path));
     };
     /** Share of the screen inside fully black rows or columns: the letterbox. */
@@ -1131,7 +1149,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     await step('08-pointer-arrow', `arrow over bare paper: ${widthsPt[0].toFixed(1)} pt at the tip, ${widest.toFixed(1)} pt at its widest, tip ${(tipPt.x - tip.x).toFixed(1)}/${(tipPt.y - tip.y).toFixed(1)} pt from the desktop pointer`);
 
     stopRecording();
-    assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${DIR}/tmp/phone-control.mp4`, join(out, 'phone-control.mp4')]).status, 0,
+    assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/tmp/phone-control.mp4`, join(out, 'phone-control.mp4')]).status, 0,
         'copy the screen recording back');
     writeFileSync(join(out, 'phone-control.json'), JSON.stringify({ device: seen.frame, udid, steps, recording: 'phone-control.mp4' }, null, 1));
     log(`phone-only control proven over ${steps.length} steps, recorded as phone-control.mp4`);
