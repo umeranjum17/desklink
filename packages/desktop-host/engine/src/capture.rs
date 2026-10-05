@@ -13,7 +13,7 @@ use pw::spa;
 use pw::spa::pod::{serialize::PodSerializer, Pod};
 use std::io::Cursor;
 use std::os::fd::OwnedFd;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -55,7 +55,9 @@ pub struct Capture {
     quit: pw::channel::Sender<()>,
     thread: Option<JoinHandle<()>>,
     pub source: SelectedSource,
-    cursor_positions: Arc<AtomicBool>,
+    /// Hidden-cursor positions, when the compositor supplies them; kept with
+    /// the capture so both stop together.
+    pub cursor: Option<crate::wl_cursor::Tracker>,
     geometry: Arc<Mutex<Option<StreamGeometry>>>,
     frames: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
@@ -64,9 +66,6 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn cursor_positions(&self) -> bool {
-        self.cursor_positions.load(Ordering::Relaxed)
-    }
     pub fn geometry(&self) -> Option<StreamGeometry> {
         self.geometry.lock().ok().and_then(|g| g.clone())
     }
@@ -203,23 +202,11 @@ pub fn start(
     encoded_width: usize,
     encoded_height: usize,
     max_fps: u32,
-    cursor_sink: Option<crate::cursor::CursorSink>,
     sink: FrameSink,
     indicator_position: Option<Arc<Mutex<Option<(i64, i64)>>>>,
     on_stop: Box<dyn Fn(String) + Send>,
 ) -> Result<Capture> {
-    let PortalSession {
-        fd,
-        source,
-        cursor_mode,
-        ..
-    } = session;
-    let cursor_positions = Arc::new(AtomicBool::new(false));
-    let cursor_sink = if cursor_mode == "metadata" {
-        cursor_sink
-    } else {
-        None
-    };
+    let PortalSession { fd, source, .. } = session;
     let geometry = Arc::new(Mutex::new(None));
     let frames = Arc::new(AtomicU64::new(0));
     let dropped = Arc::new(AtomicU64::new(0));
@@ -227,9 +214,7 @@ pub fn start(
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
 
     let node_id = source.node_id;
-    let source_size = (source.width.max(1) as usize, source.height.max(1) as usize);
     let thread = {
-        let cursor_positions = cursor_positions.clone();
         let geometry = geometry.clone();
         let frames = frames.clone();
         let dropped = dropped.clone();
@@ -240,12 +225,9 @@ pub fn start(
                 let result = run_loop(
                     fd,
                     node_id,
-                    source_size,
                     encoded_width,
                     encoded_height,
                     max_fps,
-                    cursor_sink,
-                    cursor_positions,
                     sink,
                     indicator_position,
                     on_stop,
@@ -272,7 +254,7 @@ pub fn start(
         quit,
         thread: Some(thread),
         source,
-        cursor_positions,
+        cursor: None,
         geometry,
         frames,
         dropped,
@@ -291,12 +273,9 @@ pub fn start(
 fn run_loop(
     fd: OwnedFd,
     node_id: u32,
-    source_size: (usize, usize),
     encoded_width: usize,
     encoded_height: usize,
     max_fps: u32,
-    cursor_sink: Option<crate::cursor::CursorSink>,
-    cursor_positions: Arc<AtomicBool>,
     sink: FrameSink,
     indicator_position: Option<Arc<Mutex<Option<(i64, i64)>>>>,
     on_stop: Box<dyn Fn(String) + Send>,
@@ -328,8 +307,6 @@ fn run_loop(
     let stream = pw::stream::StreamBox::new(&core, "desklink-capture", props)
         .context("pw_stream_new failed")?;
 
-    let wants_cursor_meta = cursor_sink.is_some();
-    let mut cursor = cursor_sink.map(crate::cursor::Reporter::new);
     let mut state = StreamState {
         box_w: encoded_width,
         box_h: encoded_height,
@@ -395,31 +372,6 @@ fn run_loop(
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
-            if let Some(cursor) = cursor.as_mut() {
-                if let Some(meta) = buffer.find_meta::<spa::buffer::meta::MetaCursor>() {
-                    cursor_positions.store(true, Ordering::Relaxed);
-                    // The wrapper's size check bounds the bitmap header;
-                    // never follow an unchecked bitmap offset.
-                    let bitmap = buffer
-                        .find_meta::<CursorWithBitmap>()
-                        .filter(|m| {
-                            m.cursor.bitmap_offset as usize
-                                == std::mem::size_of::<spa::sys::spa_meta_cursor>()
-                        })
-                        .map(|m| &m.bitmap);
-                    if state.logical_w == 0 || state.logical_h == 0 {
-                        return;
-                    }
-                    let mut position = *meta.as_raw();
-                    position.position.x = (i64::from(position.position.x) * source_size.0 as i64)
-                        .div_euclid(state.logical_w as i64)
-                        as i32;
-                    position.position.y = (i64::from(position.position.y) * source_size.1 as i64)
-                        .div_euclid(state.logical_h as i64)
-                        as i32;
-                    cursor.update_spa(&position, bitmap, source_size.0, source_size.1);
-                }
-            }
             let Some(format) = state.format else { return };
             let datas = buffer.datas_mut();
             if datas.is_empty() {
@@ -516,15 +468,10 @@ fn run_loop(
     format_pod(&mut format_buf, max_fps)?;
     let mut buffer_buf = Vec::new();
     buffer_pod(&mut buffer_buf)?;
-    let mut cursor_buf = Vec::new();
-    cursor_pod(&mut cursor_buf)?;
     let mut params = vec![
         Pod::from_bytes(&format_buf).context("invalid EnumFormat pod")?,
         Pod::from_bytes(&buffer_buf).context("invalid Buffers pod")?,
     ];
-    if wants_cursor_meta {
-        params.push(Pod::from_bytes(&cursor_buf).context("invalid Cursor Meta pod")?);
-    }
 
     stream
         .connect(
@@ -718,7 +665,7 @@ mod tests {
                 origin_x: 0,
                 origin_y: 0,
             },
-            cursor_positions: Arc::new(AtomicBool::new(false)),
+            cursor: None,
             geometry: Arc::new(Mutex::new(None)),
             frames: Arc::new(AtomicU64::new(0)),
             dropped: Arc::new(AtomicU64::new(0)),
@@ -738,34 +685,4 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("capture stopped and joined");
     }
-}
-
-fn cursor_pod(buffer: &mut Vec<u8>) -> Result<()> {
-    use spa::pod::{object, property, Value};
-    let obj = object!(
-        spa::utils::SpaTypes::ObjectParamMeta,
-        spa::param::ParamType::Meta,
-        property!(
-            RawKey(spa::sys::SPA_PARAM_META_type),
-            Id,
-            RawKey(spa::sys::SPA_META_Cursor)
-        ),
-        property!(
-            RawKey(spa::sys::SPA_PARAM_META_size),
-            Int,
-            (std::mem::size_of::<CursorWithBitmap>() + 256 * 256 * 4) as i32
-        )
-    );
-    PodSerializer::serialize(Cursor::new(buffer), &Value::Object(obj))
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("failed to build Cursor Meta pod: {e}"))
-}
-
-#[repr(C)]
-struct CursorWithBitmap {
-    cursor: spa::sys::spa_meta_cursor,
-    bitmap: spa::sys::spa_meta_bitmap,
-}
-impl spa::buffer::meta::Metadata for CursorWithBitmap {
-    const META_TYPE: u32 = spa::sys::SPA_META_Cursor;
 }

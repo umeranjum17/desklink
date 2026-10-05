@@ -93,6 +93,8 @@ mod session;
 #[cfg(target_os = "windows")]
 mod win;
 #[cfg(target_os = "linux")]
+mod wl_cursor;
+#[cfg(target_os = "linux")]
 mod x11;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 #[path = "x11_mac.rs"]
@@ -391,7 +393,6 @@ async fn probe_portal(seconds: u64) -> Result<()> {
         width,
         height,
         30,
-        None,
         Box::new(move |frame, seq, _raw| {
             let _ = tx.send((frame.width, frame.height, seq));
         }),
@@ -558,10 +559,13 @@ fn render_event(notice: session::Notice) -> Option<String> {
             "session.state",
             serde_json::json!({ "sessionId": session_id, "capture": capture, "transport": transport, "firstFrame": first_frame }),
         ),
-        session::SessionEvent::Cursor { position } => (
-            "session.cursor",
-            serde_json::json!({ "sessionId": session_id, "x": position.x, "y": position.y, "visible": position.visible, "timestamp_us": position.timestamp_us }),
-        ),
+        session::SessionEvent::Cursor { position } => ("session.cursor", {
+            let mut params = serde_json::json!({ "sessionId": session_id, "x": position.x, "y": position.y, "visible": position.visible, "timestamp_us": position.timestamp_us });
+            if let Some((x, y)) = position.hotspot {
+                params["hotspot"] = serde_json::json!({ "x": x, "y": y });
+            }
+            params
+        }),
         session::SessionEvent::Frame {
             seq,
             damage,
@@ -892,6 +896,7 @@ mod tests {
                     x: 32,
                     y: 64,
                     visible: false,
+                    hotspot: None,
                     timestamp_us: 123456,
                 },
             },

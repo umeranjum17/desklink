@@ -895,7 +895,7 @@ pub fn capabilities() -> serde_json::Value {
             "formats": ["bgrx", "bgra", "rgbx", "rgba"],
             "cursor": "embedded",
             "cursor_modes": ["embedded", "hidden"],
-            "cursor_positions": {"x11": true, "portal": "negotiated"},
+            "cursor_positions": {"x11": true, "wayland": "ext-image-copy-capture-v1"},
             "audio": false,
         },
         "encode": encode_capabilities(),
@@ -1205,8 +1205,8 @@ impl Session {
                 }
                 .map_err(|error| {
                     let message = format!("{error:#}");
-                    let code = if message.contains("cursor_positions_unavailable:") {
-                        "cursor_positions_unavailable"
+                    let code = if message.contains("cursor-unavailable:") {
+                        "cursor-unavailable"
                     } else {
                         "source"
                     };
@@ -1264,12 +1264,11 @@ impl Session {
                 )
                 .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
                 #[cfg(target_os = "linux")]
-                let capture = capture::start(
+                let mut capture = capture::start(
                     portal,
                     width,
                     height,
                     max_fps,
-                    cursor_sink,
                     sink,
                     indicator
                         .as_ref()
@@ -1281,16 +1280,31 @@ impl Session {
                 )
                 .map_err(|error| SessionError::new("source", format!("{error:#}")))?;
                 #[cfg(target_os = "linux")]
-                {
-                    if request.cursor == crate::protocol::CursorMode::Hidden
-                        && !capture.cursor_positions()
-                    {
-                        return Err(SessionError::new(
-                            "cursor_positions_unavailable",
-                            "portal stream did not provide SPA cursor metadata",
-                        ));
+                if let Some(cursor_sink) = cursor_sink {
+                    // Positions are an addition to hidden capture, never a
+                    // condition of it: without them the stream still runs and
+                    // the reply says why the receiver gets no cursor.
+                    cursor_info["source"] = serde_json::json!(crate::wl_cursor::PROTOCOL);
+                    let limitation = match crate::wl_cursor::start(
+                        (source.origin_x, source.origin_y),
+                        (source_w, source_h),
+                        cursor_sink,
+                        Duration::from_secs(1),
+                    ) {
+                        Ok((tracker, observed)) => {
+                            capture.cursor = Some(tracker);
+                            cursor_info["positions"] = serde_json::json!(observed);
+                            (!observed).then_some("the compositor has sent no cursor position yet: the cursor is off the captured output, the seat has no pointer, or the compositor withholds positions from this engine")
+                        }
+                        Err(error) => {
+                            log::warn!("hidden cursor capture has no cursor positions: {error:#}");
+                            Some("this compositor does not offer ext-image-copy-capture-v1 cursor sessions, so the cursor is hidden and its position is unknown")
+                        }
+                    };
+                    if let Some(limitation) = limitation {
+                        log::warn!("{limitation}");
+                        cursor_info["limitation"] = serde_json::json!(limitation);
                     }
-                    cursor_info["positions"] = serde_json::json!(capture.cursor_positions());
                 }
                 #[cfg(target_os = "linux")]
                 if let Some(indicator) = indicator.as_mut() {

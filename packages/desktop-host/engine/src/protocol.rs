@@ -569,5 +569,6 @@ pub struct CursorPosition {
     pub x: i32,
     pub y: i32,
     pub visible: bool,
+    pub hotspot: Option<(i32, i32)>,
     pub timestamp_us: u64,
 }

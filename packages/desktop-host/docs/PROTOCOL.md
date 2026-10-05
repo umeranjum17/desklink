@@ -126,7 +126,7 @@ require fresh consent. The macOS engine requires a VP9-enabled build
     "formats": ["bgrx", "bgra", "rgbx", "rgba"],
     "cursor": "embedded",
     "cursor_modes": ["embedded", "hidden"],
-    "cursor_positions": {"x11": true, "portal": "negotiated"},
+    "cursor_positions": {"x11": true, "wayland": "ext-image-copy-capture-v1"},
     "audio": false
   },
   "encode": {"codecs": ["vp9", "h264"], "hardware": false,
@@ -493,40 +493,52 @@ whose accounting is wrong.
 ## Cursor-free capture
 
 `session.open` accepts `cursor: "hidden"` (default `"embedded"`). Existing
-callers keep their capture behavior. Linux hidden capture requires portal
-**Metadata** so cursor positions remain available while cursor pixels are
-omitted. A portal without Metadata returns the typed
-`cursor_positions_unavailable` refusal. Successful open returns
+callers keep their capture behavior. Linux portal capture asks the portal for
+**Hidden** (or **Metadata**, whose cursor data is ignored) so cursor pixels are
+omitted; a portal that offers neither refuses with `cursor-unavailable`. Cursor
+positions do not come from the portal: the engine asks the compositor directly
+through the `ext-image-copy-capture-v1` pointer cursor session over the
+selected output (Hyprland and wlroots compositors advertise it). Successful
+open returns
 `cursor: {"mode":"metadata"|"hidden"|"embedded"|"unavailable",
-"positions":true|false}`; `mode` names the portal mode accepted by the portal,
-not just the requested option.
+"positions":true|false, "source"?:"ext-image-copy-capture-v1", "limitation"?:string}`;
+`mode` names the portal mode accepted by the portal, not just the requested
+option.
 
 Linux capabilities advertise `capture.cursor_modes: ["embedded","hidden"]`
-and `capture.cursor_positions: {"x11":true,"portal":"negotiated"}`. Portal
-support is resolved at open: hidden capture requires Metadata and an observed
-SPA cursor metadata buffer. A portal that offers only Hidden refuses open with
-`cursor_positions_unavailable`; accepted hidden sessions report `positions:true`.
-Metadata-mode buffers that contain no new cursor data do not fabricate a move
-or a visibility change.
+and `capture.cursor_positions: {"x11":true,"wayland":"ext-image-copy-capture-v1"}`.
+A hidden session never fails for want of positions. `positions` is true once
+the compositor delivered one within a second of open. Otherwise the stream
+still runs, cursor hidden, and `limitation` says why: the compositor lacks the
+protocol, or it has sent nothing yet (the cursor is off the captured output,
+the seat has no pointer, or the compositor withholds positions; Hyprland
+gates them on its cursor permission). The engine logs a warning in each case
+and never reports a guessed or zero position.
+
+The compositor sends a position only when it changes and only while the
+cursor is over the source, at its own commit cadence. The engine keeps the last
+one: a quiet compositor is a still cursor. Leaving the source reports the last
+position with `visible:false`.
 
 Hidden sessions with positions emit local protocol events independently of
 pixel damage, including on a still X11 desktop:
 
 ```json
-{"event":"session.cursor","params":{"sessionId":"…","x":400,"y":300,"visible":true,"timestamp_us":123456}}
+{"event":"session.cursor","params":{"sessionId":"…","x":400,"y":300,"visible":true,"hotspot":{"x":4,"y":6},"timestamp_us":123456}}
 ```
 
 `x,y` name the pointer hotspot in the selected source's coordinates
 (`geometry.source`), before video scaling, without the desktop origin added.
-Portal buffer coordinates are mapped to that geometry. `visible` is false
-outside the source or when SPA supplies an invisible cursor bitmap.
+Compositor buffer coordinates are mapped to that geometry (Hyprland's, which
+are already logical, are taken as they are). `hotspot`, where the compositor
+reports it, is the hotspot's offset inside the cursor image, in the same
+units. `visible` is false while the cursor is outside the source.
 `timestamp_us` is a monotonic engine-process clock in microseconds, sampled
-when the capture thread observes the pointer. The same clock stamps
+when the engine observes the pointer. The same clock stamps
 `session.frame.changed` and `session.frame` metadata, so local recording
 consumers can compare cursor samples to frame handoff times. These are not
-wall-clock or RTP timestamps. SPA cursor updates accompany PipeWire buffers;
-X11 pointer queries run at the session frame cap even with no pixel damage.
-Repeated identical positions/visibility are suppressed.
+wall-clock or RTP timestamps. X11 pointer queries run at the session frame cap
+even with no pixel damage. Repeated identical samples are suppressed.
 
 X11 root GetImage/MIT-SHM never contains the server cursor and this engine
 never composites it, including for existing embedded-default callers. Its
