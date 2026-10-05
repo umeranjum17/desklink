@@ -90,6 +90,9 @@ pub fn start(
         | wl_output::Transform::Flipped270 => (output.mode.1, output.mode.0),
         _ => output.mode,
     };
+    if !state.logical && (state.buffer_size.0 == 0 || state.buffer_size.1 == 0) {
+        bail!("compositor sent no current mode for the captured output");
+    }
     let (first_tx, first_rx) = mpsc::channel();
     state.first = Some(first_tx);
     // The seat's capabilities arrive with the outputs; the session opens as
@@ -109,6 +112,8 @@ pub fn start(
             .name("desklink-wl-cursor".into())
             .spawn(move || {
                 if let Err(error) = run(&connection, &mut queue, &mut state, &stop) {
+                    state.entered = false;
+                    state.report();
                     log::warn!("{PROTOCOL}: cursor session ended: {error:#}");
                 }
             })
