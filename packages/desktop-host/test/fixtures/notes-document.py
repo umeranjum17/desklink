@@ -122,7 +122,9 @@ class Fixture:
         point = self.view.translate_coordinates(self.window, x, y)
         if point is None:
             return round(x), round(y)
-        return round(point.x), round(point.y)
+        # PyGObject hands back a plain (x, y) tuple, not a Gdk.Point.
+        gx, gy = point
+        return round(gx), round(gy)
 
     def dump(self):
         text = self.buffer.get_text(self.buffer.get_start_iter(), self.buffer.get_end_iter(), False)
