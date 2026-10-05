@@ -30,6 +30,9 @@ repository it resolves through the workspace; anywhere else, install it from npm
 npx expo install @desklink/react-native      # or yarn add, then prebuild/rebuild
 ```
 
+Expo SDK 55 and later are supported, including the SDK a fresh
+`npx create-expo-app` resolves today: no SDK pin is needed.
+
 Android uses an Expo native module; iOS uses the app's existing
 `react-native-webrtc` peer connection and `RTCView` from JavaScript, plus a small
 Expo module of its own for the hardware keyboard and an iPad pointer. Both need a

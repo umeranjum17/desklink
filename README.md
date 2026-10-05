@@ -32,6 +32,9 @@ npm install @desklink/host               # the engine
 npx expo install @desklink/react-native  # the view and session
 ```
 
+The package supports Expo SDK 55 and later, including the SDK a fresh
+`npx create-expo-app` resolves today: no SDK pin is needed.
+
 The npm version badges track the registry, and npm verifies package integrity
 on install. See the [host installation guide](packages/desktop-host/README.md#install-and-run)
 for supported desktop platforms and the [receiver installation guide](packages/desktop-client/README.md#install)

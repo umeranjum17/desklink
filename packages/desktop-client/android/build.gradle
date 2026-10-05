@@ -1,8 +1,20 @@
 apply plugin: 'com.android.library'
-apply plugin: 'kotlin-android'
+// expo-modules-core's own Kotlin API is reified through the `pika` compiler
+// plugin, and this plugin is what applies it. Building with a bare
+// `kotlin-android` leaves those reified calls un-inlined, and the app then
+// throws "This function has a reified type parameter ..." out of
+// DesklinkModule.definition() on startup. Expo's plugin covers every SDK, and
+// applies kotlin-android and the default Expo module dependencies itself.
+apply plugin: 'expo-module-gradle-plugin'
 
 group = 'expo.modules.desklink'
 version = '0.1.1'
+
+// This package ships from npm, not from Expo's Maven repository, so the
+// plugin's publishing task has nothing to publish.
+expoModule {
+  canBePublished = false
+}
 
 android {
   namespace 'expo.modules.desklink'

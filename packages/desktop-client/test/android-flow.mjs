@@ -88,6 +88,10 @@ const adb = (...args) => {
     assert.equal(done.status, 0, `adb ${args.join(' ')} failed: ${done.stderr}`);
     return done.stdout;
 };
+// A package installed moments ago can take a while to answer the resolver, so
+// the link that opens the app is retried rather than failed on.
+const tryAdb = (...args) =>
+    spawnSync('adb', ['-s', serial, ...args], { encoding: 'utf8', timeout: 120000 }).status === 0;
 const capture = name => {
     const path = join(out, name);
     const shot = spawnSync('sh', ['-c', `adb -s ${serial} exec-out screencap -p > ${path}`]);
@@ -101,8 +105,8 @@ const receipt = {
 const children = [];
 let xvfb, target, bridge, metro, receiver;
 
-const start = (name, cmd, args, childEnv) => {
-    const child = spawn(cmd, args, { cwd: repo, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+const start = (name, cmd, args, childEnv, cwd = repo) => {
+    const child = spawn(cmd, args, { cwd, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.on('data', c => { logs[name] += c; });
     child.stderr.on('data', c => { logs[name] += c; });
     children.push([name, child]);
@@ -176,13 +180,16 @@ try {
 
     // A debug build loads its JavaScript from this machine's Metro, which the
     // device reaches on its own loopback through adb rather than over the air.
-    metro = start('metro', 'npx', ['expo', 'start', '--port', '8081'], { ...env, CI: '1' });
+    // Metro serves the example app, so it runs where that app's own `expo`
+    // lives: the repository root is not an Expo project and has no SDK to read.
+    metro = start('metro', 'npx', ['expo', 'start', '--port', '8081'], { ...env, CI: '1' }, example);
     await waitFor(() => /Waiting on http/.test(logs.metro), 'Metro');
     adb('install', '-r', '-g', apk);
     adb('reverse', 'tcp:8081', 'tcp:8081');
 
     // The journey.
-    adb('shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', `"${link}"`);
+    await waitFor(() => tryAdb('shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', `"${link}"`),
+    'the app to answer its connection link', 120000);
     await waitFor(() => reports.length > 0, "the app's own report", 180000);
     await waitFor(() => {
         const last = JSON.parse(reports[reports.length - 1] ?? '{}');
