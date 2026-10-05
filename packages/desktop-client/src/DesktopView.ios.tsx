@@ -298,11 +298,11 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
                 const under = point(at.x, at.y);
                 if (under) pointer('move', under);
             } else {
-            // A whole desktop has nowhere to move to, so the finger moves the
-            // desktop's pointer instead. It is the zoom over the fit, not the
-            // default fill, that says there is room to pan: a fill that landed
-            // on the fit has none.
-            g.mode = zoomed > 1.001 ? 'pan' : 'hover';
+                // A whole desktop has nowhere to move to, so the finger moves the
+                // desktop's pointer instead. It is the zoom over the fit, not the
+                // default fill, that says there is room to pan: a fill that landed
+                // on the fit has none.
+                g.mode = zoomed > 1.001 ? 'pan' : 'hover';
             }
         }
         if (g.mode === 'scroll') {
