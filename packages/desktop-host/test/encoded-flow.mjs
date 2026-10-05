@@ -34,11 +34,11 @@
  * decodes.
  */
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 
@@ -297,7 +297,12 @@ function startRelay(engine) {
 /** The browser build behind the binary, so a failure names what actually ran. */
 function chromeVersion(binary) {
     try {
-        return basename(dirname(realpathSync(binary)));
+        const line = String(execFileSync(binary, ['--version'], { timeout: 5000, encoding: 'utf8' })).trim().split('\n').pop()?.trim();
+        if (line) return line;
+    } catch {
+    }
+    try {
+        return realpathSync(binary);
     } catch {
         return 'unknown version';
     }
@@ -354,42 +359,67 @@ async function startChrome(binary, pageUrl) {
         }
         if (port === null) await sleep(100);
     }
+    const fate = () => stopped
+        ?? (chrome.exitCode !== null || chrome.signalCode !== null
+            ? `the browser exited, code ${chrome.exitCode}, signal ${chrome.signalCode}`
+            : 'it was still running and said nothing');
     if (port === null) {
+        try {
+            chrome.kill('SIGKILL');
+        } catch {
+        }
+        rmSync(profile, { recursive: true, force: true });
         throw new Error(
             `Chrome never opened a debugging port in ${Date.now() - started}ms from ${binary} `
-            + `(build ${chromeVersion(binary)}): ${stopped ?? 'it was still running and said nothing'}; `
+            + `(${chromeVersion(binary)}): ${fate()}; `
             + `stderr: ${stderr.slice(-400)}`,
         );
     }
     console.log(`debug port ${port} after ${Date.now() - started}ms`);
 
-    const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
-    const socket = new WebSocket(version.webSocketDebuggerUrl);
-    await new Promise((open, fail) => {
-        socket.once('open', open);
-        socket.once('error', fail);
-    });
-    let next = 0;
+    let socket = null;
+    let session = null;
     const pending = new Map();
-    socket.on('message', (raw) => {
-        const message = JSON.parse(raw.toString());
-        if (message.id === undefined) return;
-        const waiting = pending.get(message.id);
-        if (waiting === undefined) return;
-        pending.delete(message.id);
-        if (message.error) waiting.reject(new Error(`${message.error.message}`));
-        else waiting.resolve(message.result);
-    });
+    let next = 0;
     const send = (method, params = {}, sessionId) =>
         new Promise((resolve, reject) => {
             const id = ++next;
             pending.set(id, { resolve, reject });
             socket.send(JSON.stringify({ id, method, params, ...(sessionId === undefined ? {} : { sessionId }) }));
         });
-
-    const target = await send('Target.createTarget', { url: pageUrl });
-    const attached = await send('Target.attachToTarget', { targetId: target.targetId, flatten: true });
-    const session = attached.sessionId;
+    try {
+        const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+        socket = new WebSocket(version.webSocketDebuggerUrl);
+        await new Promise((open, fail) => {
+            socket.once('open', open);
+            socket.once('error', fail);
+        });
+        socket.on('message', (raw) => {
+            const message = JSON.parse(raw.toString());
+            if (message.id === undefined) return;
+            const waiting = pending.get(message.id);
+            if (waiting === undefined) return;
+            pending.delete(message.id);
+            if (message.error) waiting.reject(new Error(`${message.error.message}`));
+            else waiting.resolve(message.result);
+        });
+        const target = await send('Target.createTarget', { url: pageUrl });
+        session = (await send('Target.attachToTarget', { targetId: target.targetId, flatten: true })).sessionId;
+    } catch (error) {
+        try {
+            socket?.close();
+        } catch {
+        }
+        try {
+            chrome.kill('SIGKILL');
+        } catch {
+        }
+        rmSync(profile, { recursive: true, force: true });
+        throw new Error(
+            `Chrome's debugging handshake failed from ${binary} (${chromeVersion(binary)}): ${error.message}; ${fate()}; `
+            + `stderr: ${stderr.slice(-400)}`,
+        );
+    }
     const evaluate = async (expression) => {
         const result = await send(
             'Runtime.evaluate',
