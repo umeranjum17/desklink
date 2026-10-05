@@ -31,7 +31,10 @@ and its only connections to this host were two established TCP connections to
 frame counts, but they describe USB.
 
 The full receipt, including every one of the 74+74 per-capture samples, is
-[`phone-wifi-latency-run.json`](phone-wifi-latency-run.json).
+[`phone-wifi-latency-run.json`](phone-wifi-latency-run.json); the run's own
+numbers artefact — device, command, host load, published figures — is
+`~/lab-tmp/dl-pm-9/pr-99-published-numbers-usb-1920x1080.json` in the private
+evidence folder.
 
 Read the latency column exactly as written: it is **excess latency over the
 fastest frame the harness saw in the same run** (each capture's difference from
@@ -117,9 +120,16 @@ result is **not** published as a 4 Mbit number, because the measurement says so:
 | 4 Mbit, userspace-shaped, scrolling | 59.8 (59.3) | 960×540 | 45 ms | 57 ms |
 
 59.8 fps is the *unshaped* rate. A real 4 Mbit link at this resolution cannot
-deliver 60 fps, so the shaped run proves the media does not ride the bridge
-connection the relay sits on. The 4 Mbit media leg therefore stays unproven: no
-privilege-free path tried reaches the media.
+deliver 60 fps, so the shaped run proves the media **bypasses** the relay
+entirely: it does not ride the bridge connection the relay sits on. The 4 Mbit
+media leg therefore stays unproven — no privilege-free path tried reaches the
+media.
+
+Stated as a rule, because it is easy to get wrong: **a number measured behind a
+relay is not a shaped-link number.** Unless the throttle demonstrably sits on the
+path the media takes — shown here by the rate not moving at all — the run is a
+measurement of a path the throttle never touched, and must not be published as
+4 Mbit, slow-link, or shaped.
 
 ## Method
 
@@ -176,6 +186,10 @@ How each number is produced:
 - **Everything the harness could not measure is named**, not dropped: unreadable
   captures, clock steps, and the capture window's own cost all appear in the
   receipt.
+- **A throttle is only believed when it changes the number.** `--relay-rate`
+  writes what it throttled into the receipt, and the 4 Mbit run above is
+  published as an attempt precisely because the rate did not move — the media
+  bypasses that connection, so the figure describes an unshaped path.
 
 ## What would close J4
 
