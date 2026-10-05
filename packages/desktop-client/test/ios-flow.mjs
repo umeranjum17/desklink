@@ -284,19 +284,31 @@ function byId(udid, id) {
     return found;
 }
 
-async function waitForId(udid, id, want) {
-    const deadline = Date.now() + 15_000;
-    let seen = null;
-    while (Date.now() < deadline) {
+/**
+ * Read until the read says the value has settled. Every step in the journey
+ * answers a moment after the tap that moved it, and the read itself can fail
+ * for a moment too — a dropped ssh connection, an axe that comes back with no
+ * such node yet — so both are retried to one deadline. Nothing polls on its
+ * own: a step that samples once is a step that needs someone at the keyboard.
+ * `what` names the reason it never settled, so a genuinely stuck value fails
+ * with that reason instead of hanging.
+ */
+async function until(what, read, settled, timeoutMs = 15_000) {
+    const deadline = Date.now() + timeoutMs;
+    let value;
+    let failure = null;
+    do {
         try {
-            seen = byId(udid, id);
-            if (seen.value === want) return seen;
+            value = await read();
+            failure = null;
+            if (settled(value)) return value;
         } catch (error) {
-            if (!String(error?.message ?? error).includes(`the screen has no ${id}`)) throw error;
+            failure = error;
         }
-        await sleep(500);
-    }
-    assert.equal(seen?.value, want, `the screen never showed ${id} as ${want}`);
+        if (Date.now() < deadline) await sleep(250);
+    } while (Date.now() < deadline);
+    if (failure !== null) assert.fail(`${what}: ${String(failure.message ?? failure).split('\n')[0]}`);
+    assert.fail(`${what}: the last read was ${JSON.stringify(value)}`);
 }
 
 // ---- processes on this machine ---------------------------------------------
@@ -474,8 +486,33 @@ mkdirSync(out, { recursive: true });
 const work = mkdtempSync(join(tmpdir(), 'desklink-ios-host-'));
 let xvfbPid = 0; let xvfb; let pagePid = 0; let bridgePid = 0; let enginePid = 0;
 let relay = null; let page = null; let udid = null; let codec = null; let temporarySimulator = false;
+let recorderPid = null;
+
+/**
+ * The Mac's screen recording of the phone, started before the journey and
+ * stopped wherever the run ends. One owner: `cleanup` stops it too, so an
+ * assertion that throws finalises the file instead of leaving a recorder
+ * running on the Mac.
+ */
+function startRecording() {
+    recorderPid = mac(`nohup xcrun simctl io ${udid} recordVideo --codec=h264 "$D/tmp/phone-control.mp4" > "$D/tmp/record.log" 2>&1 < /dev/null & echo $!`).trim();
+    mac('sleep 3');
+    if (mac(`kill -0 ${recorderPid} 2>/dev/null && echo running || true`).trim() !== 'running') {
+        assert.fail(`the screen recorder did not start: ${mac('cat "$D/tmp/record.log" 2>/dev/null || true')}`);
+    }
+}
+
+/** SIGINT, not SIGTERM: simctl finalises the mp4 on SIGINT and drops it otherwise. */
+function stopRecording() {
+    if (recorderPid === null) return;
+    mac(`kill -INT ${recorderPid} 2>/dev/null || true; sleep 2`);
+    recorderPid = null;
+}
 
 async function cleanup() {
+    try {
+        stopRecording();
+    } catch (error) { log('recorder cleanup:', error.message); }
     if (udid !== null && temporarySimulator) {
         try {
             mac(`xcrun simctl terminate ${udid} ${BUNDLE} || true; xcrun simctl shutdown ${udid} || true; xcrun simctl delete ${udid}`);
@@ -691,11 +728,8 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         const at = { x: origin.x + (target.x + 0.5) * scale, y: origin.y + (target.y + 0.5) * scale };
         const before = await page.evaluate('clicks.length');
         mac(`axe tap -x ${at.x.toFixed(1)} -y ${at.y.toFixed(1)} --udid ${udid}`);
-        let clicks = [];
-        for (let i = 0; i < 50 && clicks.length < 2; i++) {
-            await sleep(100);
-            clicks = (await page.evaluate('clicks')).slice(before);
-        }
+        const clicks = await until('a tap reached the desktop as one click',
+            async () => (await page.evaluate('clicks')).slice(before), (seen) => seen.length >= 2);
         assert.deepEqual(clicks.map((click) => click.type), ['mousedown', 'mouseup'], `a tap is one click: ${JSON.stringify(clicks)}`);
         for (const click of clicks) {
             assert(Math.abs(click.x - target.x) <= slack && Math.abs(click.y - target.y) <= slack && click.button === 0,
@@ -741,11 +775,8 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         const tip = { x: origin.x + (previous.x + 0.5) * scale, y: origin.y + (previous.y + 0.5) * scale };
         const count = await page.evaluate('clicks.length');
         mac(`axe tap -x ${tip.x.toFixed(1)} -y ${tip.y.toFixed(1)} --udid ${udid}`);
-        let received = [];
-        for (let i = 0; i < 50 && received.length < 2; i++) {
-            await sleep(100);
-            received = (await page.evaluate('clicks')).slice(count);
-        }
+        const received = await until('a tap at the pointer tip reached the desktop as one click',
+            async () => (await page.evaluate('clicks')).slice(count), (seen) => seen.length >= 2);
         assert.deepEqual(received.map((click) => click.type), ['mousedown', 'mouseup']);
         const error = Math.hypot(received[0].x - previous.x, received[0].y - previous.y);
         assert(error <= 2, `tap at pointer tip differs by ${error} desktop pixels`);
@@ -789,11 +820,8 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // keyboard's would: Up, Esc, Tab, Command+C, then typed text.
     const keysBefore = await page.evaluate('keys.length');
     for (const press of ['key 82', 'key 41', 'key 43', 'key-combo --modifiers 227 --key 6', 'type desk']) mac(`axe ${press} --udid ${udid}`);
-    let keys = [];
-    for (let i = 0; i < 50 && !keys.some((key) => key.type === 'keyup' && key.key === 'k'); i++) {
-        await sleep(100);
-        keys = (await page.evaluate('keys')).slice(keysBefore);
-    }
+    const keys = await until('the hardware keys reached the desktop',
+        async () => (await page.evaluate('keys')).slice(keysBefore), (seen) => seen.some((key) => key.type === 'keyup' && key.key === 'k'));
     const downs = keys.filter((key) => key.type === 'keydown');
     log(`host keys: ${downs.map((key) => `${key.meta ? 'Meta+' : ''}${key.key}`).join(' ')}`);
     // The desktop reports Command's Meta as its own key too; the chord is what matters.
@@ -888,15 +916,17 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         `the phone says its live status once, not twice: ${JSON.stringify(onScreen.filter((entry) => entry.text === 'Connected'))}`);
     await step('00-live-desktop', `live desktop at the documented portrait fit: ${(geometry.width * scale).toFixed(0)}x${pictureHeightPt.toFixed(0)} pt band at the top of a ${screenWidth}x${screenHeight} pt screen (${(100 * pictureHeightPt / screenHeight).toFixed(0)}% of its height; the rest is letterbox and the app's own chrome), no diagnostic text on the phone`);
 
-    // The whole phone-only journey as one screen recording on the Mac.
-    mac(`nohup xcrun simctl io ${udid} recordVideo --codec=h264 "$D/tmp/phone-control.mp4" > "$D/tmp/record.log" 2>&1 < /dev/null & echo $! > "$D/tmp/record.pid"; sleep 3`);
+    // The whole phone-only journey as one screen recording on the Mac. Its
+    // lifetime belongs to `stopRecording`, which cleanup runs too, so a failed
+    // step finalises the file instead of leaving a recorder running.
+    startRecording();
 
     // 1. pointer and click
     const press = { x: 700, y: 460 };
     let since = await clean();
     tapDesktop(press);
-    let clicked = [];
-    for (let i = 0; i < 50 && clicked.length < 2; i++) { await sleep(100); clicked = (await page.evaluate('clicks')).slice(since); }
+    const clicked = await until('a tap on the phone is one click on the desktop',
+        async () => (await page.evaluate('clicks')).slice(since), (seen) => seen.length >= 2);
     assert.deepEqual(clicked.map((click) => click.type), ['mousedown', 'mouseup'], `a tap on the phone is one click on the desktop: ${JSON.stringify(clicked)}`);
     assert(within(clicked[0], press) && clicked[0].button === 0, `the click lands under the finger: ${JSON.stringify(clicked[0])}`);
     await step('01-click', `tap → mousedown+mouseup at desktop (${clicked[0].x}, ${clicked[0].y})`);
@@ -908,8 +938,8 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     const to = { x: Math.round(lineRight) - 6, y: from.y };
     since = await clean();
     pointerSteps(udid, [{ action: IPAD ? 'drag' : 'dragTouch', ...screenPoint(from), toX: screenPoint(to).x, toY: screenPoint(to).y }]);
-    await sleep(500);
-    const dragged = (await page.evaluate('pointer')).slice(since);
+    const dragged = await until('the finger dragging over the line arrived as a drag',
+        async () => (await page.evaluate('pointer')).slice(since), (seen) => seen.some((event) => event.type === 'mouseup' && event.button === 0));
     writeFileSync(join(out, 'step-02-drag-events.json'), JSON.stringify(dragged, null, 1));
     const held = dragged.filter((event) => event.type === 'mousemove' && (event.buttons & 1) === 1);
     const dragDown = dragged.find((event) => event.type === 'mousedown' && event.button === 0);
@@ -923,8 +953,13 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // 3. two fingers scroll the desktop; a one finger would pan the picture
     since = await clean();
     pointerSteps(udid, [{ action: 'scrollTwo', ...screenPoint({ x: 700, y: 300 }), dy: 220 }]);
-    const wheels = (await page.evaluate('pointer')).slice(since).filter((event) => event.type === 'wheel');
-    const total = wheels.reduce((sum, event) => sum + event.dy, 0);
+    // The wheel arrives as a burst the finger is still making, so it is read
+    // until the whole gesture has turned the wheel, not sampled once.
+    const wheelDelta = (seen) => seen.filter((event) => event.type === 'wheel').reduce((sum, event) => sum + event.dy, 0);
+    const scrolled = await until("two fingers turn the desktop's wheel",
+        async () => (await page.evaluate('pointer')).slice(since), (seen) => Math.abs(wheelDelta(seen)) >= 100);
+    const wheels = scrolled.filter((event) => event.type === 'wheel');
+    const total = wheelDelta(scrolled);
     assert(wheels.length > 0 && Math.abs(total) >= 100, `two fingers turn the desktop's wheel: ${wheels.length} wheel events, deltaY ${total}`);
     await step('03-scroll', `two-finger scroll → ${wheels.length} wheel events, deltaY ${total}`);
 
@@ -936,8 +971,8 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     const mirrorBefore = await page.evaluate('document.getElementById("typed").textContent');
     since = await clean();
     mac(`axe type 'desklink' --udid ${udid}`);
-    let typed = padBefore;
-    for (let i = 0; i < 50 && typed === padBefore; i++) { await sleep(200); typed = await page.evaluate('document.getElementById("pad").value'); }
+    const typed = await until('what the phone typed reached the desktop\'s field',
+        () => page.evaluate('document.getElementById("pad").value'), (seen) => seen !== padBefore);
     assert(typed === 'desklink', `what the phone typed is in the desktop's field, once: ${JSON.stringify(typed)}`);
     // The page's own key log is the truth about delivery: one keydown per
     // character, and the page's mirror untouched because the field took them.
@@ -951,25 +986,24 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // 5. sticky modifiers: latch, chord, release
     await clean();
     mac(`axe tap --id desklink-key-Control --udid ${udid}`);
-    assert.equal((await waitForId(udid, 'desklink-key-Control', 'latched')).value, 'latched', 'one tap arms Ctrl');
+    const ctrlValue = (want) => until(`the phone's screen never showed Control as ${want}`,
+        () => byId(udid, 'desklink-key-Control'), (seen) => seen.value === want);
+    assert.equal((await ctrlValue('latched')).value, 'latched', 'one tap arms Ctrl');
     since = await page.evaluate('keys.length');
     mac(`axe key 4 --udid ${udid}`);
-    let chorded = [];
-    for (let i = 0; i < 50 && !chorded.some((key) => key.type === 'keyup' && key.key === 'a'); i++) {
-        await sleep(100);
-        chorded = (await page.evaluate('keys')).slice(since);
-    }
+    const chorded = await until('Ctrl then A reached the desktop',
+        async () => (await page.evaluate('keys')).slice(since), (seen) => seen.some((key) => key.type === 'keyup' && key.key === 'a'));
     const chordDown = chorded.find((key) => key.type === 'keydown' && key.key === 'a');
     assert(chordDown?.ctrl, `Ctrl then A reaches the desktop as Control+A: ${JSON.stringify(chorded)}`);
     assert(chorded.some((key) => key.type === 'keyup' && key.key === 'a'), 'the chorded key is released, not left held');
     assert.equal(await page.evaluate('document.title'), 'Notes',
         'the desktop is still the page the phone was driving, chord and all');
-    assert.equal((await waitForId(udid, 'desklink-key-Control', 'off')).value, 'off', 'the latch clears after the one key it was armed for');
+    assert.equal((await ctrlValue('off')).value, 'off', 'the latch clears after the one key it was armed for');
     mac(`axe tap --id desklink-key-Control --udid ${udid}; axe tap --id desklink-key-Control --udid ${udid}`);
-    assert.equal((await waitForId(udid, 'desklink-key-Control', 'locked')).value, 'locked', 'a second tap locks Ctrl');
+    assert.equal((await ctrlValue('locked')).value, 'locked', 'a second tap locks Ctrl');
     await step('05-sticky-modifier', 'Ctrl latched → next key sent as Control+A → latch cleared; two taps lock it');
     mac(`axe tap --id desklink-key-Control --udid ${udid}`);
-    await waitForId(udid, 'desklink-key-Control', 'off');
+    await ctrlValue('off');
 
     // 6. the desktop's clipboard comes over to the phone
     // The page may have moved under an earlier scroll, so aim at where the
@@ -977,18 +1011,15 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     const buttonSpot = await page.evaluate('(() => { const box = document.getElementById("copy-out").getBoundingClientRect(); return { x: box.left + box.width / 2, y: box.top + box.height / 2 }; })()');
     since = await clean();
     tapDesktop(buttonSpot);
-    let clickedOnButton = [];
-    for (let i = 0; i < 30 && clickedOnButton.length < 2; i++) { await sleep(100); clickedOnButton = (await page.evaluate('clicks')).slice(since); }
+    const clickedOnButton = await until('the tap on the copy button reached the desktop',
+        async () => (await page.evaluate('clicks')).slice(since), (seen) => seen.length >= 2);
     assert.equal(await page.evaluate('window.copied'), 'select this line',
         `the page put its selection on the desktop clipboard: ${await page.evaluate('window.copyAttempts ?? 0')} clicks on the button, ${JSON.stringify(clickedOnButton)} at the tap`);
     mac(`axe tap --id desklink-copy --udid ${udid}`);
     // The phone confirms the transfer with a pill on its own screen; the
     // simulator shares the Mac's pasteboard, so that pill is the phone's proof.
-    let pill = '';
-    for (let i = 0; i < 30 && !pill.includes('select this line'); i++) {
-        await sleep(120);
-        pill = visibleText(udid).find((text) => text.startsWith('Copied to phone')) ?? '';
-    }
+    const pill = await until('the phone\'s screen confirmed the desktop\'s clipboard',
+        async () => visibleText(udid).find((text) => text.startsWith('Copied to phone')) ?? '', (seen) => seen.includes('select this line'));
     assert(pill.includes('select this line'), `the phone's own screen confirms the desktop's clipboard and its text: ${JSON.stringify(pill)}; on screen now: ${JSON.stringify(visibleText(udid))}`);
     await step('06-clipboard-out', `desktop → phone, confirmed on screen: ${pill}`);
 
@@ -1002,22 +1033,22 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // The confirmation pill lives about a second and a half, so poll for it and
     // for the system's own paste consent in the same breath: the grant is to
     // the app under test, on this task's simulator, and to nothing else.
-    let sent = '';
     let allowed = false;
-    for (let i = 0; i < 30 && !sent.includes('select this line'); i++) {
-        await sleep(120);
+    const screenAllowingPaste = async () => {
         const texts = visibleText(udid);
-        sent = texts.find((text) => text.startsWith('Sent to desktop')) ?? '';
-        if (sent === '' && !allowed && texts.includes('Allow Paste')) {
+        if (!allowed && texts.includes('Allow Paste')) {
             mac(`axe tap --label "Allow Paste" --udid ${udid}`);
             allowed = true;
             log('allowed the app under test its own paste prompt on this simulator');
         }
-    }
+        return texts;
+    };
+    const sent = await until('the phone\'s screen confirmed what it sent to the desktop',
+        async () => (await screenAllowingPaste()).find((text) => text.startsWith('Sent to desktop')) ?? '', (seen) => seen.includes('select this line'));
     assert(sent.includes('select this line'), `the phone's own screen confirms what it sent: ${JSON.stringify(sent)}; on screen now: ${JSON.stringify(visibleText(udid))}`);
     mac(`axe key-combo --modifiers 224 --key 25 --udid ${udid}`);
-    let pastes = [];
-    for (let i = 0; i < 40 && pastes.length === 0; i++) { await sleep(250); pastes = await page.evaluate('window.pastes'); }
+    const pastes = await until('the desktop pasted the phone\'s clipboard',
+        () => page.evaluate('window.pastes'), (seen) => seen.length > 0);
     assert.equal(pastes.at(-1)?.text, 'select this line', `the desktop pasted the phone's clipboard: ${JSON.stringify(pastes)}`);
     const filled = await page.evaluate('document.getElementById("pad").value');
     assert(filled.endsWith('select this line'), `the desktop's field holds the phone's text: ${JSON.stringify(filled)}`);
@@ -1030,8 +1061,8 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // A finger travelling over bare paper, so the mark is read over clean
     // background: the press paints its dot 200 desktop pixels away.
     pointerSteps(udid, [{ action: 'dragTouch', ...screenPoint({ x: 700, y: 460 }), toX: screenPoint({ x: 900, y: 300 }).x, toY: screenPoint({ x: 900, y: 300 }).y }]);
-    await sleep(600);
-    const travelled = (await page.evaluate('pointer')).slice(since).filter((event) => event.x !== undefined);
+    const travelled = await until('a finger travelling over the picture arrived on the desktop',
+        async () => (await page.evaluate('pointer')).slice(since).filter((event) => event.x !== undefined), (seen) => seen.length > 0);
     assert(travelled.length > 0, `a finger travelling over the picture carries the desktop's pointer: ${JSON.stringify(travelled)}`);
     const landed = travelled.at(-1);
     assert(within(landed, { x: 900, y: 300 }), `the pointer ends where the finger did: ${JSON.stringify(landed)}`);
@@ -1083,7 +1114,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     }, null, 1));
     await step('08-pointer-arrow', `arrow over bare paper: ${widthsPt[0].toFixed(1)} pt at the tip, ${widest.toFixed(1)} pt at its widest, tip ${(tipPt.x - tip.x).toFixed(1)}/${(tipPt.y - tip.y).toFixed(1)} pt from the desktop pointer`);
 
-    mac(`kill -INT "$(cat "$D/tmp/record.pid")" 2>/dev/null || true; sleep 2`);
+    stopRecording();
     assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${DIR}/tmp/phone-control.mp4`, join(out, 'phone-control.mp4')]).status, 0,
         'copy the screen recording back');
     writeFileSync(join(out, 'phone-control.json'), JSON.stringify({ device: seen.frame, udid, steps, recording: 'phone-control.mp4' }, null, 1));
