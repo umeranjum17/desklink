@@ -358,8 +358,13 @@ Xcode has no simulator platform, point `DESKLINK_IOS_XCODE` at one that does;
 script's header lists the other settings. To capture the cursor tip proof, set
 `DESKLINK_IOS_POINTER_PROOF=before` or `after`; the run writes a 4x crop, device
 frame, proof metadata, and host click log under `DESKLINK_IOS_OUT`. Set
-`DESKLINK_IOS_APP` to reuse an app bundle under `DESKLINK_IOS_DIR` when running
-with `DESKLINK_IOS_SKIP_BUILD=1`. Run once with `before` before the change and
+`DESKLINK_IOS_APP` to reuse an app bundle under the lane's directory when
+running with `DESKLINK_IOS_SKIP_BUILD=1`. `DESKLINK_IOS_DIR` is the shared Mac
+lab root (`fm-desklink-ios`) and `DESKLINK_IOS_LANE` names this lane's own
+subdirectory within it; the run deletes that subdirectory and nothing else when
+it finishes, so two lanes can build at once without one cleanup deleting the
+other's build. Set `DESKLINK_IOS_KEEP=1` to keep it. Run once with `before`
+before the change and
 once with `after` after it, on both iPhone and iPad simulators, to compare the
 pointer crop and verify the host click is within two desktop pixels of the tip.
 To try the example by hand against any bridge:
