@@ -182,15 +182,15 @@ Start the bridge where the phone can reach it, on a private network:
 npx @desklink/host bridge --listen 0.0.0.0:19400
 ```
 
-Then make a new Expo app on SDK 55, the SDK the receiver is built and tested
-against. One `expo install` adds the view, its WebRTC binding, the
+Then make a new Expo app (SDK 57 today; SDK 55 and later are supported). One
+`expo install` adds the view, its WebRTC binding, the
 [`@byokit/signaling`](https://www.npmjs.com/package/@byokit/signaling)
 WebSocket adapter for the bridge, and both config plugins to `app.json`:
 
 ```sh
-npx create-expo-app@latest desklink-quickstart --template blank-typescript@sdk-55
+npx create-expo-app@latest desklink-quickstart --template blank-typescript
 cd desklink-quickstart
-npx expo install @desklink/react-native react-native-webrtc @config-plugins/react-native-webrtc@14 @byokit/signaling@0.1.0
+npx expo install @desklink/react-native react-native-webrtc @config-plugins/react-native-webrtc@15 @byokit/signaling@0.1.0
 ```
 
 Replace `App.tsx` with this, putting in the computer's address and the token
