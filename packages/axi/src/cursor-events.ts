@@ -39,6 +39,6 @@ export class CursorEventBuffer {
 
 export function formatCursorSamples(samples: CursorSample[], dropped: number): string {
   return samples.length
-    ? `cursor[${samples.length}] dropped:${dropped} {sessionId,x,y,visible,timestamp_us}:\n${samples.map(sample => `  ${JSON.stringify(sample)}`).join('\n')}`
+    ? `cursor[${samples.length}] dropped:${dropped} {sessionId,x,y,visible,timestamp_us,hotspot?}:\n${samples.map(sample => `  ${JSON.stringify(sample)}`).join('\n')}`
     : `cursor: no pending samples; dropped:${dropped}`;
 }
