@@ -235,8 +235,7 @@ function visibleNodes(udid) {
             texts: [...said, ...mine.map((entry) => entry.text)],
         };
     };
-    const tree = JSON.parse(mac(`axe describe-ui --udid ${udid}`));
-    if (process.env.DESKLINK_IOS_TREE) writeFileSync(process.env.DESKLINK_IOS_TREE, JSON.stringify(tree, null, 1));
+    const tree = describeTree(udid);
     for (const root of tree) entries.push(...walk(root).entries);
     // React Native hands the accessibility tree a wrapper and its inner text
     // node at the same frame in the same process: one word on the phone's
@@ -252,6 +251,18 @@ function visibleNodes(udid) {
 
 const visibleText = (udid) => visibleNodes(udid).map((entry) => entry.text);
 
+function describeTree(udid) {
+    let last = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            const tree = JSON.parse(mac(`axe describe-ui --udid ${udid}`));
+            if (process.env.DESKLINK_IOS_TREE) writeFileSync(process.env.DESKLINK_IOS_TREE, JSON.stringify(tree, null, 1));
+            return tree;
+        } catch (error) { last = error; }
+    }
+    throw last;
+}
+
 /** Whichever array of nodes an axe tree node carries its children under. */
 function kidsOf(node) {
     return Object.values(node).find((value) => Array.isArray(value) && value.length > 0 && value.every((item) => item && typeof item === 'object')) ?? [];
@@ -259,8 +270,7 @@ function kidsOf(node) {
 
 /** The hidden accessibility status the app exposes as `testID="desklink-status"`, and the screen's size in points. */
 function screen(udid) {
-    const tree = JSON.parse(mac(`axe describe-ui --udid ${udid}`));
-    if (process.env.DESKLINK_IOS_TREE) writeFileSync(process.env.DESKLINK_IOS_TREE, JSON.stringify(tree, null, 1));
+    const tree = describeTree(udid);
     let status = null;
     const walk = (node) => {
         if (node.AXUniqueId === 'desklink-status') status = node.AXLabel ?? node.AXValue ?? '';
@@ -272,8 +282,7 @@ function screen(udid) {
 
 /** The accessibility value the simulator's own screen carries for one identifier. */
 function byId(udid, id) {
-    const tree = JSON.parse(mac(`axe describe-ui --udid ${udid}`));
-    if (process.env.DESKLINK_IOS_TREE) writeFileSync(process.env.DESKLINK_IOS_TREE, JSON.stringify(tree, null, 1));
+    const tree = describeTree(udid);
     let found = null;
     const walk = (node) => {
         if (node.AXUniqueId === id) found = { label: node.AXLabel ?? null, value: node.AXValue ?? null };
