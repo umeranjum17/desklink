@@ -2,6 +2,8 @@ node_modules
 dist/
 *.tsbuildinfo
 packages/desktop-host/engine/target/
+# Gradle output written into the published package when the example app builds it.
+packages/desktop-client/android/build/
 .review-target/
 # release/build-engine.sh output and release/pack.mjs tarballs
 dist-desklink/
