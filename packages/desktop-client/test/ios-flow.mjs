@@ -476,6 +476,9 @@ let xvfbPid = 0; let xvfb; let pagePid = 0; let bridgePid = 0; let enginePid = 0
 let relay = null; let page = null; let udid = null; let codec = null; let temporarySimulator = false;
 
 async function cleanup() {
+    try {
+        if (udid !== null) mac(`kill -INT "$(cat "$D/tmp/record.pid")" 2>/dev/null || true`);
+    } catch (error) { log('recording cleanup:', error.message); }
     if (udid !== null && temporarySimulator) {
         try {
             mac(`xcrun simctl terminate ${udid} ${BUNDLE} || true; xcrun simctl shutdown ${udid} || true; xcrun simctl delete ${udid}`);
@@ -908,8 +911,11 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     const to = { x: Math.round(lineRight) - 6, y: from.y };
     since = await clean();
     pointerSteps(udid, [{ action: IPAD ? 'drag' : 'dragTouch', ...screenPoint(from), toX: screenPoint(to).x, toY: screenPoint(to).y }]);
-    await sleep(500);
-    const dragged = (await page.evaluate('pointer')).slice(since);
+    let dragged = [];
+    for (let i = 0; i < 50 && !dragged.some((event) => event.type === 'mouseup' && event.button === 0); i++) {
+        await sleep(100);
+        dragged = (await page.evaluate('pointer')).slice(since);
+    }
     writeFileSync(join(out, 'step-02-drag-events.json'), JSON.stringify(dragged, null, 1));
     const held = dragged.filter((event) => event.type === 'mousemove' && (event.buttons & 1) === 1);
     const dragDown = dragged.find((event) => event.type === 'mousedown' && event.button === 0);
@@ -923,7 +929,11 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // 3. two fingers scroll the desktop; a one finger would pan the picture
     since = await clean();
     pointerSteps(udid, [{ action: 'scrollTwo', ...screenPoint({ x: 700, y: 300 }), dy: 220 }]);
-    const wheels = (await page.evaluate('pointer')).slice(since).filter((event) => event.type === 'wheel');
+    let wheels = [];
+    for (let i = 0; i < 50 && wheels.length === 0; i++) {
+        await sleep(100);
+        wheels = (await page.evaluate('pointer')).slice(since).filter((event) => event.type === 'wheel');
+    }
     const total = wheels.reduce((sum, event) => sum + event.dy, 0);
     assert(wheels.length > 0 && Math.abs(total) >= 100, `two fingers turn the desktop's wheel: ${wheels.length} wheel events, deltaY ${total}`);
     await step('03-scroll', `two-finger scroll → ${wheels.length} wheel events, deltaY ${total}`);
@@ -979,7 +989,9 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     tapDesktop(buttonSpot);
     let clickedOnButton = [];
     for (let i = 0; i < 30 && clickedOnButton.length < 2; i++) { await sleep(100); clickedOnButton = (await page.evaluate('clicks')).slice(since); }
-    assert.equal(await page.evaluate('window.copied'), 'select this line',
+    let copied = null;
+    for (let i = 0; i < 50 && copied !== 'select this line'; i++) { await sleep(100); copied = await page.evaluate('window.copied'); }
+    assert.equal(copied, 'select this line',
         `the page put its selection on the desktop clipboard: ${await page.evaluate('window.copyAttempts ?? 0')} clicks on the button, ${JSON.stringify(clickedOnButton)} at the tap`);
     mac(`axe tap --id desklink-copy --udid ${udid}`);
     // The phone confirms the transfer with a pill on its own screen; the
@@ -1030,8 +1042,11 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // A finger travelling over bare paper, so the mark is read over clean
     // background: the press paints its dot 200 desktop pixels away.
     pointerSteps(udid, [{ action: 'dragTouch', ...screenPoint({ x: 700, y: 460 }), toX: screenPoint({ x: 900, y: 300 }).x, toY: screenPoint({ x: 900, y: 300 }).y }]);
-    await sleep(600);
-    const travelled = (await page.evaluate('pointer')).slice(since).filter((event) => event.x !== undefined);
+    let travelled = [];
+    for (let i = 0; i < 50 && !travelled.some((event) => within(event, { x: 900, y: 300 })); i++) {
+        await sleep(100);
+        travelled = (await page.evaluate('pointer')).slice(since).filter((event) => event.x !== undefined);
+    }
     assert(travelled.length > 0, `a finger travelling over the picture carries the desktop's pointer: ${JSON.stringify(travelled)}`);
     const landed = travelled.at(-1);
     assert(within(landed, { x: 900, y: 300 }), `the pointer ends where the finger did: ${JSON.stringify(landed)}`);
