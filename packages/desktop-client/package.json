@@ -30,7 +30,7 @@
     ],
     "peerDependencies": {
         "expo": ">=55",
-        "expo-modules-core": ">=55",
+        "expo-modules-core": ">=55 <56",
         "react": ">=19",
         "react-native": ">=0.83",
         "react-native-webrtc": ">=124"

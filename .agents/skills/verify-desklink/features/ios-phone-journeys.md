@@ -100,6 +100,28 @@ cleans it.
 
 ## Gotchas
 
+- **An iPad simulator needs a clean `npm install` after the SDK moves.** The
+  package peers `expo-modules-core`, and npm resolves that peer on its own: left
+  unbounded it hoists a newer major than the SDK uses, whose podspec asks for a
+  higher iOS than the app's deployment target, and `pod install` then fails with
+  `Unable to find a specification for ExpoModulesCore depended upon by ExpoAsset`.
+  The peer is pinned to the SDK line for this reason; if a machine's
+  `node_modules` predates that, delete `package-lock.json`,
+  `node_modules/.package-lock.json` and `node_modules/expo-modules-core` before
+  installing again, or npm keeps the hoisted copy it already resolved.
+- **XCUITest's synthesized touch is not in screen points on an iPad simulator.**
+  The flow addresses the device in screen points, and `axe tap` honours that
+  exactly: a tap at (77.1, 224.2) pt on an 820x1180 pt screen lands on the
+  desktop's (120, 299). The same point synthesized by
+  `test/ios-pointer/` through `XCSynthesizedEventRecord` lands on (120, 349) -
+  one status-bar inset lower, measured on the desktop's own page. Every
+  XCUITest step (the drags, the two-finger scroll, the pointer mark) therefore
+  misses by that inset on an iPad simulator, while the same steps pass on an
+  iPhone. The steps before it - the live picture, its fit, the caret that proves
+  it advances, `axe` taps and the diagnostics-free screen - all hold on the iPad.
+  Until that offset is accounted for, `DESKLINK_IOS_IPAD=1` cannot complete on an
+  iPad simulator; `DESKLINK_IOS_DEVICE=<iPad>` without it is the iPad run.
+
 - **A chord goes to the desktop, and the desktop reacts.** `Control+J` is Chrome's
   Downloads: the lab desktop navigates away and every later step sees a different
   page. Use a chord with no host binding, and assert the page is still there.
