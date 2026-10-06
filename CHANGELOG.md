@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.5.2
+
+Patch release of `@desklink/host`, `@desklink/host-linux-x64-gnu`,
+`@desklink/host-darwin-arm64`, `@desklink/react-native` and `@desklink/axi`.
+The changes are in the React Native receiver; the host and AXI move to 0.5.2
+only to keep the five packages on one version. The protocol is unchanged at
+version 3.
+
+### Fixed
+
+- **The tapped field stays above the iOS keyboard.** On iOS the picture never
+  moved when the keyboard came up, and the whole keyboard height counted as
+  covered, so a field low on the desktop, tapped with the phone on its side,
+  ended up behind the keyboard. The receiver now measures what the keyboard
+  really covers and moves the picture so the pointer, where the tap put the
+  caret, stays in sight, as Android already did.
+  [PR112](https://github.com/umeranjum17/desklink/pull/112)
+- **Live means the picture is moving.** A session whose video stopped while
+  signalling stayed up kept reporting `live` over a frozen picture. It now
+  drops to `reconnecting` after two seconds without frames and returns to
+  `live` when frames move again.
+  [PR108](https://github.com/umeranjum17/desklink/pull/108)
+
+### Added
+
+- **A desktop over a TCP-only path.** `session.loopbackTcp` forwards the
+  engine's `loopback_tcp` mode, so a phone whose only route to the computer is
+  a tunnel or `adb reverse` gets a picture. A connection that shows no frame
+  within 20 s fails with that reason instead of sitting on an empty view.
+  [PR106](https://github.com/umeranjum17/desklink/pull/106)
+
+### Known issues and limits
+
+- Everything 0.5.1 listed under *Known issues and limits* still applies.
+- The iOS keyboard fix was proven on an iOS simulator against an Expo SDK 55
+  app; the lab's Xcode could not build Expo SDK 57.
+
+### Install
+
+```sh
+npm install @desklink/host@0.5.2
+npm install @desklink/react-native@0.5.2
+npm install --global @desklink/axi@0.5.2
+```
+
+The host selects its exact-version optional native package automatically.
+
 ## 0.5.1
 
 Patch release of `@desklink/host`, `@desklink/host-linux-x64-gnu`,
