@@ -834,12 +834,12 @@ const quickstartJourney = async () => {
         const scaffold = spawnSync('npx', ['-y', 'create-expo-app@latest', quickstart, '--template', 'blank-typescript'],
             { encoding: 'utf8', timeout: 600000 });
         assert.equal(scaffold.status, 0, `could not scaffold ${quickstart}: ${(scaffold.stderr ?? scaffold.stdout ?? '').slice(-400)}`);
-        if (packageSource !== 'repo') {
-            const installedPackages = spawnSync('npx', ['expo', 'install', '@desklink/react-native', 'react-native-webrtc',
-                '@config-plugins/react-native-webrtc@15', '@byokit/signaling@0.1.0'],
-                { cwd: quickstart, env, encoding: 'utf8', timeout: 600000 });
-            assert.equal(installedPackages.status, 0, `could not install the published packages: ${(installedPackages.stderr ?? installedPackages.stdout ?? '').slice(-400)}`);
-        }
+    }
+    if (packageSource !== 'repo' && !existsSync(join(quickstart, 'node_modules', '@desklink', 'react-native', 'package.json'))) {
+        const installedPackages = spawnSync('npx', ['expo', 'install', '@desklink/react-native', 'react-native-webrtc',
+            '@config-plugins/react-native-webrtc@15', '@byokit/signaling@0.1.0'],
+            { cwd: quickstart, env, encoding: 'utf8', timeout: 600000 });
+        assert.equal(installedPackages.status, 0, `could not install the published packages: ${(installedPackages.stderr ?? installedPackages.stdout ?? '').slice(-400)}`);
     }
     writeFileSync(join(quickstart, 'App.tsx'), quickstartApp(`ws://127.0.0.1:${wirePort}/desktop?token=${token}`));
     // `published` is what a new user gets from npm. `repo` installs this
