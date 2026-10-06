@@ -127,6 +127,8 @@ interface WebSession {
     chordsDown: Set<string>;
     /** Re-measure what the keyboard covers; null until a surface is attached. */
     followKeyboard: (() => void) | null;
+    /** Whether the first frame was already reported; renegotiation must not re-mark a stale picture. */
+    presented: boolean;
     /** Candidates that arrived before the offer; applied once it is set. */
     remoteDescriptionSet: boolean;
     pendingCandidates: RTCIceCandidateInit[];
@@ -960,6 +962,7 @@ export const nativeDesklink: NativeDesklinkModule = {
             compositionSent: '',
             composing: false,
             chordsDown: new Set<string>(),
+            presented: false,
             remoteDescriptionSet: false,
             pendingCandidates: [],
             detach: null,
@@ -982,6 +985,12 @@ export const nativeDesklink: NativeDesklinkModule = {
             // track and produce nothing.
             const presented = (): void => {
                 if (sessions.get(id) !== session) return;
+                // Readiness is the first frame. Renegotiation re-fires ontrack
+                // and the compositor repaints the frame it already holds, and a
+                // repaint is not a new frame: a second mark would read a stale
+                // picture as live and reset the recovery budget mid-outage.
+                if (session.presented) return;
+                session.presented = true;
                 video.style.opacity = '1';
                 emit(id, 'presented', {});
             };
