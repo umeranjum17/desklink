@@ -630,9 +630,12 @@ async function main() {
         // frozen picture under it. That is a real finding about the product, not
         // something to paper over by asserting either way; see the report.
         const settled = await sample();
+        const bufferedFramesAfterCut = typeof settled.decoded === 'number' && typeof held.decoded === 'number'
+            ? settled.decoded - held.decoded
+            : null;
         log(`cut: still answering ${Date.now() - cutAt}ms in, status ${aliveDuringCut.status}, `
             + `${forwardedDuringCut} datagrams forwarded, ${link.counters.discarded - discardedBeforeCut} discarded, `
-            + `${settled.decoded - held.decoded} more frames decoded than when it was noticed`);
+            + `${bufferedFramesAfterCut} more frames decoded than when it was noticed`);
         receipt.stages.push({
             stage: 'dropped',
             noticedMs,
@@ -640,7 +643,7 @@ async function main() {
             statusAtEndOfCut: aliveDuringCut.status,
             datagramsForwardedDuringCut: forwardedDuringCut,
             datagramsDiscardedDuringCut: link.counters.discarded - discardedBeforeCut,
-            bufferedFramesAfterCut: settled.decoded - held.decoded,
+            bufferedFramesAfterCut,
             pageStillAnswering: true,
             pageErrors: 0,
             meanLuminance: round2(frozen.meanLuminance),
@@ -664,6 +667,7 @@ async function main() {
         assert(after.failure === null, `the session recovered with a failure recorded: ${JSON.stringify(after.failure)}`);
         assert(!after.log.some(([, status]) => status === 'ended'), `the session ended instead of recovering: ${JSON.stringify(after.log.slice(-12))}`);
         assert(afterSample.meanLuminance > 8, `the recovered picture is black: ${JSON.stringify(afterSample)}`);
+        assert.equal(after.opens, 1, `the recovery opened a new session instead of healing the same one: ${after.opens} opens`);
         // The fixture's marker moves. A picture that is showing the desktop
         // again has that marker alive; a stale last frame cannot.
         await until(
