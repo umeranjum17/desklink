@@ -117,7 +117,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run build --workspace @desklink/host
+      # The whole published set, so the install proof below packs what ships.
+      - run: npm run build
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -155,6 +156,13 @@ jobs:
         run: npx vitest run packages/desktop-host/src/resolveEngine.spec.ts packages/desktop-host/src/engineProcess.windows.spec.ts
       - name: Windows Node resolver and serve handshake via the published API (no desktop access)
         run: node packages/desktop-host/test/windows-resolver.mjs
+        env:
+          DESKLINK_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/x86_64-pc-windows-msvc/debug/desklink-host.exe
+      # A consumer installs the published packages into an empty project and
+      # starts the engine. Installation and startup on a hosted machine only:
+      # capture, input, encoding quality and the desktop stay with the rig lanes.
+      - name: Windows clean-project install of the packed packages, then engine startup
+        run: node packages/desktop-host/test/windows-install.mjs
         env:
           DESKLINK_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/x86_64-pc-windows-msvc/debug/desklink-host.exe
 
