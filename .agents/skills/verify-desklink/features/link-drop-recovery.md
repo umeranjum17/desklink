@@ -50,7 +50,7 @@ vite page built from the client's **own** `useDesktopSession` plus
 |---|---|
 | live | `status: live`, frames advancing, decoded picture not black |
 | throttled | 400 ms added per datagram; the relay's own delayed-datagram count grows, the frame rate drops, the picture stays up, the session stays live |
-| dropped | every datagram discarded; `reconnecting` within seconds, no new frames, the page still answers, no page error, the last picture still on screen |
+| dropped | every datagram discarded; `reconnecting` within seconds, the relay forwarded zero datagrams while discarding traffic, the page still answers with the last picture held, no page error |
 | recovered | frames advance again, status `live` again, the fixture's moving marker moves again, and a pointer the page sends is reported by the desktop itself |
 
 ## Gotchas
