@@ -66,7 +66,25 @@ vite page built from the client's **own** `useDesktopSession` plus
   with a small stickiness so two live sockets do not flap.
 - Advertise exactly one candidate per peer per session. Two remote candidates
   make the engine run two browser sockets at once and nothing settles.
-- Expect recovery through a session *reopen*, not an in-session ICE restart: the
-  engine's own consent takes about 30 s to declare a silent path lost, so a cut
-  shorter than that always ends in a reopen. That is the client's designed path,
-  not a defect — but a report must not claim an ICE restart healed it.
+- What a cut heals through, measured: with the link cut and then restored, the
+  receipt shows `sessionOpens: 1` and frames advancing again about half a second
+  after forwarding resumed — the same session coming back, not a reopen. A
+  claim that a cut *always* ends in a session reopen is wrong and came from an
+  earlier, faulty measurement (see below); do not repeat it.
+- **Do not claim more mechanism than the evidence supports.** The flow asserts
+  what the receipt shows: the status left `live`, the relay forwarded zero
+  datagrams while discarding traffic, frames advanced again on the *same*
+  session, and control worked. It does not assert which internal mechanism
+  produced that — it never counts `session.restart_ice` calls. Say "the same
+  session came back", and leave the mechanism to the client's own README.
+- The client's README describes a restart-with-backoff path that spans about a
+  minute. That is the client's general behaviour and is **not** what this
+  journey measures: an 8 s cut here heals far faster than that schedule, so the
+  two documents are about different situations and neither contradicts the
+  other. Do not "fix" the README to match this page, or the reverse.
+- Measure a cut at the relay, never in the browser. A renderer keeps presenting
+  frames it already holds for a while after the last datagram arrives, so a
+  frame counter read through a cut measures the jitter buffer, not the link —
+  and that is how an earlier version of this flow "passed" a cut while counting
+  ~65 frames of pure buffer. It also made a healthy recovery look like a 27 s
+  session reopen, which is the wrong claim this page used to carry.
