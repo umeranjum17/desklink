@@ -49,10 +49,20 @@
  *
  *   ANDROID_SERIAL          the physical device (never an emulator)
  *   DESKLINK_ANDROID_HOST   this machine's address on the device's network
+ *   DESKLINK_QUICKSTART_DIR  where the README quickstart app is created
+ *                            (default ~/.cache/desklink-quickstart; created
+ *                            from the published packages on the first run)
  *   DESKLINK_ENGINE         engine binary (default: a release build)
  *   DESKLINK_G2G_STAMP      stamp_target binary (default: a release build)
  *   DESKLINK_ANDROID_OUT    evidence directory (default a fresh one under ~/lab-tmp)
  *   DESKLINK_ANDROID_SKIP_BUILD 1 reuses the APK the last run built
+ *
+ * `--journey quickstart` runs the README's own phone journey instead of the J4
+ * measurement: a fresh `create-expo-app` with the published `@desklink/*` and
+ * `@byokit/signaling` packages, the published `npx @desklink/host bridge`, one
+ * connect and one real tap, with the phone's screen recorded throughout. The
+ * desktop it shows is a window on the private X display whose button counts its
+ * own clicks on this host, so "the tap reached the desktop" is the host's count.
  */
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -88,8 +98,16 @@ const example = join(repo, 'packages/desktop-client/example');
 const apk = join(example, 'android/app/build/outputs/apk/debug/app-debug.apk');
 const claim = claimPrivateDisplay({ from: 170, count: 40 });
 const display = claim.display;
+// `latency` is the J4 measurement this harness was built for. `quickstart` is
+// the README journey: published packages only, one connect, one real tap.
+const journey = arg('journey', 'latency');
+// The quickstart app is a fresh project outside this checkout, kept in the
+// cache so a retry does not re-download the published packages.
+const quickstart = resolve(process.env.DESKLINK_QUICKSTART_DIR ?? join(homedir(), '.cache', 'desklink-quickstart'));
 const host = process.env.DESKLINK_ANDROID_HOST;
-assert(host, 'set DESKLINK_ANDROID_HOST to this machine\'s address on the phone\'s network');
+if (journey !== 'quickstart') {
+    assert(host, 'set DESKLINK_ANDROID_HOST to this machine\'s address on the phone\'s network');
+}
 const scenarios = arg('scenarios', 'typing,scroll').split(',').filter(Boolean);
 const fpsSeconds = Number(arg('fps-seconds', 12));
 const latencySeconds = Number(arg('latency-seconds', 30));
@@ -101,7 +119,11 @@ const transport = arg('transport', 'wifi');
 const relayRate = arg('relay-rate', null);
 // `--keep-captures` leaves the raw captures on the device for offline study.
 const keepCaptures = process.argv.includes('--keep-captures');
-const env = { ...process.env, WAYLAND_DISPLAY: '', TMPDIR: scratch, DESKLINK_ENGINE: engine };
+// The quickstart journey runs the published package, so it must not be handed
+// this checkout's engine path: the published launcher resolves its own prebuilt.
+const env = journey === 'quickstart'
+    ? { ...process.env, WAYLAND_DISPLAY: '', TMPDIR: scratch }
+    : { ...process.env, WAYLAND_DISPLAY: '', TMPDIR: scratch, DESKLINK_ENGINE: engine };
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 const load = () => {
     const [one, five, fifteen, idle] = readFileSync('/proc/loadavg', 'utf8').split(' ');
@@ -140,7 +162,7 @@ const adbTry = (...args) => spawnSync('adb', ['-s', serial, ...args],
 const adbBin = (...args) => spawnSync('adb', ['-s', serial, ...args], { encoding: 'buffer', timeout: 600000, maxBuffer: 256 * 1024 * 1024 });
 
 const children = [];
-let xvfb, bridge, metro, receiver, stampChild, relayPort;
+let xvfb, bridge, metro, receiver, stampChild, relayPort, xenv, bridgePort;
 const logs = { bridge: '', metro: '' };
 const receipt = {
     outcome: 'FAIL', serial, host, display, engine, engineSha256: null, stampBinary,
@@ -418,11 +440,104 @@ const startRelay = (upstreamPort, bitsPerSecond) => {
 };
 
 const reports = [];
-try {
-    for (const path of [engine, stampBinary]) assert(existsSync(path), `missing binary: ${path}: build the engine first`);
-    Object.assign(receipt, { engineSha256: hash(engine), stampSha256: hash(stampBinary), sourceHead: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim() });
+/** Every frame the phone and the bridge exchanged, for the evidence folder. */
+const wireLog = [];
+/** How many frames the recording takes. Each `screencap` on this phone is about 200 ms. */
+const RECORD_FRAMES = 400;
+/** The desktop the phone is given: a button whose clicks this host counts itself. */
+const FIXTURE_HTML = `<!doctype html><meta charset="utf-8"><title>desklink tap fixture</title>
+<style>html,body{margin:0;height:100%;background:#0f0f14;color:#fafafa;
+font:600 34px system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px}
+button{width:900px;height:400px;font-size:88px;border-radius:28px;border:8px solid #22d3ee;background:#0e7490;color:#fff}
+#n{font-size:72px}</style>
+<div>desklink phone tap fixture</div>
+<button id="hit">TAP ME</button>
+<div>desktop clicks: <span id="n">0</span></div>
+<script>let n=0;document.getElementById('hit').addEventListener('click',()=>{n+=1;
+document.getElementById('n').textContent=String(n);fetch('/tap').catch(()=>{})})</script>`;
 
-    // The host: a private Xvfb at 1080p, the stamp fixture and the bridge.
+/** The README's `App.tsx`, with only the bridge address and token filled in. */
+const quickstartApp = bridge => `import { useEffect } from 'react';
+import { Button, View } from 'react-native';
+import { authorizeBridge } from '@byokit/signaling';
+import { DesktopView, useDesktopSession } from '@desklink/react-native';
+
+const BRIDGE = '${bridge}';
+const authorize = authorizeBridge(BRIDGE, {});
+
+export default function App() {
+  const desktop = useDesktopSession({ authorize });
+  const { status, failure } = desktop.snapshot;
+  useEffect(() => desktop.setInputEnabled(status === 'live'), [status]);
+  return (
+    <View style={{ flex: 1, backgroundColor: 'black', paddingVertical: 48 }}>
+      <DesktopView sessionId={desktop.nativeId} style={{ flex: 1 }} />
+      {status !== 'live' && (
+        <Button title={failure ? \`Retry (\${failure.code})\` : status === 'idle' ? 'Connect' : status}
+          onPress={() => void desktop.connect()} />
+      )}
+    </View>
+  );
+}
+`;
+
+/** The published packages this quickstart app actually resolved. */
+const publishedVersions = dir => Object.fromEntries(Object.entries(JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).dependencies)
+    .filter(([name]) => /desklink|byokit|webrtc/.test(name)));
+
+/** One raw frame off the phone, with the picture band and a hash of its middle. */
+const phoneFrame = () => {
+    const { pixels, width, height } = capturePixels(adbBin('exec-out', 'screencap').stdout);
+    assert(width > 0 && pixels.length > 0, 'the phone returned no screen');
+    let hash = 0;
+    for (let y = Math.round(height * 0.3); y < Math.round(height * 0.7); y += 4) {
+        for (let x = Math.round(width * 0.2); x < Math.round(width * 0.8); x += 4) {
+            hash = (hash * 31 + pixels[(y * width + x) * 4]) >>> 0;
+        }
+    }
+    return { pixels, width, height, hash, band: pictureBand(pixels, width, height) };
+};
+
+/**
+ * The Connect control's own bounds, from the phone's accessibility tree, so
+ * the run taps what a user sees instead of a coordinate guessed in advance. The
+ * label is matched loosely: the platform renders a React Native Button's text
+ * in capitals.
+ */
+const uiBound = label => {
+    const dump = adbTry('shell', 'uiautomator dump /data/local/tmp/dl-ui.xml >/dev/null 2>&1; cat /data/local/tmp/dl-ui.xml').stdout ?? '';
+    const want = label.toLowerCase();
+    for (const [node] of dump.matchAll(/<node[^>]*>/g)) {
+        const text = /text="([^"]*)"/.exec(node)?.[1] ?? '';
+        const desc = /content-desc="([^"]*)"/.exec(node)?.[1] ?? '';
+        if (!`${text} ${desc}`.toLowerCase().includes(want)) continue;
+        const [, x0, y0, x1, y1] = /bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/.exec(node) ?? [];
+        if (x0 === undefined) continue;
+        return { label, found: `${text} ${desc}`.trim(), bounds: [Number(x0), Number(y0), Number(x1), Number(y1)], centerX: (Number(x0) + Number(x1)) / 2, centerY: (Number(y0) + Number(y1)) / 2 };
+    }
+    return null;
+};
+
+/** Wait until the phone's own screen carries the desktop picture. */
+const waitForLive = async (ms = 120000) => {
+    const from = Date.now();
+    let last = null;
+    while (Date.now() - from < ms) {
+        last = phoneFrame();
+        if (last.band !== null && last.band.bottom - last.band.top > 200) {
+            return { first_picture_ms: Date.now() - from, picture_band: last.band };
+        }
+        await sleep(1000);
+    }
+    throw new Error('the desktop never appeared on the phone screen');
+};
+
+/**
+ * The host, which both journeys share: a private Xvfb at 1080p and a bridge.
+ * The quickstart journey runs the published `npx @desklink/host` exactly as the
+ * README tells a new user to; the latency run keeps using this checkout.
+ */
+const hostLab = async () => {
     const authority = join(scratch, 'Xauthority');
     spawnSync('xauth', ['-f', authority, 'add', display, '.', randomBytes(16).toString('hex')]);
     xvfb = start('xvfb', 'Xvfb', [display, '-sigstop', '-noreset', '-auth', authority, '-screen', '0', '1920x1080x24', '-nolisten', 'tcp']);
@@ -431,17 +546,32 @@ try {
     await waitFor(() => state(xvfb.pid)?.includes('State:\tT'), 'Xvfb initialization');
     await verifyOwnedXvfb(xvfb);
     xvfb.kill('SIGCONT');
-    const xenv = { ...env, DISPLAY: display, XAUTHORITY: authority };
+    xenv = { ...env, DISPLAY: display, XAUTHORITY: authority };
 
     const probe = createServer();
     await new Promise(ok => probe.listen(0, '0.0.0.0', ok));
-    const bridgePort = probe.address().port;
+    bridgePort = probe.address().port;
     probe.close();
     receipt.bridgePort = bridgePort;
-    bridge = start('bridge', process.execPath,
-        ['packages/desktop-host/bin/desklink-host.mjs', 'bridge', '--source', 'x11', '--display', display, '--listen', `0.0.0.0:${bridgePort}`], xenv);
-    await waitFor(() => /^open\s+http/m.test(logs.bridge), 'the bridge URL');
+    // Over a reverse tunnel the bridge only has to answer on loopback; the
+    // Wi-Fi measurement asks for every interface, because the phone dials in.
+    const published = journey === 'quickstart';
+    bridge = start('bridge', published ? 'npx' : process.execPath, [
+        ...(published ? ['-y', '@desklink/host'] : ['packages/desktop-host/bin/desklink-host.mjs']), 'bridge',
+        '--source', 'x11', '--display', display,
+        '--listen', `${published ? '127.0.0.1' : '0.0.0.0'}:${bridgePort}`,
+    ], xenv, published ? scratch : repo);
+    await waitFor(() => /^open\s+http/m.test(logs.bridge), `the bridge URL: ${logs.bridge.slice(-300)}`);
     const token = /token[= ](\S+)/.exec(logs.bridge)[1];
+    receipt.bridge = published ? 'npx @desklink/host bridge (the published package)' : 'packages/desktop-host/bin/desklink-host.mjs bridge (this checkout)';
+    return token;
+};
+
+/** The J4 measurement: this checkout's example app against the stamp fixture. */
+const latencyJourney = async () => {
+    for (const path of [engine, stampBinary]) assert(existsSync(path), `missing binary: ${path}: build the engine first`);
+    Object.assign(receipt, { engineSha256: hash(engine), stampSha256: hash(stampBinary), sourceHead: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim() });
+    const token = await hostLab();
 
     receiver = createServer((request, response) => {
         const chunks = [];
@@ -628,6 +758,239 @@ try {
     receipt.load_after = load();
     receipt.outcome = 'PASS';
     console.log(`PASS: ${serial} measured over ${receipt.device.wifi}; evidence ${out}`);
+};
+
+/**
+ * The README quickstart, on the real phone, exactly as a new user runs it.
+ *
+ * Nothing here is from this checkout except the phone driver: the app is a
+ * fresh `create-expo-app` with the published `@desklink/react-native`,
+ * `react-native-webrtc`, `@config-plugins/react-native-webrtc` and
+ * `@byokit/signaling`, and the bridge is the published `npx @desklink/host`.
+ * The desktop it shows is a window on the private X display whose button counts
+ * its own clicks on this host, so the tap is proved by the host's count rather
+ * than by the harness's opinion of a screenshot.
+ *
+ * Transport: the phone reaches this host over an `adb reverse` tunnel on the
+ * USB cable, not over the local network. Both legs the developer would meet —
+ * the app's JavaScript and the WebRTC media — ride that tunnel, and the receipt
+ * says so wherever it names a path.
+ */
+const quickstartJourney = async () => {
+    receipt.sourceHead = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+    receipt.published_host_version = spawnSync('npm', ['view', '@desklink/host', 'version'], { encoding: 'utf8' }).stdout.trim() || null;
+    receipt.transport_detail = 'adb reverse tunnel over the USB cable, both legs (signalling, app JavaScript and, as the wire log shows, WebRTC media); '
+        + 'not the local network: this host drops inbound TCP except sshd, and the phone is on the same subnet';
+    const token = await hostLab();
+    let wireRelay;
+    let fixture;
+    let recording;
+    let wirePort;
+    try {
+    // Every frame between the phone and the bridge, so the receipt can say what
+    // the wire actually carried. The token never appears: it is replaced.
+    const wire = wireLog;
+    wireRelay = createNetServer(client => {
+        const upstream = connect({ host: '127.0.0.1', port: bridgePort });
+        const pump = (from, to, side) => {
+            from.on('data', chunk => {
+                wire.push(`[${new Date().toISOString()}] ${side} ${chunk.toString().slice(0, 8000).split(token).join('<bridge-token>')}\n`);
+                to.write(chunk);
+            });
+            from.on('end', () => to.end());
+            from.on('error', () => to.destroy());
+            to.on('error', () => from.destroy());
+        };
+        pump(client, upstream, 'phone->host');
+        pump(upstream, client, 'host->phone');
+    });
+    await new Promise(ok => wireRelay.listen(0, '127.0.0.1', ok));
+    wirePort = wireRelay.address().port;
+    receipt.wirePort = wirePort;
+
+    // The desktop: one window on the private display with a button that tells
+    // this host how many times the desktop was clicked.
+    let fixtureTaps = 0;
+    fixture = createServer((request, response) => {
+        if (request.url.startsWith('/tap')) {
+            fixtureTaps += 1;
+            response.writeHead(204);
+            response.end();
+            return;
+        }
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        response.end(FIXTURE_HTML);
+    });
+    await new Promise(ok => fixture.listen(0, '127.0.0.1', ok));
+    const fixturePort = fixture.address().port;
+    const fixtureBrowser = start('fixture', 'chromium', ['--no-sandbox', '--no-first-run', '--no-default-browser-check',
+        '--disable-dev-shm-usage', '--window-position=0,0', '--window-size=1280,720',
+        `--user-data-dir=${join(scratch, 'chromium-profile')}`, `--app=http://127.0.0.1:${fixturePort}/`], xenv, scratch);
+    mark('fixture-open');
+
+    const packageSource = process.env.DESKLINK_QUICKSTART_PACKAGE ?? 'published';
+    if (!existsSync(join(quickstart, 'package.json'))) {
+        mkdirSync(quickstart, { recursive: true });
+        const scaffold = spawnSync('npx', ['-y', 'create-expo-app@latest', quickstart, '--template', 'blank-typescript'],
+            { encoding: 'utf8', timeout: 600000 });
+        assert.equal(scaffold.status, 0, `could not scaffold ${quickstart}: ${(scaffold.stderr ?? scaffold.stdout ?? '').slice(-400)}`);
+    }
+    if (packageSource !== 'repo' && !existsSync(join(quickstart, 'node_modules', '@desklink', 'react-native', 'package.json'))) {
+        const installedPackages = spawnSync('npx', ['expo', 'install', '@desklink/react-native', 'react-native-webrtc',
+            '@config-plugins/react-native-webrtc@15', '@byokit/signaling@0.1.0'],
+            { cwd: quickstart, env, encoding: 'utf8', timeout: 600000 });
+        assert.equal(installedPackages.status, 0, `could not install the published packages: ${(installedPackages.stderr ?? installedPackages.stdout ?? '').slice(-400)}`);
+    }
+    writeFileSync(join(quickstart, 'App.tsx'), quickstartApp(`ws://127.0.0.1:${wirePort}/desktop?token=${token}`));
+    // A release only needed PR #95's `android/build.gradle` until it was
+    // published; apply it only when the installed copy still lacks the plugin,
+    // so a fixed release is proved as published rather than quietly patched.
+    const installedGradle = join(quickstart, 'node_modules/@desklink/react-native/android/build.gradle');
+    const publishedCarriesTheFix = existsSync(installedGradle) && /expo-module-gradle-plugin/.test(readFileSync(installedGradle, 'utf8'));
+    receipt.app_package_source = packageSource;
+    receipt.app_published_patch = publishedCarriesTheFix ? null
+        : 'android/build.gradle from PR #95 (expo-module-gradle-plugin), applied because the installed release still lacks it';
+    const patchGradle = `node -e "require('node:fs').copyFileSync('${join(repo, 'packages/desktop-client/android/build.gradle')}', 'node_modules/@desklink/react-native/android/build.gradle')"`;
+    if (process.env.DESKLINK_ANDROID_SKIP_BUILD !== '1') {
+        const build = spawnSync('flock', ['/tmp/fm-desklink-heavy.lock', 'bash', '-c', [
+            // `--install-links` copies the package instead of symlinking it, so
+            // Metro resolves the app's own `expo` from inside the project.
+            ...(packageSource === 'repo' ? [`npm install --no-audit --no-fund --install-links file:${join(repo, 'packages/desktop-client')}`] : []),
+            ...(publishedCarriesTheFix ? [] : [patchGradle]),
+            'npx expo prebuild --platform android --no-install',
+            'cd android && ./gradlew --no-daemon assembleDebug',
+        ].join(' && ')], { cwd: quickstart, env, encoding: 'utf8', timeout: 3600000 });
+        writeFileSync(join(out, 'build.log'), `${build.stdout ?? ''}${build.stderr ?? ''}`);
+        assert.equal(build.status, 0, 'the quickstart app did not build; see build.log');
+    }
+    const quickApk = join(quickstart, 'android/app/build/outputs/apk/debug/app-debug.apk');
+    assert(existsSync(quickApk), `no quickstart APK at ${quickApk}`);
+    receipt.app = {
+        project: quickstart,
+        packages: publishedVersions(quickstart),
+        apk_sha256: hash(quickApk),
+    };
+    const applicationId = /applicationId\s+['"]([^'"]+)['"]/.exec(readFileSync(join(quickstart, 'android/app/build.gradle'), 'utf8'))?.[1];
+    assert(applicationId, 'no applicationId in the quickstart build.gradle');
+    receipt.app.application_id = applicationId;
+    mark('apk-ready');
+    // No `-g`: nothing is pre-granted on the captain's phone, so the journey
+    // proves only what a new user actually taps.
+    const installed = spawnSync('adb', ['-s', serial, 'install', '-r', '-t', '--no-streaming', quickApk], { encoding: 'utf8', timeout: 900000 });
+    assert.equal(installed.status, 0, `adb install failed: ${installed.stderr ?? installed.stdout ?? installed.signal}`);
+    mark('apk-installed');
+    const metroProbe = createServer();
+    await new Promise(ok => metroProbe.listen(0, '127.0.0.1', ok));
+    const metroPort = metroProbe.address().port;
+    metroProbe.close();
+    metro = start('metro', 'npx', ['expo', 'start', '--port', String(metroPort)], { ...env, CI: '1' }, quickstart);
+    try {
+        await waitFor(() => /Waiting on http|Metro waiting/.test(logs.metro), 'Metro', 180000);
+    } catch (error) {
+        throw new Error(`${error}; metro said: ${logs.metro.slice(-400)}`);
+    }
+    // The debug build loads its JavaScript from Metro on 8081, and the media
+    // bridge answers on its own port: both legs of the journey are this tunnel.
+    adb('reverse', 'tcp:8081', `tcp:${metroPort}`);
+    adb('reverse', `tcp:${wirePort}`, `tcp:${wirePort}`);
+    receipt.metroPort = metroPort;
+    mark('metro-ready');
+
+    // The recording. `screenrecord` runs in its own SELinux domain and cannot
+    // open a file adb can read on this phone, so the recording is a frame
+    // sequence the phone writes itself and this host encodes at the cadence it
+    // actually achieved; the receipt publishes that cadence as the limit.
+    const recordDir = '/data/local/tmp/dl-quickstart';
+    adb('shell', `rm -rf ${recordDir}; mkdir -p ${recordDir}`);
+    const recordFrom = Date.now();
+    recording = spawn('adb', ['-s', serial, 'shell',
+        `i=0; while [ $i -lt ${RECORD_FRAMES} ]; do screencap -p ${recordDir}/f_$i.png; i=$((i+1)); done; echo done`],
+    { stdio: 'ignore' });
+    const stopRecording = async () => {
+        try { process.kill(recording.pid, 'SIGTERM'); } catch { /* already finished */ }
+        await sleep(500);
+    };
+
+    receipt.device = {
+        model: adb('shell', 'getprop', 'ro.product.model').trim(),
+        release: adb('shell', 'getprop', 'ro.build.version.release').trim(),
+        sdk: adb('shell', 'getprop', 'ro.build.version.sdk').trim(),
+        resolution: adb('shell', 'wm', 'size').trim().split(':').pop().trim(),
+    };
+    // A cold start, so the app cannot keep a link to a bridge that is gone.
+    adb('shell', 'am', 'force-stop', applicationId);
+    await sleep(1000);
+    adb('shell', 'am', 'start', '-n', `${applicationId}/.MainActivity`);
+    await sleep(8000); // Metro serves the first bundle request here
+    await waitFor(() => uiBound('Connect') !== null, 'the quickstart Connect button', 120000);
+    mark('app-open');
+
+    // Tap Connect the way a user does: the control's own bounds, not a guess.
+    const connectButton = uiBound('Connect');
+    writeFileSync(join(out, 'app-idle.png'), adbBin('exec-out', 'screencap', '-p').stdout);
+    adb('shell', 'input', 'tap', String(Math.round(connectButton.centerX)), String(Math.round(connectButton.centerY)));
+    const connected = await waitForLive();
+    writeFileSync(join(out, 'first-connect.png'), adbBin('exec-out', 'screencap', '-p').stdout);
+    receipt.first_connect = { ...connected, connect_button: connectButton };
+    mark('session-live');
+
+    // A real tap on the picture: the host's own click count is the proof, so
+    // the run tries the middle of the picture and, if the view crops the
+    // desktop differently than expected, moves across it until the desktop
+    // answers. How many taps it took is published either way.
+    const before = phoneFrame();
+    writeFileSync(join(out, 'tap-before.png'), adbBin('exec-out', 'screencap', '-p').stdout);
+    receipt.tap = { attempts: [] };
+    assert(before.band !== null, 'the phone lost the desktop picture before the tap');
+    for (const [at, position] of [[0.5, 0.5], [0.35, 0.5], [0.65, 0.5], [0.5, 0.38], [0.5, 0.62]].entries()) {
+        const x = Math.round(before.width * position[1]);
+        const y = Math.round(before.band.top + (before.band.bottom - before.band.top) * position[0]);
+        const taps = fixtureTaps;
+        adb('shell', 'input', 'tap', String(x), String(y));
+        await sleep(2500);
+        receipt.tap.attempts.push({ phone_x: x, phone_y: y, desktop_ticks: fixtureTaps - taps });
+        if (fixtureTaps > taps) break;
+    }
+    await stopRecording();
+    receipt.tap.desktop_clicks = fixtureTaps;
+    const after = phoneFrame();
+    writeFileSync(join(out, 'tap-after.png'), adbBin('exec-out', 'screencap', '-p').stdout);
+    assert(fixtureTaps > 0, 'no tap on the picture reached the desktop');
+    // The desktop changed on the phone's own screen, not only in the host's count.
+    assert(after.hash !== before.hash, 'the phone screen did not change after the tap that the host counted');
+    receipt.tap.phone_screen_changed = true;
+    mark('tap-landed');
+
+    // The recording, at the cadence this device actually gave.
+    const frames = adb('shell', `ls ${recordDir} | wc -l`).trim();
+    const seconds = (Date.now() - recordFrom) / 1000;
+    const fps = Math.max(1, Math.round(Number(frames) / Math.max(1, seconds) * 100) / 100);
+    receipt.recording = { frames: Number(frames), seconds: round(seconds), fps, note: 'frame sequence, not screenrecord: screenrecord cannot write a readable file on this phone' };
+    const pulled = join(out, 'frames');
+    mkdirSync(pulled, { recursive: true });
+    spawnSync('adb', ['-s', serial, 'pull', `${recordDir}/.`, pulled], { encoding: 'utf8', timeout: 600000 });
+    const encoded = spawnSync('ffmpeg', ['-y', '-framerate', String(fps), '-i', join(pulled, 'f_%d.png'),
+        '-vf', 'scale=540:-2', '-pix_fmt', 'yuv420p', '-c:v', 'libx264', '-crf', '30', join(out, 'connect-and-tap.mp4')],
+    { encoding: 'utf8', timeout: 600000 });
+    assert.equal(encoded.status, 0, `ffmpeg could not encode the recording: ${encoded.stderr?.slice(-400)}`);
+    // The frames are bulky scratch; the encoded recording is the proof.
+    spawnSync('rm', ['-rf', pulled]);
+    mark('recorded');
+
+    receipt.load_after = load();
+    receipt.outcome = 'PASS';
+    console.log(`PASS: ${serial} connected and tapped through the published quickstart; evidence ${out}`);
+    fixtureBrowser.kill('SIGTERM');
+    } finally {
+        try { recording?.kill('SIGTERM'); } catch { /* already finished */ }
+        if (wirePort !== undefined) adbTry('reverse', '--remove', `tcp:${wirePort}`);
+        adbTry('reverse', '--remove', 'tcp:8081');
+        try { wireRelay?.close(); } catch { /* already closed */ }
+        try { fixture?.close(); } catch { /* already closed */ }
+    }
+};
+try {
+    await (journey === 'quickstart' ? quickstartJourney() : latencyJourney());
 } catch (error) {
     receipt.error = String(error);
     console.error(String(error));
@@ -638,10 +1001,11 @@ try {
     receiver?.close();
     writeFileSync(join(out, 'screen-final.png'), adbBin('exec-out', 'screencap', '-p').stdout);
     adb('shell', 'input', 'keyevent', '3');
-    if (!keepCaptures) adb('shell', 'rm', '-rf', '/data/local/tmp/dl-phone-g2g');
+    if (!keepCaptures) adb('shell', 'rm', '-rf', '/data/local/tmp/dl-phone-g2g', '/data/local/tmp/dl-quickstart');
     if (xvfb) { try { await stopOwnedXvfb(xvfb); } catch (error) { receipt.cleanup = String(error); } }
     claim.release();
     for (const name of Object.keys(logs)) writeFileSync(join(out, `${name}.log`), logs[name]);
+    writeFileSync(join(out, 'wire.log'), wireLog.join(''));
     writeFileSync(join(out, 'run.json'), `${JSON.stringify(receipt, null, 2)}\n`);
 }
 process.exit(receipt.outcome === 'PASS' ? 0 : 1);
