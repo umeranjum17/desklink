@@ -523,7 +523,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
      * idempotent, so the peer's event and the engine's `session.state` telling
      * the same story neither double-counts nor fights.
      */
-    const onTransportState = useCallback((state: string, trackIce = true) => {
+    const onTransportState = useCallback((state: string, trackIce = true, skipGrace = false) => {
         // Synthetic stall reports say nothing about ICE itself.
         if (trackIce) iceConnected.current = state === 'connected' || state === 'completed';
         const mapped = connectionStatusFor(state, statusRef.current, presentedRef.current && !frozen.current);
@@ -535,7 +535,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             ? 'reconnecting'
             : mapped;
         // Our own restart's transients are expected, not a new outage.
-        if (next === 'reconnecting' && Date.now() < restartGraceUntil.current) return;
+        if (!skipGrace && next === 'reconnecting' && Date.now() < restartGraceUntil.current) return;
         update({ status: next });
         if (next === 'reconnecting') {
             // Only a path that once carried frames is worth restarting: an
@@ -608,7 +608,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             // The picture has stopped, so the session is not live whatever the
             // transport reports. When the transport has already said so, there
             // is nothing to change: the recovery it started is the right one.
-            if (statusRef.current === 'live' || statusRef.current === 'connecting') onTransportState('disconnected', false);
+            if (statusRef.current === 'live' || statusRef.current === 'connecting') onTransportState('disconnected', false, true);
         }, () => undefined);
     }, [armMedia, onTransportState]);
 
