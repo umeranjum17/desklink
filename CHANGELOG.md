@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.5.1
+
+Patch release of `@desklink/host`, `@desklink/host-linux-x64-gnu`,
+`@desklink/host-darwin-arm64`, `@desklink/react-native` and `@desklink/axi`.
+It carries one change — the Android startup crash a fresh install hit — and
+nothing else. The protocol is unchanged at version 3, and a 0.5.0 AXI still
+needs a 0.5.1 engine.
+
+### Verification
+
+- Pack-level: the five tarballs were built by `release/pack.mjs` from this
+  release commit and installed into an empty project by
+  `release/check-install.sh`, which resolves the pinned engine, completes the
+  protocol handshake and probes capabilities without opening a capture session.
+- Registry: all five packages report `latest = 0.5.1`, and each tarball's
+  integrity matches the byte-for-byte SHA-512 `release/publish.mjs` recorded.
+  Every file npm serves exists in this repository at the same path.
+- Android: a fresh `create-expo-app` project that installs
+  `@desklink/react-native@0.5.1` from npm builds, installs and starts on an
+  API 36 emulator and on a physical test phone without the Expo module
+  registration crash that stopped 0.5.0. A live desktop on the physical phone
+  is not established by this release; the release pull request says why.
+
+### Fixed
+
+- **A fresh Expo app starts.** `@desklink/react-native@0.5.0` threw
+  `UnsupportedOperationException: This function has a reified type parameter`
+  out of `DesklinkModule.definition()` while the module registered, so the app
+  died before it could contact a desktop. The Android module declared a bare
+  `kotlin-android`, but expo-modules-core reaches its type descriptors through
+  the `pika` compiler plugin, which `expo-module-gradle-plugin` applies; without
+  it 52 reified calls stayed runtime markers. Applying Expo's own plugin also
+  supplies `kotlin-android` and the default Expo module dependencies.
+  [PR95](https://github.com/umeranjum17/desklink/pull/95)
+- **No second expo-modules-core.** The peer range `expo-modules-core ">=55 <56"`
+  made npm install and hoist a core 55 beside the 57 the app uses, and the
+  module compiled against the wrong one. The range is widened, so one core
+  resolves and a fresh `npx create-expo-app` needs no SDK pin. Expo SDK 55 and
+  later are supported.
+  [PR95](https://github.com/umeranjum17/desklink/pull/95)
+
+### Known issues and limits
+
+- Everything 0.5.0 listed under *Known issues and limits* still applies: macOS
+  arm64 remains an unsigned, default-enabled **preview** whose Screen Recording
+  and Accessibility permissions belong to the app that launches it; `getStats()`
+  is receiver-side counters, not latency; iOS picture fill, the iOS simulator
+  pointer, interactive macOS/Windows capture and input, Wayland
+  portal-producer journeys, Wayland clipboard and the arm64/musl native package
+  are not established.
+- 0.5.1 changes the engine's crate version string only. The Linux and macOS
+  engines are rebuilt from this commit.
+
+### Install
+
+```sh
+npm install @desklink/host@0.5.1
+npm install @desklink/react-native@0.5.1
+npm install --global @desklink/axi@0.5.1
+```
+
+The host selects its exact-version optional native package automatically.
+
 ## 0.5.0
 
 Tester build of `@desklink/host`, `@desklink/host-linux-x64-gnu`,
