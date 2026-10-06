@@ -1385,6 +1385,8 @@ const recoveryJourney = async () => {
     receipt.outcome = 'PASS';
     console.log(`PASS: ${serial} recovered drop, roam and background on real Wi-Fi; evidence ${out}`);
     } finally {
+        adbTry('shell', 'svc wifi enable');
+        try { await waitWifiIp(30000); } catch { /* the case error owns the failure */ }
         for (const reverse of reverses) adbTry('reverse', '--remove', reverse);
         adbTry('reverse', '--remove', 'tcp:8081');
     }
