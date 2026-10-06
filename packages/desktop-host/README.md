@@ -161,6 +161,11 @@ from the logged-in Mac session, grant **Screen & System Audio Recording** and
 and check `log show --last 5m --predicate 'process == "tccd"'` for new denials.
 TCC belongs to the responsible app: launching the unsigned CLI or a Node
 bridge from SSH/Terminal can instead request grants for Node or Terminal.
+To verify a cue visually, capture through the granted identity itself:
+`session.frame` writes the latest pre-encode frame to a path. A
+`screencapture` taken from an SSH shell is attributed to that shell's
+responsible app and comes back without app windows, so a cue that is on
+screen will not appear in it.
 macOS currently uses a US ANSI virtual-key map for character chords (the
 current input layout is diagnostic); free-form text uses Unicode key events.
 
