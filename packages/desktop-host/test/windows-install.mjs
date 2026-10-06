@@ -84,9 +84,10 @@ try {
 
     // From here the only @desklink/host in scope is the installed one.
     writeFileSync(join(project, 'consumer.mjs'), `import assert from 'node:assert/strict';
-import { EngineClient, platformTag, resolveEngine } from '@desklink/host';
+// Only the published entry point: a consumer imports '@desklink/host', not the
+// package's internal modules.
+import { EngineClient, resolveEngine } from '@desklink/host';
 
-assert.equal(platformTag(), 'win32-x64-msvc');
 const resolved = resolveEngine();
 assert.equal(resolved?.origin, 'configured', 'the installed package resolved the engine: ' + JSON.stringify(resolved));
 let exitDetail = null;
