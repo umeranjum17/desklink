@@ -826,8 +826,7 @@ const quickstartJourney = async () => {
         seenText = `${seenText}${text}`.slice(-8192);
         for (const [, port] of seenText.matchAll(/candidate:\d+ 1 tcp \d+ 127\.0\.0\.1 (\d+) typ host tcptype passive/g)) {
             if (forwardedLoopback.includes(port)) continue;
-            adb('reverse', `tcp:${port}`, `tcp:${port}`);
-            forwardedLoopback.push(port);
+            if (adbTry('reverse', `tcp:${port}`, `tcp:${port}`).status === 0) forwardedLoopback.push(port);
         }
     };
     let wirePort;
@@ -976,6 +975,7 @@ const quickstartJourney = async () => {
             const path = join(recordDir, `f_${index}.png`);
             writeFileSync(path, frame);
             frames.push(path);
+            await sleep(0);
         }
     })();
     const stopRecording = async () => {
