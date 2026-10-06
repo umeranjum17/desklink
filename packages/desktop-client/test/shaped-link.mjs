@@ -150,9 +150,9 @@ class ShapedLink {
             // Only the browser is ever told this address, so this is the
             // browser's traffic and its address, whatever else arrives here.
             this.#remember(from);
-            this.#forward(payload, this.host, toBrowser);
+            this.#forward(payload, this.host, toBrowser, 'toEngine');
         });
-        toBrowser.on('message', (payload) => this.#forward(payload, this.browser, toEngine));
+        toBrowser.on('message', (payload) => this.#forward(payload, this.browser, toEngine, 'toBrowser'));
         this.#ports = await Promise.all([this.#listen(toEngine), this.#listen(toBrowser)]);
         return this.#ports;
     }
@@ -182,7 +182,7 @@ class ShapedLink {
     }
 
     /** Forward one datagram in one direction, out of that direction's socket. */
-    #forward(payload, to, socket) {
+    #forward(payload, to, socket, direction) {
         if (this.shape.discard === true) {
             this.counters.discarded += 1;
             return;
@@ -199,7 +199,7 @@ class ShapedLink {
                 this.counters.unroutable += 1;
                 return;
             }
-            this.counters[socket === this.#out.toEngine ? 'toEngine' : 'toBrowser'] += 1;
+            this.counters[direction] += 1;
             try {
                 socket.send(payload, to.port, to.ip);
             } catch {
@@ -335,7 +335,7 @@ function startSignalling(link, bridgePort, token) {
                 send(host, message);
             });
             host.on('close', () => client.close());
-            host.on('error', (error) => log(`signalling upstream error: ${error.message}`));
+            host.on('error', (error) => link.log(`signalling upstream error: ${error.message}`));
             client.on('close', () => host.close());
             client.on('error', () => host.close());
         });
