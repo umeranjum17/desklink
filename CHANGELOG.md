@@ -8,10 +8,19 @@ It carries one change — the Android startup crash a fresh install hit — and
 nothing else. The protocol is unchanged at version 3, and a 0.5.0 AXI still
 needs a 0.5.1 engine.
 
-**This release was not on the registry when these notes were written.** The
-publish is blocked on a valid npm credential with publish rights on the
-`@desklink` scope, and on a green `main`. Nothing here describes bytes that
-npm is currently serving.
+### Verification
+
+- Pack-level: the five tarballs were built by `release/pack.mjs` from this
+  release commit and installed into an empty project by
+  `release/check-install.sh`, which resolves the pinned engine, completes the
+  protocol handshake and probes capabilities without opening a capture session.
+- Registry: all five packages report `latest = 0.5.1`, and each tarball's
+  integrity matches the byte-for-byte SHA-512 `release/publish.mjs` recorded.
+  Every file npm serves exists in this repository at the same path.
+- Android: a fresh `create-expo-app` project that installs
+  `@desklink/react-native@0.5.1` from npm builds, installs and starts on an
+  API 36 device without the Expo module registration crash. The release pull
+  request records the device proof and its limits.
 
 ### Fixed
 
@@ -30,20 +39,6 @@ npm is currently serving.
   resolves and a fresh `npx create-expo-app` needs no SDK pin. Expo SDK 55 and
   later are supported.
   [PR95](https://github.com/umeranjum17/desklink/pull/95)
-
-### Verification
-
-- Pack-level: the five tarballs were built by `release/pack.mjs` from this
-  release commit and installed into an empty project by
-  `release/check-install.sh`, which resolves the pinned engine, completes the
-  protocol handshake and probes capabilities without opening a capture session.
-- Android: a fresh Expo app installing the packed `@desklink/react-native`
-  tarball builds, starts, connects on its connection link and shows the live
-  desktop. See the release pull request for the recorded version string and the
-  evidence folder.
-- Not verified here: the published-tarball install on the real test phone. That
-  proof is only possible once npm serves these bytes, which is exactly what the
-  publish blocker prevents.
 
 ### Known issues and limits
 
