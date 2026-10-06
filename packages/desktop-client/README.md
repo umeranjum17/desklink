@@ -230,9 +230,10 @@ view.
   instead of sitting at 44 pt. An app may draw its own keys
   from `modifiers` instead.
 - **Readiness is a rendered frame.** Android marks the first draw; iOS marks
-  the first `RTCView` video-dimensions callback and ignores later ones, so a
-  resize or remount during a reconnect does not read as live. Neither marks
-  a track or ICE connection as live.
+  the first `RTCView` video-dimensions callback and ignores later ones; web
+  marks the first presented frame and ignores later repaints, so a resize,
+  remount, or renegotiation repaint during a reconnect does not read as live.
+  No platform marks a track or ICE connection as live.
 - **Connection states, as they happen.** The session status is `idle`,
   `opening`, `connecting`, `live`, `reconnecting`, `ended` or `failed`. The
   peer's ICE state and the engine's `session.state` both feed it: a
