@@ -104,6 +104,11 @@ const journey = arg('journey', 'latency');
 // The quickstart app is a fresh project outside this checkout, kept in the
 // cache so a retry does not re-download the published packages.
 const quickstart = resolve(process.env.DESKLINK_QUICKSTART_DIR ?? join(homedir(), '.cache', 'desklink-quickstart'));
+// The README's second snippet: ask the engine for its loopback ICE route. It is
+// what a phone on a TCP-only path (a tunnel, `adb reverse`) needs, because the
+// engine's own addresses are UDP, and this host's nftables ruleset drops inbound
+// UDP from the phone's subnet.
+const quickstartLoopbackTcp = process.env.DESKLINK_QUICKSTART_LOOPBACK_TCP === '1';
 const host = process.env.DESKLINK_ANDROID_HOST;
 if (journey !== 'quickstart') {
     assert(host, 'set DESKLINK_ANDROID_HOST to this machine\'s address on the phone\'s network');
@@ -456,14 +461,17 @@ button{width:900px;height:400px;font-size:88px;border-radius:28px;border:8px sol
 <script>let n=0;document.getElementById('hit').addEventListener('click',()=>{n+=1;
 document.getElementById('n').textContent=String(n);fetch('/tap').catch(()=>{})})</script>`;
 
-/** The README's `App.tsx`, with only the bridge address and token filled in. */
-const quickstartApp = bridge => `import { useEffect } from 'react';
+/**
+ * The README's `App.tsx`, with only the bridge address and token filled in, and
+ * `loopbackTcp` set only where the README's own TCP-only section sets it.
+ */
+const quickstartApp = (bridge, loopbackTcp = false) => `import { useEffect } from 'react';
 import { Button, View } from 'react-native';
 import { authorizeBridge } from '@byokit/signaling';
 import { DesktopView, useDesktopSession } from '@desklink/react-native';
 
 const BRIDGE = '${bridge}';
-const authorize = authorizeBridge(BRIDGE, {});
+const authorize = authorizeBridge(BRIDGE, ${loopbackTcp ? '{ loopbackTcp: true }' : '{}'});
 
 export default function App() {
   const desktop = useDesktopSession({ authorize });
@@ -519,10 +527,11 @@ const uiBound = label => {
 };
 
 /** Wait until the phone's own screen carries the desktop picture. */
-const waitForLive = async (ms = 120000) => {
+const waitForLive = async (ms = 120000, onPoll = () => {}) => {
     const from = Date.now();
     let last = null;
     while (Date.now() - from < ms) {
+        onPoll();
         last = phoneFrame();
         if (last.band !== null && last.band.bottom - last.band.top > 200) {
             return { first_picture_ms: Date.now() - from, picture_band: last.band };
@@ -781,11 +790,33 @@ const quickstartJourney = async () => {
     receipt.published_host_version = spawnSync('npm', ['view', '@desklink/host', 'version'], { encoding: 'utf8' }).stdout.trim() || null;
     receipt.transport_detail = 'adb reverse tunnel over the USB cable, both legs (signalling, app JavaScript and, as the wire log shows, WebRTC media); '
         + 'not the local network: this host drops inbound TCP except sshd, and the phone is on the same subnet';
+    receipt.app_loopback_tcp = quickstartLoopbackTcp
+        ? 'the README TCP-only snippet: session.loopbackTcp asked the engine for its loopback ICE port, and the run forwarded each port it offered'
+        : 'not asked for: the README quickstart snippet as published, whose ICE candidates are all UDP';
     const token = await hostLab();
     let wireRelay;
     let fixture;
     let recording;
     let wirePort;
+    const forwarded = new Set();
+    receipt.loopback_tcp_ports = [];
+    /**
+     * Install the forward for the engine's loopback ICE port before the phone
+     * can dial it: a TCP connect refused while the forward is still being
+     * installed is a candidate ICE has already given up on, and the engine picks
+     * a new port per session, so the port has to be followed rather than guessed.
+     */
+    const forwardLoopbackIn = text => {
+        if (!quickstartLoopbackTcp) return;
+        for (const match of text.matchAll(/candidate:\S+\s+\S+\s+tcp\s+\S+\s+127\.0\.0\.1\s+(\d+)\s+typ\s+host/g)) {
+            const port = Number(match[1]);
+            // ICE's throwaway port 9 is not a listener and cannot be bound.
+            if (forwarded.has(port) || port < 1024) continue;
+            const installed = adbTry('reverse', `tcp:${port}`, `tcp:${port}`);
+            forwarded.add(port);
+            receipt.loopback_tcp_ports.push(installed.status === 0 ? port : `${port} (reverse failed: ${(installed.stderr ?? '').trim()})`);
+        }
+    };
     try {
     // Every frame between the phone and the bridge, so the receipt can say what
     // the wire actually carried. The token never appears: it is replaced.
@@ -794,7 +825,11 @@ const quickstartJourney = async () => {
         const upstream = connect({ host: '127.0.0.1', port: bridgePort });
         const pump = (from, to, side) => {
             from.on('data', chunk => {
-                wire.push(`[${new Date().toISOString()}] ${side} ${chunk.toString().slice(0, 8000).split(token).join('<bridge-token>')}\n`);
+                const text = chunk.toString();
+                // The forward goes in before the candidate reaches the phone,
+                // not on the next poll of the wire log.
+                if (side === 'host->phone') forwardLoopbackIn(text);
+                wire.push(`[${new Date().toISOString()}] ${side} ${text.slice(0, 8000).split(token).join('<bridge-token>')}\n`);
                 to.write(chunk);
             });
             from.on('end', () => to.end());
@@ -841,7 +876,7 @@ const quickstartJourney = async () => {
             { cwd: quickstart, env, encoding: 'utf8', timeout: 600000 });
         assert.equal(installedPackages.status, 0, `could not install the published packages: ${(installedPackages.stderr ?? installedPackages.stdout ?? '').slice(-400)}`);
     }
-    writeFileSync(join(quickstart, 'App.tsx'), quickstartApp(`ws://127.0.0.1:${wirePort}/desktop?token=${token}`));
+    writeFileSync(join(quickstart, 'App.tsx'), quickstartApp(`ws://127.0.0.1:${wirePort}/desktop?token=${token}`, quickstartLoopbackTcp));
     // A release only needed PR #95's `android/build.gradle` until it was
     // published; apply it only when the installed copy still lacks the plugin,
     // so a fixed release is proved as published rather than quietly patched.
@@ -929,7 +964,48 @@ const quickstartJourney = async () => {
     const connectButton = uiBound('Connect');
     writeFileSync(join(out, 'app-idle.png'), adbBin('exec-out', 'screencap', '-p').stdout);
     adb('shell', 'input', 'tap', String(Math.round(connectButton.centerX)), String(Math.round(connectButton.centerY)));
-    const connected = await waitForLive();
+
+    /**
+     * The engine's loopback ICE port, read off the wire as the engine offers it:
+     * it is the only route a TCP-only forward can carry, the engine picks a new
+     * one per session, and the quickstart app reports nothing, so each port is
+     * forwarded the moment it appears — as `android-flow.mjs` does for the
+     * example app, from the wire instead of from a report.
+     */
+    const forwardLoopback = () => forwardLoopbackIn(wire.join(''));
+
+    /** The app's own Retry control, once the failed session has shown one. */
+    const retryControl = async (ms) => {
+        const from = Date.now();
+        while (Date.now() - from < ms) {
+            const retry = uiBound('Retry');
+            if (retry) return retry;
+            await sleep(1000);
+        }
+        return null;
+    };
+
+    /**
+     * Connect, and when the picture never arrives, use the app's own Retry
+     * control the way a user would: the next session picks the next port, and
+     * the forward follows it.
+     */
+    receipt.connect_rounds = [];
+    const connectOverTunnel = async () => {
+        for (let round = 1; round <= 3; round += 1) {
+            try {
+                return { ...(await waitForLive(60000, forwardLoopback)), round };
+            } catch (error) {
+                forwardLoopback();
+                const retry = await retryControl(round === 3 ? 5000 : 60000);
+                receipt.connect_rounds.push({ round, forwarded: [...forwarded], retry_control: retry?.found ?? null });
+                if (!retry || round === 3) throw error;
+                adb('shell', 'input', 'tap', String(Math.round(retry.centerX)), String(Math.round(retry.centerY)));
+                await sleep(2000);
+            }
+        }
+    };
+    const connected = await connectOverTunnel();
     writeFileSync(join(out, 'first-connect.png'), adbBin('exec-out', 'screencap', '-p').stdout);
     receipt.first_connect = { ...connected, connect_button: connectButton };
     mark('session-live');
@@ -983,6 +1059,7 @@ const quickstartJourney = async () => {
     fixtureBrowser.kill('SIGTERM');
     } finally {
         try { recording?.kill('SIGTERM'); } catch { /* already finished */ }
+        for (const port of forwarded) adbTry('reverse', '--remove', `tcp:${port}`);
         if (wirePort !== undefined) adbTry('reverse', '--remove', `tcp:${wirePort}`);
         adbTry('reverse', '--remove', 'tcp:8081');
         try { wireRelay?.close(); } catch { /* already closed */ }
