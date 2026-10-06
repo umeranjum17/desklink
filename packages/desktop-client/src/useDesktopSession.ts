@@ -1192,6 +1192,8 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         cancelRestart();
         cancelStall();
         cancelFirstFrame();
+        if (mediaTimer.current !== null) clearTimeout(mediaTimer.current);
+        mediaTimer.current = null;
         generationToken.current += 1;
         const id = nativeRef.current;
         nativeRef.current = null;
