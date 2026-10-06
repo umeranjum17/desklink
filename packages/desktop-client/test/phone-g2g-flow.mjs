@@ -119,11 +119,19 @@ const transport = arg('transport', 'wifi');
 const relayRate = arg('relay-rate', null);
 // `--keep-captures` leaves the raw captures on the device for offline study.
 const keepCaptures = process.argv.includes('--keep-captures');
+// Chromium's launcher reads `$XDG_CONFIG_HOME/chromium-flags.conf` on every
+// start, and this account's copy pins `--ozone-platform=wayland`: the fixture
+// desktop would die on startup, leaving the private Xvfb empty, the phone black
+// and the run's "no picture" indistinguishable from a transport fault. A
+// task-owned config home is what the other labs here already do
+// (`portal-g2g-flow.mjs`, `a11y-flow.mjs`).
+const labConfig = join(scratch, 'config');
+mkdirSync(labConfig, { recursive: true });
 // The quickstart journey runs the published package, so it must not be handed
 // this checkout's engine path: the published launcher resolves its own prebuilt.
 const env = journey === 'quickstart'
-    ? { ...process.env, WAYLAND_DISPLAY: '', TMPDIR: scratch }
-    : { ...process.env, WAYLAND_DISPLAY: '', TMPDIR: scratch, DESKLINK_ENGINE: engine };
+    ? { ...process.env, WAYLAND_DISPLAY: '', TMPDIR: scratch, XDG_CONFIG_HOME: labConfig }
+    : { ...process.env, WAYLAND_DISPLAY: '', TMPDIR: scratch, XDG_CONFIG_HOME: labConfig, DESKLINK_ENGINE: engine };
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 const load = () => {
     const [one, five, fifteen, idle] = readFileSync('/proc/loadavg', 'utf8').split(' ');
@@ -457,13 +465,18 @@ button{width:900px;height:400px;font-size:88px;border-radius:28px;border:8px sol
 document.getElementById('n').textContent=String(n);fetch('/tap').catch(()=>{})})</script>`;
 
 /** The README's `App.tsx`, with only the bridge address and token filled in. */
-const quickstartApp = bridge => `import { useEffect } from 'react';
+/**
+ * The README's quickstart app. `loopback` selects the README's second snippet,
+ * the one that asks the engine for its loopback ICE route, for a phone whose
+ * only route to this computer is a forward of that loopback.
+ */
+const quickstartApp = (bridge, loopback) => `import { useEffect } from 'react';
 import { Button, View } from 'react-native';
 import { authorizeBridge } from '@byokit/signaling';
 import { DesktopView, useDesktopSession } from '@desklink/react-native';
 
 const BRIDGE = '${bridge}';
-const authorize = authorizeBridge(BRIDGE, {});
+const authorize = authorizeBridge(BRIDGE, ${loopback ? '{ loopbackTcp: true }' : '{}'});
 
 export default function App() {
   const desktop = useDesktopSession({ authorize });
@@ -485,17 +498,22 @@ export default function App() {
 const publishedVersions = dir => Object.fromEntries(Object.entries(JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).dependencies)
     .filter(([name]) => /desklink|byokit|webrtc/.test(name)));
 
-/** One raw frame off the phone, with the picture band and a hash of its middle. */
+/** One raw frame off the phone, with the picture band and a hash of it: the
+ * picture sits wherever the app puts it, so a fixed middle strip would hash
+ * only the black around it and stay frozen while the desktop answers. */
 const phoneFrame = () => {
     const { pixels, width, height } = capturePixels(adbBin('exec-out', 'screencap').stdout);
     assert(width > 0 && pixels.length > 0, 'the phone returned no screen');
+    const band = pictureBand(pixels, width, height);
+    const top = band?.top ?? Math.round(height * 0.3);
+    const bottom = band?.bottom ?? Math.round(height * 0.7);
     let hash = 0;
-    for (let y = Math.round(height * 0.3); y < Math.round(height * 0.7); y += 4) {
+    for (let y = top; y < bottom; y += 2) {
         for (let x = Math.round(width * 0.2); x < Math.round(width * 0.8); x += 4) {
             hash = (hash * 31 + pixels[(y * width + x) * 4]) >>> 0;
         }
     }
-    return { pixels, width, height, hash, band: pictureBand(pixels, width, height) };
+    return { pixels, width, height, hash, band };
 };
 
 /**
@@ -518,14 +536,24 @@ const uiBound = label => {
     return null;
 };
 
+/**
+ * Our own app, and only ours, has to be what is in front: a run that loses the
+ * app to the launcher would otherwise read the phone's own wallpaper as the
+ * desktop picture and tap the captain's home screen.
+ */
+const ourAppInFront = id => (adbTry('shell', 'dumpsys activity activities | grep -m1 topResumedActivity').stdout ?? '').includes(id);
+const bringOurAppToFront = id => adb('shell', 'am', 'start', '-n', `${id}/.MainActivity`);
+
 /** Wait until the phone's own screen carries the desktop picture. */
-const waitForLive = async (ms = 120000) => {
+const waitForLive = async (applicationId, ms = 120000) => {
     const from = Date.now();
     let last = null;
+    let relaunches = 0;
     while (Date.now() - from < ms) {
+        if (!ourAppInFront(applicationId)) { relaunches += 1; bringOurAppToFront(applicationId); await sleep(2000); continue; }
         last = phoneFrame();
         if (last.band !== null && last.band.bottom - last.band.top > 200) {
-            return { first_picture_ms: Date.now() - from, picture_band: last.band };
+            return { first_picture_ms: Date.now() - from, picture_band: last.band, app_relaunches: relaunches };
         }
         await sleep(1000);
     }
@@ -784,7 +812,24 @@ const quickstartJourney = async () => {
     const token = await hostLab();
     let wireRelay;
     let fixture;
-    let recording;
+    // The loopback ICE ports this run forwarded, so the receipt can name the
+    // path and the forwards can be undone whatever happens.
+    const forwardedLoopback = [];
+    // A WebSocket message can be split across reads, so the tail of what has
+    // already gone past is kept: a candidate line cut in half still matches.
+    let seenText = '';
+    // The engine's loopback candidate reaches the phone in the same chunk that
+    // carries it: install the forward before that chunk goes on, because a TCP
+    // connect refused while the forward is still being set up is a candidate
+    // ICE does not come back to.
+    const forwardLoopbackCandidates = text => {
+        seenText = `${seenText}${text}`.slice(-8192);
+        for (const [, port] of seenText.matchAll(/candidate:\d+ 1 tcp \d+ 127\.0\.0\.1 (\d+) typ host tcptype passive/g)) {
+            if (forwardedLoopback.includes(port)) continue;
+            adb('reverse', `tcp:${port}`, `tcp:${port}`);
+            forwardedLoopback.push(port);
+        }
+    };
     let wirePort;
     try {
     // Every frame between the phone and the bridge, so the receipt can say what
@@ -794,7 +839,9 @@ const quickstartJourney = async () => {
         const upstream = connect({ host: '127.0.0.1', port: bridgePort });
         const pump = (from, to, side) => {
             from.on('data', chunk => {
-                wire.push(`[${new Date().toISOString()}] ${side} ${chunk.toString().slice(0, 8000).split(token).join('<bridge-token>')}\n`);
+                const text = chunk.toString();
+                if (side === 'host->phone') forwardLoopbackCandidates(text);
+                wire.push(`[${new Date().toISOString()}] ${side} ${text.slice(0, 8000).split(token).join('<bridge-token>')}\n`);
                 to.write(chunk);
             });
             from.on('end', () => to.end());
@@ -827,6 +874,7 @@ const quickstartJourney = async () => {
         '--disable-dev-shm-usage', '--window-position=0,0', '--window-size=1280,720',
         `--user-data-dir=${join(scratch, 'chromium-profile')}`, `--app=http://127.0.0.1:${fixturePort}/`], xenv, scratch);
     mark('fixture-open');
+    receipt.fixture_browser = { pid: fixtureBrowser.pid, config_home: labConfig };
 
     const packageSource = process.env.DESKLINK_QUICKSTART_PACKAGE ?? 'published';
     if (!existsSync(join(quickstart, 'package.json'))) {
@@ -835,13 +883,26 @@ const quickstartJourney = async () => {
             { encoding: 'utf8', timeout: 600000 });
         assert.equal(scaffold.status, 0, `could not scaffold ${quickstart}: ${(scaffold.stderr ?? scaffold.stdout ?? '').slice(-400)}`);
     }
+    // `tarball` proves what a user gets from a release: the packed archive
+    // npm publishes, installed by path rather than linked from this checkout.
+    let packageInstall = null;
+    if (packageSource === 'tarball') {
+        const packed = spawnSync('npm', ['pack', '--pack-destination', scratch, join(repo, 'packages/desktop-client')], { encoding: 'utf8', timeout: 600000 });
+        assert.equal(packed.status, 0, `could not pack the client: ${(packed.stderr ?? packed.stdout ?? '').slice(-400)}`);
+        packageInstall = join(scratch, packed.stdout.trim().split('\n').pop().trim());
+        receipt.app_tarball = { path: packageInstall, sha256: hash(packageInstall) };
+    }
     if (packageSource !== 'repo' && !existsSync(join(quickstart, 'node_modules', '@desklink', 'react-native', 'package.json'))) {
         const installedPackages = spawnSync('npx', ['expo', 'install', '@desklink/react-native', 'react-native-webrtc',
             '@config-plugins/react-native-webrtc@15', '@byokit/signaling@0.1.0'],
             { cwd: quickstart, env, encoding: 'utf8', timeout: 600000 });
         assert.equal(installedPackages.status, 0, `could not install the published packages: ${(installedPackages.stderr ?? installedPackages.stdout ?? '').slice(-400)}`);
     }
-    writeFileSync(join(quickstart, 'App.tsx'), quickstartApp(`ws://127.0.0.1:${wirePort}/desktop?token=${token}`));
+    const loopbackTcp = process.env.DESKLINK_QUICKSTART_LOOPBACK_TCP === '1';
+    receipt.app_loopback_tcp = loopbackTcp
+        ? 'the README TCP-only snippet: session.loopbackTcp asked the engine for its loopback ICE port, and this run forwards each port it offers before the candidate reaches the phone'
+        : 'the README quickstart as written: the engine is asked for its ordinary candidates only';
+    writeFileSync(join(quickstart, 'App.tsx'), quickstartApp(`ws://127.0.0.1:${wirePort}/desktop?token=${token}`, loopbackTcp));
     // A release only needed PR #95's `android/build.gradle` until it was
     // published; apply it only when the installed copy still lacks the plugin,
     // so a fixed release is proved as published rather than quietly patched.
@@ -856,6 +917,7 @@ const quickstartJourney = async () => {
             // `--install-links` copies the package instead of symlinking it, so
             // Metro resolves the app's own `expo` from inside the project.
             ...(packageSource === 'repo' ? [`npm install --no-audit --no-fund --install-links file:${join(repo, 'packages/desktop-client')}`] : []),
+            ...(packageSource === 'tarball' ? [`npm install --no-audit --no-fund --install-links ${packageInstall}`] : []),
             ...(publishedCarriesTheFix ? [] : [patchGradle]),
             'npx expo prebuild --platform android --no-install',
             'cd android && ./gradlew --no-daemon assembleDebug',
@@ -897,18 +959,28 @@ const quickstartJourney = async () => {
     mark('metro-ready');
 
     // The recording. `screenrecord` runs in its own SELinux domain and cannot
-    // open a file adb can read on this phone, so the recording is a frame
-    // sequence the phone writes itself and this host encodes at the cadence it
-    // actually achieved; the receipt publishes that cadence as the limit.
-    const recordDir = '/data/local/tmp/dl-quickstart';
-    adb('shell', `rm -rf ${recordDir}; mkdir -p ${recordDir}`);
+    // open a file adb can read on this phone, and neither can a `screencap`
+    // loop writing under /data/local/tmp: the sequence is grabbed over
+    // `adb exec-out`, which this phone does serve, and this host encodes it at
+    // the cadence it actually achieved; the receipt publishes that cadence as
+    // the limit.
+    const recordDir = join(out, 'frames');
+    mkdirSync(recordDir, { recursive: true });
     const recordFrom = Date.now();
-    recording = spawn('adb', ['-s', serial, 'shell',
-        `i=0; while [ $i -lt ${RECORD_FRAMES} ]; do screencap -p ${recordDir}/f_$i.png; i=$((i+1)); done; echo done`],
-    { stdio: 'ignore' });
+    let recording = true;
+    const frames = [];
+    const capture = (async () => {
+        for (let index = 0; recording && index < RECORD_FRAMES; index++) {
+            const frame = adbBin('exec-out', 'screencap', '-p').stdout;
+            if (!frame.length) break;
+            const path = join(recordDir, `f_${index}.png`);
+            writeFileSync(path, frame);
+            frames.push(path);
+        }
+    })();
     const stopRecording = async () => {
-        try { process.kill(recording.pid, 'SIGTERM'); } catch { /* already finished */ }
-        await sleep(500);
+        recording = false;
+        await capture;
     };
 
     receipt.device = {
@@ -929,7 +1001,7 @@ const quickstartJourney = async () => {
     const connectButton = uiBound('Connect');
     writeFileSync(join(out, 'app-idle.png'), adbBin('exec-out', 'screencap', '-p').stdout);
     adb('shell', 'input', 'tap', String(Math.round(connectButton.centerX)), String(Math.round(connectButton.centerY)));
-    const connected = await waitForLive();
+    const connected = await waitForLive(applicationId);
     writeFileSync(join(out, 'first-connect.png'), adbBin('exec-out', 'screencap', '-p').stdout);
     receipt.first_connect = { ...connected, connect_button: connectButton };
     mark('session-live');
@@ -938,6 +1010,7 @@ const quickstartJourney = async () => {
     // the run tries the middle of the picture and, if the view crops the
     // desktop differently than expected, moves across it until the desktop
     // answers. How many taps it took is published either way.
+    if (!ourAppInFront(applicationId)) bringOurAppToFront(applicationId);
     const before = phoneFrame();
     writeFileSync(join(out, 'tap-before.png'), adbBin('exec-out', 'screencap', '-p').stdout);
     receipt.tap = { attempts: [] };
@@ -946,6 +1019,7 @@ const quickstartJourney = async () => {
         const x = Math.round(before.width * position[1]);
         const y = Math.round(before.band.top + (before.band.bottom - before.band.top) * position[0]);
         const taps = fixtureTaps;
+        if (!ourAppInFront(applicationId)) bringOurAppToFront(applicationId);
         adb('shell', 'input', 'tap', String(x), String(y));
         await sleep(2500);
         receipt.tap.attempts.push({ phone_x: x, phone_y: y, desktop_ticks: fixtureTaps - taps });
@@ -962,29 +1036,32 @@ const quickstartJourney = async () => {
     mark('tap-landed');
 
     // The recording, at the cadence this device actually gave.
-    const frames = adb('shell', `ls ${recordDir} | wc -l`).trim();
+    await stopRecording();
     const seconds = (Date.now() - recordFrom) / 1000;
-    const fps = Math.max(1, Math.round(Number(frames) / Math.max(1, seconds) * 100) / 100);
-    receipt.recording = { frames: Number(frames), seconds: round(seconds), fps, note: 'frame sequence, not screenrecord: screenrecord cannot write a readable file on this phone' };
-    const pulled = join(out, 'frames');
-    mkdirSync(pulled, { recursive: true });
-    spawnSync('adb', ['-s', serial, 'pull', `${recordDir}/.`, pulled], { encoding: 'utf8', timeout: 600000 });
-    const encoded = spawnSync('ffmpeg', ['-y', '-framerate', String(fps), '-i', join(pulled, 'f_%d.png'),
+    const fps = Math.max(1, Math.round(frames.length / Math.max(1, seconds) * 100) / 100);
+    receipt.recording = { frames: frames.length, seconds: round(seconds), fps, note: 'frame sequence over adb exec-out screencap, not screenrecord: this phone lets no other process write a readable capture' };
+    const encoded = spawnSync('ffmpeg', ['-y', '-framerate', String(fps), '-i', join(recordDir, 'f_%d.png'),
         '-vf', 'scale=540:-2', '-pix_fmt', 'yuv420p', '-c:v', 'libx264', '-crf', '30', join(out, 'connect-and-tap.mp4')],
     { encoding: 'utf8', timeout: 600000 });
     assert.equal(encoded.status, 0, `ffmpeg could not encode the recording: ${encoded.stderr?.slice(-400)}`);
     // The frames are bulky scratch; the encoded recording is the proof.
-    spawnSync('rm', ['-rf', pulled]);
+    spawnSync('rm', ['-rf', recordDir]);
     mark('recorded');
 
     receipt.load_after = load();
+    receipt.loopback_tcp_ports = forwardedLoopback.slice();
+    if (forwardedLoopback.length > 0) {
+        receipt.media_path = `adb reverse over USB (this host drops inbound traffic, so the engine's loopback ICE port ${forwardedLoopback.join(', ')} was forwarded; a user on a normal network would use the ordinary path)`;
+    }
     receipt.outcome = 'PASS';
     console.log(`PASS: ${serial} connected and tapped through the published quickstart; evidence ${out}`);
     fixtureBrowser.kill('SIGTERM');
     } finally {
-        try { recording?.kill('SIGTERM'); } catch { /* already finished */ }
+        try { await stopRecording(); } catch { /* already finished */ }
         if (wirePort !== undefined) adbTry('reverse', '--remove', `tcp:${wirePort}`);
         adbTry('reverse', '--remove', 'tcp:8081');
+        receipt.loopback_tcp_ports = forwardedLoopback.slice();
+        for (const port of forwardedLoopback) adbTry('reverse', '--remove', `tcp:${port}`);
         try { wireRelay?.close(); } catch { /* already closed */ }
         try { fixture?.close(); } catch { /* already closed */ }
     }
