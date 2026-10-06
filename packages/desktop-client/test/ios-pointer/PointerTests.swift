@@ -17,6 +17,7 @@ final class PointerTests: XCTestCase {
     let dy: Double?
     let span: Double?
     let scale: Double?
+    let id: String?
   }
 
   func testPointer() throws {
@@ -81,6 +82,8 @@ final class PointerTests: XCTestCase {
           record.add(path)
         }
         try record.synthesize()
+      // A button by its test id: the element's own frame, in whichever way the screen is turned.
+      case "tapButton": app.buttons[try XCTUnwrap(step.id)].tap()
       case "landscape": XCUIDevice.shared.orientation = .landscapeLeft
       case "portrait": XCUIDevice.shared.orientation = .portrait
       default: XCTFail("unknown step \(step.action)")

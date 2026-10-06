@@ -199,15 +199,16 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
     });
     const { status } = desktop.snapshot;
     const [copyError, setCopyError] = React.useState<string | null>(null);
-    // Where the picture ended, and how tall the controls are: the deck fills the
-    // band between them, so a tall screen is controls rather than empty space.
+    // Where the picture ended: on a tall screen the deck fills the band under
+    // it, so the screen is controls rather than empty space.
     const [pictureBottom, setPictureBottom] = React.useState(0);
-    const [deckHeight, setDeckHeight] = React.useState(0);
     const [screen, setScreen] = React.useState({ width: 0, height: 0 });
     // A tablet's band carries tablet-sized controls and starts under the picture.
     // A phone's is left exactly as it was: its own keys, at the bottom edge.
     const tablet = Math.min(screen.width, screen.height) >= TABLET_MIN;
     const tallDeck = tablet && screen.height - (insets?.bottom ?? 0) - pictureBottom >= DECK_TALL;
+    // A phone on its side is too short for the buttons one above the other: they share one row.
+    const sideways = !tablet && screen.width > screen.height;
 
     async function copy() {
         setCopyError(null);
@@ -277,25 +278,27 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
             <View pointerEvents="box-none" style={[styles.bottom, {
                 // Under the picture on a tablet, where the band is the controls';
                 // at the bottom of the screen on a phone, and whenever the
-                // keyboard has taken the band, as it always was.
-                top: tallDeck ? pictureBottom : screen.height - deckHeight - insets.bottom,
+                // keyboard has taken the band, as tall as its controls. A height
+                // measured from the deck itself would be squeezed to nothing by
+                // a turn, and stay there.
+                top: tallDeck ? pictureBottom : undefined,
                 paddingBottom: insets.bottom,
             }]}>
-            <View style={[styles.deck, tallDeck && styles.deckTall]} onLayout={(event) => setDeckHeight(event.nativeEvent.layout.height)}>
+            <View style={[styles.deck, tallDeck && styles.deckTall]}>
             <View pointerEvents="none" style={styles.bar}>
                 <Text testID="desklink-status" style={styles.status}>
                     {statusText(desktop.snapshot)}
                 </Text>
             </View>
             <ModifierKeys modifiers={desktop.modifiers} onTap={desktop.tapModifier} style={styles.row} grow={tallDeck} />
-            <View style={styles.keys}>
-                <Pressable testID="desklink-keyboard" accessibilityRole="button" onPress={() => desktop.showKeyboard()} style={[styles.copy, tallDeck && styles.copyTall]}>
+            <View style={[styles.keys, sideways && styles.keysRow]}>
+                <Pressable testID="desklink-keyboard" accessibilityRole="button" onPress={() => desktop.showKeyboard()} style={[styles.copy, tallDeck && styles.copyTall, sideways && styles.copyRow]}>
                     <Text style={styles.copyLabel}>Keys</Text>
                 </Pressable>
-                <Pressable testID="desklink-copy" accessibilityRole="button" onPress={() => void copy()} style={[styles.copy, tallDeck && styles.copyTall]}>
+                <Pressable testID="desklink-copy" accessibilityRole="button" onPress={() => void copy()} style={[styles.copy, tallDeck && styles.copyTall, sideways && styles.copyRow]}>
                     <Text style={styles.copyLabel}>Copy</Text>
                 </Pressable>
-                <Pressable testID="desklink-paste" accessibilityRole="button" onPress={() => void paste()} style={[styles.copy, tallDeck && styles.copyTall]}>
+                <Pressable testID="desklink-paste" accessibilityRole="button" onPress={() => void paste()} style={[styles.copy, tallDeck && styles.copyTall, sideways && styles.copyRow]}>
                     <Text style={styles.copyLabel}>Paste</Text>
                 </Pressable>
             </View>
@@ -324,5 +327,7 @@ const styles = StyleSheet.create({
     row: { backgroundColor: 'transparent' },
     copy: { margin: 8, minHeight: 44, paddingHorizontal: 12, borderRadius: 8, justifyContent: 'center', backgroundColor: '#2b2d33' },
     copyTall: { flexGrow: 1, minHeight: 96 },
+    keysRow: { flexDirection: 'row' },
+    copyRow: { flex: 1 },
     copyLabel: { color: '#c9ccd3', fontSize: 15, fontWeight: '500' },
 });

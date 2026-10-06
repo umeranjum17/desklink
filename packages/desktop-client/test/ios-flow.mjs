@@ -171,6 +171,11 @@ function buildApp(udid) {
     log('building the example app on the Mac (the first build takes a while)');
     mac(`cd "$D/desktop-client/example"
 [ node_modules/.package-lock.json -nt package.json ] || npm install --no-audit --no-fund
+# The package is installed packed (see .npmrc): unpack this checkout's over it,
+# or a kept lane builds the package as it was at its first install.
+PACKED="$D/tmp/$(cd .. && npm pack --silent --pack-destination "$D/tmp")"
+rm -rf node_modules/@desklink/react-native && mkdir node_modules/@desklink/react-native
+tar -xzf "$PACKED" -C node_modules/@desklink/react-native --strip-components=1 && rm "$PACKED"
 # The native project is generated: regenerate it when what it is generated from changes,
 # the package's own native module and config plugin included.
 if [ ! -f ios/Podfile.lock ] || [ -n "$(find package.json app.json ../expo-module.config.json ../app.plugin.js ../ios -newer ios/Podfile.lock)" ]; then
@@ -1331,6 +1336,130 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     assert.equal(await page.evaluate('clicks.length'), clicksBefore, 'zooming and one-finger panning click nothing');
     writeFileSync(join(out, 'desklink-receiver-fill-portrait-panned.png'), PNG.sync.write(pannedShot));
     log(`panned: the marker moved right from x ${dotFirst.toFixed(1)} to ${dotPanned.toFixed(1)} pt without a click`);
+
+    // ---- the keyboard over a field, sideways -----------------------------------------------
+    // A phone on its side, a sign-in field tapped, the on-screen keyboard up:
+    // the field stays in sight above the keyboard, and what is typed lands in
+    // it. A fresh launch starts from the default fill, not the zoom above.
+    mac(`xcrun simctl terminate ${udid} ${BUNDLE} 2>/dev/null || true
+xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`);
+    await until('the relaunched app shows the desktop again', async () => screen(udid).status, (status) => status === 'Connected', 90_000);
+    const appearance = mac(`xcrun simctl ui ${udid} appearance`).trim();
+    startRecording();
+    pointerSteps(udid, [{ action: 'landscape', x: 0, y: 0 }]);
+    await sleep(1500);
+    const wide = { width: screenHeight, height: screenWidth };
+    const sideways = landscapeCapture('step-09-keyboard-landscape-before.png');
+    const fillBox = pictureBox(sideways, wide.width);
+    const fillScale = Math.max(wide.width / geometry.width, wide.height / geometry.height);
+    // The field sits just above the app's own controls, where a finger can
+    // reach it, and below where the keyboard's top will be.
+    const deckTop = Math.min(...visibleNodes(udid).filter((entry) => entry.id?.startsWith('desklink-'))
+        .map((entry) => Number(/\{\{-?[\d.]+,\s*(-?[\d.]+)\}/.exec(entry.frame ?? '')?.[1] ?? Infinity)));
+    assert(Number.isFinite(deckTop), 'the app\'s controls have a place on the screen');
+    const field = { left: 420, width: 360, height: 44 };
+    field.top = Math.round((deckTop - 8 - fillBox.top) / fillScale) - field.height;
+    await page.evaluate(`(() => {
+        const input = document.createElement('input');
+        input.id = 'email'; input.placeholder = 'Email'; input.autocomplete = 'off';
+        input.style.cssText = 'position:fixed;left:${field.left}px;top:${field.top}px;width:${field.width}px;height:${field.height}px;box-sizing:border-box;font:22px system-ui,sans-serif;border:2px solid #4a4a52;border-radius:8px;background:#fff;padding:0 10px';
+        document.body.append(input);
+        window.reset();
+    })()`);
+    const fieldCenter = { x: field.left + field.width / 2, y: field.top + field.height / 2 };
+    // axe's coordinates are not the turned screen's: three taps on bare paper,
+    // read back where the desktop says each landed, give the mapping, and the
+    // field is aimed through its inverse.
+    const aiming = [];
+    for (const aimed of [{ x: 360, y: 150 }, { x: 560, y: 150 }, { x: 360, y: 260 }]) {
+        await page.evaluate('window.reset()');
+        mac(`axe tap -x ${aimed.x} -y ${aimed.y} --udid ${udid}`);
+        const click = await until(`the aiming tap at (${aimed.x}, ${aimed.y}) reached the desktop`, () => page.evaluate('clicks.at(-1)'), (seen) => seen?.type === 'mouseup');
+        aiming.push({ aimed, at: { x: fillBox.left + (click.x + 0.5) * fillScale, y: fillBox.top + (click.y + 0.5) * fillScale } });
+    }
+    const [k0, k1, k2] = aiming;
+    const kax = (k1.at.x - k0.at.x) / (k1.aimed.x - k0.aimed.x); const kbx = (k2.at.x - k0.at.x) / (k2.aimed.y - k0.aimed.y);
+    const kay = (k1.at.y - k0.at.y) / (k1.aimed.x - k0.aimed.x); const kby = (k2.at.y - k0.at.y) / (k2.aimed.y - k0.aimed.y);
+    const kdet = kax * kby - kbx * kay;
+    /** Where to aim axe for a point on the turned screen. */
+    const sidewaysAim = (spot) => {
+        const kdx = spot.x - k0.at.x; const kdy = spot.y - k0.at.y;
+        return { x: k0.aimed.x + (kby * kdx - kbx * kdy) / kdet, y: k0.aimed.y + (kax * kdy - kay * kdx) / kdet };
+    };
+    const fieldAt = { x: fillBox.left + fieldCenter.x * fillScale, y: fillBox.top + fieldCenter.y * fillScale };
+    const fieldAim = sidewaysAim(fieldAt);
+    log(`sideways aiming: ${JSON.stringify(aiming)}; the field at (${fieldAt.x.toFixed(1)}, ${fieldAt.y.toFixed(1)}) pt is aimed at (${fieldAim.x.toFixed(1)}, ${fieldAim.y.toFixed(1)})`);
+    await page.evaluate('window.reset()');
+    mac(`axe tap -x ${fieldAim.x.toFixed(1)} -y ${fieldAim.y.toFixed(1)} --udid ${udid}`);
+    await until(`the tap focused the sign-in field at desktop (${fieldCenter.x}, ${fieldCenter.y})`,
+        () => page.evaluate('({ focused: document.activeElement && document.activeElement.id, click: clicks.at(-1) })'), (seen) => seen.focused === 'email');
+    pointerSteps(udid, [{ action: 'tapButton', id: 'desklink-keyboard', x: 0, y: 0 }]);
+    /**
+     * The top of the on-screen keyboard's first row of keys on the turned
+     * screen; null while it is down. The keyboard reports its keys in the
+     * upright screen's points, where the turned screen's top edge is its right.
+     */
+    const keyboardKeys = () => {
+        const keys = visibleNodes(udid).filter((entry) => /^(q|w|e|r|t|y|u|i|o|p)$/.test(entry.text) && entry.id === null)
+            .map((entry) => /\{\{(-?[\d.]+),\s*-?[\d.]+\},\s*\{([\d.]+),/.exec(entry.frame ?? ''))
+            .filter(Boolean).map(([, x, width]) => wide.height - (Number(x) + Number(width)));
+        return keys.length > 0 ? Math.min(...keys) : null;
+    };
+    await sleep(1500);
+    writeFileSync(join(out, 'step-09-keyboard-tree.json'), JSON.stringify(describeTree(udid), null, 1));
+    landscapeCapture('step-09-keyboard-landscape-up.png');
+    const keyRow = await until('the on-screen keyboard came up', async () => keyboardKeys(), (top) => top !== null);
+    /**
+     * The click's dot, which the page drew at the field's middle: its navy is
+     * nothing else on the screen. Its lowest row and the keyboard's first key
+     * row say whether the field is above the keyboard.
+     */
+    const dotRows = (png) => {
+        const density = png.width / wide.width;
+        const rows = [];
+        for (let y = 0; y < png.height; y++) {
+            let n = 0;
+            for (let x = 0; x < png.width; x++) {
+                const i = (y * png.width + x) * 4;
+                const [r, g, b] = [png.data[i], png.data[i + 1], png.data[i + 2]];
+                if (r < 40 && g < 45 && b < 75 && b - r >= 10) n++;
+            }
+            if (n >= 6 * density) rows.push(y / density);
+        }
+        return rows;
+    };
+    const themed = {};
+    for (const theme of ['light', 'dark']) {
+        mac(`xcrun simctl ui ${udid} appearance ${theme}`);
+        await sleep(1500);
+        const name = `step-09-keyboard-landscape-${theme}.png`;
+        const shot = landscapeCapture(name);
+        themed[theme] = shot;
+        const rows = dotRows(shot);
+        assert(rows.length > 0, `the tapped field is on the screen with the keyboard up (${theme}): its dot is nowhere in ${name}, the keyboard's keys start at ${keyRow.toFixed(0)} pt`);
+        const dot = { top: Math.min(...rows), bottom: Math.max(...rows) };
+        const fieldBottom = (dot.top + dot.bottom) / 2 + (field.height / 2) * (dot.bottom - dot.top) / 36;
+        // The keyboard's suggestion strip sits above its first row of keys.
+        const keyboardTop = keyRow - 50;
+        assert(fieldBottom <= keyboardTop, `the whole field is above the keyboard (${theme}): it ends at ${fieldBottom.toFixed(0)} pt, the keyboard starts near ${keyboardTop.toFixed(0)} pt`);
+        log(`step 09-keyboard-${theme}: sideways, keyboard up (${theme}): the tapped field ends at ${fieldBottom.toFixed(0)} pt, above the keyboard near ${keyboardTop.toFixed(0)} pt (${name})`);
+    }
+    // The example app pins one look (Expo's `userInterfaceStyle` defaults to
+    // light), so the keyboard over it stays light whatever the phone is set to.
+    const changed = themed.light.data.filter((value, i) => value !== themed.dark.data[i]).length / themed.light.data.length;
+    log(`the phone set to dark changes ${(changed * 100).toFixed(1)}% of the screen: the example app keeps its own light keyboard`);
+    mac(`axe type 'umer' --udid ${udid}`);
+    const signedIn = await until('what the phone typed reached the sign-in field',
+        () => page.evaluate('document.getElementById("email").value'), (value) => value === 'umer');
+    assert.equal(signedIn, 'umer', 'what the phone typed is in the field');
+    await sleep(800);
+    landscapeCapture('step-09-keyboard-landscape-typed.png');
+    stopRecording();
+    mac(`xcrun simctl ui ${udid} appearance ${appearance === 'dark' ? 'dark' : 'light'}`);
+    pointerSteps(udid, [{ action: 'portrait', x: 0, y: 0 }]);
+    assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/tmp/phone-control.mp4`, join(out, 'keyboard-landscape.mp4')]).status, 0,
+        'copy the keyboard recording back');
+    log('sideways with the keyboard up, the tapped field stays in sight and takes what is typed');
     console.log(`ok: the iOS receiver shows the live desktop, answers ${codec} with NACK, its taps click the host and its hardware input drives it${IPAD ? ', trackpad included' : ''} (${out})`);
 }
 

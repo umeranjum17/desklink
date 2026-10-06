@@ -71,7 +71,12 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
     const [revision, refresh] = React.useReducer((n: number) => n + 1, 0);
     const [bounds, setBounds] = React.useState({ width: 0, height: 0 });
     const [size, setSize] = React.useState(() => getDesktopSize(sessionId) ?? { width: 0, height: 0 });
-    const [keyboardHeight, setKeyboardHeight] = React.useState(0);
+    /** How much of the view's bottom the keyboard covers, measured against where the view is on screen. */
+    const [keyboardOverlap, setKeyboardOverlap] = React.useState(0);
+    /** The keyboard's top on screen while it is up. */
+    const keyboardTop = React.useRef<number | null>(null);
+    /** Where the desktop's pointer was last sent, in desktop pixels: where a tap just put the caret. */
+    const pointerAt = React.useRef<Point | null>(null);
     /** Zoom over the whole-desktop fit; null fills the view, the default. */
     const [zoom, setZoom] = React.useState<number | null>(null);
     /** From the middle of the uncovered part of the view; clamped to the picture's edges when shown. */
@@ -100,9 +105,11 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         return observeDesktopSurface(() => { refresh(); setEnabled(desktopInputEnabled(sessionId)); });
     }, [sessionId]);
     React.useEffect(() => {
-        const show = Keyboard.addListener('keyboardWillShow', (event) => setKeyboardHeight(event.endCoordinates.height));
-        const hide = Keyboard.addListener('keyboardWillHide', () => setKeyboardHeight(0));
+        const show = Keyboard.addListener('keyboardWillShow', (event) => { keyboardTop.current = event.endCoordinates.screenY; measureKeyboard(); });
+        const hide = Keyboard.addListener('keyboardWillHide', () => { keyboardTop.current = null; setKeyboardOverlap(0); });
         return () => { show.remove(); hide.remove(); };
+        // `measureKeyboard` reads refs only.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
     React.useEffect(() => {
         // A held drag belongs to the old meaning: let go of the button rather
@@ -135,7 +142,7 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
     const left = insets?.left ?? 0;
     const safeWidth = Math.max(1, bounds.width - left - (insets?.right ?? 0));
     const safeHeight = Math.max(1, bounds.height - top - (insets?.bottom ?? 0));
-    const visibleBottom = Math.min(top + safeHeight, bounds.height - (keyboardHeight ? keyboardHeight + keyboardClearance : 0));
+    const visibleBottom = Math.min(top + safeHeight, bounds.height - (keyboardOverlap ? keyboardOverlap + keyboardClearance : 0));
     const visibleHeight = Math.max(1, visibleBottom - top);
     const fit = size.width && size.height ? Math.min(safeWidth / size.width, visibleHeight / size.height) : 1;
     const defaultScale = bounds.width <= bounds.height
@@ -169,6 +176,21 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
     const shown = clampOffset(offset.x, offset.y);
     const originX = left + (safeWidth - pictureWidth) / 2 + shown.x;
     const originY = top + (zoom === null && pictureHeight <= visibleHeight ? 0 : (visibleHeight - pictureHeight) / 2) + shown.y;
+    // The keyboard took (or gave back) the bottom of the view. A picture taller
+    // than what is left is moved so the pointer, where a tap just put the
+    // caret, stays in sight, as `DesktopView.kt` does.
+    const shownBottom = React.useRef(visibleBottom);
+    React.useLayoutEffect(() => {
+        const before = shownBottom.current;
+        shownBottom.current = visibleBottom;
+        const at = pointerAt.current;
+        if (Math.abs(visibleBottom - before) < 0.5 || !at) return;
+        const y = originY + (at.y + 0.5) * scale;
+        const margin = Math.min(56, visibleBottom / 4);
+        if (y > visibleBottom - margin) setOffset(clampOffset(shown.x, shown.y - (y - (visibleBottom - margin))));
+        // Only a change in what the keyboard covers moves the picture.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [visibleBottom]);
     // An application's controls can sit under the picture instead of over it,
     // so it needs to know where the picture ended. Reported only when the
     // picture moved: the callback sets state, and a fresh callback each render
@@ -189,6 +211,7 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
     };
     const pointer = (phase: string, at: Point, button?: number, mark = true) => {
         send({ kind: 'pointer', phase, x: at.x, y: at.y, ...(button ? { button } : {}) });
+        pointerAt.current = at;
         // A device screen shows the touch itself; a cursor would be a second finger that lies.
         // A trackpad or mouse has the system's own pointer on screen.
         if (!mark) setCursor(null);
@@ -426,7 +449,19 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         wheel.current.y += -dy / scale / PIXELS_PER_DETENT;
         flushWheel(false);
     };
-    const onLayout = (event: LayoutChangeEvent) => setBounds(event.nativeEvent.layout);
+    /**
+     * The keyboard covers only the part of the view below its top: the view can
+     * end above the screen's bottom. The hidden input sits at the view's bottom
+     * edge, so it says where that edge is on screen.
+     */
+    const measureKeyboard = () => {
+        const keyboardAt = keyboardTop.current;
+        if (keyboardAt === null) return;
+        input.current?.measureInWindow((_x, y, _width, height) => {
+            if (keyboardTop.current === keyboardAt) setKeyboardOverlap(Math.max(0, y + height - keyboardAt));
+        });
+    };
+    const onLayout = (event: LayoutChangeEvent) => { setBounds(event.nativeEvent.layout); measureKeyboard(); };
     const surface: ViewProps = {
         style: [styles.surface, style], onLayout, accessible: accessibilityLabel !== undefined, accessibilityLabel,
         onStartShouldSetResponder: () => enabled, onMoveShouldSetResponder: () => enabled,
