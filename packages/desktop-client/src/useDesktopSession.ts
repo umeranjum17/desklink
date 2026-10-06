@@ -576,7 +576,9 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         armMedia();
         const id = nativeRef.current;
         if (id == null || nativeDesklink?.getStats == null) return;
+        const token = generationToken.current;
         void nativeDesklink.getStats(id).then((raw) => {
+            if (token !== generationToken.current || nativeRef.current !== id) return;
             let counts: { frames: number; packets: number } | null;
             try {
                 counts = mediaCounts(JSON.parse(raw));
