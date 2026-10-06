@@ -31,7 +31,15 @@ because the obvious design silently works until the first drop.
 
 The signalling WebSocket is deliberately **not** cut: it is the application's
 channel, and the client's recovery surface is the ICE restart and reopen it
-drives over it. What is cut is the WebRTC link, media and data channel both.
+drives over it. The whole-link stage cuts the WebRTC link, media and data
+channel both.
+
+A second stage cuts **only the media**: the relay drops RTP and RTCP (the first
+byte is `0x80`–`0xBF` for both, while STUN leads with `0x00`–`0x03` and DTLS
+with `0x14`–`0x19`) and forwards everything else. Signalling, ICE consent and
+the control channel stay up, so the transport keeps saying everything is fine
+while the picture is stopped — the only case where a client has to read the
+media path itself to know it is not live.
 
 ## Driving it
 
@@ -44,11 +52,13 @@ env -u DISPLAY -u WAYLAND_DISPLAY \
 
 The flow owns a private Xvfb, the `x11_target` fixture on it, the engine, a
 vite page built from the client's **own** `useDesktopSession` plus
-`native.web.ts`, and Chromium. Four stages, one capture each:
+`native.web.ts`, and Chromium. Six stages, one capture each:
 
 | Stage | What is asserted |
 |---|---|
 | live | `status: live`, frames advancing, decoded picture not black |
+| media-frozen | only RTP/RTCP dropped; decoded frames stop while signalling and control keep working, the status leaves `live`, the picture is held, and a pointer sent now still lands on the desktop |
+| media-restored | frames advance again within a second on the **same** session, status `live`, the fixture's marker moving again |
 | throttled | 400 ms added per datagram; the relay's own delayed-datagram count grows, the frame rate drops, the picture stays up, the session never fails |
 | dropped | every datagram discarded; `reconnecting` within seconds, the relay forwarded zero datagrams while discarding traffic, the page still answers with the last picture held, no page error |
 | recovered | frames advance again, status `live` again, the fixture's moving marker moves again, and a pointer the page sends is reported by the desktop itself |
@@ -82,6 +92,16 @@ vite page built from the client's **own** `useDesktopSession` plus
   journey measures: an 8 s cut here heals far faster than that schedule, so the
   two documents are about different situations and neither contradicts the
   other. Do not "fix" the README to match this page, or the reverse.
+- The relay is one path, not the only one: the engine's offer carries its real
+  host candidates as well as the trickled ones, so the two peers also reach each
+  other directly. A whole-link cut of the relay therefore does **not** stop the
+  picture — measured, frames keep advancing through it and `live` is correct.
+  To stop the picture, cut the media (see above); to prove the relay's own path,
+  assert its counters.
+- Count decoded frames from the session's own `getStats`
+  (`framesDecoded`/`packetsReceived`), never from the page. `requestVideoFrameCallback`
+  and `getVideoPlaybackQuality().totalVideoFrames` both keep climbing on a dead
+  media path, because the renderer re-presents the frame it already holds.
 - Measure a cut at the relay, never in the browser. A renderer keeps presenting
   frames it already holds for a while after the last datagram arrives, so a
   frame counter read through a cut measures the jitter buffer, not the link —

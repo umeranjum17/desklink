@@ -236,25 +236,30 @@ view.
   peer's ICE state and the engine's `session.state` both feed it: a
   `disconnected` path reads as `reconnecting` within about a second of the
   drop — never a frozen picture that still says live — and a recovered path
-  reads as `live` again once ICE is `connected`. A path that reports
+  reads as `live` again once the picture is advancing again (ICE `connected`
+  alone does not restore `live` while the picture is frozen). A path that reports
   `failed` reopens the session with fresh authority instead of staying stuck.
   Every event carries its engine session id where the carrier preserves it,
   and the session ignores anything naming a session it no longer holds, so a
   previous generation's queued offer or revocation cannot corrupt or kill a
   healthy recovery.
-  Detection is two-layered: ICE and engine `session.state` events, plus the
+  Detection is three-layered: ICE and engine `session.state` events, the
   engine's twice-a-second control-channel heartbeat (`{"kind":"ping"}`) — a
   path that stops heartbeating reads as stalled within ~1.5 s even while ICE
   consent timers are still making up their minds, and resumed heartbeats read
-  as recovered. Clients on engines that predate the heartbeat simply never
-  arm that watchdog.
+  as recovered — and a half-second poll of the receiver's own video counters
+  while a picture is shown: a picture stopped for ~2 s reads as not `live`
+  even while signalling, ICE and control all answer. Clients on engines that
+  predate the heartbeat simply never arm that watchdog.
 - **ICE restarts before reopens.** When the path drops after frames were
   shown, the session asks the engine (`session.restart_ice`) to re-offer on
   the same peer connection: the fresh offer arrives as the usual
   `session.description` event and is answered as usual, all without reopening
   the session. The first restart waits ~2 s for blips that heal alone;
   retries back off across ~60 s, so a 30–60 s outage still recovers when the
-  network returns. When the restart schedule is spent without the peer
+  network returns — except while the picture is frozen, when the short ~2 s
+  retry keeps being spent without consuming the reopen budget until frames
+  move again. When the restart schedule is spent without the peer
   reporting `failed`, the session reopens instead of sitting in
   `reconnecting`. An engine revocation with code `transport` (the path was
   lost) also reopens the session; any other revocation code, or none, ends

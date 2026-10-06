@@ -13,6 +13,10 @@
 // process dropping or delaying its own datagrams, and the receipt carries the
 // relay's own counters as the evidence of that.
 //
+// The stages, in order: a live desktop, a media-only cut with the picture
+// stopped and the client no longer calling it live, the media path back on the
+// same session, a throttled link, a whole-link cut, and the recovery from it.
+//
 // What each side proves:
 //
 //  - the client notices: when the link stops carrying anything, the hook's
@@ -245,6 +249,26 @@ const readRegion = (video, x, y, width, height) => {
         }
     }
     return { meanLuminance: samples === 0 ? 0 : luminance / samples, litFraction: samples === 0 ? 0 : lit / samples, samples };
+};
+
+/**
+ * What the receiver itself has decoded, as the session reports it. This is the
+ * only count that says whether *video* is arriving: a renderer re-presents the
+ * frame it already holds at display rate, so both the presentation callbacks
+ * and the compositor's own frame total keep climbing on a dead media path.
+ */
+(window as any).__media = async () => {
+    const rows = await (window as any).__session.getStats();
+    let frames = 0;
+    let packets = 0;
+    let streams = 0;
+    for (const row of rows as Array<Record<string, any>>) {
+        if (row.mediaType !== undefined && row.mediaType !== 'video') continue;
+        streams += 1;
+        frames += row.framesDecoded ?? 0;
+        packets += row.packetsReceived ?? 0;
+    }
+    return { frames, packets, streams };
 };
 
 (window as any).__sample = () => {
@@ -547,7 +571,107 @@ async function main() {
             capture: await shot('01-live', 'the desktop showing, before any shaping'),
         });
 
-        // ---- stage 2: throttle ----------------------------------------------
+
+        // ---- stage 2: the media path dies, everything else lives -------------
+        // The whole-link cut below cannot show this case: there the transport
+        // dies with the media, so a client listening to the transport sees the
+        // loss anyway. Here only the picture stops. Signalling is up, ICE keeps
+        // its consent, and the control channel carries input — and a client that
+        // believes the transport is telling the user everything is fine over a
+        // frozen image. So the picture decides: frames must stop, and the status
+        // must leave `live` even though nothing but the media has moved.
+        const liveMedia = await page.evaluate('window.__media()');
+        const forwardedBeforeMediaCut = link.counters.toEngine + link.counters.toBrowser;
+        link.set({ discardMedia: true }, 'media cut: RTP and RTCP discarded, signalling and control carried on');
+        const mediaCutAt = Date.now();
+        let frozenStatus = null;
+        let frozenMedia = null;
+        let lastFrames = liveMedia.frames;
+        for (let attempt = 0; attempt < 40 && frozenStatus === null; attempt += 1) {
+            await sleep(500);
+            const read = await page.evaluate('window.__media()');
+            const readProbe = await probe();
+            // Two things have to be true at once: nothing new decoded since the
+            // last read, and the session no longer calling itself live.
+            if (read.frames === lastFrames && readProbe.status !== 'live') {
+                frozenStatus = readProbe.status;
+                frozenMedia = read;
+            }
+            lastFrames = read.frames;
+        }
+        const mediaDiscarded = link.counters.mediaDiscarded;
+        log(`media cut: ${frozenStatus} after ${Date.now() - mediaCutAt}ms, ${mediaDiscarded} media datagrams discarded`);
+        assert(mediaDiscarded > 0, 'no media reached the relay to discard');
+        assert(
+            link.counters.toEngine + link.counters.toBrowser > forwardedBeforeMediaCut,
+            'the link carried nothing at all: this is a whole-link cut, not a media one',
+        );
+        assert(frozenStatus !== null, `the client still reported live with the picture stopped: ${JSON.stringify(await probe())}`);
+        assert.equal((await probe()).failure, null, 'the client failed the session instead of reporting a stopped picture');
+        const heldPicture = await sample();
+        assert(heldPicture.mounted === true, 'the picture was torn down instead of being held when the media path died');
+        assert(heldPicture.meanLuminance > 8, `the held picture went black: ${JSON.stringify(heldPicture)}`);
+
+        // Signalling and control really are up: a pointer sent now must still
+        // land on the desktop, over the data channel, with no picture moving.
+        const beforeFrozenPointer = fixtureEvents().length;
+        assert.equal(await page.evaluate('window.__pointer(760, 520)'), 'sent');
+        let landedWhileFrozen = false;
+        for (let attempt = 0; attempt < 40 && !landedWhileFrozen; attempt += 1) {
+            await sleep(250);
+            landedWhileFrozen = fixtureEvents().slice(beforeFrozenPointer).some((event) => event.x === 760 && event.y === 520);
+        }
+        assert(landedWhileFrozen, `control did not reach the desktop while the media path was dead: ${JSON.stringify(fixtureEvents().slice(-4))}`);
+        log('media cut: the desktop reported a pointer at (760,520) with no picture moving');
+        const frozenMs = Date.now() - mediaCutAt;
+        receipt.stages.push({
+            stage: 'media-frozen',
+            reportedLive: false,
+            status: frozenStatus,
+            frozenAfterMs: frozenMs,
+            receiverAtFreeze: frozenMedia,
+            mediaDatagramsDiscarded: mediaDiscarded,
+            datagramsCarriedDuringFreeze: link.counters.toEngine + link.counters.toBrowser - forwardedBeforeMediaCut,
+            controlLanded: true,
+            capture: await shot('02-media-frozen', 'only the media path is cut: the picture is stopped and the client does not call it live'),
+        });
+
+        // ---- stage 3: the media path comes back, on the same session ---------
+        const opensBeforeMediaRestore = (await probe()).opens;
+        const framesBeforeMediaRestore = (await page.evaluate('window.__media()')).frames;
+        const mediaRestoredAt = Date.now();
+        link.set({}, 'media restored: RTP and RTCP forwarded again');
+        let framesBackAfterMs = null;
+        for (let attempt = 0; attempt < 60 && framesBackAfterMs === null; attempt += 1) {
+            await sleep(250);
+            const read = await page.evaluate('window.__media()');
+            if (read.frames > framesBeforeMediaRestore) framesBackAfterMs = Date.now() - mediaRestoredAt;
+        }
+        assert(framesBackAfterMs !== null, 'no frames came back 15s after the media path was restored');
+        await until('the status to be live again', 'window.__probe.status === "live"', 15_000);
+        const afterMedia = await probe();
+        assert.equal(afterMedia.opens, opensBeforeMediaRestore, `the media restore opened a new session instead of healing the same one: ${afterMedia.opens} opens`);
+        assert(afterMedia.failure === null, `the media restore recorded a failure: ${JSON.stringify(afterMedia.failure)}`);
+        log(`media restored: frames again ${framesBackAfterMs}ms after it, same session, status ${afterMedia.status}`);
+        receipt.stages.push({
+            stage: 'media-restored',
+            firstFrameAfterRestoreMs: framesBackAfterMs,
+            status: afterMedia.status,
+            sessionOpens: afterMedia.opens,
+            capture: await shot('03-media-restored', 'the media path back: frames advance again on the same session'),
+        });
+        // The picture is the live desktop again, not the frozen one: the
+        // fixture's marker moves, and a frozen picture cannot move it.
+        const liveMarker = await sample();
+        await until(
+            'the fixture marker to move again after the media restore',
+            `window.__sample().marker.meanLuminance !== ${heldPicture.marker.meanLuminance}`,
+            15_000,
+            'true',
+        );
+        assert(liveMarker.meanLuminance > 8, `the restored picture is black: ${JSON.stringify(liveMarker)}`);
+
+        // ---- stage 4: throttle ----------------------------------------------
         // What this stage can honestly measure is worth saying out loud. The
         // client's `getStats` deliberately withholds network addresses, and the
         // round trip with them, so a latency number is not available from the
@@ -577,10 +701,18 @@ async function main() {
             datagramsDelayed: delayedDatagrams,
             meanLuminance: round2(throttledSample.meanLuminance),
             status: throttled.status,
-            capture: await shot('02-throttled', 'the link throttled: the desktop still shown, slower'),
+            capture: await shot('04-throttled', 'the link throttled: the desktop still shown, slower'),
         });
 
-        // ---- stage 3: cut ----------------------------------------------------
+        // ---- stage 5: cut ----------------------------------------------------
+        // Worth saying plainly what this stage cuts and what it does not: the
+        // relay is one path between the peers, and the engine's offer carries
+        // its real host candidates as well as the trickled ones, so the two
+        // also reach each other directly. Measured in this run, the picture
+        // keeps advancing through this cut for that reason, and the status
+        // stays `live` because the picture really is still moving. What this
+        // stage proves is the notice and the same-session recovery of the
+        // relay's path; stage 2 is the one that stops the picture.
         link.set({}, 'unshape, so the cut starts from a healthy path');
         await until('the link to settle after the throttle', `window.__probe.frames > ${throttled.frames + 20}`, 20_000);
         const forwardedBeforeCut = link.counters.toEngine + link.counters.toBrowser;
@@ -647,10 +779,10 @@ async function main() {
             pageStillAnswering: true,
             pageErrors: 0,
             meanLuminance: round2(frozen.meanLuminance),
-            capture: await shot('03-dropped', 'the link cut: the client is reconnecting, still holding the last picture'),
+            capture: await shot('05-dropped', 'the link cut: the client is reconnecting, still holding the last picture'),
         });
 
-        // ---- stage 4: restore ------------------------------------------------
+        // ---- stage 6: restore ------------------------------------------------
         const outageMs = Date.now() - cutAt;
         link.set({}, 'restore: forwarding again');
         const restoreWatch = setInterval(() => link.report(`restored +${Date.now() - cutAt}ms`), 3000);
@@ -698,7 +830,7 @@ async function main() {
             sessionOpens: after.opens,
             markerMovingAgain: true,
             controlLanded: true,
-            capture: await shot('04-recovered', 'the link restored: the desktop is live again and control works'),
+            capture: await shot('06-recovered', 'the link restored: the desktop is live again and control works'),
         });
 
         // ---- the receipt, and the motion that spans the drop and the recovery -

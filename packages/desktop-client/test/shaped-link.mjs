@@ -29,6 +29,19 @@ function parseCandidate(line) {
 const renderCandidate = (candidate, ip, port) =>
     [candidate.foundation, candidate.component, candidate.proto, candidate.priority, ip, String(port), 'typ', candidate.type, ...candidate.rest].join(' ');
 
+/**
+ * RTP or RTCP, which is the picture and nothing else.
+ *
+ * The first byte carries the version in its top two bits: 10 for RTP and RTCP,
+ * and every datagram this relay forwards is either STUN (a leading 0x00–0x03),
+ * DTLS (0x14–0x19) or RTP/RTCP. SRTP is encrypted, but the header stays in the
+ * clear by design, so this reads the same before and after encryption.
+ */
+function isMedia(payload) {
+    if (payload.length === 0) return false;
+    return (payload[0] & 0xc0) === 0x80;
+}
+
 /** Loopback and every local IPv4 address, so a candidate can be checked before it is trusted. */
 function localAddresses() {
     const found = new Set(['127.0.0.1']);
@@ -90,9 +103,20 @@ class ShapedLink {
 
     constructor(log) {
         this.log = log;
-        this.counters = { toEngine: 0, toBrowser: 0, delayed: 0, discarded: 0, unroutable: 0 };
+        this.counters = { toEngine: 0, toBrowser: 0, delayed: 0, discarded: 0, unroutable: 0, mediaDiscarded: 0 };
         /** `{}` forwards at once, `{ delayMs }` slows it, `{ discard: true }` drops it. */
         this.shape = {};
+        /**
+         * Drop media and nothing else. The peers bundle their video and their
+         * data channel onto one 5-tuple and every datagram on it is small, so
+         * size cannot tell a frame from a heartbeat. What does tell them apart
+         * is the first byte: STUN and DTLS — consent checks and the control
+         * channel — lead with 0x00–0x03 or 0x14–0x19, while RTP and RTCP lead
+         * with 0x80–0xBF. Dropping only those is a media cut with signalling,
+         * ICE and control still up, which is the case a client cannot see the
+         * loss of by listening to the transport.
+         */
+        this.discardMedia = false;
         /** The engine candidate the relay forwards to, per generation. */
         this.host = null;
         /** Where the browser really is, learned from the packets it sends. */
@@ -127,6 +151,7 @@ class ShapedLink {
     set(shape, why) {
         this.marks.push({ at: Date.now(), why, shape: { ...shape }, countersBefore: { ...this.counters } });
         this.shape = shape;
+        this.discardMedia = shape.discardMedia === true;
         this.log(`link → ${JSON.stringify(shape)} (${why})`);
     }
 
@@ -183,6 +208,10 @@ class ShapedLink {
 
     /** Forward one datagram in one direction, out of that direction's socket. */
     #forward(payload, to, socket, direction) {
+        if (this.discardMedia && isMedia(payload)) {
+            this.counters.mediaDiscarded += 1;
+            return;
+        }
         if (this.shape.discard === true) {
             this.counters.discarded += 1;
             return;
