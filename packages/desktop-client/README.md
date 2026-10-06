@@ -182,8 +182,10 @@ view.
   touched shows the finger itself.
 - **The picture above the keyboard.** While the phone's keyboard is up, the
   picture sits above it and above the room the app keeps for its own controls
-  (`keyboardClearance`). Android follows the keyboard animation and keeps the
-  pointer in sight; iOS follows the keyboard show/hide bounds.
+  (`keyboardClearance`). Only the part of the view the keyboard really covers
+  counts, and a picture taller than what is left moves so the pointer, where
+  a tap just put the caret, stays in sight. Android also follows the keyboard
+  animation frame by frame; iOS moves once, as the keyboard shows or hides.
 - **Contained geometry.** Touch maps through the picture's actual placement.
   On the whole desktop, a one-finger drag starting in the letterbox does not move the pointer; a
   second finger on the picture can still start a pinch or scroll. A drag that
