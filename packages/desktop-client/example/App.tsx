@@ -43,7 +43,7 @@ function connectionLink(link: string | null): { url: string; report: string | nu
 }
 
 /** The bridge re-serves the engine's local protocol; this unwraps its events for the hook. */
-function bridgeSignaling(address: string): Signaling & { close: () => void } {
+function bridgeSignaling(address: string, onEvent?: (event: SessionEvent) => void): Signaling & { close: () => void } {
     const socket = new WebSocket(address);
     const open = new Promise<void>((resolve, reject) => {
         socket.onopen = () => resolve();
@@ -68,7 +68,10 @@ function bridgeSignaling(address: string): Signaling & { close: () => void } {
         else if (msg.event === 'session.candidate') event = { kind: 'candidate', candidate: { candidate: p.candidate, sdpMid: p.sdpMid ?? null, sdpMLineIndex: p.sdpMLineIndex ?? null }, sessionId: p.sessionId };
         else if (msg.event === 'session.state') event = { kind: 'state', capture: p.capture, transport: p.transport, firstFrame: p.firstFrame, sessionId: p.sessionId };
         else if (msg.event === 'session.revoked') event = { kind: 'revoked', reason: p.reason, sessionId: p.sessionId };
-        if (event !== null) for (const handler of handlers) handler(event);
+        if (event !== null) {
+            onEvent?.(event);
+            for (const handler of handlers) handler(event);
+        }
     };
     socket.onclose = () => {
         for (const waiter of pending.values()) waiter.reject(new Error('the bridge closed'));
@@ -164,8 +167,34 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
         authorize: async () => {
             // A reconnect gets a fresh socket: the bridge ends a session whose socket closed.
             signaling.current?.close();
-            signaling.current = bridgeSignaling(url);
-            return { signaling: signaling.current, session: {} };
+            signaling.current = bridgeSignaling(url, event => {
+                // The engine's loopback ICE port is ephemeral and may arrive in
+                // the offer itself or as a later candidate, so a harness that
+                // forwards loopback has to learn it from either.
+                if (report === null) return;
+                const lines = event.kind === 'candidate'
+                    ? [event.candidate.candidate]
+                    : event.kind === 'description'
+                        ? event.description.sdp.split(/\r?\n/).filter(line => line.startsWith('a=candidate'))
+                        : [];
+                for (const line of lines) {
+                    // SDP writes the same line with an `a=` prefix, which shifts
+                    // every field, so it is stripped before parsing.
+                    const fields = line.replace(/^a=/, '').trim().split(/\s+/);
+                    if (fields[2]?.toLowerCase() !== 'tcp') continue;
+                    const port = Number(fields[5]);
+                    if (!Number.isInteger(port) || port === 0) continue;
+                    void fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), loopbackTcpPort: port }) })
+                        .catch(() => undefined);
+                }
+            });
+            return {
+                signaling: signaling.current,
+                // The example runs over a plain adb-reverse forward in the
+                // harness, which is TCP only: ask for the engine's loopback
+                // route so the picture can reach the phone at all.
+                session: { loopbackTcp: true },
+            };
         },
     });
     const { status } = desktop.snapshot;

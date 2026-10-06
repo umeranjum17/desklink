@@ -125,6 +125,15 @@ const UNREACHABLE_DESKTOP =
     'The phone must reach the desktop directly, on the same network or its tailnet. Other networks need a relay route supplied by the app.';
 
 /**
+ * A connection that never shows a frame is a connection that never formed, and
+ * saying so beats an empty picture: on a path that only reaches the desktop
+ * through a tunnel or a USB forward, the app has to ask for the loopback route.
+ */
+export const FIRST_FRAME_AFTER_MS = 20_000;
+const NO_PICTURE =
+    'The desktop never sent a picture. On a path that only reaches the desktop through a tunnel or a USB forward, open the session with loopbackTcp: true.';
+
+/**
  * The engine's and host's own refusal tokens, mapped to this package's failure
  * codes. A token the engine did not send is a deliberate refusal, not a network
  * blip, so it is not treated as retryable.
@@ -282,6 +291,8 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const restartTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     /** The pending stall watchdog, armed by heartbeats. */
     const stallTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    /** Armed while a first connection waits for its first frame. */
+    const firstFrameTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     /** When the last heartbeat arrived, or 0 before the first one. */
     const lastPingAt = useRef(0);
     /** Renegotiation transients are not a new outage before this time. */
@@ -354,6 +365,24 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         if (stallTimer.current !== null) clearTimeout(stallTimer.current);
         stallTimer.current = null;
     }, []);
+
+    const cancelFirstFrame = useCallback(() => {
+        if (firstFrameTimer.current !== null) clearTimeout(firstFrameTimer.current);
+        firstFrameTimer.current = null;
+    }, []);
+
+    /**
+     * A first connection that stays frameless for this long is not going to
+     * arrive: report why instead of leaving an empty picture on screen.
+     */
+    const armFirstFrame = useCallback(() => {
+        cancelFirstFrame();
+        firstFrameTimer.current = setTimeout(() => {
+            firstFrameTimer.current = null;
+            if (presentedRef.current || statusRef.current !== 'connecting') return;
+            transportFailed(NO_PICTURE);
+        }, FIRST_FRAME_AFTER_MS);
+    }, [cancelFirstFrame, transportFailed]);
 
     const scheduleRestartRef = useRef<(delay: number) => void>(() => undefined);
 
@@ -627,6 +656,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         cancelReconnect();
         cancelRestart();
         cancelStall();
+        cancelFirstFrame();
         restoreToken.current = null;
         const openedRef = opened.current;
         const owner = signaling.current;
@@ -634,7 +664,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         if (closeRemote) await endRemote(openedRef, owner);
         update({ status: 'ended', presented: false, failure: null });
         void reason;
-    }, [cancelReconnect, cancelRestart, cancelStall, endRemote, discardSession, update]);
+    }, [cancelReconnect, cancelRestart, cancelStall, cancelFirstFrame, endRemote, discardSession, update]);
 
     const establish = useCallback(async () => {
         if (nativeRef.current != null) return;
@@ -751,6 +781,10 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 // reopen; the app's own grant wins when it names one.
                 restore_token: authorization.session.restoreToken ?? restoreToken.current ?? undefined,
                 ttl_seconds: authorization.session.ttlSeconds,
+                // A TCP-only path (an SSH tunnel, `adb reverse`) can only be
+                // reached on the engine's loopback, which the engine offers
+                // only when the app asks. Off by default, as on the wire.
+                ...(authorization.session.loopbackTcp ? { loopback_tcp: true } : {}),
             });
         } catch (error) {
             const message = error instanceof Error ? error.message : 'the desktop could not start';
@@ -765,6 +799,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 if (sample.sessionId === openedResult.sessionId) optionsRef.current.onCursor?.(sample);
             }
             update({ geometry: openedResult.geometry, status: 'connecting' });
+            armFirstFrame();
             if (token !== generationToken.current) return;
 
             const platform = nativeDesklink;
@@ -808,7 +843,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 await endRemote(openedResult, authorization.signaling);
             }
         }
-    }, [discardSession, endRemote, refuse, teardown, transportFailed, update, onTransportState]);
+    }, [armFirstFrame, discardSession, endRemote, refuse, teardown, transportFailed, update, onTransportState]);
 
     /**
      * Open (or reopen) the session with fresh authority. A deliberate call
@@ -869,6 +904,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                         restartAttempts.current = 0;
                         restartCycles.current = 0;
                         cancelRestart();
+                        cancelFirstFrame();
                         update({ status: 'live', presented: true, failure: null });
                         return;
                     case 'control': {
@@ -1031,6 +1067,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         cancelReconnect();
         cancelRestart();
         cancelStall();
+        cancelFirstFrame();
         generationToken.current += 1;
         const id = nativeRef.current;
         nativeRef.current = null;

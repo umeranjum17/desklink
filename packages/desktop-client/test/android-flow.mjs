@@ -31,6 +31,19 @@
  *   adb devices                       # or: ANDROID_SERIAL=...
  *   node packages/desktop-client/test/android-flow.mjs
  *
+ * `--transport usb` runs the same journey over `adb reverse`, which carries TCP
+ * only: the engine's own addresses are UDP, so the app asks for the loopback
+ * route (`session.loopbackTcp`) and this flow follows the engine's ephemeral
+ * loopback port, forwarding it to the device exactly as a tunnel operator would.
+ * A tap is asserted on this leg too, because a tap that arrives proves the
+ * input channel rode the same forward as the picture. `--no-forward-loopback`
+ * is its counterfactual: the same leg with the forward withheld, which must
+ * fail to present a frame.
+ *
+ * `--wifi-off` is what makes the `usb` leg really TCP only: the phone's Wi-Fi
+ * is turned off for the run (and restored afterwards), so the engine's own UDP
+ * candidates are unreachable and the loopback forward is the only route left.
+ *
  * Environment:
  *
  *   ANDROID_SERIAL            device serial to drive (default the only device
@@ -73,8 +86,9 @@ const example = join(repo, 'packages/desktop-client/example');
 const apk = join(example, 'android/app/build/outputs/apk/debug/app-debug.apk');
 const claim = claimPrivateDisplay({ from: 170, count: 40 });
 const display = claim.display;
+const transport = process.argv.includes('--transport') ? process.argv[process.argv.indexOf('--transport') + 1] : 'wifi';
 const host = process.env.DESKLINK_ANDROID_HOST;
-assert(host, 'set DESKLINK_ANDROID_HOST to this machine\'s address on the phone\'s network');
+assert(transport === 'usb' || host, 'set DESKLINK_ANDROID_HOST to this machine\'s address on the device\'s network');
 const env = { ...process.env, WAYLAND_DISPLAY: '', TMPDIR: scratch, DESKLINK_ENGINE: engine };
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 const attached = spawnSync('adb', ['devices'], { encoding: 'utf8' }).stdout.split('\n').slice(1)
@@ -100,9 +114,16 @@ const capture = name => {
 const logs = { bridge: '', fixture: '', metro: '' };
 const receipt = {
     outcome: 'FAIL', serial, sourceHead: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim(),
+    transport,
+    media_path: transport === 'usb'
+        ? 'TCP only, over adb reverse: the engine\'s loopback ICE port forwarded to the device'
+        : 'this host to the device over the network',
 };
 const children = [];
 let xvfb, target, bridge, metro, receiver;
+// This machine leaves the device's own Wi-Fi exactly as it found it.
+const wifiOff = process.argv.includes('--wifi-off');
+let wifiWasOn = false;
 
 const start = (name, cmd, args, childEnv, cwd = repo) => {
     const child = spawn(cmd, args, { cwd, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -118,6 +139,12 @@ const waitFor = async (ready, what, ms = 60000) => {
 };
 
 try {
+    if (wifiOff) {
+        wifiWasOn = adb('shell', 'settings', 'get', 'global', 'wifi_on').trim() === '1';
+        adb('shell', 'svc', 'wifi', 'disable');
+        await sleep(3000);
+        receipt.wifi = wifiWasOn ? 'turned off for this run, restored at the end' : 'already off';
+    }
     for (const path of [engine, fixture]) assert(existsSync(path), `missing binary: ${path}: build the engine first`);
     Object.assign(receipt, { engine, engineSha256: hash(engine), fixtureSha256: hash(fixture), example, display });
 
@@ -159,9 +186,33 @@ try {
         });
     });
     await new Promise(ok => receiver.listen(0, '0.0.0.0', ok));
-    const link = `desklink-example://connect?url=${encodeURIComponent(`ws://${host}:${bridgePort}/desktop?token=${token}`)}`
-        + `&report=${encodeURIComponent(`http://${host}:${receiver.address().port}/report`)}`;
+    const phoneHost = transport === 'usb' ? '127.0.0.1' : host;
+    if (transport === 'usb') {
+        // The signalling socket and the receiver ride `adb reverse`; the media
+        // forward is the engine's loopback port, which it picks per session and
+        // the app reports as it sees the candidate.
+        adb('reverse', `tcp:${bridgePort}`, `tcp:${bridgePort}`);
+        adb('reverse', `tcp:${receiver.address().port}`, `tcp:${receiver.address().port}`);
+    }
+    const link = `desklink-example://connect?url=${encodeURIComponent(`ws://${phoneHost}:${bridgePort}/desktop?token=${token}`)}`
+        + `&report=${encodeURIComponent(`http://${phoneHost}:${receiver.address().port}/report`)}`;
     receipt.link = link.replace(token, '<bridge-token>');
+    // Every loopback ICE port the app sees, forwarded as it appears. ICE's
+    // throwaway port 9 is not a listener and cannot be bound.
+    const forwarded = new Set();
+    receipt.loopback_tcp_ports = [];
+    const noForward = process.argv.includes('--no-forward-loopback');
+    const forwardLoopback = report => {
+        const port = report?.loopbackTcpPort;
+        if (!Number.isInteger(port) || port < 1024 || forwarded.has(port)) return;
+        forwarded.add(port);
+        if (noForward) {
+            receipt.loopback_tcp_ports.push(`${port} (withheld)`);
+            return;
+        }
+        adb('reverse', `tcp:${port}`, `tcp:${port}`);
+        receipt.loopback_tcp_ports.push(port);
+    };
 
     if (process.env.DESKLINK_ANDROID_SKIP_BUILD !== '1') {
         // Every other desklink build takes this lock; the example app's Gradle
@@ -181,15 +232,33 @@ try {
     // device reaches on its own loopback through adb rather than over the air.
     // Metro serves the example app, so it runs where that app's own `expo`
     // lives: the repository root is not an Expo project and has no SDK to read.
-    metro = start('metro', 'npx', ['expo', 'start', '--port', '8081'], { ...env, CI: '1' }, example);
+    // Another lane may hold 8081, so Metro takes a port the operating system
+    // says is free and the device's own 8081 is reversed onto it.
+    const metroProbe = createServer();
+    await new Promise(ok => metroProbe.listen(0, '127.0.0.1', ok));
+    const metroPort = metroProbe.address().port;
+    metroProbe.close();
+    receipt.metroPort = metroPort;
+    metro = start('metro', 'npx', ['expo', 'start', '--port', String(metroPort)], { ...env, CI: '1' }, example);
     await waitFor(() => /Waiting on http/.test(logs.metro), 'Metro');
     adb('install', '-r', '-g', apk);
-    adb('reverse', 'tcp:8081', 'tcp:8081');
+    adb('reverse', 'tcp:8081', `tcp:${metroPort}`);
 
-    // The journey.
-    await waitFor(() => tryAdb('shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', `"${link}"`),
+    // The journey. Another desklink app may answer the same `desklink-example`
+    // link on this device, so the run names this build's own activity instead
+    // of letting the resolver choose whose desktop opens.
+    adb('shell', 'am', 'force-stop', 'dev.desklink.example');
+    await sleep(1000);
+    await waitFor(() => tryAdb('shell', 'am', 'start', '-n', 'dev.desklink.example/.MainActivity',
+        '-a', 'android.intent.action.VIEW', '-d', `"${link}"`),
     'the app to answer its connection link', 120000);
     await waitFor(() => reports.length > 0, "the app's own report", 180000);
+    // The forward follows the engine's loopback port, so it is in place before
+    // the session can finish connecting.
+    await waitFor(() => {
+        for (const report of reports) forwardLoopback(JSON.parse(report));
+        return transport !== 'usb' || forwarded.size > 0;
+    }, 'the engine\'s loopback ICE port to forward', 120000);
     await waitFor(() => {
         const last = JSON.parse(reports[reports.length - 1] ?? '{}');
         return typeof last.presentedAt === 'number' && last.presentedAt > 0;
@@ -210,6 +279,14 @@ try {
     await waitFor(() => reports.length > 1 && decoded(reports[reports.length - 1]) > decoded(reports[0]),
         'the app to decode further video frames', 60000);
 
+    // The click: input has to ride the same forward as the picture, so a tap
+    // inside the picture must reach the fixture, which records it and repaints
+    // a marker there.
+    const buttons = () => logs.fixture.split('\n').filter(line => line.includes('"button"')).length;
+    const beforeButtons = buttons();
+    adb('shell', 'input', 'tap', String(Math.round(1080 * 0.5)), String(Math.round(2400 * 0.25)));
+    await sleep(1500);
+
     // The cursor: a swipe across the picture moves the desktop's pointer, and
     // the fixture records where it landed. Both ends must start inside the
     // picture: on SDK 57 the fit-width picture is top-anchored (about y 110-717
@@ -219,26 +296,36 @@ try {
     const before = pointers();
     adb('shell', 'input', 'swipe', String(Math.round(1080 * 0.2)), String(Math.round(2400 * 0.2)),
         String(Math.round(1080 * 0.75)), String(Math.round(2400 * 0.13)), '600');
-    await waitFor(() => pointers() > before, 'the fixture pointer to move');
+    await waitFor(() => pointers() > before, 'the fixture pointer to move', 120000);
     const cursor = logs.fixture.split('\n').filter(line => line.includes('"pointer"')).pop();
+    // The tap is read after the swipe, because the fixture's own stdout is
+    // block-buffered: a swipe's flood of events is what flushes the tap line.
+    await waitFor(() => buttons() > beforeButtons, 'the tap to reach the desktop', 30000);
+    const button = logs.fixture.split('\n').filter(line => line.includes('"button"')).pop();
 
     Object.assign(receipt, {
-        captures: [first, second, capture('03-cursor-moved.png')].map(path => path.replace(homedir(), '~')),
+        captures: [first, second, capture('03-tap-received.png'), capture('04-cursor-moved.png')].map(path => path.replace(homedir(), '~')),
         reports: reports.length,
         firstReport: JSON.parse(reports[0]),
-        lastReport: JSON.parse(reports[reports.length - 1]),
+        lastReport: JSON.parse(reports.at(-1)),
         cursor: cursor.trim(),
+        tap: button.trim(),
     });
     receipt.outcome = 'PASS';
     console.log(`PASS: the example app opens a live desktop on ${serial}; evidence ${out}`);
 } catch (error) {
     receipt.error = String(error);
+    // What the person holding the phone sees is part of a failed run's evidence.
+    try { capture('00-failure.png'); } catch { /* the device may be gone */ }
     console.error(String(error));
 } finally {
     for (const [, child] of children) child.kill('SIGTERM');
     await sleep(700);
     for (const [, child] of children) { try { process.kill(child.pid, 0); child.kill('SIGKILL'); } catch { child.exitCode ??= 0; } }
     receiver?.close();
+    if (wifiOff && wifiWasOn) {
+        try { adb('shell', 'svc', 'wifi', 'enable'); } catch (error) { receipt.wifi_restore = String(error); }
+    }
     if (xvfb) { try { await stopOwnedXvfb(xvfb); } catch (error) { receipt.cleanup = String(error); } }
     claim.release();
     for (const name of ['bridge', 'fixture', 'metro']) writeFileSync(join(out, `${name}.log`), logs[name]);

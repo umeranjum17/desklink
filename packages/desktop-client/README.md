@@ -127,6 +127,24 @@ the iOS receiver asks the engine for H.264, which iOS decodes in hardware
 iOS decodes in software — so a 1440p or 4K picture on such a host costs CPU,
 heat and battery.
 
+### Paths with no UDP route
+
+`session.loopbackTcp` asks the engine to also offer ICE over TCP on its own
+`127.0.0.1`, for a client whose only way to the computer is a forward of that
+loopback — an SSH tunnel, `adb reverse`:
+
+```tsx
+session: { loopbackTcp: true },
+```
+
+It is off by default, like the wire field it sets. A client with a UDP path
+keeps it: ICE prefers UDP whenever it has one. The engine picks that port per
+session, so the forward has to follow it (`adb reverse tcp:<port> tcp:<port>`,
+`ssh -L <port>:127.0.0.1:<port> <computer>`) with `<port>` from the
+`session.candidate` the engine offers. Without it a connection that never
+forms fails after 20 seconds with that reason, rather than sitting on an empty
+view.
+
 ### What the package guarantees
 
 - **Hardware decoding where the platform has it.** Android and web decode the
