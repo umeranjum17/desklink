@@ -782,11 +782,15 @@ const quickstartJourney = async () => {
     receipt.transport_detail = 'adb reverse tunnel over the USB cable, both legs (signalling, app JavaScript and, as the wire log shows, WebRTC media); '
         + 'not the local network: this host drops inbound TCP except sshd, and the phone is on the same subnet';
     const token = await hostLab();
-
+    let wireRelay;
+    let fixture;
+    let recording;
+    let wirePort;
+    try {
     // Every frame between the phone and the bridge, so the receipt can say what
     // the wire actually carried. The token never appears: it is replaced.
     const wire = wireLog;
-    const wireRelay = createNetServer(client => {
+    wireRelay = createNetServer(client => {
         const upstream = connect({ host: '127.0.0.1', port: bridgePort });
         const pump = (from, to, side) => {
             from.on('data', chunk => {
@@ -801,13 +805,13 @@ const quickstartJourney = async () => {
         pump(upstream, client, 'host->phone');
     });
     await new Promise(ok => wireRelay.listen(0, '127.0.0.1', ok));
-    const wirePort = wireRelay.address().port;
+    wirePort = wireRelay.address().port;
     receipt.wirePort = wirePort;
 
     // The desktop: one window on the private display with a button that tells
     // this host how many times the desktop was clicked.
     let fixtureTaps = 0;
-    const fixture = createServer((request, response) => {
+    fixture = createServer((request, response) => {
         if (request.url.startsWith('/tap')) {
             fixtureTaps += 1;
             response.writeHead(204);
@@ -824,13 +828,24 @@ const quickstartJourney = async () => {
         `--user-data-dir=${join(scratch, 'chromium-profile')}`, `--app=http://127.0.0.1:${fixturePort}/`], xenv, scratch);
     mark('fixture-open');
 
-    // The app: this run's own quickstart project, pointed at this run's bridge.
+    const packageSource = process.env.DESKLINK_QUICKSTART_PACKAGE ?? 'published';
+    if (!existsSync(join(quickstart, 'package.json'))) {
+        mkdirSync(quickstart, { recursive: true });
+        const scaffold = spawnSync('npx', ['-y', 'create-expo-app@latest', quickstart, '--template', 'blank-typescript'],
+            { encoding: 'utf8', timeout: 600000 });
+        assert.equal(scaffold.status, 0, `could not scaffold ${quickstart}: ${(scaffold.stderr ?? scaffold.stdout ?? '').slice(-400)}`);
+        if (packageSource !== 'repo') {
+            const installedPackages = spawnSync('npx', ['expo', 'install', '@desklink/react-native', 'react-native-webrtc',
+                '@config-plugins/react-native-webrtc@15', '@byokit/signaling@0.1.0'],
+                { cwd: quickstart, env, encoding: 'utf8', timeout: 600000 });
+            assert.equal(installedPackages.status, 0, `could not install the published packages: ${(installedPackages.stderr ?? installedPackages.stdout ?? '').slice(-400)}`);
+        }
+    }
     writeFileSync(join(quickstart, 'App.tsx'), quickstartApp(`ws://127.0.0.1:${wirePort}/desktop?token=${token}`));
     // `published` is what a new user gets from npm. `repo` installs this
     // checkout's package instead. Either way the one file PR #95 fixed is
     // applied to the installed copy, because npm's 0.5.0 predates it and cannot
     // start a fresh SDK 57 app at all; that file is what the next publish needs.
-    const packageSource = process.env.DESKLINK_QUICKSTART_PACKAGE ?? 'published';
     receipt.app_package_source = packageSource;
     receipt.app_published_patch = 'android/build.gradle from PR #95 (expo-module-gradle-plugin), '
         + 'applied to the installed package because npm 0.5.0 predates it';
@@ -887,7 +902,7 @@ const quickstartJourney = async () => {
     const recordDir = '/data/local/tmp/dl-quickstart';
     adb('shell', `rm -rf ${recordDir}; mkdir -p ${recordDir}`);
     const recordFrom = Date.now();
-    const recording = spawn('adb', ['-s', serial, 'shell',
+    recording = spawn('adb', ['-s', serial, 'shell',
         `i=0; while [ $i -lt ${RECORD_FRAMES} ]; do screencap -p ${recordDir}/f_$i.png; i=$((i+1)); done; echo done`],
     { stdio: 'ignore' });
     const stopRecording = async () => {
@@ -925,8 +940,9 @@ const quickstartJourney = async () => {
     const before = phoneFrame();
     writeFileSync(join(out, 'tap-before.png'), adbBin('exec-out', 'screencap', '-p').stdout);
     receipt.tap = { attempts: [] };
+    assert(before.band !== null, 'the phone lost the desktop picture before the tap');
     for (const [at, position] of [[0.5, 0.5], [0.35, 0.5], [0.65, 0.5], [0.5, 0.38], [0.5, 0.62]].entries()) {
-        const x = Math.round(540 * position[1]);
+        const x = Math.round(before.width * position[1]);
         const y = Math.round(before.band.top + (before.band.bottom - before.band.top) * position[0]);
         const taps = fixtureTaps;
         adb('shell', 'input', 'tap', String(x), String(y));
@@ -963,8 +979,14 @@ const quickstartJourney = async () => {
     receipt.load_after = load();
     receipt.outcome = 'PASS';
     console.log(`PASS: ${serial} connected and tapped through the published quickstart; evidence ${out}`);
-    fixture.close();
     fixtureBrowser.kill('SIGTERM');
+    } finally {
+        try { recording?.kill('SIGTERM'); } catch { /* already finished */ }
+        if (wirePort !== undefined) adbTry('reverse', '--remove', `tcp:${wirePort}`);
+        adbTry('reverse', '--remove', 'tcp:8081');
+        try { wireRelay?.close(); } catch { /* already closed */ }
+        try { fixture?.close(); } catch { /* already closed */ }
+    }
 };
 try {
     await (journey === 'quickstart' ? quickstartJourney() : latencyJourney());
