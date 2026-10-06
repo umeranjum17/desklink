@@ -56,6 +56,13 @@ export interface SessionOpenRequest {
     iceServers?: IceServerConfig[];
     restoreToken?: string;
     ttlSeconds?: number;
+    /**
+     * Ask the engine to also offer ICE over TCP on its own loopback, for a
+     * client whose only way to this computer is a forward of that loopback
+     * (an SSH tunnel, `adb reverse`). A client with a UDP path keeps it: ICE
+     * prefers UDP whenever it has one.
+     */
+    loopbackTcp?: boolean;
 }
 
 export interface SessionOpenResult {

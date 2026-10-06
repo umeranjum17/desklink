@@ -229,6 +229,24 @@ lists every gesture, and the keyboard, clipboard and safe-area options.
 `ws://` is plaintext and the token is full access: keep it to a private network,
 or put the bridge behind TLS and use `wss://`.
 
+#### When the phone has no UDP route to the computer
+
+An SSH tunnel or `adb reverse` carries TCP only, and the engine's own
+addresses are UDP, so nothing connects and the view stays empty. Ask for the
+loopback route instead:
+
+```tsx
+const authorize = authorizeBridge(BRIDGE, { loopbackTcp: true });
+```
+
+The engine then also offers ICE over TCP on `127.0.0.1` and the existing
+forward carries it; a phone with a UDP path is unaffected, because ICE always
+prefers UDP when it has one. The engine picks that port per session, so the
+forward has to follow it: `adb reverse tcp:<port> tcp:<port>` or
+`ssh -L <port>:127.0.0.1:<port> <computer>`, with `<port>` taken from the
+`session.candidate` the engine offers. A session that shows no picture within
+20 seconds now says so, instead of leaving a black screen.
+
 ## Develop
 
 ```sh
