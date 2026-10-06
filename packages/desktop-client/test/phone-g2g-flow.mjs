@@ -56,6 +56,14 @@
  *   DESKLINK_G2G_STAMP      stamp_target binary (default: a release build)
  *   DESKLINK_ANDROID_OUT    evidence directory (default a fresh one under ~/lab-tmp)
  *   DESKLINK_ANDROID_SKIP_BUILD 1 reuses the APK the last run built
+ *   DESKLINK_QUICKSTART_PACKAGE repo installs this checkout's client by path,
+ *                            tarball installs an `npm pack` of it (what a user
+ *                            gets from a release), anything else uses the
+ *                            published packages (default published)
+ *   DESKLINK_QUICKSTART_LOOPBACK_TCP 1 runs the README's TCP-only snippet
+ *                            (`session.loopbackTcp`, forwarding each loopback
+ *                            ICE port the engine offers); unset runs the
+ *                            README quickstart as written
  *
  * `--journey quickstart` runs the README's own phone journey instead of the J4
  * measurement: a fresh `create-expo-app` with the published `@desklink/*` and
@@ -117,7 +125,10 @@ const latencySeconds = Number(arg('latency-seconds', 30));
 const transport = arg('transport', 'wifi');
 // `--relay-rate 4mbit` puts a userspace token bucket in front of the bridge.
 const relayRate = arg('relay-rate', null);
-// `--keep-captures` leaves the raw captures on the device for offline study.
+// `--keep-captures` leaves the device-side raw captures (the latency journey's
+// on-phone frames) on the device for offline study. The quickstart journey's
+// frame sequence lives on this host and is always encoded to connect-and-tap.mp4
+// with the frames removed afterwards.
 const keepCaptures = process.argv.includes('--keep-captures');
 // Chromium's launcher reads `$XDG_CONFIG_HOME/chromium-flags.conf` on every
 // start, and this account's copy pins `--ozone-platform=wayland`: the fixture
