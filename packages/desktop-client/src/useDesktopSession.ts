@@ -58,6 +58,35 @@ const RESTART_GRACE_MS = 2500;
 /** How long a restart offer may go unanswered before the next attempt. */
 const RESTART_REPLY_MS = 5000;
 /**
+ * How long the media path may carry nothing at all before a session that says
+ * `live` stops saying so. The engine's transport state reaches the client over
+ * the signalling channel, which is not part of the media path, so a dead link
+ * with signalling up reads as `connected` over a picture that has stopped: live
+ * has to mean the picture is advancing, not that someone answered.
+ */
+const FROZEN_AFTER_MS = 2000;
+/** How often the media path is read while the session claims to be live. */
+const MEDIA_POLL_MS = 500;
+
+/**
+ * What the receiver has taken in, summed over its video streams: new decoded
+ * frames, and packets that arrived at all. Either moving means the picture is
+ * advancing; a still screen that keeps no frames moving is not a dead path, so
+ * both counts are read rather than frames alone.
+ */
+function mediaCounts(rows: Array<Record<string, unknown>>): { frames: number; packets: number } | null {
+    let frames = 0;
+    let packets = 0;
+    let streams = 0;
+    for (const row of rows) {
+        if (row.mediaType !== undefined && row.mediaType !== 'video') continue;
+        streams += 1;
+        frames += typeof row.framesDecoded === 'number' ? row.framesDecoded : 0;
+        packets += typeof row.packetsReceived === 'number' ? row.packetsReceived : 0;
+    }
+    return streams === 0 ? null : { frames, packets };
+}
+/**
  * Full session reopens back off across about a minute, holding at patient
  * 8 s retries: a return must never wait out a 32 s gap, and an attempt every
  * 8 s costs nothing next to a live desktop.
@@ -94,13 +123,17 @@ export type ConnectionStateName =
  * What one ICE/engine-transport state means for the session status, or null
  * when it changes nothing. `disconnected` surfaces as `reconnecting` at once —
  * event-driven, so within about a second of the drop — and `connected` moves a
- * session that had shown frames back to `live`. `failed` is terminal and is
- * handled by the failure path, not here.
+ * session whose picture is advancing back to `live`. `failed` is terminal and
+ * is handled by the failure path, not here.
+ *
+ * `advancing` is the media path, not the transport: a transport that answers
+ * with a still image is not a live desktop, so a session whose picture has
+ * stopped stays out of `live` whatever the transport reports.
  */
 export function connectionStatusFor(
     state: string,
     status: SessionSnapshot['status'],
-    presented: boolean,
+    advancing: boolean,
 ): SessionSnapshot['status'] | null {
     switch (state) {
         case 'disconnected':
@@ -108,9 +141,9 @@ export function connectionStatusFor(
         case 'connected':
         case 'completed':
             if (status !== 'reconnecting') return null;
-            // Frames were never shown: this is still the first connection, not
-            // a recovery, so it stays `connecting` until a frame renders.
-            return presented ? 'live' : 'connecting';
+            // No picture is moving: this is still the first connection, not a
+            // recovery, so it stays `connecting` until frames advance again.
+            return advancing ? 'live' : 'connecting';
         default:
             return null;
     }
@@ -295,6 +328,14 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const firstFrameTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     /** When the last heartbeat arrived, or 0 before the first one. */
     const lastPingAt = useRef(0);
+    /** The pending media read, armed while the session claims to be live. */
+    const mediaTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    /** The receiver's counts at the last media read, to see the next one move. */
+    const mediaRef = useRef<{ frames: number; packets: number } | null>(null);
+    /** When the media path last moved, or null while it has never moved. */
+    const mediaMovingAt = useRef<number | null>(null);
+    /** Whether the picture of an open session has stopped advancing. */
+    const frozen = useRef(false);
     /** Renegotiation transients are not a new outage before this time. */
     const restartGraceUntil = useRef(0);
     /** ICE-restart attempts spent on the current drop. */
@@ -393,7 +434,11 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
      */
     const spendRestartAttempt = useCallback((): void => {
         if (statusRef.current !== 'reconnecting' || nativeRef.current == null) return;
-        const wait = backoffDelay(RESTART_BACKOFF_MS, restartAttempts.current);
+        // A frozen picture is the media path itself, and a restart is what
+        // rebuilds it, so the short delay keeps being spent until frames move
+        // again. Backing off to half a minute while the picture is stopped
+        // leaves the user looking at a still image long after the link is back.
+        const wait = frozen.current ? RESTART_AFTER_MS : backoffDelay(RESTART_BACKOFF_MS, restartAttempts.current);
         if (wait === null) {
             transportFailed('the desktop did not come back; reopening the session');
             return;
@@ -441,7 +486,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 // the session itself is wedged and only a reopen heals it.
                 // (While ICE is down, patience: the network may still come
                 // back, and the backoff schedule owns that case.)
-                if (restartCycles.current >= 2 && iceConnected.current) {
+                if (restartCycles.current >= 2 && iceConnected.current && !frozen.current) {
                     transportFailed('the desktop stopped responding; reopening the session');
                     return;
                 }
@@ -449,7 +494,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 // which the session answers as usual; without recovery by the
                 // reply deadline, spend the next attempt. A live transport
                 // answers in milliseconds, so hold it to a short leash.
-                const replyMs = iceConnected.current ? 2000 : RESTART_REPLY_MS;
+                const replyMs = frozen.current ? RESTART_AFTER_MS : iceConnected.current ? 2000 : RESTART_REPLY_MS;
                 restartTimer.current = setTimeout(() => {
                     restartTimer.current = null;
                     spendRestartAttempt();
@@ -461,9 +506,17 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     useEffect(() => {
         scheduleRestartRef.current = scheduleRestart;
         checkStallRef.current = checkStall;
+        mediaWatchRef.current = checkMedia;
     });
 
     const checkStallRef = useRef(() => {});
+    const mediaWatchRef = useRef<() => void>(() => undefined);
+
+    /** Arm one media read; each tick decides whether to arm another. */
+    const armMedia = useCallback((): void => {
+        if (mediaTimer.current !== null) return;
+        mediaTimer.current = setTimeout(() => mediaWatchRef.current(), MEDIA_POLL_MS);
+    }, []);
 
     /**
      * One ICE or engine-transport state, from either reporter. The mapping is
@@ -473,8 +526,14 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const onTransportState = useCallback((state: string, trackIce = true) => {
         // Synthetic stall reports say nothing about ICE itself.
         if (trackIce) iceConnected.current = state === 'connected' || state === 'completed';
-        const next = connectionStatusFor(state, statusRef.current, presentedRef.current);
-        if (next === null) return;
+        const mapped = connectionStatusFor(state, statusRef.current, presentedRef.current && !frozen.current);
+        if (mapped === null) return;
+        // A transport that answers while the picture is frozen is not a
+        // recovery. For a session that has shown frames that stays `reconnecting`,
+        // rather than falling back to the first connection it has left behind.
+        const next = mapped === 'connecting' && statusRef.current === 'reconnecting' && presentedRef.current
+            ? 'reconnecting'
+            : mapped;
         // Our own restart's transients are expected, not a new outage.
         if (next === 'reconnecting' && Date.now() < restartGraceUntil.current) return;
         update({ status: next });
@@ -492,9 +551,64 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 // from here is a stalled session, not a healthy idle one.
                 cancelStall();
                 stallTimer.current = setTimeout(() => checkStallRef.current(), STALL_AFTER_MS);
+                // And the picture is what says live, so it is watched from here.
+                armMedia();
             }
         }
-    }, [cancelRestart, cancelStall, scheduleRestart, update]);
+    }, [cancelRestart, cancelStall, scheduleRestart, update, armMedia]);
+
+    /**
+     * One read of the receiver's own counts: is the picture actually advancing?
+     *
+     * The engine's transport state arrives over the signalling channel, which
+     * is not the media path, so a link that carries nothing while signalling
+     * answers can hand the session a `connected` it must not believe. This is
+     * the check that keeps `live` honest, and the one that ends the freeze:
+     * frames moving again put the session back to `live` on the same session.
+     */
+    const checkMedia = useCallback((): void => {
+        mediaTimer.current = null;
+        // A session that has shown a picture is watched for as long as it has
+        // one: a freeze that arrives while the session is already reconnecting
+        // is exactly the case where waiting for the transport to say so would
+        // say it for the rest of the outage.
+        if (!presentedRef.current) return;
+        armMedia();
+        const id = nativeRef.current;
+        if (id == null || nativeDesklink?.getStats == null) return;
+        void nativeDesklink.getStats(id).then((raw) => {
+            let counts: { frames: number; packets: number } | null;
+            try {
+                counts = mediaCounts(JSON.parse(raw));
+            } catch {
+                return;
+            }
+            // No video stats yet: there is nothing here to judge a picture by.
+            if (counts === null) return;
+            const previous = mediaRef.current;
+            mediaRef.current = counts;
+            const moving = previous === null
+                || counts.frames > previous.frames
+                || counts.packets > previous.packets;
+            if (moving) {
+                mediaMovingAt.current = Date.now();
+                if (!frozen.current) return;
+                frozen.current = false;
+                // The picture advances again, so the transport can be believed
+                // for this session: live returns without waiting for it to say so.
+                if (statusRef.current === 'reconnecting') onTransportState('connected', false);
+                return;
+            }
+            if (mediaMovingAt.current === null) return;
+            if (Date.now() - mediaMovingAt.current < FROZEN_AFTER_MS) return;
+            if (frozen.current) return;
+            frozen.current = true;
+            // The picture has stopped, so the session is not live whatever the
+            // transport reports. When the transport has already said so, there
+            // is nothing to change: the recovery it started is the right one.
+            if (statusRef.current === 'live' || statusRef.current === 'connecting') onTransportState('disconnected', false);
+        }, () => undefined);
+    }, [armMedia, onTransportState]);
 
     /**
      * One stall check: quiet too long while the session should be talking
@@ -627,6 +741,13 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         pendingCursorEvents.current = [];
         restartGraceUntil.current = 0;
         restartCycles.current = 0;
+        // A new session has its own media path: the last one's counts and its
+        // freeze say nothing about this one.
+        if (mediaTimer.current !== null) clearTimeout(mediaTimer.current);
+        mediaTimer.current = null;
+        mediaRef.current = null;
+        mediaMovingAt.current = null;
+        frozen.current = false;
         opened.current = null;
         signaling.current = null;
         setNativeId(null);
@@ -906,6 +1027,9 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                         cancelRestart();
                         cancelFirstFrame();
                         update({ status: 'live', presented: true, failure: null });
+                        // A first frame is a picture, so from here the client
+                        // watches that the picture keeps coming.
+                        armMedia();
                         return;
                     case 'control': {
                         const reply = parseControlReply(String(event.payload.message ?? ''));
@@ -991,7 +1115,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             dropped = true;
             subscription?.remove();
         };
-    }, [transportFailed, onTransportState, cancelRestart, spendRestartAttempt, notePing, teardown, update, pressKey, typeText]);
+    }, [transportFailed, onTransportState, cancelRestart, spendRestartAttempt, notePing, teardown, update, pressKey, typeText, armMedia]);
 
     const copyRemoteToLocal = useCallback(async (writeLocal: (text: string) => Promise<void>) => {
         if (!inputEnabled.current) throw new Error('Desktop control is off.');
