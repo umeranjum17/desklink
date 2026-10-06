@@ -39,6 +39,27 @@ jobs:
       # What would be published, so a manifest change that drops a file shows here.
       - run: npm pack --dry-run --workspaces
 
+  # The same package-level checks the Linux `packages` job runs, on Windows:
+  # install, build, test, the axi validation and the pack dry run. Capture and
+  # input stay in the dedicated rig lanes.
+  packages-windows:
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - run: npx -y axi-axi validate 'node bin/desklink-axi.js' --dir .
+        working-directory: packages/axi
+      - run: npm pack --dry-run --workspaces
+
   engine:
     runs-on: ubuntu-24.04
     steps:
