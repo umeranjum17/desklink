@@ -310,29 +310,39 @@ function startSignalling(link, bridgePort, token) {
                 host.once('close', () => fail(new Error('the engine channel closed before the page sent anything')));
             });
             host.on('message', async (raw) => {
-                const message = JSON.parse(String(raw));
-                if (message.event === 'session.description') {
-                    // A re-offer is a new ICE generation; its candidates need
-                    // their own relay socket, so the count advances here.
-                    generation += 1;
+                try {
+                    const message = JSON.parse(String(raw));
+                    if (message.event === 'session.description') {
+                        // A re-offer is a new ICE generation; its candidates need
+                        // their own relay socket, so the count advances here.
+                        generation += 1;
+                    }
+                    if (message.event === 'session.candidate') {
+                        const rewritten = await link.down(String(message.params.candidate), generation);
+                        if (rewritten === null) return;
+                        message.params.candidate = rewritten;
+                    }
+                    send(client, message);
+                } catch (error) {
+                    link.log(`signalling downstream error: ${error instanceof Error ? error.message : error}`);
+                    try { client.close(); } catch { /* already closed */ }
                 }
-                if (message.event === 'session.candidate') {
-                    const rewritten = await link.down(String(message.params.candidate), generation);
-                    if (rewritten === null) return;
-                    message.params.candidate = rewritten;
-                }
-                send(client, message);
             });
             client.on('message', async (raw) => {
-                await hostReady;
-                const message = JSON.parse(String(raw));
-                if (message.method === 'session.open') link.newSession();
-                if (message.method === 'session.candidate' && typeof message.params?.candidate === 'string') {
-                    const rewritten = await link.up(message.params.candidate);
-                    if (rewritten === null) return;
-                    message.params.candidate = rewritten;
+                try {
+                    await hostReady;
+                    const message = JSON.parse(String(raw));
+                    if (message.method === 'session.open') link.newSession();
+                    if (message.method === 'session.candidate' && typeof message.params?.candidate === 'string') {
+                        const rewritten = await link.up(message.params.candidate);
+                        if (rewritten === null) return;
+                        message.params.candidate = rewritten;
+                    }
+                    send(host, message);
+                } catch (error) {
+                    link.log(`signalling upstream not ready: ${error instanceof Error ? error.message : error}`);
+                    try { client.close(); } catch { /* already closed */ }
                 }
-                send(host, message);
             });
             host.on('close', () => client.close());
             host.on('error', (error) => link.log(`signalling upstream error: ${error.message}`));
