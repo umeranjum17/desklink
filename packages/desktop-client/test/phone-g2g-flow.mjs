@@ -842,20 +842,21 @@ const quickstartJourney = async () => {
         assert.equal(installedPackages.status, 0, `could not install the published packages: ${(installedPackages.stderr ?? installedPackages.stdout ?? '').slice(-400)}`);
     }
     writeFileSync(join(quickstart, 'App.tsx'), quickstartApp(`ws://127.0.0.1:${wirePort}/desktop?token=${token}`));
-    // `published` is what a new user gets from npm. `repo` installs this
-    // checkout's package instead. Either way the one file PR #95 fixed is
-    // applied to the installed copy, because npm's 0.5.0 predates it and cannot
-    // start a fresh SDK 57 app at all; that file is what the next publish needs.
+    // A release only needed PR #95's `android/build.gradle` until it was
+    // published; apply it only when the installed copy still lacks the plugin,
+    // so a fixed release is proved as published rather than quietly patched.
+    const installedGradle = join(quickstart, 'node_modules/@desklink/react-native/android/build.gradle');
+    const publishedCarriesTheFix = existsSync(installedGradle) && /expo-module-gradle-plugin/.test(readFileSync(installedGradle, 'utf8'));
     receipt.app_package_source = packageSource;
-    receipt.app_published_patch = 'android/build.gradle from PR #95 (expo-module-gradle-plugin), '
-        + 'applied to the installed package because npm 0.5.0 predates it';
+    receipt.app_published_patch = publishedCarriesTheFix ? null
+        : 'android/build.gradle from PR #95 (expo-module-gradle-plugin), applied because the installed release still lacks it';
     const patchGradle = `node -e "require('node:fs').copyFileSync('${join(repo, 'packages/desktop-client/android/build.gradle')}', 'node_modules/@desklink/react-native/android/build.gradle')"`;
     if (process.env.DESKLINK_ANDROID_SKIP_BUILD !== '1') {
         const build = spawnSync('flock', ['/tmp/fm-desklink-heavy.lock', 'bash', '-c', [
             // `--install-links` copies the package instead of symlinking it, so
             // Metro resolves the app's own `expo` from inside the project.
             ...(packageSource === 'repo' ? [`npm install --no-audit --no-fund --install-links file:${join(repo, 'packages/desktop-client')}`] : []),
-            patchGradle,
+            ...(publishedCarriesTheFix ? [] : [patchGradle]),
             'npx expo prebuild --platform android --no-install',
             'cd android && ./gradlew --no-daemon assembleDebug',
         ].join(' && ')], { cwd: quickstart, env, encoding: 'utf8', timeout: 3600000 });
