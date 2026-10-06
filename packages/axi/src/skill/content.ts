@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { emitList } from '../output/toon.js';
-export const DESCRIPTION = "See and drive a live Linux or macOS desktop and an opted-in browser through desklink; text and changes by default, pixels on request";
+export const DESCRIPTION = "See and drive a live Linux desktop (macOS in preview) and an opted-in browser through desklink; text and changes by default, pixels on request";
 export const SPEC_VERSION = 'axi/1.0-2026-07';
 const commands = ['start','stop','health','screen','tree','marks','diff','look','point','click','type','press','scroll','drag','batch','wait','clipboard read','clipboard write','setup hooks','browser attach','browser launch','browser tabs','browser select','browser open','browser navigate','browser close','browser snapshot','browser click','browser fill','browser press','browser upload','browser detach'];
 export function renderHome(binPath: string): string { return `desklink-axi: ${binPath.replace(homedir(),'~')} — ${DESCRIPTION}\nhelp[5]:\n  desklink-axi start --source x11 --display :97\n  desklink-axi screen --query "<words>"\n  desklink-axi tree --query "<words>"\n  desklink-axi look @r1\n  desklink-axi browser snapshot`; }

@@ -1,14 +1,14 @@
 ---
 name: desklink-axi
-description: "See and drive a live Linux or macOS desktop and an opted-in browser through desklink; text and changes by default, pixels on request"
+description: "See and drive a live Linux desktop (macOS in preview) and an opted-in browser through desklink; text and changes by default, pixels on request"
 ---
 
 # desklink-axi
 
-See and drive a live Linux or macOS desktop and an opted-in browser through desklink; text and changes by default, pixels on request (axi/1.0-2026-07).
+See and drive a live Linux desktop (macOS in preview) and an opted-in browser through desklink; text and changes by default, pixels on request (axi/1.0-2026-07).
 
 ```
-desklink-axi: desklink-axi — See and drive a live Linux or macOS desktop and an opted-in browser through desklink; text and changes by default, pixels on request
+desklink-axi: desklink-axi — See and drive a live Linux desktop (macOS in preview) and an opted-in browser through desklink; text and changes by default, pixels on request
 help[5]:
   desklink-axi start --source x11 --display :97
   desklink-axi screen --query "<words>"
