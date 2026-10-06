@@ -19,8 +19,9 @@ needs a 0.5.1 engine.
   Every file npm serves exists in this repository at the same path.
 - Android: a fresh `create-expo-app` project that installs
   `@desklink/react-native@0.5.1` from npm builds, installs and starts on an
-  API 36 device without the Expo module registration crash. The release pull
-  request records the device proof and its limits.
+  API 36 emulator and on a physical test phone without the Expo module
+  registration crash that stopped 0.5.0. A live desktop on the physical phone
+  is not established by this release; the release pull request says why.
 
 ### Fixed
 
