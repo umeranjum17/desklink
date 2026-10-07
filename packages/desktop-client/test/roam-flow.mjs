@@ -3,6 +3,7 @@
 // node packages/desktop-client/test/roam-flow.mjs <fresh-evidence-dir> --outage 12000
 // P0b: --path new-address --driver-restart uses a TEST-ONLY retention shim.
 // P1: --product-retention disables that shim and checks real bridge retention.
+// P1e: --burst-restarts 3 --product-retention sends queued restarts on reattach.
 // Record the standalone 20s roam's actual outcome against the unchanged 2s bar.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -23,7 +24,9 @@ const option = (name, fallback) => args.includes(name) ? args[args.indexOf(name)
 const outage = Number(option('--outage', '12000'));
 const scenario = option('--scenario', 'roam');
 const pathMode = option('--path', 'same-address');
-const driverRestart = args.includes('--driver-restart');
+const burstRestarts = Number(option('--burst-restarts', '1'));
+assert(Number.isInteger(burstRestarts) && burstRestarts >= 1 && burstRestarts <= 100, '--burst-restarts must be 1..100');
+const driverRestart = args.includes('--driver-restart') || burstRestarts > 1;
 const productRetention = args.includes('--product-retention');
 assert(['same-address', 'new-address'].includes(pathMode), 'unknown --path');
 assert(!driverRestart || scenario === 'roam', '--driver-restart requires roam');
@@ -38,7 +41,7 @@ const tap = (direction, message) => {
     appendFileSync(join(evidence, 'stdio.jsonl'), JSON.stringify(row) + '\n');
     return row;
 };
-const result = { scenario, outage, pathMode, driverRestart, productRetention, head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).stdout.trim(),
+const result = { scenario, outage, pathMode, driverRestart, burstRestarts, productRetention, head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).stdout.trim(),
     shape: 'userspace-shaped link; no netem, privileges or firewall changes', tap: [], teardown: { strays: [], failures: [] } };
 const tag = `DESKLINK_ROAM=${process.pid}`;
 const tagged = () => readdirSync('/proc').flatMap(name => {
@@ -55,6 +58,7 @@ const request = (method, params = {}) => new Promise((resolve, reject) => {
     const id = ++seq; pending.set(id, { resolve, reject }); socket.send(JSON.stringify({ id, method, params }));
 });
 const candidates = [];
+const offers = new Set();
 peer.onicecandidate = e => { if (e.candidate) candidates.push(e.candidate.toJSON()); void flush(); };
 async function flush() {
     if (!probe.sessionId) return;
@@ -69,7 +73,9 @@ socket.onmessage = async e => {
     const m = JSON.parse(e.data), p = m.params ?? {};
     if (m.id !== undefined) { const w = pending.get(m.id); pending.delete(m.id); if (m.error) w?.reject(new Error(m.error.message)); else w?.resolve(m.result); return; }
     if (m.event === 'session.description') {
-        probe.iceGeneration++;
+        const ufrag = p.description.sdp.match(/a=ice-ufrag:([^\\r\\n]+)/)[1];
+        if (offers.has(ufrag)) return;
+        offers.add(ufrag); probe.iceGeneration++;
         await peer.setRemoteDescription(p.description);
         const answer = await peer.createAnswer(); await peer.setLocalDescription(answer);
         await request('session.description', { session_id: p.sessionId, generation: p.generation, description: answer });
@@ -78,7 +84,7 @@ socket.onmessage = async e => {
     if (m.event === 'session.candidate') await peer.addIceCandidate({ candidate: p.candidate, sdpMid: p.sdpMid, sdpMLineIndex: p.sdpMLineIndex });
 };
 socket.onopen = async () => {
-    if (restart) { await request('session.restart_ice', { session_id: probe.sessionId, generation: 1 }); return; }
+    if (restart) { await Promise.all(Array.from({ length: ${burstRestarts} }, () => request('session.restart_ice', { session_id: probe.sessionId, generation: 1 }))); return; }
     const opened = await request('session.open', { max_width: 1280, max_height: 720, max_fps: 30 }); probe.sessionId = opened.sessionId; await flush();
 };
 }
@@ -159,7 +165,7 @@ async function run() {
             const lines = buffered.split('\n'); buffered = lines.pop();
             for (const line of lines) {
                 const message = JSON.parse(line);
-                if (['session.revoked', 'session.state'].includes(message.event)) result.tap.push(tap('engine->bridge', message));
+                if (['session.revoked', 'session.state', 'session.description'].includes(message.event)) result.tap.push(tap('engine->bridge', message));
             }
         });
         signalling = await startSignalling(link, bridge.port, token, { relayOnly: driverRestart });
@@ -230,6 +236,7 @@ async function run() {
         let last = result.atPathBack, recovered = null;
         let reset = last !== null && (last.sessionId !== held.sessionId || last.peerId !== held.peerId
             || Object.keys(held.frames).some(id => !(id in last.frames) || last.frames[id] < held.frames[id]));
+        if (burstRestarts > 1) { result.restartAt = Date.now(); await page.evaluate(() => window.__restart()); }
         if (scenario === 'roam') {
             while (Date.now() - result.backAt < 2000) {
                 const m = await measure();
@@ -242,12 +249,11 @@ async function run() {
         result.counterReset = reset; result.firstFrameAfterPathBackMs = recovered; result.last = last;
         if (driverRestart) {
             result.beforeRestart = await measure();
-            if (pathMode === 'new-address') {
+            if (pathMode === 'new-address' && burstRestarts === 1) {
                 assert.equal(recovered, null, 'old tuple healed before restart');
                 assert.deepEqual(result.beforeRestart.frames, result.atPathBack.frames, 'frames before restart on retired tuple');
             }
-            result.restartAt = Date.now();
-            await page.evaluate(() => window.__restart());
+            if (burstRestarts === 1) { result.restartAt = Date.now(); await page.evaluate(() => window.__restart()); }
             await wait(async () => {
                 const m = await measure();
                 return m.iceGeneration === 2 && m.answerAt > result.restartAt
@@ -264,6 +270,11 @@ async function run() {
             result.generation2Port = Number(linkLog.match(/\(generation 2\) → browser through 127\.0\.0\.1:(\d+)/)?.[1]);
             assert.equal(result.afterRestart.pair.remotePort, result.generation2Port, 'selected tuple bypassed relay');
             assert(linkLog.includes(`link generation 2 media through 127.0.0.1:${result.generation2Port}`), 'no generation-2 relay media');
+            const restartOffers = result.tap.filter(e => e.event === 'session.description' && e.at >= result.restartAt);
+            result.restartUfrags = [...new Set(restartOffers.map(e => e.params.description.sdp.match(/a=ice-ufrag:([^\r\n]+)/)[1]))];
+            assert.equal(restartOffers.length, burstRestarts, 'each restart must re-emit an offer');
+            assert.equal(result.restartUfrags.length, 1, 'queued restarts stacked ICE credentials');
+            if (burstRestarts > 1) assert(recovered !== null && recovered <= 2000, 'burst recovery exceeded 2s');
             assert.equal(result.afterRestart.sessionId, held.sessionId);
             assert.equal(result.afterRestart.peerId, held.peerId);
             assert.deepEqual(result.afterRestart.errors, []);

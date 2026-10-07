@@ -1008,11 +1008,17 @@ impl VideoPeer {
         Ok(applied)
     }
 
-    /// Restart ICE on this peer: a fresh offer with a new ICE generation,
+    /// Restart ICE on this peer, reusing any unanswered local offer; otherwise
+    /// create a fresh offer with a new ICE generation,
     /// for the client to answer as usual. The engine stays the offerer, so
     /// this is the same local-offer path as the initial negotiation.
     pub async fn restart_ice(&self) -> Result<String> {
         use rtc::peer_connection::configuration::RTCOfferOptions;
+        // The stdio dispatcher serializes requests; overlapping carriers must
+        // answer this offer before another restart can turn over credentials.
+        if let Some(offer) = self.peer.pending_local_description().await {
+            return Ok(offer.sdp);
+        }
         let offer = self
             .peer
             .create_offer(Some(RTCOfferOptions {

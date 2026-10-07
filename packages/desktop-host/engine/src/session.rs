@@ -1875,7 +1875,7 @@ impl Session {
             .ok_or_else(|| anyhow::anyhow!("no offer has been made for this session yet"))
     }
 
-    /// Restart ICE: a fresh offer on the same peer, announced as a new
+    /// Restart ICE: a pending or fresh offer on the same peer, announced as a new
     /// `session.description` event for the client to answer as usual.
     pub async fn restart_ice(&self) -> Result<()> {
         let offer = self.current_peer()?.restart_ice().await?;
@@ -4241,6 +4241,42 @@ mod tests {
             session.read_clipboard().await.unwrap_err(),
             "clipboard is unavailable for this desktop source",
         );
+    }
+
+    #[tokio::test]
+    async fn three_queued_ice_restarts_reemit_one_offer_and_accept_its_answer() {
+        let codec = crate::peer::tests::h264_receiver_codec();
+        let (peer, _) = crate::peer::tests::answered(vec![codec.clone()]).await;
+        let (events, mut received) = tokio_mpsc::unbounded_channel();
+        let (inner, _) = test_inner_with(events, peer, 64, 64);
+        let session = Session { inner };
+        let mut offers = Vec::new();
+        for _ in 0..3 {
+            session.restart_ice().await.expect("restart accepted");
+            match received.recv().await.expect("offer event").event {
+                SessionEvent::Description { sdp, .. } => offers.push(sdp),
+                _ => panic!("expected the pending offer"),
+            }
+        }
+        let ufrag = |sdp: &str| {
+            sdp.lines()
+                .find_map(|line| line.strip_prefix("a=ice-ufrag:"))
+                .expect("ICE credentials")
+                .to_owned()
+        };
+        assert!(offers.iter().all(|sdp| ufrag(sdp) == ufrag(&offers[0])));
+        let client = crate::peer::tests::answerer_with(&offers[0], vec![codec]).await;
+        let answer = client.create_answer(None).await.expect("client answer");
+        client
+            .set_local_description(answer.clone())
+            .await
+            .expect("local answer");
+        session
+            .accept_answer(answer.sdp)
+            .await
+            .expect("pending answer accepted");
+        client.close().await.expect("close client");
+        session.current_peer().unwrap().close().await;
     }
 
     #[tokio::test]
