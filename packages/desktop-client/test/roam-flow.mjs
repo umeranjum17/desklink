@@ -26,7 +26,11 @@ const scenario = option('--scenario', 'roam');
 const pathMode = option('--path', 'same-address');
 const burstRestarts = Number(option('--burst-restarts', '1'));
 assert(Number.isInteger(burstRestarts) && burstRestarts >= 1 && burstRestarts <= 100, '--burst-restarts must be 1..100');
-const driverRestart = args.includes('--driver-restart') || burstRestarts > 1;
+const killDuringRestart = args.includes('--kill-during-restart');
+const adapter = option('--adapter', 'driver');
+assert(['driver', 'demo'].includes(adapter), 'unknown --adapter');
+assert(!killDuringRestart || adapter === 'demo', '--kill-during-restart requires --adapter demo');
+const driverRestart = args.includes('--driver-restart') || burstRestarts > 1 || killDuringRestart;
 const productRetention = args.includes('--product-retention');
 assert(['same-address', 'new-address'].includes(pathMode), 'unknown --path');
 assert(!driverRestart || scenario === 'roam', '--driver-restart requires roam');
@@ -41,7 +45,7 @@ const tap = (direction, message) => {
     appendFileSync(join(evidence, 'stdio.jsonl'), JSON.stringify(row) + '\n');
     return row;
 };
-const result = { scenario, outage, pathMode, driverRestart, burstRestarts, productRetention, head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).stdout.trim(),
+const result = { scenario, outage, pathMode, driverRestart, burstRestarts, productRetention, adapter, killDuringRestart, head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).stdout.trim(),
     shape: 'userspace-shaped link; no netem, privileges or firewall changes', tap: [], teardown: { strays: [], failures: [] } };
 const tag = `DESKLINK_ROAM=${process.pid}`;
 const tagged = () => readdirSync('/proc').flatMap(name => {
@@ -49,14 +53,24 @@ const tagged = () => readdirSync('/proc').flatMap(name => {
     catch { return []; }
 });
 const driver = (port, token) => `
+${adapter === 'demo' ? `import { bridgeSignaling } from '/@fs/${worktree}/packages/desktop-client/example/App.tsx';` : ''}
 const probe = window.__probe = { sessionId: null, peerId: 1, iceGeneration: 0, answerAt: null, errors: [] };
 window.addEventListener('unhandledrejection', e => probe.errors.push(String(e.reason)));
 const peer = new RTCPeerConnection({ iceServers: [] });
-let socket;
+let socket, demo;
+probe.pending = 0; probe.carrierClosed = 0;
 const pending = new Map(); let seq = 0, inputSeq = 0, channel;
-const request = (method, params = {}) => new Promise((resolve, reject) => {
-    const id = ++seq; pending.set(id, { resolve, reject }); socket.send(JSON.stringify({ id, method, params }));
-});
+const request = (method, params = {}) => {
+    probe.pending++;
+    const started = performance.now();
+    const reply = ${adapter === 'demo' ? 'demo.request(method, params)' : `new Promise((resolve, reject) => {
+        const id = ++seq; pending.set(id, { resolve, reject }); socket.send(JSON.stringify({ id, method, params }));
+    })`};
+    return reply.catch(error => {
+        if (method === 'session.restart_ice') probe.restartRejected = { code: error.code, ms: performance.now() - started };
+        throw error;
+    }).finally(() => probe.pending--);
+};
 const candidates = [];
 const offers = new Set();
 peer.onicecandidate = e => { if (e.candidate) candidates.push(e.candidate.toJSON()); void flush(); };
@@ -67,10 +81,10 @@ async function flush() {
 peer.ontrack = e => { const video = document.querySelector('video'); video.srcObject = new MediaStream([e.track]); void video.play(); };
 peer.ondatachannel = e => { channel = e.channel; channel.onmessage = () => {}; };
 function connect(restart = false) {
-socket = new WebSocket('ws://127.0.0.1:${port}/desktop?token=${token}');
-socket.onclose = () => { for (const p of pending.values()) p.reject(new Error('bridge closed')); pending.clear(); };
-socket.onmessage = async e => {
-    const m = JSON.parse(e.data), p = m.params ?? {};
+${adapter === 'demo' ? '' : `socket = new WebSocket('ws://127.0.0.1:${port}/desktop?token=${token}');`}
+if (socket) socket.onclose = () => { for (const p of pending.values()) p.reject(new Error('bridge closed')); pending.clear(); };
+const receive = async m => {
+    const p = m.params ?? {};
     if (m.id !== undefined) { const w = pending.get(m.id); pending.delete(m.id); if (m.error) w?.reject(new Error(m.error.message)); else w?.resolve(m.result); return; }
     if (m.event === 'session.description') {
         const ufrag = p.description.sdp.match(/a=ice-ufrag:([^\\r\\n]+)/)[1];
@@ -83,13 +97,21 @@ socket.onmessage = async e => {
     }
     if (m.event === 'session.candidate') await peer.addIceCandidate({ candidate: p.candidate, sdpMid: p.sdpMid, sdpMLineIndex: p.sdpMLineIndex });
 };
-socket.onopen = async () => {
+const opened = async () => {
     if (restart) { await Promise.all(Array.from({ length: ${burstRestarts} }, () => request('session.restart_ice', { session_id: probe.sessionId, generation: 1 }))); return; }
     const opened = await request('session.open', { max_width: 1280, max_height: 720, max_fps: 30 }); probe.sessionId = opened.sessionId; await flush();
 };
+${adapter === 'demo' ? `demo = bridgeSignaling('ws://127.0.0.1:${port}/desktop?token=${token}');
+demo.subscribe(event => {
+    if (event.kind === 'carrier-closed') { probe.carrierClosed++; return; }
+    const params = event.kind === 'candidate' ? { ...event, ...event.candidate } : event;
+    void receive({ event: 'session.' + event.kind, params });
+});
+void demo.open.then(opened).catch(error => probe.errors.push(String(error)));` : `socket.onmessage = e => void receive(JSON.parse(e.data)); socket.onopen = opened;`}
 }
 connect();
 window.__restart = () => connect(true);
+window.__carrierRequest = () => { void request('session.metrics', { session_id: probe.sessionId }).catch(error => { probe.carrierRejection = error.code; }); };
 const send = message => channel.send(JSON.stringify({ ...message, seq: ++inputSeq }));
 window.__hold = () => { send({ kind: 'pointer', phase: 'down', x: 320, y: 180, button: 1 }); send({ kind: 'key', character: 'a', down: true }); };
 window.__release = () => send({ kind: 'release_all' });
@@ -100,6 +122,7 @@ window.__measure = async () => {
     const pair = stats.get(transport?.selectedCandidatePairId);
     const remote = stats.get(pair?.remoteCandidateId);
     return { at: Date.now(), sessionId: probe.sessionId, peerId: probe.peerId, iceGeneration: probe.iceGeneration, answerAt: probe.answerAt,
+        pending: probe.pending, carrierClosed: probe.carrierClosed, carrierRejection: probe.carrierRejection, restartRejected: probe.restartRejected,
         pair: pair && { id: pair.id, state: pair.state, remotePort: remote?.port }, frames, channel: channel?.readyState, errors: probe.errors };
 };
 `;
@@ -111,7 +134,7 @@ async function run() {
     assert(existsSync(engine) && existsSync(fixture), 'build task-owned desklink-host and x11_target first');
     const scratch = mkdtempSync(join(tmpdir(), 'dl-roam-'));
     let claim, xvfb, target, bridge, signalling, relay, vite, context;
-    let fixtureLog = '', fixtureBuffer = '', refused = 0, blocked = false;
+    let fixtureLog = '', fixtureBuffer = '', refused = 0, blocked = false, holdMetrics = false;
     const observedFixture = [];
     const upstreams = new Set();
     const link = new ShapedLink((...items) => appendFileSync(join(evidence, 'link.log'), `${Date.now()} ${items.join(' ')}\n`));
@@ -174,9 +197,25 @@ async function run() {
             const host = new WebSocket(`ws://127.0.0.1:${signalling.port}/desktop?token=${token}`);
             upstreams.add(host);
             const queue = [];
-            host.on('open', () => { for (const raw of queue) host.send(raw); });
-            client.on('message', raw => host.readyState === WebSocket.OPEN ? host.send(raw) : queue.push(raw));
-            host.on('message', raw => { if (client.readyState === WebSocket.OPEN) client.send(String(raw)); });
+            const forward = raw => {
+                if (host.readyState !== WebSocket.OPEN) { queue.push(raw); return; }
+                host.send(raw);
+                if (killDuringRestart && JSON.parse(String(raw)).method === 'session.restart_ice') {
+                    // Dispatch to the real bridge, then cut before forwarding its reply.
+                    tap('restart-carrier-cut', {}); client.terminate();
+                }
+            };
+            host.on('open', () => { for (const raw of queue.splice(0)) forward(raw); });
+            client.on('message', forward);
+            const heldIds = new Set();
+            client.on('message', raw => {
+                const message = JSON.parse(String(raw));
+                if (holdMetrics && message.method === 'session.metrics') heldIds.add(message.id);
+            });
+            host.on('message', raw => {
+                if (heldIds.has(JSON.parse(String(raw)).id)) return; // Withhold a real reply until the carrier cut.
+                if (client.readyState === WebSocket.OPEN) client.send(String(raw));
+            });
             host.on('close', () => { upstreams.delete(host); client.terminate(); });
             host.on('error', error => { tap('relay-error', { message: error.message }); client.terminate(); });
             client.on('close', () => host.close());
@@ -185,7 +224,14 @@ async function run() {
         writeFileSync(join(scratch, 'index.html'), '<video autoplay muted style="width:100%;height:100vh"></video><script type="module" src="/driver.js"></script>');
         writeFileSync(join(scratch, 'driver.js'), driver(relay.address().port, token));
         const { createServer } = await import('vite');
-        vite = await createServer({ root: scratch, configFile: false, logLevel: 'error', server: { host: '127.0.0.1', port: 0 } });
+        const stub = join(scratch, 'app-stub.js');
+        writeFileSync(stub, `export const Linking = {}, Platform = {}, Pressable = null, ScrollView = null, Settings = {}, StatusBar = null, StyleSheet = { create: x => x }, Text = null, View = null, SafeAreaProvider = null, useSafeAreaInsets = () => ({}), ClipboardConfirmation = null, DesktopView = null, ModifierKeys = null, useDesktopSession = () => ({});`);
+        vite = await createServer({ root: scratch, configFile: false, logLevel: 'error',
+            resolve: { alias: [
+                ...['react-native', 'expo-clipboard', 'react-native-safe-area-context', '@desklink/react-native'].map(find => ({ find, replacement: stub })),
+                { find: /^react$/, replacement: join(worktree, 'node_modules/react/index.js') },
+            ] },
+            server: { host: '127.0.0.1', port: 0, fs: { allow: [scratch, worktree] } } });
         await vite.listen();
         const { chromium } = await import('playwright-core');
         // Chromium keeps the real runtime dir; only its profile is isolated.
@@ -194,6 +240,7 @@ async function run() {
             args: ['--no-sandbox', '--autoplay-policy=no-user-gesture-required', '--disable-features=WebRtcHideLocalIpsWithMdns'] });
         const page = context.pages()[0];
         await page.goto(vite.resolvedUrls.local[0]);
+        await page.waitForFunction(() => typeof window.__measure === 'function');
         const measure = () => page.evaluate(() => window.__measure());
         await wait(async () => { const m = await measure(); return m.channel === 'open' && Object.values(m.frames).some(n => n > 5); }, 20000, 'decoded live video and input');
         await verifyOwnedXvfb(xvfb);
@@ -207,9 +254,23 @@ async function run() {
         }
         await page.screenshot({ path: join(evidence, 'before.png') });
         result.before = await measure();
+        if (adapter === 'demo') {
+            holdMetrics = true;
+            await page.evaluate(() => window.__carrierRequest());
+            await wait(async () => (await measure()).pending === 1, 1000, 'real carrier request awaiting reply');
+        }
         result.cutAt = Date.now(); blocked = true;
         if (!productRetention || scenario === 'roam') link.set({ discard: true }, 'roam cut');
         for (const client of relay.clients) client.terminate();
+        if (adapter === 'demo') {
+            await sleep(1000);
+            result.carrierAfterCut = await measure();
+            assert.equal(result.carrierAfterCut.pending, 0, 'request pending 1s after carrier cut');
+            assert.equal(result.carrierAfterCut.carrierClosed, 1, 'carrier close not delivered exactly once');
+            assert.equal(result.carrierAfterCut.carrierRejection, 'transport');
+            await page.evaluate(() => { window.__probe.carrierRejection = null; window.__carrierRequest(); });
+            await wait(async () => (await measure()).carrierRejection === 'transport', 50, 'future request rejected on dead carrier');
+        }
         if (scenario === 'close-in-window') {
             await sleep(500);
             if (productRetention) {
@@ -254,6 +315,14 @@ async function run() {
                 assert.deepEqual(result.beforeRestart.frames, result.atPathBack.frames, 'frames before restart on retired tuple');
             }
             if (burstRestarts === 1) { result.restartAt = Date.now(); await page.evaluate(() => window.__restart()); }
+            if (killDuringRestart) {
+                await wait(async () => (await measure()).restartRejected, 1000, 'restart rejected after carrier cut');
+                result.restartRejection = (await measure()).restartRejected;
+                assert.equal(result.restartRejection.code, 'transport');
+                assert(result.restartRejection.ms <= 50, 'restart rejection exceeded 50ms');
+                assert.equal((await measure()).pending, 0);
+                return;
+            }
             await wait(async () => {
                 const m = await measure();
                 return m.iceGeneration === 2 && m.answerAt > result.restartAt

@@ -103,6 +103,8 @@ export interface CursorSample {
  * the new session corrupts or kills a healthy recovery.
  */
 export type SessionEvent =
+    /** Optional carrier notification, distinct from the native peer's `closed`. */
+    | { kind: 'carrier-closed'; sessionId?: never }
     | { kind: 'description'; description: RtcDescription; sessionId?: string }
     | { kind: 'candidate'; candidate: RtcCandidate; sessionId?: string }
     | ({ kind: 'cursor' } & CursorSample)
@@ -120,10 +122,13 @@ export type SessionEvent =
  * The package calls these and nothing else, so an application can carry them
  * over its existing encrypted request path, a socket, or an in-process bridge.
  * `subscribe` delivers engine notifications until the returned function runs.
+ * The application's authorize() resolves only once this carrier is open.
  */
 export interface Signaling {
     /**
-     * Send one request. A rejection may carry a stable `code` — the engine's or
+     * Send one request. Reject pending and future requests with `code: 'transport'`
+     * once the carrier is gone; never queue requests on a dead carrier.
+     * A rejection may carry a stable `code` — the engine's or
      * the host's own token — which the package reads to classify a refusal, so a
      * refusal is not retried as though it were a network failure.
      */

@@ -804,7 +804,8 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         try {
             authorization = await optionsRef.current.authorize();
         } catch (error) {
-            refuse(error instanceof Error ? error.message : 'the desktop was not authorized', 'permission');
+            const code = (error as { code?: unknown } | null)?.code === 'transport' ? 'transport' : 'permission';
+            refuse(error instanceof Error ? error.message : 'the desktop was not authorized', code);
             return;
         }
         if (token !== generationToken.current) return;

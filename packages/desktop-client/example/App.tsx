@@ -45,17 +45,38 @@ function connectionLink(link: string | null): { url: string; report: string | nu
 }
 
 /** The bridge re-serves the engine's local protocol; this unwraps its events for the hook. */
-function bridgeSignaling(address: string, onEvent?: (event: SessionEvent) => void): Signaling & { close: () => void } {
+export function bridgeSignaling(address: string, onEvent?: (event: SessionEvent) => void): Signaling & { open: Promise<void>; close: () => void } {
     const socket = new WebSocket(address);
-    const open = new Promise<void>((resolve, reject) => {
-        socket.onopen = () => resolve();
-        // The address carries the pairing token, so no error ever names it.
-        socket.onerror = () => reject(new Error('cannot reach the desktop host'));
-    });
     const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
     const handlers = new Set<(event: SessionEvent) => void>();
-    let seq = 0;
+    // The address carries the pairing token, so no error ever names it.
+    const transportError = () => Object.assign(new Error('cannot reach the desktop host'), { code: 'transport' });
+    let closed = false, seq = 0;
+    let rejectOpen!: (error: Error) => void;
+    const emit = (event: SessionEvent) => {
+        onEvent?.(event);
+        for (const handler of handlers) handler(event);
+    };
+    const finish = () => {
+        if (closed) return;
+        closed = true;
+        clearTimeout(timeout);
+        rejectOpen(transportError());
+        for (const waiter of pending.values()) waiter.reject(transportError());
+        pending.clear();
+        emit({ kind: 'carrier-closed' });
+    };
+    const open = new Promise<void>((resolve, reject) => {
+        rejectOpen = reject;
+        socket.onopen = () => { if (!closed) { clearTimeout(timeout); resolve(); } };
+    });
+    // close() can run before authorize() starts awaiting this promise.
+    void open.catch(() => undefined);
+    const timeout = setTimeout(() => { finish(); socket.close(); }, 5000);
+    socket.onerror = () => { finish(); socket.close(); };
+    socket.onclose = finish;
     socket.onmessage = (message) => {
+        if (closed) return;
         const msg = JSON.parse(String(message.data));
         if (msg.id !== undefined) {
             const waiter = pending.get(msg.id);
@@ -70,29 +91,26 @@ function bridgeSignaling(address: string, onEvent?: (event: SessionEvent) => voi
         else if (msg.event === 'session.candidate') event = { kind: 'candidate', candidate: { candidate: p.candidate, sdpMid: p.sdpMid ?? null, sdpMLineIndex: p.sdpMLineIndex ?? null }, sessionId: p.sessionId };
         else if (msg.event === 'session.state') event = { kind: 'state', capture: p.capture, transport: p.transport, firstFrame: p.firstFrame, sessionId: p.sessionId };
         else if (msg.event === 'session.revoked') event = { kind: 'revoked', reason: p.reason, code: p.code, sessionId: p.sessionId };
-        if (event !== null) {
-            onEvent?.(event);
-            for (const handler of handlers) handler(event);
-        }
-    };
-    socket.onclose = () => {
-        for (const waiter of pending.values()) waiter.reject(new Error('the bridge closed'));
-        pending.clear();
+        if (event !== null) emit(event);
     };
     return {
+        open,
         request: async <T,>(method: string, params?: Record<string, unknown>) => {
+            if (closed) throw transportError();
             await open;
+            if (closed) throw transportError();
             return new Promise<T>((resolve, reject) => {
                 const id = ++seq;
                 pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
-                socket.send(JSON.stringify({ id, method, params: params ?? {} }));
+                try { socket.send(JSON.stringify({ id, method, params: params ?? {} })); }
+                catch { finish(); socket.close(); }
             });
         },
         subscribe: (handler) => {
             handlers.add(handler);
             return () => handlers.delete(handler);
         },
-        close: () => socket.close(),
+        close: () => { finish(); socket.close(); handlers.clear(); },
     };
 }
 
@@ -173,7 +191,8 @@ function ConnectedDesktop({ url, report, cover }: { url: string; report: string 
     const signaling = React.useRef<ReturnType<typeof bridgeSignaling> | null>(null);
     const desktop = useDesktopSession({
         authorize: async () => {
-            // A reconnect gets a fresh socket: the bridge ends a session whose socket closed.
+            // A fresh authorization needs an open carrier; the bridge may retain
+            // the old session briefly after its previous socket closes.
             signaling.current?.close();
             signaling.current = bridgeSignaling(url, event => {
                 // The engine's loopback ICE port is ephemeral and may arrive in
@@ -196,6 +215,7 @@ function ConnectedDesktop({ url, report, cover }: { url: string; report: string 
                         .catch(() => undefined);
                 }
             });
+            await signaling.current.open;
             return {
                 signaling: signaling.current,
                 // The example runs over a plain adb-reverse forward in the
