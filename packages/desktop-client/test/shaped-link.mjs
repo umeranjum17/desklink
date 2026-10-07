@@ -94,12 +94,9 @@ function localAddresses() {
  */
 class ShapedLink {
     /** The socket each direction is sent from, and the ports they are advertised on. */
-    #out = { toEngine: null, toBrowser: null };
-    #ports = null;
+    #routes = new Map();
     /** Candidates are taken one at a time, in arrival order. */
     #queue = Promise.resolve();
-    /** How many packets running the latest browser address has sent. */
-    #seen = null;
 
     constructor(log) {
         this.log = log;
@@ -143,8 +140,7 @@ class ShapedLink {
      * not a new session, and the relay must keep following the same socket.
      */
     newSession() {
-        this.browserAdvertised = false;
-        this.#seen = null;
+        // Signalling assigns a fresh ICE generation to the next offer.
     }
 
     /** Adopt a shape and record when it happened, so the receipt shows the order. */
@@ -166,48 +162,43 @@ class ShapedLink {
         return socket;
     }
 
-    async #ready() {
-        if (this.#ports !== null) return this.#ports;
-        const toEngine = this.#open();
-        const toBrowser = this.#open();
-        this.#out = { toEngine, toBrowser };
-        toEngine.on('message', (payload, from) => {
-            // Only the browser is ever told this address, so this is the
-            // browser's traffic and its address, whatever else arrives here.
-            this.#remember(from);
-            this.#forward(payload, this.host, toBrowser, 'toEngine');
-        });
-        toBrowser.on('message', (payload) => this.#forward(payload, this.browser, toEngine, 'toBrowser'));
-        this.#ports = await Promise.all([this.#listen(toEngine), this.#listen(toBrowser)]);
-        return this.#ports;
+    async #ready(generation) {
+        let route = this.#routes.get(generation);
+        if (!route) {
+            route = { generation, host: null, browser: null, advertised: false, toBrowser: this.#open() };
+            this.#routes.set(generation, route);
+            route.toBrowser.on('message', payload => this.#forward(payload, route.browser, route.toEngine, 'toBrowser', route));
+            route.ready = Promise.all([this.#browserSide(route), this.#listen(route.toBrowser)]);
+        }
+        await route.ready;
+        return route;
     }
 
-    /**
-     * Note where the browser really is, without flapping between its sockets.
-     *
-     * Chrome keeps more than one ICE socket alive across a restart, and both go
-     * on sending for a while. Following the most recent one alone would send the
-     * desktop's picture back and forth between a live socket and a dead one and
-     * no session would ever settle, so a new address has to earn the switch by
-     * arriving several times running.
-     */
-    #remember(from) {
-        const seen = { ip: from.address, port: from.port };
-        const same = this.browser !== null && this.browser.ip === seen.ip && this.browser.port === seen.port;
-        this.#seen = same ? { address: seen, runs: 0 } : this.#seen?.address?.port === seen.port && this.#seen.address.ip === seen.ip
-            ? { address: seen, runs: this.#seen.runs + 1 }
-            : { address: seen, runs: 1 };
-        if (this.browser === null) {
-            this.browser = seen;
-            return;
+    async #browserSide(route) {
+        route.toEngine = this.#open();
+        route.toEngine.on('message', (payload, from) => {
+            route.browser = { ip: from.address, port: from.port };
+            this.browser = route.browser;
+            this.#forward(payload, route.host, route.toBrowser, 'toEngine', route);
+        });
+        return this.#listen(route.toEngine);
+    }
+
+    // Retire the advertised browser-facing address. No packets on the old
+    // tuple can discover its replacement; a fresh offer must advertise it.
+    async rebindBrowserSide() {
+        for (const route of this.#routes.values()) {
+            const oldPort = route.toEngine.address().port;
+            route.toEngine.close();
+            this.sockets.delete(route.toEngine);
+            route.browser = null;
+            const newPort = await this.#browserSide(route);
+            this.log(`link generation ${route.generation} browser-side rebind ${oldPort} → ${newPort}`);
         }
-        if (same || this.#seen.runs < 3) return;
-        this.log(`link browser moved from ${this.browser.ip}:${this.browser.port} to ${seen.ip}:${seen.port}`);
-        this.browser = seen;
     }
 
     /** Forward one datagram in one direction, out of that direction's socket. */
-    #forward(payload, to, socket, direction) {
+    #forward(payload, to, socket, direction, route) {
         if (this.discardMedia && isMedia(payload)) {
             this.counters.mediaDiscarded += 1;
             return;
@@ -231,6 +222,10 @@ class ShapedLink {
             this.counters[direction] += 1;
             try {
                 socket.send(payload, to.port, to.ip);
+                if (direction === 'toBrowser' && isMedia(payload) && !route.mediaSeen) {
+                    route.mediaSeen = true;
+                    this.log(`link generation ${route.generation} media through 127.0.0.1:${socket.address().port}`);
+                }
             } catch {
                 // A datagram still inside a delay when the run ended. Nothing is
                 // waiting on it, and a closed relay is not a failure.
@@ -258,7 +253,7 @@ class ShapedLink {
      */
     async down(line, generation) {
         const candidate = parseCandidate(line);
-        if (candidate === null || candidate.type !== 'host') return null;
+        if (candidate === null || candidate.type !== 'host' || candidate.proto.toLowerCase() !== 'udp') return null;
         if (!this.local.has(candidate.ip)) {
             this.log(`link engine candidate ${candidate.ip}:${candidate.port} is not a local address; dropping it`);
             return null;
@@ -267,9 +262,10 @@ class ShapedLink {
         // concurrently, so they are taken in order: exactly one is advertised,
         // and the rest are dropped rather than each opening a relay.
         const answer = this.#queue.then(async () => {
-            if (this.host !== null && this.host.generation === generation) return null;
-            const [toEngine] = await this.#ready();
-            this.host = { ip: candidate.ip, port: candidate.port, generation };
+            const route = await this.#ready(generation);
+            if (route.host !== null) return null;
+            const toEngine = route.toEngine.address().port;
+            this.host = route.host = { ip: candidate.ip, port: candidate.port, generation };
             this.log(`link engine candidate ${candidate.ip}:${candidate.port} (generation ${generation}) → browser through 127.0.0.1:${toEngine}`);
             return renderCandidate(candidate, '127.0.0.1', toEngine);
         });
@@ -284,16 +280,17 @@ class ShapedLink {
      * only one: the engine picks a remote candidate and commits to it, and
      * giving it several makes it run two browser sockets at once.
      */
-    async up(line) {
+    async up(line, generation) {
         const candidate = parseCandidate(line);
-        if (candidate === null || candidate.type !== 'host') return null;
+        if (candidate === null || candidate.type !== 'host' || candidate.proto.toLowerCase() !== 'udp') return null;
         if (!this.local.has(candidate.ip)) {
             this.log(`link browser candidate ${candidate.ip}:${candidate.port} is not a local address; dropping it`);
             return null;
         }
-        if (this.browserAdvertised) return null;
-        this.browserAdvertised = true;
-        const [, toBrowser] = await this.#ready();
+        const route = await this.#ready(generation);
+        if (route.advertised) return null;
+        route.advertised = true;
+        const toBrowser = route.toBrowser.address().port;
         // A hint only, and taken over by the first packet the browser sends,
         // which is how ICE itself finds a peer.
         this.log(`link browser candidate ${candidate.ip}:${candidate.port} → engine through 127.0.0.1:${toBrowser}`);
@@ -321,9 +318,22 @@ class ShapedLink {
  * Everything else passes through untouched, in both directions: this is the
  * app's signalling channel, and the flow deliberately does not cut it.
  */
-function startSignalling(link, bridgePort, token) {
+function startSignalling(link, bridgePort, token, { relayOnly = false } = {}) {
     const upstream = `ws://127.0.0.1:${bridgePort}/desktop?token=${token}`;
     let generation = 0;
+    // Restart SDP can embed candidates without trickling them again. Rewrite
+    // both directions, otherwise a direct candidate bypasses the shaped link.
+    const rewriteSdp = async (description, direction) => {
+        if (!relayOnly) return;
+        const lines = [];
+        for (const line of description.sdp.split('\r\n')) {
+            if (line.startsWith('a=remote-candidates:')) continue;
+            if (!line.startsWith('a=candidate:')) { lines.push(line); continue; }
+            const rewritten = await link[direction](line.slice(2), generation);
+            if (rewritten !== null) lines.push('a=' + rewritten);
+        }
+        description.sdp = lines.join('\r\n');
+    };
     return new Promise((ready) => {
         const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
         server.on('connection', (client) => {
@@ -345,6 +355,7 @@ function startSignalling(link, bridgePort, token) {
                         // A re-offer is a new ICE generation; its candidates need
                         // their own relay socket, so the count advances here.
                         generation += 1;
+                        await rewriteSdp(message.params.description, 'down');
                     }
                     if (message.event === 'session.candidate') {
                         const rewritten = await link.down(String(message.params.candidate), generation);
@@ -362,8 +373,9 @@ function startSignalling(link, bridgePort, token) {
                     await hostReady;
                     const message = JSON.parse(String(raw));
                     if (message.method === 'session.open') link.newSession();
+                    if (message.method === 'session.description') await rewriteSdp(message.params.description, 'up');
                     if (message.method === 'session.candidate' && typeof message.params?.candidate === 'string') {
-                        const rewritten = await link.up(message.params.candidate);
+                        const rewritten = await link.up(message.params.candidate, generation);
                         if (rewritten === null) return;
                         message.params.candidate = rewritten;
                     }

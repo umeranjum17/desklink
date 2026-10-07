@@ -1,7 +1,9 @@
 // P0a RED baseline: userspace-shaped media + signaling outage on an owned Xvfb.
 // Build the engine/fixture, then run with DISPLAY and WAYLAND_DISPLAY unset:
 // node packages/desktop-client/test/roam-flow.mjs <fresh-evidence-dir> --outage 12000
-// Main intentionally exits 1: closing the signaling socket destroys the session.
+// Without --driver-restart this remains P0a RED: detach destroys the session.
+// P0b: --path new-address --driver-restart uses a TEST-ONLY retention shim;
+// it proves restart connectivity, not product persistence or the unchanged 2s bar.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -20,6 +22,10 @@ const args = process.argv.slice(2);
 const option = (name, fallback) => args.includes(name) ? args[args.indexOf(name) + 1] : fallback;
 const outage = Number(option('--outage', '12000'));
 const scenario = option('--scenario', 'roam');
+const pathMode = option('--path', 'same-address');
+const driverRestart = args.includes('--driver-restart');
+assert(['same-address', 'new-address'].includes(pathMode), 'unknown --path');
+assert(!driverRestart || scenario === 'roam', '--driver-restart requires roam');
 assert(Number.isInteger(outage) && outage >= 1000 && outage <= 60000, '--outage must be 1000..60000 ms');
 assert(['roam', 'abandon', 'close-in-window'].includes(scenario), 'unknown --scenario');
 assert(args[0] && !args[0].startsWith('--'), 'supply a fresh evidence directory first');
@@ -31,7 +37,7 @@ const tap = (direction, message) => {
     appendFileSync(join(evidence, 'stdio.jsonl'), JSON.stringify(row) + '\n');
     return row;
 };
-const result = { scenario, outage, head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).stdout.trim(),
+const result = { scenario, outage, pathMode, driverRestart, head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).stdout.trim(),
     shape: 'userspace-shaped link; no netem, privileges or firewall changes', tap: [], teardown: { strays: [], failures: [] } };
 const tag = `DESKLINK_ROAM=${process.pid}`;
 const tagged = () => readdirSync('/proc').flatMap(name => {
@@ -39,15 +45,14 @@ const tagged = () => readdirSync('/proc').flatMap(name => {
     catch { return []; }
 });
 const driver = (port, token) => `
-const probe = window.__probe = { sessionId: null, peerId: 1, errors: [] };
+const probe = window.__probe = { sessionId: null, peerId: 1, iceGeneration: 0, answerAt: null, errors: [] };
 window.addEventListener('unhandledrejection', e => probe.errors.push(String(e.reason)));
 const peer = new RTCPeerConnection({ iceServers: [] });
-const socket = new WebSocket('ws://127.0.0.1:${port}/desktop?token=${token}');
+let socket;
 const pending = new Map(); let seq = 0, inputSeq = 0, channel;
 const request = (method, params = {}) => new Promise((resolve, reject) => {
     const id = ++seq; pending.set(id, { resolve, reject }); socket.send(JSON.stringify({ id, method, params }));
 });
-socket.onclose = () => { for (const p of pending.values()) p.reject(new Error('bridge closed')); pending.clear(); };
 const candidates = [];
 peer.onicecandidate = e => { if (e.candidate) candidates.push(e.candidate.toJSON()); void flush(); };
 async function flush() {
@@ -56,23 +61,39 @@ async function flush() {
 }
 peer.ontrack = e => { const video = document.querySelector('video'); video.srcObject = new MediaStream([e.track]); void video.play(); };
 peer.ondatachannel = e => { channel = e.channel; channel.onmessage = () => {}; };
+function connect(restart = false) {
+socket = new WebSocket('ws://127.0.0.1:${port}/desktop?token=${token}');
+socket.onclose = () => { for (const p of pending.values()) p.reject(new Error('bridge closed')); pending.clear(); };
 socket.onmessage = async e => {
     const m = JSON.parse(e.data), p = m.params ?? {};
     if (m.id !== undefined) { const w = pending.get(m.id); pending.delete(m.id); if (m.error) w?.reject(new Error(m.error.message)); else w?.resolve(m.result); return; }
     if (m.event === 'session.description') {
+        probe.iceGeneration++;
         await peer.setRemoteDescription(p.description);
         const answer = await peer.createAnswer(); await peer.setLocalDescription(answer);
         await request('session.description', { session_id: p.sessionId, generation: p.generation, description: answer });
+        probe.answerAt = Date.now();
     }
     if (m.event === 'session.candidate') await peer.addIceCandidate({ candidate: p.candidate, sdpMid: p.sdpMid, sdpMLineIndex: p.sdpMLineIndex });
 };
-socket.onopen = async () => { const opened = await request('session.open', { max_width: 1280, max_height: 720, max_fps: 30 }); probe.sessionId = opened.sessionId; await flush(); };
+socket.onopen = async () => {
+    if (restart) { await request('session.restart_ice', { session_id: probe.sessionId, generation: 1 }); return; }
+    const opened = await request('session.open', { max_width: 1280, max_height: 720, max_fps: 30 }); probe.sessionId = opened.sessionId; await flush();
+};
+}
+connect();
+window.__restart = () => connect(true);
 const send = message => channel.send(JSON.stringify({ ...message, seq: ++inputSeq }));
 window.__hold = () => { send({ kind: 'pointer', phase: 'down', x: 320, y: 180, button: 1 }); send({ kind: 'key', character: 'a', down: true }); };
+window.__release = () => send({ kind: 'release_all' });
 window.__measure = async () => {
     const stats = await peer.getStats(); const frames = {};
     stats.forEach(row => { if (row.type === 'inbound-rtp' && row.kind === 'video') frames[row.id] = row.framesDecoded ?? 0; });
-    return { at: Date.now(), sessionId: probe.sessionId, peerId: probe.peerId, frames, channel: channel?.readyState, errors: probe.errors };
+    const transport = [...stats.values()].find(row => row.type === 'transport' && row.selectedCandidatePairId);
+    const pair = stats.get(transport?.selectedCandidatePairId);
+    const remote = stats.get(pair?.remoteCandidateId);
+    return { at: Date.now(), sessionId: probe.sessionId, peerId: probe.peerId, iceGeneration: probe.iceGeneration, answerAt: probe.answerAt,
+        pair: pair && { id: pair.id, state: pair.state, remotePort: remote?.port }, frames, channel: channel?.readyState, errors: probe.errors };
 };
 `;
 
@@ -109,12 +130,17 @@ async function run() {
             source: { kind: 'x11', display: claim.display } });
         // Tap bytes at the real stdio boundary, not client requests: close on
         // detach originates inside Bridge. This test deliberately inspects it.
+        if (driverRestart) {
+            // TEST ONLY: retain the bridge's session across detach; the driver
+            // reattaches without session.open. Product persistence is NOT proven.
+            bridge.releaseSessionIfDetached = () => tap('reattach-shim', { retained: true });
+        }
         const child = bridge.engine.child;
         const write = child.stdin.write.bind(child.stdin);
         child.stdin.write = (...values) => {
             for (const line of String(values[0]).trim().split('\n')) {
                 const message = JSON.parse(line);
-                if (['session.close', 'session.restart_ice'].includes(message.method)) result.tap.push(tap('bridge->engine', message));
+                if (['session.close', 'session.restart_ice', 'session.description'].includes(message.method)) result.tap.push(tap('bridge->engine', message));
             }
             return write(...values);
         };
@@ -127,7 +153,7 @@ async function run() {
                 if (['session.revoked', 'session.state'].includes(message.event)) result.tap.push(tap('engine->bridge', message));
             }
         });
-        signalling = await startSignalling(link, bridge.port, token);
+        signalling = await startSignalling(link, bridge.port, token, { relayOnly: driverRestart });
         relay = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: () => { if (blocked) refused++; return !blocked; } });
         relay.on('connection', client => {
             const host = new WebSocket(`ws://127.0.0.1:${signalling.port}/desktop?token=${token}`);
@@ -159,6 +185,11 @@ async function run() {
         await page.evaluate(() => window.__hold());
         await wait(() => fixtureRows().some(e => e.kind === 'key' && e.phase === 'down') && fixtureRows().some(e => e.kind === 'button' && e.phase === 'down'), 2000, 'held key and button');
         await sleep(1000); // Allow X autorepeat to establish its pre-cut rate.
+        // P0b isolates connectivity; held-input outage safety remains P0a's test.
+        if (driverRestart) {
+            await page.evaluate(() => window.__release());
+            await wait(() => fixtureRows().some(e => e.kind === 'button' && e.phase === 'up'), 2000, 'pre-cut P0b release');
+        }
         await page.screenshot({ path: join(evidence, 'before.png') });
         result.before = await measure();
         result.cutAt = Date.now(); blocked = true;
@@ -173,7 +204,10 @@ async function run() {
         result.refused = refused;
         result.atPathBack = scenario === 'close-in-window' ? null : await measure();
         result.backAt = Date.now();
-        if (scenario !== 'abandon') { blocked = false; link.set({}, 'path back'); }
+        if (scenario !== 'abandon') {
+            if (pathMode === 'new-address') await link.rebindBrowserSide();
+            blocked = false; link.set({}, 'path back');
+        }
         const held = result.before;
         let last = result.atPathBack, recovered = null;
         let reset = last !== null && (last.sessionId !== held.sessionId || last.peerId !== held.peerId
@@ -188,6 +222,35 @@ async function run() {
             await page.screenshot({ path: join(evidence, 'after.png') });
         }
         result.counterReset = reset; result.firstFrameAfterPathBackMs = recovered; result.last = last;
+        if (driverRestart) {
+            result.beforeRestart = await measure();
+            if (pathMode === 'new-address') {
+                assert.equal(recovered, null, 'old tuple healed before restart');
+                assert.deepEqual(result.beforeRestart.frames, result.atPathBack.frames, 'frames before restart on retired tuple');
+            }
+            result.restartAt = Date.now();
+            await page.evaluate(() => window.__restart());
+            await wait(async () => {
+                const m = await measure();
+                return m.iceGeneration === 2 && m.answerAt > result.restartAt
+                    && result.tap.some(e => e.event === 'session.state' && e.at >= m.answerAt && e.params.transport === 'connected');
+            }, 20000, 'engine connected after restart answer');
+            result.connected = await measure();
+            await wait(async () => {
+                const m = await measure();
+                result.afterRestart = m;
+                return m.pair?.state === 'succeeded' && m.pair.remotePort !== held.pair.remotePort
+                    && Object.keys(held.frames).some(id => m.frames[id] > result.connected.frames[id]);
+            }, 5000, 'frames advance on new selected tuple');
+            const linkLog = readFileSync(join(evidence, 'link.log'), 'utf8');
+            result.generation2Port = Number(linkLog.match(/\(generation 2\) → browser through 127\.0\.0\.1:(\d+)/)?.[1]);
+            assert.equal(result.afterRestart.pair.remotePort, result.generation2Port, 'selected tuple bypassed relay');
+            assert(linkLog.includes(`link generation 2 media through 127.0.0.1:${result.generation2Port}`), 'no generation-2 relay media');
+            assert.equal(result.afterRestart.sessionId, held.sessionId);
+            assert.equal(result.afterRestart.peerId, held.peerId);
+            assert.deepEqual(result.afterRestart.errors, []);
+            await page.screenshot({ path: join(evidence, 'restart.png') });
+        }
         result.closeMs = result.tap.find(e => e.direction === 'bridge->engine' && e.method === 'session.close' && e.params.session_id === held.sessionId)?.at - result.cutAt;
         await wait(() => {
             const rows = fixtureRows();
@@ -202,7 +265,7 @@ async function run() {
         result.counters = link.counters;
         assert(result.refused > 0, 'outage admission was not exercised');
         assert(result.buttonUps > 0 && result.keyUps >= result.keyDowns, 'held input was not released');
-        assert(scenario !== 'roam' || recovered !== null, 'RED: pre-cut peer/session did not resume decoded video within 2s of path-back');
+        assert(driverRestart || scenario !== 'roam' || recovered !== null, 'RED: pre-cut peer/session did not resume decoded video within 2s of path-back');
     } finally {
         writeFileSync(join(evidence, 'fixture-events.jsonl'), fixtureLog);
         for (const [name, cleanup] of [
