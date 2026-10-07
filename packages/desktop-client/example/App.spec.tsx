@@ -4,7 +4,7 @@ import React from 'react';
 import TestRenderer from 'react-test-renderer';
 
 import type { SessionSnapshot } from '../src/protocol';
-import App, { statusText } from './App';
+import App, { bridgeSignaling, statusText } from './App';
 
 /** `act` refuses to flush state updates unless React is told this is a test. */
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -165,6 +165,48 @@ async function presented(): Promise<void> {
         for (const listener of [...nativeListeners]) listener({ sessionId: 'native-1', name: 'presented', payload: {} });
     });
 }
+
+describe('the demo carrier', () => {
+    it('rejects pending and future requests when closed, and emits carrier-closed once', async () => {
+        const signaling = bridgeSignaling(BRIDGE_URL);
+        const events: string[] = [];
+        signaling.subscribe(event => events.push(event.kind));
+        await vi.advanceTimersByTimeAsync(0);
+        await signaling.open;
+        const reply = signaling.request('session.restart_ice');
+        const rejected = expect(reply).rejects.toMatchObject({ code: 'transport' });
+        await Promise.resolve(); // Request has been dispatched, reply has not arrived.
+        sockets[0]!.onclose?.();
+        sockets[0]!.onerror?.();
+        await rejected;
+        await expect(signaling.request('session.close')).rejects.toMatchObject({ code: 'transport' });
+        signaling.close();
+        expect(events).toEqual(['carrier-closed']);
+    });
+
+    it('bounds opening and rejects a carrier closed before opening', async () => {
+        const signaling = bridgeSignaling(BRIDGE_URL);
+        sockets[0]!.onopen = undefined;
+        const rejected = expect(signaling.open).rejects.toMatchObject({ code: 'transport' });
+        await vi.advanceTimersByTimeAsync(5000);
+        await rejected;
+        await expect(signaling.request('session.open')).rejects.toMatchObject({ code: 'transport' });
+        signaling.close();
+        const early = bridgeSignaling(BRIDGE_URL);
+        early.close();
+        await expect(early.open).rejects.toMatchObject({ code: 'transport' });
+    });
+
+    it('carries the engine revocation code unchanged', async () => {
+        const signaling = bridgeSignaling(BRIDGE_URL);
+        const events: unknown[] = [];
+        signaling.subscribe(event => events.push(event));
+        await vi.advanceTimersByTimeAsync(0);
+        sockets[0]!.event('session.revoked', { reason: 'path lost', code: 'transport', sessionId: 'engine-1' });
+        expect(events).toEqual([{ kind: 'revoked', reason: 'path lost', code: 'transport', sessionId: 'engine-1' }]);
+        signaling.close();
+    });
+});
 
 describe('the example status line', () => {
     it('says Connected once the picture shows', async () => {

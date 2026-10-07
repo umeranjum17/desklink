@@ -168,6 +168,19 @@ uses only export-safe shaped-link and lab-safety helpers; do not import the
 side-effecting link-drop flow. Screenshots show the owned fixture; they do not
 prove any unimplemented automatic signaling reconnection UI.
 
+## Demo carrier contract
+
+For client carrier changes, also run `roam-flow.mjs` in a fresh evidence folder
+with `--outage 12000 --adapter demo`, then a second run with
+`--outage 12000 --adapter demo --kill-during-restart --product-retention`.
+Use the same task-owned engine, unset displays, heavy lock and memory gate as
+above. The demo lane imports the real example adapter; RN rendering is stubbed,
+not the carrier or WebRTC peer. Require zero pending requests one second after
+cut, pending/future `transport` rejection, one carrier-close event, unchanged
+2s recovery bar, and clean teardown. The extreme run dispatches a real restart
+before cutting its reply: inspect the engine restart tap and require rejection
+within 50ms. This proves carrier behavior, not automatic hook reattachment.
+
 ## Motion
 
 Record video for **every interaction the change under review moves**, not

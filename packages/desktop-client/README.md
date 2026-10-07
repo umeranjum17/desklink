@@ -314,6 +314,15 @@ interface Signaling {
 candidates, state and revocation. Pixels and input do **not** use this
 channel — they are the desktop's own WebRTC session.
 
+`authorize()` must wait for the authenticated carrier to open before returning
+its `Signaling`. When that carrier is gone, reject pending and future requests
+with `code: 'transport'`; do not queue them indefinitely. An adapter may emit
+`{ kind: 'carrier-closed' }` once to notify subscribers of that loss. This is
+not the native peer's `closed` event or an engine revocation. Preserve the
+engine's `session.revoked` code: `transport` indicates path loss; other codes
+(or no code) are final. The demo adapter bounds connection setup to five seconds
+and closes its socket and pending queue when disposed.
+
 ## Shipping on iOS
 
 What the consuming app — not this package — must get right before review.
