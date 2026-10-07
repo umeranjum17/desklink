@@ -321,6 +321,8 @@ class ShapedLink {
 function startSignalling(link, bridgePort, token, { relayOnly = false } = {}) {
     const upstream = `ws://127.0.0.1:${bridgePort}/desktop?token=${token}`;
     let generation = 0;
+    let offerUfrag;
+    let rewrittenOffer;
     // Restart SDP can embed candidates without trickling them again. Rewrite
     // both directions, otherwise a direct candidate bypasses the shaped link.
     const rewriteSdp = async (description, direction) => {
@@ -352,10 +354,14 @@ function startSignalling(link, bridgePort, token, { relayOnly = false } = {}) {
                 try {
                     const message = JSON.parse(String(raw));
                     if (message.event === 'session.description') {
-                        // A re-offer is a new ICE generation; its candidates need
-                        // their own relay socket, so the count advances here.
-                        generation += 1;
-                        await rewriteSdp(message.params.description, 'down');
+                        const description = message.params.description;
+                        const ufrag = description.sdp.match(/a=ice-ufrag:([^\r\n]+)/)?.[1];
+                        if (ufrag !== offerUfrag) {
+                            offerUfrag = ufrag;
+                            generation += 1;
+                            rewrittenOffer = rewriteSdp(description, 'down').then(() => ({ ...description }));
+                        }
+                        message.params.description = await rewrittenOffer;
                     }
                     if (message.event === 'session.candidate') {
                         const rewritten = await link.down(String(message.params.candidate), generation);

@@ -346,7 +346,9 @@ re-offers — a fresh offer with a new ICE generation — as a new
 `session.description` event, which the client answers as usual. The session
 and its generation survive; only the ICE generation turns over. Fresh
 candidates from the restart trickle through `session.candidate` on both sides
-exactly as the initial ones do.
+exactly as the initial ones do. If a local offer is still unanswered, the
+engine re-emits that pending offer instead: queued restarts share its ICE
+credentials until the answer arrives.
 
 The WebSocket bridge retains the session after its last signaling socket leaves
 for `reattachMs` (default 30000 ms; CLI `--reattach-ms`; 0 closes immediately).
