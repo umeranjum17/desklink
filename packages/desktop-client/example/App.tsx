@@ -69,7 +69,7 @@ function bridgeSignaling(address: string, onEvent?: (event: SessionEvent) => voi
         if (msg.event === 'session.description') event = { kind: 'description', description: p.description, sessionId: p.sessionId };
         else if (msg.event === 'session.candidate') event = { kind: 'candidate', candidate: { candidate: p.candidate, sdpMid: p.sdpMid ?? null, sdpMLineIndex: p.sdpMLineIndex ?? null }, sessionId: p.sessionId };
         else if (msg.event === 'session.state') event = { kind: 'state', capture: p.capture, transport: p.transport, firstFrame: p.firstFrame, sessionId: p.sessionId };
-        else if (msg.event === 'session.revoked') event = { kind: 'revoked', reason: p.reason, sessionId: p.sessionId };
+        else if (msg.event === 'session.revoked') event = { kind: 'revoked', reason: p.reason, code: p.code, sessionId: p.sessionId };
         if (event !== null) {
             onEvent?.(event);
             for (const handler of handlers) handler(event);
@@ -141,7 +141,13 @@ export function statusText({ status, presented, failure }: SessionSnapshot): str
 export default function App() {
     const [connection, setConnection] = React.useState(() => {
         const url: unknown = Platform.OS === 'ios' ? Settings.get('desklinkUrl') : null;
-        return typeof url === 'string' ? { url, report: null as string | null, cover: false, key: url } : null;
+        // A demo journey opts the picture into covering the view
+        // (`-desklinkCover 1` at launch), mirroring the Android deep link's
+        // `cover=1`; anywhere else it is off.
+        const coverSetting: unknown = Platform.OS === 'ios' ? Settings.get('desklinkCover') : null;
+        return typeof url === 'string'
+            ? { url, report: null as string | null, cover: coverSetting === '1' || coverSetting === 'true' || coverSetting === 1, key: url }
+            : null;
     });
     React.useEffect(() => {
         if (Platform.OS === 'ios') return;

@@ -156,7 +156,7 @@ view.
   VP9. Neither platform links a second WebRTC stack.
 - **A sharp, zoomable picture.** In portrait the default is fit-width;
   in landscape it covers the screen below the status bar (as far as the 2.5
-  zoom limit allows). The `cover` prop (Android) opts portrait into the same
+  zoom limit allows). The `cover` prop opts portrait into the same
   coverage, cropping the overflowing sides instead of letterboxing. The picture stays undistorted. One finger pans cropped
   content; pinch to zoom before panning when the whole desktop already fits.
   Pass the screen's safe-area `insets` (for example from
