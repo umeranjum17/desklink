@@ -892,7 +892,7 @@ const quickstartJourney = async () => {
     await new Promise(ok => fixture.listen(0, '127.0.0.1', ok));
     const fixturePort = fixture.address().port;
     const fixtureBrowser = start('fixture', 'chromium', ['--no-sandbox', '--no-first-run', '--no-default-browser-check',
-        '--disable-dev-shm-usage', '--window-position=0,0', '--window-size=1280,720',
+        '--disable-dev-shm-usage', '--ozone-platform=x11', '--window-position=0,0', '--window-size=1280,720',
         `--user-data-dir=${join(scratch, 'chromium-profile')}`, `--app=http://127.0.0.1:${fixturePort}/`], xenv, scratch);
     mark('fixture-open');
     receipt.fixture_browser = { pid: fixtureBrowser.pid, config_home: labConfig };
@@ -1221,7 +1221,10 @@ const recoveryJourney = async () => {
     receipt.costs = captureCost();
 
     const link = `desklink-example://connect?url=${encodeURIComponent(`ws://127.0.0.1:${sigRev}/desktop?token=${token}`)}`
-        + `&report=${encodeURIComponent(`http://127.0.0.1:${repRev}/report`)}`;
+        + `&report=${encodeURIComponent(`http://127.0.0.1:${repRev}/report`)}&cover=1`;
+    // `cover=1` opts this demo's picture into covering the view (the J3
+    // recovery legs prove a full-screen picture); the latency journey's link
+    // carries no cover, so its full-width stamp strip keeps decoding.
     receipt.link = link.replace(token, '<bridge-token>');
     const applicationId = 'dev.desklink.example';
     try {

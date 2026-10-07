@@ -33,12 +33,14 @@ const DECK_TALL = 560;
 /** The shortest edge that makes a screen a tablet's rather than a phone's. */
 const TABLET_MIN = 500;
 
-function connectionLink(link: string | null): { url: string; report: string | null; key: string } | null {
+function connectionLink(link: string | null): { url: string; report: string | null; cover: boolean; key: string } | null {
     if (!link) return null;
     try {
         const parsed = new URL(link);
         const url = parsed.searchParams.get('url');
-        return url ? { url, report: parsed.searchParams.get('report'), key: link } : null;
+        // A demo journey opts the picture into covering the view (`cover=1`)
+        // instead of fitting the portrait width; anywhere else it is off.
+        return url ? { url, report: parsed.searchParams.get('report'), cover: parsed.searchParams.get('cover') === '1', key: link } : null;
     } catch { return null; }
 }
 
@@ -139,7 +141,7 @@ export function statusText({ status, presented, failure }: SessionSnapshot): str
 export default function App() {
     const [connection, setConnection] = React.useState(() => {
         const url: unknown = Platform.OS === 'ios' ? Settings.get('desklinkUrl') : null;
-        return typeof url === 'string' ? { url, report: null as string | null, key: url } : null;
+        return typeof url === 'string' ? { url, report: null as string | null, cover: false, key: url } : null;
     });
     React.useEffect(() => {
         if (Platform.OS === 'ios') return;
@@ -151,12 +153,12 @@ export default function App() {
     if (!connection) return <View style={[styles.root, styles.idle]}><StatusBar hidden /><Text style={styles.messageText}>Open a desktop connection link to connect.</Text></View>;
     return (
         <SafeAreaProvider>
-            <ConnectedDesktop key={connection.key} url={connection.url} report={connection.report} />
+            <ConnectedDesktop key={connection.key} url={connection.url} report={connection.report} cover={connection.cover} />
         </SafeAreaProvider>
     );
 }
 
-function ConnectedDesktop({ url, report }: { url: string; report: string | null }) {
+function ConnectedDesktop({ url, report, cover }: { url: string; report: string | null; cover: boolean }) {
     const startedAt = React.useRef(Date.now());
     const presentedAt = React.useRef<number | null>(null);
     // The picture fills the screen but starts and pans inside the status bar,
@@ -264,7 +266,7 @@ function ConnectedDesktop({ url, report }: { url: string; report: string | null 
         <View style={styles.root} onLayout={(event) => setScreen(event.nativeEvent.layout)}>
             <StatusBar hidden />
             <DesktopView sessionId={desktop.nativeId} style={StyleSheet.absoluteFill} insets={insets} accessibilityLabel="desktop"
-                onPictureFrame={(frame) => setPictureBottom(frame.top + frame.height)} />
+                cover={cover} onPictureFrame={(frame) => setPictureBottom(frame.top + frame.height)} />
 
             <View pointerEvents="box-none" style={styles.confirmation}>
                 {copyError ? (
