@@ -141,7 +141,10 @@ address, port, code or certificate reaches the user, and the engine's session is
 started by the host that already serves the terminal. A consumer with no channel
 of its own is not left to invent one — `desklink-host bridge` re-serves the same
 protocol over a WebSocket and serves a reference client that needs no build step,
-so a stranger's first run is one command and one URL.
+so a stranger's first run is one command and one URL. Its bounded reattach window
+is in-memory only: no durable store, new pairing authority, lease renewal or
+restart-after-process-exit guarantee. Consumers close revoked pairing sessions
+explicitly; a missing signaling carrier is not itself revocation.
 
 The same substitution is therefore available to both: the packages carry no muxr
 concept, and muxr's contribution is one file that adapts its own channel to the

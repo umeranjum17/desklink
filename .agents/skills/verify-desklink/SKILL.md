@@ -139,6 +139,35 @@ here: `packages/desktop-client/test/ios-flow.mjs` writes
 `~/lab-tmp/dl-pm-iphone/<run>/`, with a capture per step, the phone-only control
 recording and the receipts named above.
 
+## Signaling reattach window
+
+For bridge retention changes, also run the existing owned-lab roam rig with
+`CARGO_TARGET_DIR`, `DESKLINK_AXI_ENGINE` and `DESKLINK_VERIFY_TARGET` pointing to
+the task-owned build. Unset ambient displays and serialize each heavy run with
+the project's lock and memory gate. Each command needs a fresh evidence folder:
+
+```sh
+env -u DISPLAY -u WAYLAND_DISPLAY node packages/desktop-client/test/roam-flow.mjs "$EVIDENCE/roam12" --outage 12000 --product-retention
+env -u DISPLAY -u WAYLAND_DISPLAY node packages/desktop-client/test/roam-flow.mjs "$EVIDENCE/abandon" --outage 31000 --scenario abandon --product-retention
+env -u DISPLAY -u WAYLAND_DISPLAY node packages/desktop-client/test/roam-flow.mjs "$EVIDENCE/close" --outage 1000 --scenario close-in-window --product-retention
+env -u DISPLAY -u WAYLAND_DISPLAY node packages/desktop-client/test/roam-flow.mjs "$EVIDENCE/extreme20" --outage 20000
+```
+
+The first three must pass with clean teardown. Read `result.json` and the real
+stdio tap: no close or revoke through the 12s outage, unchanged session id and
+peer, recovery inside the unchanged 2s bar; abandonment closes at 30s ±0.5s;
+explicit bridge shutdown inside the window finishes within 1s. Abandonment
+cuts signaling only so engine-side transport failure cannot mask the deadline.
+The standalone extreme20 starts as an expected RED recovery control; record its
+actual outcome without weakening the 2s assertion. A GREEN on the original
+candidate pair is old-pair resume, not signaling reattachment or hook recovery.
+Name its unchanged session, peer, generation and selected tuple, and any missing
+client ICE-state timestamps. Never rerun it merely to manufacture RED.
+`--product-retention` never installs the P0b test-only retention shim. The rig
+uses only export-safe shaped-link and lab-safety helpers; do not import the
+side-effecting link-drop flow. Screenshots show the owned fixture; they do not
+prove any unimplemented automatic signaling reconnection UI.
+
 ## Motion
 
 Record video for **every interaction the change under review moves**, not

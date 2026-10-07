@@ -322,6 +322,15 @@ is that page's source: one file, no build step, and the shortest complete
 description of the protocol that exists. The bridge operator chooses the capture
 source with its flag or environment; clients cannot choose or override it.
 
+The bridge keeps a session in memory for 30 seconds after its last socket
+leaves. `Bridge.start({ reattachMs })` or CLI `--reattach-ms MS` changes that
+window; `0` restores immediate close. Any authenticated attacher cancels the
+deadline and can send `session.restart_ice` with the held id. This is not an
+automatic reconnect or durable session store. A replacing open, explicit close,
+engine-side end or bridge shutdown cancels retention; late abandoned opens
+still close immediately. A revocation received while detached is replayed once
+to the next attacher, not treated as permission to revive a spent lease.
+
 Two things the bridge is honest about: `ws://` is plaintext, so keep it on a
 private network or put it behind TLS; and the token in the URL *is* the
 pairing credential for full view, input and clipboard, so treat it as a secret.
@@ -330,7 +339,9 @@ the engine while client transports remain open so an active control channel can
 receive `{"kind":"revoked","code":"closed"}` (with a reason), then closes the
 sockets. Teardown remains bounded if the engine or a client does not respond;
 notification failure does not preserve access. Restarting with a new token
-also prevents the old pairing from opening future sessions.
+also prevents the old pairing from opening future sessions. Applications that
+revoke a pairing must explicitly close its live sessions and refuse future
+opens; merely dropping its signaling socket now starts the retention window.
 
 ## Packaging
 

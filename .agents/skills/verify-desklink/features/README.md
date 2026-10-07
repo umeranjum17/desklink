@@ -11,6 +11,7 @@ use the ownership-verified private lab.
 | [iOS phone journeys](ios-phone-journeys.md) | Example app on the Mac's own simulator, driven by `test/ios-flow.mjs` | Readable live desktop with frames advancing; phone-only click, drag, scroll, typing, sticky modifiers, clipboard both ways; measured arrow tip |
 | [Machine capabilities](capabilities-report.md) | `desklink-host capabilities` | Actual capability JSON and engine child exit; helper Doctor |
 | [Desktop control from the agent CLI](agent-cli-desktop-as-text.md) | Existing private-lab CLI flow | Independent X11 click/typing/clipboard effects; separate journey |
+| Signaling carrier reattachment | `test/roam-flow.mjs --product-retention` on owned Xvfb | 12s outage preserves id without close; abandon closes at 30s ±0.5s; bridge shutdown inside window ≤1s; standalone 20s recovery records its actual outcome and old-pair vs restart mechanism |
 | [Recovery from a dropped link](link-drop-recovery.md) | Private lab, Chromium, `test/link-drop-flow.mjs` | Userspace-shaped link throttled, cut and restored; `reconnecting` inside the cut with the last picture held, frames and control back after |
 
 The browser input journey and both phone form factors are the executed seed

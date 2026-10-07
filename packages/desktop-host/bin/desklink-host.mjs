@@ -22,9 +22,10 @@ async function main() {
 USAGE:
   desklink-host path                  print the engine binary this package would run
   desklink-host capabilities          print what this machine can do right now
-  desklink-host bridge [--listen H:P] [--token T] [--source portal|x11|display] [--display :0] [--display-id ID]
+  desklink-host bridge [--listen H:P] [--token T] [--source portal|x11|display] [--display :0] [--display-id ID] [--reattach-ms MS]
                                       re-serve the engine's protocol over a WebSocket and
                                       print the URL to open; no signaling of your own needed
+                                      retain detached sessions for 30000 ms; --reattach-ms 0 closes immediately
   desklink-host <engine command> ...  run the engine directly (serve, keep, capture-probe, setup-input, version)
 
 Set DESKLINK_ENGINE to use an engine built somewhere else (MUXR_DESKLINK_ENGINE still works as a deprecated fallback).`);
@@ -50,6 +51,8 @@ Set DESKLINK_ENGINE to use an engine built somewhere else (MUXR_DESKLINK_ENGINE 
             return index === -1 ? fallback : rest[index + 1];
         };
         const listen = flag('listen', '127.0.0.1:19400');
+        const reattachMs = Number(flag('reattach-ms', '30000'));
+        if (!Number.isFinite(reattachMs) || reattachMs < 0) throw new Error('--reattach-ms must be a nonnegative finite number');
         const token = flag('token', randomBytes(24).toString('base64url'));
         if (typeof token !== 'string' || token.trim() === '') throw new Error('the bridge token must not be blank');
         const sourceKind = flag('source', process.env.MUXR_DESKTOP_SOURCE ?? (process.platform === 'win32' ? 'display' : 'portal'));
@@ -66,6 +69,7 @@ Set DESKLINK_ENGINE to use an engine built somewhere else (MUXR_DESKLINK_ENGINE 
         const bridge = await Bridge.start({
             listen,
             token,
+            reattachMs,
             engineCommand: resolved.command,
             engineArgs: resolved.args,
             // The engine's own diagnostics are the only clue when a session

@@ -1,9 +1,9 @@
 // P0a RED baseline: userspace-shaped media + signaling outage on an owned Xvfb.
 // Build the engine/fixture, then run with DISPLAY and WAYLAND_DISPLAY unset:
 // node packages/desktop-client/test/roam-flow.mjs <fresh-evidence-dir> --outage 12000
-// Without --driver-restart this remains P0a RED: detach destroys the session.
-// P0b: --path new-address --driver-restart uses a TEST-ONLY retention shim;
-// it proves restart connectivity, not product persistence or the unchanged 2s bar.
+// P0b: --path new-address --driver-restart uses a TEST-ONLY retention shim.
+// P1: --product-retention disables that shim and checks real bridge retention.
+// Record the standalone 20s roam's actual outcome against the unchanged 2s bar.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -24,6 +24,7 @@ const outage = Number(option('--outage', '12000'));
 const scenario = option('--scenario', 'roam');
 const pathMode = option('--path', 'same-address');
 const driverRestart = args.includes('--driver-restart');
+const productRetention = args.includes('--product-retention');
 assert(['same-address', 'new-address'].includes(pathMode), 'unknown --path');
 assert(!driverRestart || scenario === 'roam', '--driver-restart requires roam');
 assert(Number.isInteger(outage) && outage >= 1000 && outage <= 60000, '--outage must be 1000..60000 ms');
@@ -37,7 +38,7 @@ const tap = (direction, message) => {
     appendFileSync(join(evidence, 'stdio.jsonl'), JSON.stringify(row) + '\n');
     return row;
 };
-const result = { scenario, outage, pathMode, driverRestart, head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).stdout.trim(),
+const result = { scenario, outage, pathMode, driverRestart, productRetention, head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).stdout.trim(),
     shape: 'userspace-shaped link; no netem, privileges or firewall changes', tap: [], teardown: { strays: [], failures: [] } };
 const tag = `DESKLINK_ROAM=${process.pid}`;
 const tagged = () => readdirSync('/proc').flatMap(name => {
@@ -104,7 +105,8 @@ async function run() {
     assert(existsSync(engine) && existsSync(fixture), 'build task-owned desklink-host and x11_target first');
     const scratch = mkdtempSync(join(tmpdir(), 'dl-roam-'));
     let claim, xvfb, target, bridge, signalling, relay, vite, context;
-    let fixtureLog = '', refused = 0, blocked = false;
+    let fixtureLog = '', fixtureBuffer = '', refused = 0, blocked = false;
+    const observedFixture = [];
     const upstreams = new Set();
     const link = new ShapedLink((...items) => appendFileSync(join(evidence, 'link.log'), `${Date.now()} ${items.join(' ')}\n`));
     const fixtureRows = () => fixtureLog.split('\n').flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
@@ -120,7 +122,14 @@ async function run() {
         trackOwnedXvfb(xvfb, claim.display); await verifyOwnedXvfb(xvfb);
         const env = { ...process.env, DISPLAY: claim.display, XAUTHORITY: authority, WAYLAND_DISPLAY: '', XDG_SESSION_TYPE: 'x11', DESKLINK_ROAM: String(process.pid), DESKLINK_OPENH264: 'off' };
         target = spawn(fixture, ['--animate'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
-        for (const stream of [target.stdout, target.stderr]) stream.on('data', chunk => { fixtureLog += chunk; });
+        for (const stream of [target.stdout, target.stderr]) stream.on('data', chunk => {
+            fixtureLog += chunk;
+            fixtureBuffer += chunk;
+            const lines = fixtureBuffer.split('\n'); fixtureBuffer = lines.pop();
+            for (const line of lines) {
+                try { observedFixture.push({ ...JSON.parse(line), observedAt: Date.now() }); } catch { /* diagnostic */ }
+            }
+        });
         await wait(() => fixtureLog.includes('"ready"'), 5000, 'fixture ready');
         // Only the owned display may become ambient for the child engine.
         Object.assign(process.env, env);
@@ -130,7 +139,7 @@ async function run() {
             source: { kind: 'x11', display: claim.display } });
         // Tap bytes at the real stdio boundary, not client requests: close on
         // detach originates inside Bridge. This test deliberately inspects it.
-        if (driverRestart) {
+        if (driverRestart && !productRetention) {
             // TEST ONLY: retain the bridge's session across detach; the driver
             // reattaches without session.open. Product persistence is NOT proven.
             bridge.releaseSessionIfDetached = () => tap('reattach-shim', { retained: true });
@@ -186,16 +195,25 @@ async function run() {
         await wait(() => fixtureRows().some(e => e.kind === 'key' && e.phase === 'down') && fixtureRows().some(e => e.kind === 'button' && e.phase === 'down'), 2000, 'held key and button');
         await sleep(1000); // Allow X autorepeat to establish its pre-cut rate.
         // P0b isolates connectivity; held-input outage safety remains P0a's test.
-        if (driverRestart) {
+        if (driverRestart || (productRetention && scenario !== 'roam')) {
             await page.evaluate(() => window.__release());
             await wait(() => fixtureRows().some(e => e.kind === 'button' && e.phase === 'up'), 2000, 'pre-cut P0b release');
         }
         await page.screenshot({ path: join(evidence, 'before.png') });
         result.before = await measure();
         result.cutAt = Date.now(); blocked = true;
-        link.set({ discard: true }, 'roam cut');
+        if (!productRetention || scenario === 'roam') link.set({ discard: true }, 'roam cut');
         for (const client of relay.clients) client.terminate();
-        if (scenario === 'close-in-window') { await sleep(500); await page.close(); }
+        if (scenario === 'close-in-window') {
+            await sleep(500);
+            if (productRetention) {
+                const closeStarted = Date.now();
+                await bridge.close();
+                result.explicitCloseMs = Date.now() - closeStarted;
+                assert(result.explicitCloseMs <= 1000, 'bridge.close exceeded 1s inside retention window');
+            }
+            await page.close();
+        }
         // A real attempted handshake demonstrates admission refusal during outage.
         const denied = new WebSocket(`ws://127.0.0.1:${relay.address().port}/desktop`);
         denied.on('error', () => {});
@@ -251,6 +269,11 @@ async function run() {
             assert.deepEqual(result.afterRestart.errors, []);
             await page.screenshot({ path: join(evidence, 'restart.png') });
         }
+        if (productRetention && scenario === 'roam') {
+            assert.equal(result.atPathBack.sessionId, held.sessionId, 'session id changed during outage');
+            assert(!result.tap.some(e => e.direction === 'bridge->engine' && e.method === 'session.close'), 'bridge closed session inside retention window');
+            assert(!result.tap.some(e => e.event === 'session.revoked'), 'engine ended retained session');
+        }
         result.closeMs = result.tap.find(e => e.direction === 'bridge->engine' && e.method === 'session.close' && e.params.session_id === held.sessionId)?.at - result.cutAt;
         await wait(() => {
             const rows = fixtureRows();
@@ -263,11 +286,17 @@ async function run() {
         result.buttonUps = rows.filter(e => e.kind === 'button' && e.phase === 'up').length;
         result.keyUps = rows.filter(e => e.kind === 'key' && e.phase === 'up').length;
         result.counters = link.counters;
+        if (productRetention && scenario === 'abandon') {
+            assert(Math.abs(result.closeMs - 30000) <= 500, `abandon close outside 30s ±0.5s: ${result.closeMs}`);
+        }
+        const buttonUp = observedFixture.find(e => e.kind === 'button' && e.phase === 'up');
+        result.inputReleaseAfterCutMs = buttonUp?.observedAt - result.cutAt;
         assert(result.refused > 0, 'outage admission was not exercised');
         assert(result.buttonUps > 0 && result.keyUps >= result.keyDowns, 'held input was not released');
         assert(driverRestart || scenario !== 'roam' || recovered !== null, 'RED: pre-cut peer/session did not resume decoded video within 2s of path-back');
     } finally {
         writeFileSync(join(evidence, 'fixture-events.jsonl'), fixtureLog);
+        writeFileSync(join(evidence, 'fixture-observed.json'), JSON.stringify(observedFixture, null, 2));
         for (const [name, cleanup] of [
             ['browser', () => context?.close()],
             ['relay', async () => { for (const client of relay?.clients ?? []) client.terminate(); for (const host of upstreams) host.terminate(); if (relay) await new Promise(resolve => relay.close(resolve)); }],
