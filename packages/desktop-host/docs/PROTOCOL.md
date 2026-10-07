@@ -348,6 +348,13 @@ and its generation survive; only the ICE generation turns over. Fresh
 candidates from the restart trickle through `session.candidate` on both sides
 exactly as the initial ones do.
 
+The WebSocket bridge retains the session after its last signaling socket leaves
+for `reattachMs` (default 30000 ms; CLI `--reattach-ms`; 0 closes immediately).
+A token-authenticated socket attaching within that window cancels the deadline;
+it may restart ICE with the held session id without a new `session.open`.
+This does not replay offers or automatically reconnect a client, extend its
+lease, or guarantee recovery within 2 seconds. Engine-side ends remain terminal.
+
 ```jsonc
 {"id":7,"method":"session.restart_ice","params":{"session_id":"…","generation":1}}
 // → {"id":7,"result":{"accepted":true}}
@@ -421,9 +428,13 @@ The session ended on the engine's side; there is nothing further to drain.
 | `error` | The engine could not keep serving it, such as an encoder refusing a frame | end and report |
 
 A session the consumer closes or replaces (`session.close`, a new
-`session.open`, the consumer leaving) sends no `session.revoked`: the consumer
-asked for it, and signaling sees `session.state` with `capture` `ended`. Only
-its control channel is told, with code `closed` (below).
+`session.open`, engine stdin EOF, or the bridge's detach deadline) sends no
+`session.revoked`: signaling sees `session.state` with `capture` `ended`. Only
+its control channel is told, with code `closed` (below). A signaling socket
+leaving alone does not end the session during the bridge's reattach window.
+If the held session is revoked while detached, the bridge remembers its last
+`session.revoked`, replays it once to the next authenticated attacher, then
+forgets it. In particular, a spent lease cannot be revived by reattachment.
 
 A code a client does not know is terminal. Engines before this field sent no
 `code`; treat its absence as terminal too.
@@ -906,4 +917,6 @@ anything to show.
   and input; audio is a different product decision.
 - It does not arbitrate between two controllers. One session, one controller.
 - It does not auto-reconnect with authority it no longer holds: after a lease
-  expiry or owner disconnect it requires a fresh `session.open`.
+  expiry or an engine-side end it requires a fresh `session.open`. A brief
+  signaling-carrier loss within the bridge's reattach window is not owner
+  revocation; the application must close revoked pairing sessions explicitly.

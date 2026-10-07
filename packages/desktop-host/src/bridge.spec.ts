@@ -359,10 +359,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
         expect(other.readyState).toBe(WebSocket.OPEN);
     }, 20_000);
 
-    it('closes the engine session when its last consumer goes away, and only then', async () => {
-        // A consumer that dies mid-gesture — a closed tab, a lost phone, a
-        // killed process — must not leave the desktop holding synthetic input
-        // until the engine's one-hour lease expires.
+    it.each(['expires', 'immediate', 'reattaches', 'revoked'] as const)('holds the detached session through the window: %s', async (scenario) => {
         const directory = mkdtempSync(join(tmpdir(), 'desklink-bridge-'));
         const script = join(directory, 'engine.cjs');
         const log = join(directory, 'engine.log');
@@ -375,7 +372,11 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   fs.appendFileSync(${JSON.stringify(log)}, request.method + ' ' + JSON.stringify(request.params ?? {}) + '\\n');
   if (request.method === 'hello') return out({ id: request.id, result: { protocol: 2 } });
   if (request.method === 'session.open') return out({ id: request.id, result: { sessionId: 'engine-1', generation: 7 } });
-  if (request.method === 'session.metrics') return out({ id: request.id, result: {} });
+  if (request.method === 'session.metrics') {
+    if (request.params.revoke) setTimeout(() => out({event:'session.revoked',params:{sessionId:'engine-1',code:'lease',reason:'expired'}}), 100);
+    return out({ id: request.id, result: {} });
+  }
+  if (request.method === 'session.restart_ice') return out({id:request.id,result:{accepted:true}});
   if (request.method === 'session.close') return out({ id: request.id, result: { closed: true } });
   if (request.method === 'shutdown') { out({ id: request.id, result: {} }); process.exit(0); }
   return out({ id: request.id, error: { code: 'operation', message: 'unknown' } });
@@ -395,6 +396,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
             engineCommand: process.execPath,
             engineArgs: [script],
             serveExample: false,
+            reattachMs: scenario === 'immediate' ? 0 : 300,
         });
         bridges.push(bridge);
         const first = await connect(bridge.port, 'token=t');
@@ -408,7 +410,39 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
         expect(sent()).toContain('session.open {"local_frames":false}');
         expect(sent().filter((line) => line.startsWith('session.close'))).toEqual([]);
 
+        if (scenario === 'revoked') await requestOn(second, 3, 'session.metrics', { revoke: true });
         second.close();
+        await new Promise<void>(resolve => second.once('close', resolve));
+        await new Promise(resolve => setTimeout(resolve, 150));
+        if (scenario === 'immediate') {
+            expect(sent()).toContain('session.close {"session_id":"engine-1","generation":7}');
+            return;
+        }
+        expect(sent().filter(line => line.startsWith('session.close'))).toEqual([]);
+        if (scenario !== 'expires') {
+            // Install the listener before open: replay arrives as soon as the
+            // authenticated handshake completes, without a new session.open.
+            const next = new WebSocket(`ws://127.0.0.1:${bridge.port}${BRIDGE_PATH}?token=t`);
+            servers.add(next);
+            const events: unknown[] = [];
+            next.on('message', raw => events.push(JSON.parse(String(raw))));
+            await new Promise<void>(resolve => next.once('open', resolve));
+            if (scenario === 'reattaches') {
+                expect(await requestOn(next, 4, 'session.restart_ice', { session_id: 'engine-1', generation: 7 })).toEqual({ accepted: true });
+                expect(sent()).toContain('session.restart_ice {"session_id":"engine-1","generation":7}');
+            } else {
+                await requestOn(next, 4, 'session.metrics');
+                expect(events).toContainEqual({event:'session.revoked',params:{sessionId:'engine-1',code:'lease',reason:'expired'}});
+                const other = await connect(bridge.port, 'token=t');
+                const repeated: unknown[] = [];
+                other.on('message', raw => repeated.push(JSON.parse(String(raw))));
+                await requestOn(other, 5, 'session.metrics');
+                expect(repeated).not.toContainEqual(events[0]);
+            }
+            await new Promise(resolve => setTimeout(resolve, 350));
+            expect(sent().filter(line => line.startsWith('session.close'))).toEqual([]);
+            return;
+        }
         const deadline = Date.now() + 5000;
         while (!sent().some((line) => line.startsWith('session.close')) && Date.now() < deadline) {
             await new Promise((resolve) => setTimeout(resolve, 25));

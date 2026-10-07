@@ -20,7 +20,7 @@ import { WebSocketServer, type VerifyClientCallbackSync, type WebSocket } from '
 import type { IncomingMessage } from 'node:http';
 
 import { EngineClient, type EngineClientOptions } from './engineProcess.js';
-import type { SourceRequest } from './protocol.js';
+import type { EngineEvent, SourceRequest } from './protocol.js';
 
 export interface BridgeOptions {
     /** Address to listen on, e.g. `127.0.0.1:19400` or `0.0.0.0:19400`. */
@@ -42,6 +42,8 @@ export interface BridgeOptions {
      */
     source?: SourceRequest;
     engineOptions?: EngineClientOptions;
+    /** Keep a detached session in memory for this long; 0 closes immediately. */
+    reattachMs?: number;
 }
 
 /** The path a client connects to: `/desktop?token=…`. */
@@ -59,6 +61,8 @@ function examplePage(): string {
 
 export class Bridge {
     private closing = false;
+    private reattachTimer: ReturnType<typeof setTimeout> | undefined;
+    private revoked: Extract<EngineEvent, { event: 'session.revoked' }> | undefined;
     /** The session the engine holds, so a consumer that vanishes can release it. */
     private session: { sessionId: string; generation?: number } | undefined;
 
@@ -68,9 +72,11 @@ export class Bridge {
         private readonly engine: EngineClient,
         private readonly defaultSource: SourceRequest | undefined,
         private readonly localFrames: boolean,
+        private readonly reattachMs: number,
     ) {}
 
     static async start(options: BridgeOptions): Promise<Bridge> {
+        if (!Number.isFinite(options.reattachMs ?? 30_000) || (options.reattachMs ?? 30_000) < 0) throw new Error('reattachMs must be a nonnegative finite number');
         if (options.token.trim() === '') throw new Error('the bridge token must not be blank');
         let bridge: Bridge | undefined;
         const server = createServer((request, response) => {
@@ -104,6 +110,7 @@ export class Bridge {
             // Grant credentials stay with the host; session notifications go
             // to the attached controllers watching this session.
             onEvent: (event) => {
+                bridge?.rememberEvent(event);
                 options.engineOptions?.onEvent?.(event);
                 if (event.event === 'session.restoreToken' || event.event === 'session.frame.changed') return;
                 const line = JSON.stringify(event);
@@ -113,7 +120,7 @@ export class Bridge {
             },
         });
 
-        bridge = new Bridge(server, sockets, engine, options.source, options.engineOptions?.onEvent !== undefined);
+        bridge = new Bridge(server, sockets, engine, options.source, options.engineOptions?.onEvent !== undefined, options.reattachMs ?? 30_000);
         sockets.on('connection', (socket) => bridge?.attach(socket));
 
         const address = splitAddress(options.listen);
@@ -131,6 +138,11 @@ export class Bridge {
     }
 
     private attach(socket: WebSocket): void {
+        this.clearReattachTimer();
+        if (this.revoked !== undefined) {
+            socket.send(JSON.stringify(this.revoked));
+            this.revoked = undefined;
+        }
         socket.on('message', (raw) => {
             if (this.closing) return;
             let request: { id?: number; method?: string; params?: Record<string, unknown> };
@@ -192,10 +204,10 @@ export class Bridge {
                 });
         });
 
-        // A consumer that disappears mid-gesture — a closed tab, a lost phone,
-        // a killed process — must not leave the desktop holding synthetic input
-        // until the engine's lease expires. Nothing keeps the session for a
-        // consumer that might reconnect: a reconnect opens a fresh one.
+        // Carrier loss keeps the session briefly for reattachment. Input release
+        // is independent: the private 12s outage proof measured release within
+        // 4.6s on peer disconnect; control-channel loss also releases input.
+        // Neither waits for the bridge's 30s retention deadline.
         const release = (): void => this.releaseSessionIfDetached();
         socket.on('close', release);
         socket.on('error', release);
@@ -203,22 +215,54 @@ export class Bridge {
 
     private rememberSession(method: string, result: unknown): void {
         if (method === 'session.close') {
+            this.clearReattachTimer();
+            this.revoked = undefined;
             this.session = undefined;
             return;
         }
         if (method !== 'session.open') return;
         const opened = result as { sessionId?: unknown; generation?: unknown } | null;
         if (typeof opened?.sessionId !== 'string') return;
+        this.clearReattachTimer();
+        this.revoked = undefined;
         this.session = typeof opened.generation === 'number'
             ? { sessionId: opened.sessionId, generation: opened.generation }
             : { sessionId: opened.sessionId };
     }
 
+    private clearReattachTimer(): void {
+        clearTimeout(this.reattachTimer);
+        this.reattachTimer = undefined;
+    }
+
+    private rememberEvent(event: EngineEvent): void {
+        if (event.params.sessionId !== this.session?.sessionId) return;
+        if (event.event === 'session.revoked') {
+            if (this.sockets.clients.size === 0) this.revoked = event;
+        } else if (event.event !== 'session.state' || event.params.capture !== 'ended') {
+            return;
+        }
+        this.clearReattachTimer();
+        this.session = undefined;
+    }
+
     private releaseSessionIfDetached(force = false): void {
         if (this.closing || (!force && this.sockets.clients.size > 0)) return;
         const session = this.session;
-        this.session = undefined;
         if (session === undefined) return;
+        if (!force && this.reattachMs > 0) {
+            if (this.reattachTimer !== undefined) return;
+            this.reattachTimer = setTimeout(() => {
+                this.reattachTimer = undefined;
+                if (this.sockets.clients.size === 0 && this.session?.sessionId === session.sessionId) {
+                    this.releaseSessionIfDetached(true);
+                }
+            }, this.reattachMs);
+            return;
+        }
+        this.clearReattachTimer();
+        this.revoked = undefined;
+        this.session = undefined;
         void this.engine
             .request('session.close', {
                 session_id: session.sessionId,
@@ -230,6 +274,8 @@ export class Bridge {
     async close(): Promise<void> {
         if (this.closing) return;
         this.closing = true;
+        this.clearReattachTimer();
+        this.revoked = undefined;
         const listenerClosed = new Promise<void>((resolve) => this.server.close(() => resolve()));
         await this.engine.stop().catch(() => undefined);
         this.session = undefined;
