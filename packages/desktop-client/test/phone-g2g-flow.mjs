@@ -179,6 +179,13 @@ const adb = (...args) => {
 const adbTry = (...args) => spawnSync('adb', ['-s', serial, ...args],
     { encoding: 'utf8', timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
 const adbBin = (...args) => spawnSync('adb', ['-s', serial, ...args], { encoding: 'buffer', timeout: 600000, maxBuffer: 256 * 1024 * 1024 });
+/** Measurement grabs fail fast: a wedged capture must never eat the device lock. */
+const adbBinQuick = (...args) => spawnSync('adb', ['-s', serial, ...args], { encoding: 'buffer', timeout: 25000, maxBuffer: 256 * 1024 * 1024 });
+const adbQuick = (...args) => {
+    const done = spawnSync('adb', ['-s', serial, ...args], { encoding: 'utf8', timeout: 25000, maxBuffer: 64 * 1024 * 1024 });
+    assert.equal(done.status, 0, `adb ${args.join(' ')} failed: ${done.stderr}`);
+    return done.stdout;
+};
 
 const children = [];
 let xvfb, bridge, metro, receiver, stampChild, relayPort, xenv, bridgePort;
@@ -512,8 +519,10 @@ const publishedVersions = dir => Object.fromEntries(Object.entries(JSON.parse(re
 /** One raw frame off the phone, with the picture band and a hash of it: the
  * picture sits wherever the app puts it, so a fixed middle strip would hash
  * only the black around it and stay frozen while the desktop answers. */
-const phoneFrame = () => {
-    const { pixels, width, height } = capturePixels(adbBin('exec-out', 'screencap').stdout);
+const phoneFrame = (quick = false) => {
+    const grab = quick ? adbBinQuick('exec-out', 'screencap') : adbBin('exec-out', 'screencap');
+    assert.equal(grab.status, 0, `screencap failed: ${grab.stderr}`);
+    const { pixels, width, height } = capturePixels(grab.stdout);
     assert(width > 0 && pixels.length > 0, 'the phone returned no screen');
     const band = pictureBand(pixels, width, height);
     const top = band?.top ?? Math.round(height * 0.3);
@@ -533,8 +542,10 @@ const phoneFrame = () => {
  * label is matched loosely: the platform renders a React Native Button's text
  * in capitals.
  */
-const uiBound = label => {
-    const dump = adbTry('shell', 'uiautomator dump /data/local/tmp/dl-ui.xml >/dev/null 2>&1; cat /data/local/tmp/dl-ui.xml').stdout ?? '';
+const uiBound = (label, quick = false) => {
+    const dump = quick
+        ? (spawnSync('adb', ['-s', serial, 'shell', 'uiautomator dump /data/local/tmp/dl-ui.xml >/dev/null 2>&1; cat /data/local/tmp/dl-ui.xml'], { encoding: 'utf8', timeout: 25000 }).stdout ?? '')
+        : (adbTry('shell', 'uiautomator dump /data/local/tmp/dl-ui.xml >/dev/null 2>&1; cat /data/local/tmp/dl-ui.xml').stdout ?? '');
     const want = label.toLowerCase();
     for (const [node] of dump.matchAll(/<node[^>]*>/g)) {
         const text = /text="([^"]*)"/.exec(node)?.[1] ?? '';
@@ -1077,8 +1088,311 @@ const quickstartJourney = async () => {
         try { fixture?.close(); } catch { /* already closed */ }
     }
 };
+/**
+ * The J3 recovery journey: this checkout's example app on the physical phone,
+ * over real Wi-Fi UDP for the media path, driven through a 5 s drop, a Wi-Fi
+ * off/on roam and a 60 s backgrounding.
+ *
+ * The path, stated plainly: signalling and the Metro bundle ride `adb reverse`
+ * over USB, but the WebRTC media rides the phone's own Wi-Fi to this host's
+ * LAN address — ordinary host candidates, no loopbackTcp, no tunnel. Turning
+ * the phone's Wi-Fi off really kills the picture, which is what makes the drop
+ * and the roam honest. (This host's firewall drops inbound TCP, so signalling
+ * cannot dial in directly; the first UDP the phone sends still opens the
+ * conntrack return, and the run fails at its preflight when no picture forms.)
+ *
+ * What each case measures, on the phone's own screen:
+ *
+ *  - the human state: the app's own status line (`Can't reach your desktop.
+ *    Reconnecting…`) read through the accessibility tree and in stills;
+ *  - the live picture: the animated fixture's band hash advancing again, which
+ *    needs no clock and cannot be faked by a held frame;
+ *  - control without stuck input: a tap after every recovery must log a button
+ *    down AND a button up in the fixture, so a lost release would fail the run;
+ *  - consent: nothing is tapped during any recovery, so a blocking prompt
+ *    would stall it past its deadline. (X11 captures have no consent UI; the
+ *    legs prove a reopen completes with zero user action.)
+ *
+ * Honest limits, published in the receipt: this phone has no SIM, so the roam
+ * is Wi-Fi off/on (interface down, address lost, DHCP on return) rather than
+ * Wi-Fi to cellular; the DHCP server usually reissues the same address, which
+ * the receipt names either way. Motion is a screencap series encoded here,
+ * because `screenrecord` on this phone writes where adb cannot read.
+ */
+const recoveryJourney = async () => {
+    const engineBin = resolve(process.env.DESKLINK_ENGINE ?? join(target, 'debug', 'desklink-host'));
+    const x11 = resolve(process.env.DESKLINK_VERIFY_TARGET ?? join(target, 'debug', 'examples', 'x11_target'));
+    for (const path of [engineBin, x11]) assert(existsSync(path), `missing binary: ${path}`);
+    Object.assign(receipt, {
+        journey: 'recovery-j3',
+        engine: engineBin, engineSha256: hash(engineBin), fixture: x11, fixtureSha256: hash(x11),
+        sourceHead: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim(),
+        media_path: 'Wi-Fi UDP between the phone and this host (ordinary host candidates); signalling and Metro over adb reverse (USB)',
+        signalling_path: 'adb reverse over USB (this host drops inbound TCP except sshd)',
+        cellular: 'none: this phone reports no SIM, so the roam leg is Wi-Fi off/on, not Wi-Fi to cellular',
+        wifi_kill_validates_path: 'the drop case fails unless the media rides Wi-Fi: a USB-carried picture would not notice the radio going off',
+        consent_note: 'X11 captures have no consent UI; each recovery completes with zero taps, which a blocking prompt would stall past its deadline',
+    });
+    const token = await hostLab();
+    mark('bridge-ready');
+
+    receiver = createServer((request, response) => {
+        const chunks = [];
+        request.on('data', c => chunks.push(c));
+        request.on('end', () => {
+            try { reports.push(JSON.parse(Buffer.concat(chunks).toString())); } catch { /* a partial body is not a report */ }
+            response.writeHead(204, { 'Access-Control-Allow-Origin': '*' });
+            response.end();
+        });
+    });
+    await new Promise(ok => receiver.listen(0, '0.0.0.0', ok));
+    receipt.reportPort = receiver.address().port;
+
+    // The desktop: the repository's own X11 target, animated so a held frame
+    // cannot read as live, logging its own pointer and button events.
+    let fixtureLog = '';
+    const fixtureProc = spawn(x11, ['--animate', '--move'], { env: xenv, stdio: ['ignore', 'pipe', 'pipe'] });
+    // The log is a tap ledger, not an archive: keep the tail so a long run
+    // cannot turn every later read quadratic.
+    const appendFixture = (c) => {
+        fixtureLog += c;
+        if (fixtureLog.length > 200000) fixtureLog = fixtureLog.slice(-100000);
+    };
+    fixtureProc.stdout.on('data', appendFixture);
+    fixtureProc.stderr.on('data', appendFixture);
+    children.push(['x11_target', fixtureProc]);
+    await waitFor(() => fixtureLog.includes('"ready"'), 'the x11_target fixture', 30000);
+    const fixtureLines = () => fixtureLog.split('\n').filter(line => line.startsWith('{'));
+    mark('fixture-ready');
+
+    const freePort = async () => {
+        const probe = createServer();
+        await new Promise(ok => probe.listen(0, '127.0.0.1', ok));
+        const port = probe.address().port;
+        await new Promise(ok => probe.close(ok));
+        return port;
+    };
+    // Signalling and reports ride the USB reverse; the media stays on Wi-Fi.
+    const sigRev = await freePort();
+    const repRev = await freePort();
+    adb('reverse', `tcp:${sigRev}`, `tcp:${bridgePort}`);
+    adb('reverse', `tcp:${repRev}`, `tcp:${receiver.address().port}`);
+    const reverses = [`tcp:${sigRev}`, `tcp:${repRev}`, 'tcp:8081'];
+
+    if (process.env.DESKLINK_ANDROID_SKIP_BUILD !== '1') {
+        const build = spawnSync('flock', ['/tmp/fm-desklink-heavy.lock', 'bash', '-c', [
+            'npm install --no-audit --no-fund',
+            'npx expo prebuild --platform android --no-install',
+            'cd android && ./gradlew --no-daemon assembleDebug',
+        ].join(' && ')], { cwd: example, env, encoding: 'utf8', timeout: 3600000 });
+        writeFileSync(join(out, 'build.log'), `${build.stdout ?? ''}${build.stderr ?? ''}`);
+        assert.equal(build.status, 0, 'the example app did not build; see build.log');
+    }
+    assert(existsSync(apk), `no APK at ${apk}: build the example app first`);
+    receipt.apkSha256 = hash(apk);
+    const marker = '/data/local/tmp/dl-phone-recovery.apk';
+    if ((adbTry('shell', `cat ${marker} 2>/dev/null`).stdout ?? '').trim() !== receipt.apkSha256) {
+        const installed = spawnSync('adb', ['-s', serial, 'install', '-r', '-t', '--no-streaming', apk], { encoding: 'utf8', timeout: 900000 });
+        assert.equal(installed.status, 0, `adb install failed: ${installed.stderr ?? installed.stdout ?? installed.signal}`);
+        adb('shell', `echo -n ${receipt.apkSha256} > ${marker}`);
+    } else {
+        receipt.apk_install = 'already installed, same sha256';
+    }
+    mark('apk-installed');
+    const metroProbe = createServer();
+    await new Promise(ok => metroProbe.listen(0, '127.0.0.1', ok));
+    const metroPort = metroProbe.address().port;
+    metroProbe.close();
+    metro = start('metro', 'npx', ['expo', 'start', '--port', String(metroPort)], { ...env, CI: '1' }, example);
+    try {
+        await waitFor(() => /Waiting on http|Metro waiting/.test(logs.metro), 'Metro', 180000);
+    } catch (error) {
+        throw new Error(`${error}; metro said: ${logs.metro.slice(-400)}`);
+    }
+    adb('reverse', 'tcp:8081', `tcp:${metroPort}`);
+    mark('metro-ready');
+    receipt.device = {
+        model: adb('shell', 'getprop', 'ro.product.model').trim(),
+        release: adb('shell', 'getprop', 'ro.build.version.release').trim(),
+        sdk: adb('shell', 'getprop', 'ro.build.version.sdk').trim(),
+        resolution: adb('shell', 'wm', 'size').trim().split(':').pop().trim(),
+        wifi: /SSID: "([^"]+)"/.exec(adb('shell', 'dumpsys', 'wifi'))?.[1] ?? 'unknown',
+    };
+    receipt.costs = captureCost();
+
+    const link = `desklink-example://connect?url=${encodeURIComponent(`ws://127.0.0.1:${sigRev}/desktop?token=${token}`)}`
+        + `&report=${encodeURIComponent(`http://127.0.0.1:${repRev}/report`)}`;
+    receipt.link = link.replace(token, '<bridge-token>');
+    const applicationId = 'dev.desklink.example';
+    try {
+    adb('shell', 'am', 'force-stop', applicationId);
+    await sleep(1000);
+    adb('shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', `"${link}"`);
+    await waitFor(connected, "the app's own report with a presented frame", 180000);
+    mark('session-live');
+    // The fixture must be visibly animating on the phone, or every later
+    // "advancing again" check is meaningless.
+    const hashes = [];
+    for (let i = 0; i < 5; i += 1) { hashes.push(phoneFrame().hash); await sleep(400); }
+    assert(new Set(hashes).size > 1, `the phone picture never changes: ${hashes.join(',')}`);
+    writeFileSync(join(out, 'screen-live.png'), adbBin('exec-out', 'screencap', '-p').stdout);
+    assert(uiBound('connected') !== null, 'the app does not read Connected while live');
+
+    const wifiIp = () => {
+        const m = /inet ([0-9.]+)/.exec(adbTry('shell', 'ip -o addr show wlan0').stdout ?? '');
+        return m?.[1] ?? null;
+    };
+    const waitWifiIp = async (ms) => {
+        const until = Date.now() + ms;
+        for (;;) {
+            const ip = wifiIp();
+            if (ip !== null) return ip;
+            if (Date.now() >= until) throw new Error('Wi-Fi never rejoined');
+            await sleep(1000);
+        }
+    };
+    const statusIs = (word) => uiBound(word, true) !== null;
+    const waitStatus = async (caseName, word, ms, phase) => {
+        console.log(`[${caseName}] waiting for ${word} (${phase})`);
+        const until = Date.now() + ms;
+        for (;;) {
+            if (statusIs(word)) { console.log(`[${caseName}] ${word} shown (${phase})`); return Date.now(); }
+            if (Date.now() >= until) throw new Error(`the app never read ${word} (${phase})`);
+            await sleep(500);
+        }
+    };
+    /** First moment the picture hash moves off `frozen`, then moves again: advancing, not a glitch. */
+    const waitAdvancing = async (caseName, frozen, ms) => {
+        console.log(`[${caseName}] waiting for the picture to advance`);
+        const until = Date.now() + ms;
+        let movedAt = null;
+        let last = frozen;
+        for (;;) {
+            const hash = phoneFrame(true).hash;
+            if (hash !== last) {
+                if (movedAt !== null) { console.log(`[${caseName}] picture advancing`); return movedAt; }
+                movedAt = Date.now();
+            }
+            last = hash;
+            if (Date.now() >= until) throw new Error('the picture never advanced again');
+            await sleep(250);
+        }
+    };
+    const tapPicture = async (caseName, why) => {
+        console.log(`[${caseName}] tap (${why})`);
+        const frame = phoneFrame(true);
+        assert(frame.band !== null, 'the phone lost the desktop picture before the tap');
+        const before = fixtureLines().length;
+        adbQuick('shell', 'input', 'tap', String(Math.round(frame.width / 2)), String(Math.round((frame.band.top + frame.band.bottom) / 2)));
+        const until = Date.now() + 8000;
+        for (;;) {
+            const fresh = fixtureLines().slice(before);
+            const downs = fresh.filter(line => line.includes('"button"') && line.includes('"down"')).length;
+            const ups = fresh.filter(line => line.includes('"button"') && line.includes('"up"')).length;
+            if (downs > 0 && ups > 0) { console.log(`[${caseName}] tap landed (${why})`); return { downs, ups }; }
+            if (Date.now() >= until) throw new Error(`the tap left ${downs} down(s) and ${ups} up(s): ${fresh.slice(-3).join(' | ')}`);
+            await sleep(250);
+        }
+    };
+    const encodeCase = (name, frames, startedAt) => {
+        const seconds = (Date.now() - startedAt) / 1000;
+        const fps = Math.max(1, Math.round(frames.length / Math.max(1, seconds) * 100) / 100);
+        const encoded = spawnSync('ffmpeg', ['-y', '-framerate', String(fps), '-i', join(out, `${name}-f_%d.png`),
+            '-vf', 'scale=540:-2', '-pix_fmt', 'yuv420p', '-c:v', 'libx264', '-crf', '30', join(out, `${name}.mp4`)],
+            { encoding: 'utf8', timeout: 600000 });
+        assert.equal(encoded.status, 0, `ffmpeg could not encode ${name}: ${encoded.stderr?.slice(-300)}`);
+        for (const path of frames) spawnSync('rm', ['-f', path]);
+        return { recording: `${name}.mp4`, frames: frames.length, seconds: round(seconds), fps };
+    };
+    receipt.cases = {};
+    // One case: record the phone throughout, run the outage, measure the return.
+    // A suspended app cannot repaint, so the background case cannot show a
+    // Reconnecting state mid-outage; its proof is the recovery, not the middle.
+    const runCase = async (name, outageMs, outage, restore, observable = true) => {
+        const frames = [];
+        const startedAt = Date.now();
+        let recording = true;
+        const capture = (async () => {
+            for (let index = 0; recording; index += 1) {
+                const frame = adbBin('exec-out', 'screencap', '-p').stdout;
+                if (!frame.length) break;
+                const path = join(out, `${name}-f_${index}.png`);
+                writeFileSync(path, frame);
+                frames.push(path);
+                await sleep(400);
+            }
+        })();
+        const leg = { name };
+        try {
+            console.log(`[${name}] pre-tap`);
+            if (!ourAppInFront(applicationId)) bringOurAppToFront(applicationId);
+            leg.preTap = await tapPicture(name, 'pre-outage');
+            const tDrop0 = Date.now();
+            console.log(`[${name}] outage starts`);
+            await outage();
+            const outageAt = Date.now();
+            console.log(`[${name}] outage triggered after ${outageAt - tDrop0}ms`);
+            if (observable) {
+                leg.reconnectingAt = await waitStatus(name, 'econnecting', 15000, 'outage') - outageAt;
+                writeFileSync(join(out, `screen-${name}-reconnecting.png`), adbBin('exec-out', 'screencap', '-p').stdout);
+                assert(statusIs('econnecting'), 'the Reconnecting state left before the outage ended');
+            }
+            await sleep(Math.max(0, outageMs - (Date.now() - tDrop0)));
+            console.log(`[${name}] restoring`);
+            await restore();
+            leg.outageMs = Date.now() - tDrop0;
+            console.log(`[${name}] restored after ${leg.outageMs}ms outage`);
+            const frozen = phoneFrame(true).hash;
+            const t0 = Date.now();
+            const firstMove = await waitAdvancing(name, frozen, 30000);
+            leg.recoveryMs = firstMove - t0;
+            leg.statusAt = await (async () => { const t = Date.now(); await waitStatus(name, 'connected', 20000, 'recovery'); return Date.now() - t; })();
+            writeFileSync(join(out, `screen-${name}-recovered.png`), adbBin('exec-out', 'screencap', '-p').stdout);
+            // Still advancing a moment later: the picture is live, not one frame.
+            await sleep(1200);
+            const later = [phoneFrame(true).hash, phoneFrame(true).hash];
+            assert(later[0] !== frozen && later[1] !== frozen, 'the picture stuck on the outage frame after the recovery');
+            leg.postTap = await tapPicture(name, 'post-recovery');
+            assert(leg.recoveryMs <= 2000, `the picture took ${leg.recoveryMs}ms to advance again (J3 allows 2000)`);
+        } finally {
+            recording = false;
+            try { await capture; } catch { /* a failed grab must not mask the case result */ }
+        }
+        Object.assign(leg, encodeCase(name, frames, startedAt));
+        receipt.cases[name] = leg;
+        saveReceipt();
+        mark(name);
+    };
+
+    const ipBefore = wifiIp();
+    assert(ipBefore !== null, 'the phone is not on Wi-Fi');
+    receipt.wifiBefore = ipBefore;
+    // A 5 s drop: both managers off, radios silent, then back.
+    await runCase('drop5', 5000,
+        async () => { adb('shell', 'svc wifi disable'); },
+        async () => { adb('shell', 'svc wifi enable'); await waitWifiIp(30000); });
+    // A roam: the interface down long enough to lose the address, then a fresh join.
+    const roamWas = wifiIp();
+    await runCase('roam', 10000,
+        async () => { adb('shell', 'svc wifi disable'); await waitFor(() => wifiIp() === null, 'the address to drop', 15000); },
+        async () => { adb('shell', 'svc wifi enable'); await waitWifiIp(30000); });
+    receipt.wifiAfterRoam = { before: roamWas, after: wifiIp() };
+    // A 60 s backgrounding: home, a full minute, back to our own activity.
+    await runCase('background60', 60000,
+        async () => { adb('shell', 'input', 'keyevent', 'KEYCODE_HOME'); await sleep(1500); assert(!ourAppInFront(applicationId), 'our app stayed in front after HOME'); },
+        async () => { bringOurAppToFront(applicationId); }, false);
+
+    receipt.outcome = 'PASS';
+    console.log(`PASS: ${serial} recovered drop, roam and background on real Wi-Fi; evidence ${out}`);
+    } finally {
+        adbTry('shell', 'svc wifi enable');
+        try { await waitWifiIp(30000); } catch { /* the case error owns the failure */ }
+        for (const reverse of reverses) adbTry('reverse', '--remove', reverse);
+        adbTry('reverse', '--remove', 'tcp:8081');
+    }
+};
 try {
-    await (journey === 'quickstart' ? quickstartJourney() : latencyJourney());
+    await (journey === 'quickstart' ? quickstartJourney() : journey === 'recovery' ? recoveryJourney() : latencyJourney());
 } catch (error) {
     receipt.error = String(error);
     console.error(String(error));

@@ -1023,6 +1023,9 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                         // Readiness is not "a track arrived": it is a frame on screen.
                         return;
                     case 'presented':
+                        // One mark per session: a producer that re-marks (a repaint
+                        // after renegotiation) must not read a stale picture as live.
+                        if (presentedRef.current) return;
                         attempts.current = 0;
                         restartAttempts.current = 0;
                         restartCycles.current = 0;
