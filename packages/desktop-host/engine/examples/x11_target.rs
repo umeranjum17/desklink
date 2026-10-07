@@ -152,7 +152,7 @@ fn main() -> Result<()> {
     );
 
     loop {
-        let event = if animate {
+        let mut event = if animate {
             connection.poll_for_event()?
         } else {
             Some(
@@ -161,8 +161,10 @@ fn main() -> Result<()> {
                     .context("the X connection dropped")?,
             )
         };
-        if let Some(event) = event {
-            match event {
+        // Drain queued input before the animation sleep: X autorepeat produces
+        // press/release pairs faster than one event per 80 ms animation tick.
+        while let Some(current) = event {
+            match current {
                 Event::Expose(_) => {
                     paint(&connection, window, graphics, marker)?;
                     connection.flush()?;
@@ -254,6 +256,11 @@ fn main() -> Result<()> {
                 }
                 _ => {}
             }
+            event = if animate {
+                connection.poll_for_event()?
+            } else {
+                None
+            };
         }
         if animate {
             if moving {
