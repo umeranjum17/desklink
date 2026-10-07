@@ -1,6 +1,7 @@
 // J3 recovery on a Mac simulator: this checkout's example app on one of the
-// Mac's own fm-iPhone simulators, driven through a 5 s engine silence and a
-// 60 s backgrounding against a bridge on this Linux host.
+// Mac's own fm-iPhone simulators, driven through a 5 s engine silence, a
+// roam-equivalent Wi-Fi bounce on the Mac, and a 60 s backgrounding against a
+// bridge on this Linux host.
 //
 // The path: the simulator reaches a WebSocket relay on this host (the Mac's
 // route back here), which taps the loopback bridge; the engine captures the
@@ -12,8 +13,10 @@
 //
 // Each case measures, on the simulator's own screen: the human Reconnecting
 // state through the accessibility tree and in stills, the picture advancing
-// again (screenshot hashes off the animated fixture), and a tap after every
-// recovery landing in the fixture's button log as down AND up. Nothing is
+// again (screenshot hashes off the animated fixture), a tap after every
+// recovery landing in the fixture's button log as down AND up, and a motion
+// recording of the whole case (`<name>.mov`) showing the picture returning
+// full-screen (the demo launches with cover, the PR 118 bar on iOS). Nothing is
 // tapped during a recovery, so a blocking consent prompt would stall it past
 // its deadline. (X11 captures have no consent UI; the legs prove a reopen
 // completes with zero user action.)
@@ -30,6 +33,9 @@
 // DESKLINK_IOS_DIR (default fm-desklink-ios), DESKLINK_IOS_OUT (required fresh
 // dir), DESKLINK_IOS_DEVICE (simulator name, default fm-iPhone 17),
 // DESKLINK_IOS_SKIP_BUILD (1 reuses the lane's last build),
+// DESKLINK_IOS_ONLY (a comma-separated leg subset, e.g. `background60` or
+// `roam`; unset runs the proof legs, drop5 and background60 — roam stays
+// opt-in for the dl-roam-persistence follow-up),
 // DESKLINK_ENGINE, DESKLINK_VERIFY_TARGET (x11_target).
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -91,6 +97,12 @@ const saveReceipt = () => writeFileSync(join(out, 'receipt.json'), `${JSON.strin
 
 let claim = null; let xvfb = null; let xvfbPid = 0; let bridgePid = 0; let enginePid = 0;
 let relay = null; let udid = ''; let bootedByMe = false;
+// The wire, for forensics: every line the relay proxies, timestamped, tail kept.
+const wire = [];
+const wireLog = (dir, raw) => {
+    wire.push(`${Date.now()} ${dir} ${String(raw).slice(0, 500)}\n`);
+    if (wire.length > 3000) wire.splice(0, wire.length - 3000);
+};
 const owned = new Map();
 const statOf = (pid) => {
     try {
@@ -269,8 +281,8 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
         const upstream = new WebSocket(`ws://127.0.0.1:${bridgePort}${request.url}`);
         const queued = [];
         upstream.on('open', () => { for (const line of queued.splice(0)) upstream.send(line); });
-        upstream.on('message', (raw) => { if (client.readyState === 1) client.send(String(raw)); });
-        client.on('message', (raw) => { if (upstream.readyState === 1) upstream.send(String(raw)); else queued.push(String(raw)); });
+        upstream.on('message', (raw) => { wireLog('engine>', raw); if (client.readyState === 1) client.send(String(raw)); });
+        client.on('message', (raw) => { wireLog('app>', raw); if (upstream.readyState === 1) upstream.send(String(raw)); else queued.push(String(raw)); });
         client.on('close', () => upstream.close());
         upstream.on('close', () => client.close());
         upstream.on('error', () => client.close());
@@ -281,7 +293,7 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
 
     mac(`xcrun simctl install ${udid} "${app}"
 xcrun simctl terminate ${udid} ${BUNDLE} 2>/dev/null || true
-xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
+xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkCover 1`, 300_000);
     log('launched');
     {
         const until = Date.now() + 120_000;
@@ -301,10 +313,14 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         assert(a !== b, 'the simulator picture never changes');
     }
     const tapPicture = async () => {
+        // The fixture paints saturated primaries, not near-white, so the band
+        // is found with a low floor; the aim sits in the band's upper third,
+        // above the deck's own controls (as the reference proof quarter-points).
         const png = shot(join(out, 'tap-aim.png'));
-        const box = pictureBox(png, png.width);
+        const box = pictureBox(png, screenPoints(), 200);
         assert(box.bottom - box.top > 50, 'no picture on the simulator screen to tap');
-        const at = { x: (box.left + box.right) / 2, y: (box.top + box.bottom) / 2 };
+        assert(box.right > box.left, 'no picture width on the simulator screen to tap');
+        const at = { x: (box.left + box.right) / 2, y: box.top + (box.bottom - box.top) * 0.35 };
         const before = fixtureLines().length;
         mac(`axe tap -x ${at.x.toFixed(1)} -y ${at.y.toFixed(1)} --udid ${udid}`);
         const until = Date.now() + 10000;
@@ -319,18 +335,94 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     };
 
     receipt.cases = {};
+    // Simulator screenshots are physical pixels while `axe tap` takes points,
+    // so the tap geometry needs the screen's point width, read once from the
+    // widest top-level accessibility frame (SpringBoard and the app both span it).
+    let pointsWidth = 0;
+    const screenPoints = () => {
+        if (pointsWidth <= 0) {
+            for (const root of describeTree()) {
+                const frame = /\{\{[^}]*\}, \{([\d.]+), ([\d.]+)\}\}/.exec(root.AXFrame ?? '');
+                if (frame) pointsWidth = Math.max(pointsWidth, Number(frame[1]));
+            }
+            assert(pointsWidth > 0, 'the accessibility tree names no screen frame');
+        }
+        return pointsWidth;
+    };
+    // One `.mov` per case, recorded on the Mac itself: the proof is motion,
+    // not stills. `recordVideo` writes its file only when it is interrupted,
+    // so the stop sends SIGINT and waits for the exit.
+    const startRecording = (name) => {
+        mac(`rm -f "$D/tmp/rec-${name}.mov" "$D/tmp/rec-${name}.pid"
+nohup xcrun simctl io ${udid} recordVideo --codec=h264 "$D/tmp/rec-${name}.mov" > "$D/tmp/rec-${name}.log" 2>&1 & echo $! > "$D/tmp/rec-${name}.pid"
+sleep 2
+kill -0 "$(cat "$D/tmp/rec-${name}.pid")" 2>/dev/null || { cat "$D/tmp/rec-${name}.log"; exit 1; }`);
+    };
+    const stopRecording = (name) => {
+        mac(`kill -INT "$(cat "$D/tmp/rec-${name}.pid")"
+for i in $(seq 1 50); do kill -0 "$(cat "$D/tmp/rec-${name}.pid")" 2>/dev/null || break; sleep 0.2; done
+test -s "$D/tmp/rec-${name}.mov"`);
+        scpFrom(`tmp/rec-${name}.mov`, join(out, `${name}.mov`));
+    };
+    // The longest run of dark pixels down three screen columns, 8–70% of the
+    // height: with cover the picture runs to the deck, so only overlaid
+    // controls break the run; a fit-width band would leave a letterbox run.
+    // Points, for the receipt.
+    const longestDarkRun = (png, width) => {
+        const density = png.width / width;
+        const dark = (x, y) => {
+            const i = (y * png.width + x) * 4;
+            return png.data[i] + png.data[i + 1] + png.data[i + 2] < 200;
+        };
+        const columns = [0.35, 0.5, 0.65].map((share) => Math.floor(png.width * share));
+        let longest = 0;
+        for (const x of columns) {
+            let run = 0;
+            for (let y = Math.floor(png.height * 0.08); y < png.height * 0.70; y += 2) {
+                run = dark(x, y) ? run + 2 : 0;
+                longest = Math.max(longest, run);
+            }
+        }
+        return longest / density;
+    };
+    // The roam's restore: ssh dies with the Mac's Wi-Fi, so every probe here
+    // may fail until the Mac is back. DHCP first, then the real thing: a TCP
+    // open to the relay, the simulator's own route here. The J3 clock starts
+    // when the path works end to end, not when the interface merely has an
+    // address back. Returns { address, wifiAt, pathAt } on this clock.
+    const waitPathBack = async (ms) => {
+        const seen = {};
+        const until = Date.now() + ms;
+        for (;;) {
+            try {
+                if (!seen.wifiAt) {
+                    const status = mac('networksetup -getairportpower en0; ipconfig getifaddr en0');
+                    if (/On/.test(status) && /\d+\.\d+\.\d+\.\d+/.test(status)) {
+                        seen.wifiAt = Date.now();
+                        seen.address = status.trim().split('\n').pop();
+                    }
+                } else if (!seen.pathAt) {
+                    mac(`nc -z -G 3 ${hostAddr} ${relay.address().port}`);
+                    seen.pathAt = Date.now();
+                } else return seen;
+            } catch { /* the Mac is still dark, or the path with it; retry */ }
+            if (Date.now() >= until) throw new Error('the simulator path never came back');
+            await sleep(1000);
+        }
+    };
     // A suspended app cannot repaint, so the background case cannot show a
     // Reconnecting state mid-outage; its proof is the recovery, not the middle.
-    const runCase = async (name, outageMs, outage, restore, background = false) => {
+    const runCase = async (name, outageMs, outage, restore, background = false, reconnectMs = 20000) => {
         const leg = { name };
         const startedAt = Date.now();
+        startRecording(name);
         try {
             leg.preTap = await tapPicture();
             const tDrop0 = Date.now();
             await outage();
             if (!background) {
                 const t = Date.now();
-                await waitStatus('econnecting', 20000);
+                await waitStatus('econnecting', reconnectMs);
                 leg.reconnectingAt = Date.now() - t;
                 shot(join(out, `screen-${name}-reconnecting.png`));
             }
@@ -346,12 +438,19 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
                 await waitStatus('connected', 20000);
                 leg.statusAt = Date.now() - t;
             }
-            shot(join(out, `screen-${name}-recovered.png`));
+            const recovered = shot(join(out, `screen-${name}-recovered.png`));
+            // The PR 118 bar applies to iOS too: with cover there is no
+            // letterbox between the picture and the deck. An overlaid
+            // control breaks the run for ~50 pt; empty space would run ~300.
+            leg.letterboxPt = longestDarkRun(recovered, screenPoints());
+            assert(leg.letterboxPt < 130, `a ${leg.letterboxPt.toFixed(0)} pt black run splits the recovered picture: letterboxed, not cover`);
             await sleep(1500);
             const c = hashShot(shot(join(out, `screen-${name}-recovered-b.png`)));
             assert(c !== frozen, 'the picture stuck on the outage frame after the recovery');
             leg.postTap = await tapPicture();
             assert(leg.recoveryMs <= 2000, `the picture took ${leg.recoveryMs}ms to advance again (J3 allows 2000)`);
+            stopRecording(name);
+            leg.recording = `${name}.mov`;
         } finally {
             receipt.cases[name] = { ...leg, elapsedMs: Date.now() - startedAt };
             saveReceipt();
@@ -366,12 +465,33 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         try { process.kill(enginePid, 'SIGCONT'); } catch { /* gone */ }
         try { process.kill(bridgePid, 'SIGCONT'); } catch { /* gone */ }
     };
-    await runCase('drop5', 5000,
+    // DESKLINK_IOS_ONLY names a leg subset for diagnosis; unset runs the
+    // proof legs (everything but roam). Roam is opt-in — it needs the
+    // dl-roam-persistence follow-up and its 2 s bar is unchanged for that
+    // lane — so it runs only when explicitly listed. Filtered receipts name
+    // their legs.
+    const only = (process.env.DESKLINK_IOS_ONLY ?? '').split(',').map((name) => name.trim()).filter(Boolean);
+    receipt.only = only.length === 0 ? 'drop5,background60' : only;
+    const runLeg = (name) => only.length === 0 ? name !== 'roam' : only.includes(name);
+    if (runLeg('drop5')) await runCase('drop5', 5000,
         async () => { process.kill(bridgePid, 'SIGSTOP'); process.kill(enginePid, 'SIGSTOP'); },
         async () => { unstop(); });
+    // A roam-equivalent path change: the simulator reaches this host through
+    // the Mac, so the Mac's own Wi-Fi off/on (interface down, address lost,
+    // DHCP on return) stands in for the Wi-Fi to cellular handoff a simulator
+    // cannot do. The toggle runs detached — the ssh that fires it dies with
+    // the Wi-Fi — and the Mac brings itself back; the restore waits for a TCP
+    // open to the relay over that route, and only then starts the 2 s clock.
+    receipt.wifiBefore = mac('ipconfig getifaddr en0').trim();
+    if (runLeg('roam')) await runCase('roam', 12000,
+        async () => {
+            mac(`nohup bash -c "networksetup -setairportpower en0 off; sleep 12; networksetup -setairportpower en0 on" > "$D/tmp/wifi-bounce.log" 2>&1 & echo launched`);
+        },
+        async () => { receipt.wifiRoam = { before: receipt.wifiBefore, ...(await waitPathBack(90000)) }; },
+        false, 60000);
     // A 60 s backgrounding on the simulator's own home gesture; launching the
     // bundle again foregrounds it.
-    await runCase('background60', 60000,
+    if (runLeg('background60')) await runCase('background60', 60000,
         async () => {
             mac(`axe button home --udid ${udid} 2>/dev/null || axe gesture home --udid ${udid}`);
             await sleep(2000);
@@ -380,7 +500,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         true);
 
     receipt.outcome = 'PASS';
-    console.log(`PASS: simulator recovered drop and background; evidence ${out}`);
+    console.log(`PASS: simulator recovered ${Object.keys(receipt.cases).join(', ')} [${receipt.only}]; evidence ${out}`);
 }
 
 try {
@@ -395,6 +515,11 @@ try {
     process.exitCode = 1;
 } finally {
     saveReceipt();
+    try { writeFileSync(join(out, 'wire.log'), wire.join('')); } catch { /* evidence best-effort */ }
+    // A case that died mid-recording leaves `recordVideo` holding the device.
+    try { mac(`pkill -INT -f "simctl io .* recordVideo" 2>/dev/null || true`); } catch { /* already down */ }
+    // A bounce that died mid-off would leave the Mac dark: best-effort on.
+    try { mac('networksetup -setairportpower en0 on'); } catch { /* already on, or the Mac is dark */ }
     try { mac(`xcrun simctl uninstall ${udid} ${BUNDLE} 2>/dev/null || true`); } catch { /* already gone */ }
     if (udid && bootedByMe) { try { mac(`xcrun simctl shutdown ${udid}`); } catch { /* already down */ } }
     if (bridgePid) await stopProcess(bridgePid, 'bridge');

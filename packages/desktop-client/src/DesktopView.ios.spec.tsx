@@ -508,6 +508,7 @@ describe('iOS proof picture bounds', () => {
     it('measures contiguous paper without including the disconnected home indicator', () => {
         for (const density of [1, 3]) {
             const png = { width: 390 * density, height: 844 * density, data: new Uint8Array(390 * 844 * density * density * 4) };
+            const right = (390 * density - 1) / density;
             const paper = (left: number, top: number, right: number, bottom: number) => {
                 for (let y = top * density; y < bottom * density; y++) for (let x = left * density; x < right * density; x++) {
                     const i = (y * png.width + x) * 4;
@@ -516,14 +517,14 @@ describe('iOS proof picture bounds', () => {
             };
             paper(0, 47, 390, 266);
             paper(125, 825, 265, 830);
-            expect(pictureBox(png, 390)).toEqual({ top: 47, left: 0, bottom: 266 });
+            expect(pictureBox(png, 390)).toEqual({ top: 47, left: 0, bottom: 266, right });
             png.data.fill(0);
             paper(0, 203, 390, 642);
             paper(125, 825, 265, 830);
-            expect(pictureBox(png, 390)).toEqual({ top: 203, left: 0, bottom: 642 });
+            expect(pictureBox(png, 390)).toEqual({ top: 203, left: 0, bottom: 642, right });
             png.data.fill(0);
             paper(47, 0, 390, 844);
-            expect(pictureBox(png, 390)).toEqual({ top: 0, left: 47, bottom: 844 });
+            expect(pictureBox(png, 390)).toEqual({ top: 0, left: 47, bottom: 844, right });
         }
     });
 });

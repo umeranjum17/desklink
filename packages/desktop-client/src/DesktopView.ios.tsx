@@ -67,7 +67,7 @@ function loadRTCView(): React.ComponentType<Record<string, unknown>> | null {
 /** An offset that the edge clamp turns into the desktop's top-left corner. */
 const TOP_LEFT: Point = { x: Infinity, y: Infinity };
 
-export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0, insets, gestures = 'desktop', onPictureFrame }: DesktopViewProps) {
+export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0, insets, gestures = 'desktop', cover = false, onPictureFrame }: DesktopViewProps) {
     const [revision, refresh] = React.useReducer((n: number) => n + 1, 0);
     const [bounds, setBounds] = React.useState({ width: 0, height: 0 });
     const [size, setSize] = React.useState(() => getDesktopSize(sessionId) ?? { width: 0, height: 0 });
@@ -145,7 +145,10 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
     const visibleBottom = Math.min(top + safeHeight, bounds.height - (keyboardOverlap ? keyboardOverlap + keyboardClearance : 0));
     const visibleHeight = Math.max(1, visibleBottom - top);
     const fit = size.width && size.height ? Math.min(safeWidth / size.width, visibleHeight / size.height) : 1;
-    const defaultScale = bounds.width <= bounds.height
+    // Portrait fits the width unless the app opted into cover, when it covers
+    // like landscape does (as `DesktopView.kt` does); either way the fill never
+    // goes below the fit or above the zoom cap.
+    const defaultScale = bounds.width <= bounds.height && !cover
         ? safeWidth / size.width
         : Math.max(bounds.width / size.width, (bounds.height - top) / size.height);
     const fill = size.width && size.height ? Math.max(fit, Math.min(MAX_SCALE, defaultScale)) : 1;
