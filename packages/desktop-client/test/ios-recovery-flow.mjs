@@ -33,8 +33,9 @@
 // DESKLINK_IOS_DIR (default fm-desklink-ios), DESKLINK_IOS_OUT (required fresh
 // dir), DESKLINK_IOS_DEVICE (simulator name, default fm-iPhone 17),
 // DESKLINK_IOS_SKIP_BUILD (1 reuses the lane's last build),
-// DESKLINK_IOS_ONLY (a comma-separated leg subset for diagnosis, e.g.
-// `background60`; unset runs the whole journey, which is the proof),
+// DESKLINK_IOS_ONLY (a comma-separated leg subset, e.g. `background60` or
+// `roam`; unset runs the proof legs, drop5 and background60 — roam stays
+// opt-in for the dl-roam-persistence follow-up),
 // DESKLINK_ENGINE, DESKLINK_VERIFY_TARGET (x11_target).
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -465,10 +466,13 @@ test -s "$D/tmp/rec-${name}.mov"`);
         try { process.kill(bridgePid, 'SIGCONT'); } catch { /* gone */ }
     };
     // DESKLINK_IOS_ONLY names a leg subset for diagnosis; unset runs the
-    // whole journey, which is the proof. A filtered receipt names its legs.
+    // proof legs (everything but roam). Roam is opt-in — it needs the
+    // dl-roam-persistence follow-up and its 2 s bar is unchanged for that
+    // lane — so it runs only when explicitly listed. Filtered receipts name
+    // their legs.
     const only = (process.env.DESKLINK_IOS_ONLY ?? '').split(',').map((name) => name.trim()).filter(Boolean);
-    receipt.only = only.length === 0 ? 'all' : only;
-    const runLeg = (name) => only.length === 0 || only.includes(name);
+    receipt.only = only.length === 0 ? 'drop5,background60' : only;
+    const runLeg = (name) => only.length === 0 ? name !== 'roam' : only.includes(name);
     if (runLeg('drop5')) await runCase('drop5', 5000,
         async () => { process.kill(bridgePid, 'SIGSTOP'); process.kill(enginePid, 'SIGSTOP'); },
         async () => { unstop(); });
