@@ -36,6 +36,11 @@ export interface DesktopViewProps {
      */
     gestures?: GestureProfile;
     /**
+     * Cover the view in every orientation, cropping the overflowing axis,
+     * instead of fitting the portrait width. Off by default.
+     */
+    cover?: boolean;
+    /**
      * Where the picture ended, in the view's own points, whenever it moves.
      * A wide desktop on a tall screen leaves a band under the picture; this is
      * how an application lays its own controls into that band instead of
@@ -53,6 +58,7 @@ interface NativeSurfaceProps {
     /** `insets` as top, left, bottom, right. */
     insets?: number[];
     gestures?: GestureProfile;
+    cover?: boolean;
 }
 
 // The Expo view is resolved at module load; on a platform without it the
@@ -69,7 +75,7 @@ const NativeSurface: React.ComponentType<NativeSurfaceProps> | null = desktopAva
  * belong to the application, which mounts this wherever it wants the desktop
  * to appear.
  */
-export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0, insets, gestures = 'desktop' }: DesktopViewProps) {
+export function DesktopView({ sessionId, style, placeholder, accessibilityLabel, keyboardClearance = 0, insets, gestures = 'desktop', cover = false }: DesktopViewProps) {
     if (NativeSurface == null || sessionId == null) {
         return (
             <View style={[styles.surface, style]}>
@@ -78,7 +84,7 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
         );
     }
     return <NativeSurface style={[styles.surface, style]} sessionId={sessionId} accessible={accessibilityLabel !== undefined} accessibilityLabel={accessibilityLabel} keyboardClearance={keyboardClearance}
-        insets={[insets?.top ?? 0, insets?.left ?? 0, insets?.bottom ?? 0, insets?.right ?? 0]} gestures={gestures} />;
+        insets={[insets?.top ?? 0, insets?.left ?? 0, insets?.bottom ?? 0, insets?.right ?? 0]} gestures={gestures} cover={cover} />;
 }
 
 const styles = StyleSheet.create({

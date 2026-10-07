@@ -145,6 +145,10 @@ class DesklinkModule : Module() {
         view.setGestures(gestures ?: "desktop")
       }
 
+      Prop("cover") { view: DesktopView, cover: Boolean? ->
+        view.setCover(cover ?: false)
+      }
+
       OnViewDestroys { view: DesktopView -> view.release() }
 
       OnViewDidUpdateProps { view: DesktopView ->

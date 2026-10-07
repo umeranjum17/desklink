@@ -114,6 +114,19 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
   private var fitted = true
   private var filling = true
   private var filledScale = 0f
+  /**
+   * Opt-in cover: the picture covers the view in every orientation, cropping
+   * the overflowing axis, instead of fitting the portrait width. Off by
+   * default; the default path below is untouched.
+   */
+  private var cover = false
+
+  fun setCover(value: Boolean) {
+    if (value == cover) return
+    cover = value
+    filledScale = 0f
+    layoutPicture()
+  }
 
   /** What the system covers at each edge (bars, cutout), in pixels: left, top, right, bottom. */
   private var insetLeft = 0f
@@ -459,9 +472,11 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
   }
 
   private fun fillScale(): Float {
-    val cover = if (width <= height) safeWidth() / surfaceWidth
-      else max(width.toFloat() / surfaceWidth, (height - insetTop) / surfaceHeight)
-    return max(fitScale(), min(cover, MAX_SCALE))
+    // Portrait fits the width unless the app opted into cover; landscape
+    // covers. Either way the fill never goes below the fit or above the zoom cap.
+    val wide = if (width <= height && !cover) safeWidth() else width.toFloat()
+    val fill = max(wide / surfaceWidth, (height - insetTop) / surfaceHeight)
+    return max(fitScale(), min(fill, MAX_SCALE))
   }
 
   /** Re-derive the placement from `filling`, `fitted`, the zoom limits and the edges. */
