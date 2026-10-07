@@ -728,8 +728,9 @@ async fn dispatch(
             Ok(serde_json::json!({ "accepted": true }))
         }
         "session.restart_ice" => {
-            // The client asks; the engine offers. The fresh offer travels as a
-            // new `session.description` event and the client answers it as
+            // The client asks; the engine offers. The offer — fresh, or the
+            // still-pending one when restarts queue — travels as a new
+            // `session.description` event and the client answers it as
             // usual, so no new event shape is needed and the session,
             // generation and control channel survive.
             let session = require_session(current)?;
