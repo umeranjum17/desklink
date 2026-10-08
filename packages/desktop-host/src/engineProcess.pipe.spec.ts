@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import type { Socket } from 'node:net';
 import { expect, it } from 'vitest';
 import { EngineClient } from './engineProcess.js';
 import { EngineRefused } from './protocol.js';
@@ -9,20 +10,26 @@ it('keeps real control-pipe failures catchable, settles every request and reaps 
     for (const mode of ['write-after-end', 'remote-close']) {
         const child = spawn(process.execPath, ['-e', `
             const readline = require('node:readline');
-            const fs = require('node:fs');
-            readline.createInterface({input: process.stdin}).on('line', line => {
+            const { Socket } = require('node:net');
+            // libuv never closes Windows stdio fds 0-2, even via fs.closeSync.
+            // An extra pipe has a single owned handle that destroy really closes.
+            const input = new Socket({fd: 3, readable: true, writable: false});
+            readline.createInterface({input}).on('line', line => {
                 const request = JSON.parse(line);
                 if (request.method === 'hold') {
-                    // Close both fd 0 and Node's pipe handle (distinct on Windows).
-                    fs.closeSync(0);
-                    process.stdin.once('close', () => process.stderr.write('control closed\\n'));
-                    process.stdin.destroy();
+                    input.once('close', () => process.stderr.write('control closed\\n'));
+                    input.destroy();
                 } else {
                     process.stdout.write(JSON.stringify({id: request.id, result: {ok: true}}) + '\\n');
                 }
             });
             setInterval(() => {}, 1000);
-        `], { stdio: ['pipe', 'pipe', 'pipe'] });
+        `], { stdio: ['ignore', 'pipe', 'pipe', 'pipe'] });
+        // Extra pipes are duplex; keep this end write-only like ordinary stdin,
+        // so read-side EOF cannot auto-end it before we exercise the failed write.
+        const control = child.stdio[3] as Socket;
+        control.pause();
+        child.stdin = control;
         const exited = once(child, 'exit');
         let closed!: () => void;
         const pipeClosed = new Promise<void>(resolve => { closed = resolve; });
