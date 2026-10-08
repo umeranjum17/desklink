@@ -63,6 +63,10 @@ export class EngineClient {
         this.child = child;
         this.timeoutMs = options.requestTimeoutMs ?? 30_000;
 
+        // A failed write also emits an error on the pipe, independently of
+        // its callback. Consume both paths and retire the unusable engine.
+        child.stdin.on('error', (error) => this.controlStreamFailed(error));
+
         const stdout = createInterface({ input: child.stdout });
         stdout.on('line', (line) => this.handleLine(line, options));
         const stderr = createInterface({ input: child.stderr });
@@ -171,9 +175,7 @@ export class EngineClient {
             this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
             this.child.stdin.write(`${JSON.stringify({ id, method, params: params ?? {} })}\n`, (error) => {
                 if (error !== null && error !== undefined) {
-                    this.pending.delete(id);
-                    clearTimeout(timer);
-                    reject(error);
+                    this.controlStreamFailed(error);
                 }
             });
         });
@@ -268,9 +270,16 @@ export class EngineClient {
         return selected;
     }
 
+    private controlStreamFailed(error: NodeJS.ErrnoException): void {
+        const reason = new EngineRefused(error.code ?? 'engine-control-stream', error.message);
+        reason.cause = error;
+        this.abandon(reason);
+    }
+
     /**
-     * The engine answers one request at a time, so one it did not answer is
-     * still running inside it — typically a `session.open` waiting on a consent
+     * A broken control pipe leaves no usable request channel. On timeout, the
+     * engine answers one request at a time, so the unanswered one is still
+     * running inside it — typically a `session.open` waiting on a consent
      * prompt nobody at the desktop is answering. Everything sent after it would
      * queue behind it, and a late answer would open a session nobody owns, so
      * the engine is killed and every waiting request fails with the reason.
@@ -291,13 +300,15 @@ export class EngineClient {
         // Set even for an engine already abandoned: a caller that stops a client
         // is done with it, so its exit is no longer news.
         this.stopping = true;
-        if (this.closed) return;
-        // The documented graceful stop: the engine exits without answering, so
-        // this is sent and the EOF/timeout below still brings a stuck engine
-        // down.
-        void this.request('shutdown').catch(() => undefined);
-        this.closed = true;
-        this.child.stdin.end();
+        if (this.closed && this.child.pid === undefined) return;
+        if (!this.closed) {
+            // The documented graceful stop: the engine exits without answering,
+            // so EOF/timeout below still brings a stuck engine down.
+            void this.request('shutdown').catch(() => undefined);
+            this.closed = true;
+            this.child.stdin.end();
+        }
+        // Even an abandoned engine remains our child until its exit is reaped.
         const child = this.child;
         await new Promise<void>((resolve) => {
             if (child.exitCode !== null || child.signalCode !== null) return resolve();

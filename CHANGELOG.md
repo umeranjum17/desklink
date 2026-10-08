@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.3
+
+Joint patch release preparation; protocol version remains 3. All five packages
+move together to preserve exact-version native engine selection.
+
+### Fixed
+
+- A broken engine control pipe now produces catchable request failures instead
+  of terminating the caller. See [control-pipe failure handling](packages/desktop-host/README.md#connecting-an-application-to-it)
+  for error details and cleanup.
+
 ## 0.5.2
 
 Patch release of `@desklink/host`, `@desklink/host-linux-x64-gnu`,

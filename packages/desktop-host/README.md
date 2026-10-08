@@ -283,6 +283,14 @@ await client.acceptAnswer(session.sessionId, session.generation, answerSdp);
 await client.addCandidate(session.sessionId, session.generation, candidate, sdpMid, sdpMLineIndex);
 ```
 
+If the engine's control pipe fails, outstanding `EngineClient` requests reject
+with `EngineRefused`, not an unhandled stream error. Its `code` preserves the
+stream error code (for example `EPIPE` or `ERR_STREAM_WRITE_AFTER_END`), or
+`engine-control-stream` when absent; `cause` holds the original error. The client
+kills the unusable engine and refuses later requests as not running. Always
+`await client.stop()` in cleanup: it waits for the child to exit even after a
+pipe failure. The regression check is `src/engineProcess.pipe.spec.ts`.
+
 For cursor-free recordings, open with `cursor: 'hidden'` and inspect
 `session.cursor`. On Wayland the portal leaves the cursor out of the pixels and
 the compositor supplies its position through `ext-image-copy-capture-v1`;

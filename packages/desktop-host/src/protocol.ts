@@ -167,7 +167,7 @@ export interface SessionMetrics {
     input_rejected: number;
 }
 
-/** A protocol-level failure carrying the engine's stable error code. */
+/** An engine refusal or control-pipe failure carrying its error code. */
 export class EngineRefused extends Error {
     readonly code: string;
 
