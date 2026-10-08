@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.3
+
+Joint patch release preparation; protocol version remains 3. All five packages
+move together to preserve exact-version native engine selection.
+
+### Fixed
+
+- A broken engine control pipe no longer emits an unhandled stream error that
+  terminates the caller. Outstanding requests reject as `EngineRefused` with
+  the original stream code and cause, and the unusable engine is killed and reaped.
+
 ## 0.5.2
 
 Patch release of `@desklink/host`, `@desklink/host-linux-x64-gnu`,
