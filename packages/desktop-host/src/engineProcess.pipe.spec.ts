@@ -13,8 +13,10 @@ it('keeps real control-pipe failures catchable, settles every request and reaps 
             readline.createInterface({input: process.stdin}).on('line', line => {
                 const request = JSON.parse(line);
                 if (request.method === 'hold') {
+                    // Close both fd 0 and Node's pipe handle (distinct on Windows).
                     fs.closeSync(0);
-                    process.stderr.write('control closed\\n');
+                    process.stdin.once('close', () => process.stderr.write('control closed\\n'));
+                    process.stdin.destroy();
                 } else {
                     process.stdout.write(JSON.stringify({id: request.id, result: {ok: true}}) + '\\n');
                 }
