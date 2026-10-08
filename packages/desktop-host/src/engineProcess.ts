@@ -277,8 +277,9 @@ export class EngineClient {
     }
 
     /**
-     * The engine answers one request at a time, so one it did not answer is
-     * still running inside it — typically a `session.open` waiting on a consent
+     * A broken control pipe leaves no usable request channel. On timeout, the
+     * engine answers one request at a time, so the unanswered one is still
+     * running inside it — typically a `session.open` waiting on a consent
      * prompt nobody at the desktop is answering. Everything sent after it would
      * queue behind it, and a late answer would open a session nobody owns, so
      * the engine is killed and every waiting request fails with the reason.

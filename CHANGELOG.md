@@ -7,9 +7,9 @@ move together to preserve exact-version native engine selection.
 
 ### Fixed
 
-- A broken engine control pipe no longer emits an unhandled stream error that
-  terminates the caller. Outstanding requests reject as `EngineRefused` with
-  the original stream code and cause, and the unusable engine is killed and reaped.
+- A broken engine control pipe now produces catchable request failures instead
+  of terminating the caller. See [control-pipe failure handling](packages/desktop-host/README.md#connecting-an-application-to-it)
+  for error details and cleanup.
 
 ## 0.5.2
 
