@@ -184,6 +184,7 @@ export default function App() {
 
 function ConnectedDesktop({ url, report, cover }: { url: string; report: string | null; cover: boolean }) {
     const startedAt = React.useRef(Date.now());
+    const root = React.useRef<View>(null);
     const presentedAt = React.useRef<number | null>(null);
     // The picture fills the screen but starts and pans inside the status bar,
     // camera cutout and home indicator, so none of them covers the desktop's corner.
@@ -271,6 +272,7 @@ function ConnectedDesktop({ url, report, cover }: { url: string; report: string 
     React.useEffect(() => {
         desktop.setInputEnabled(status === 'live');
     }, [status]);
+    useJourney(root, status === 'live');
     React.useEffect(() => {
         if (status !== 'live') return;
         presentedAt.current ??= Date.now();
@@ -289,7 +291,7 @@ function ConnectedDesktop({ url, report, cover }: { url: string; report: string 
     }, [status, desktop.getStats, report]);
 
     return (
-        <View style={styles.root} onLayout={(event) => setScreen(event.nativeEvent.layout)}>
+        <View ref={root} style={styles.root} onLayout={(event) => setScreen(event.nativeEvent.layout)}>
             <StatusBar hidden />
             <DesktopView sessionId={desktop.nativeId} style={StyleSheet.absoluteFill} insets={insets} accessibilityLabel="desktop"
                 cover={cover} onPictureFrame={(frame) => setPictureBottom(frame.top + frame.height)} />
@@ -334,6 +336,64 @@ function ConnectedDesktop({ url, report, cover }: { url: string; report: string 
             </View>
         </View>
     );
+}
+
+type Fiber = { tag: number; child: Fiber | null; sibling: Fiber | null; return: Fiber | null; memoizedProps: any; stateNode: any };
+
+/**
+ * Debug builds only: `-desklinkJourney http://HOST:PORT/` makes the live app
+ * fetch scripted steps from test/ios-device-flow.mjs and run each through the
+ * desktop view's own touch and text handlers and the app's own buttons. It is
+ * for a real device no test runner can drive; nothing physical touches the
+ * screen, so it proves everything after the gesture recognizer, not the glass.
+ */
+function useJourney(root: React.RefObject<View | null>, live: boolean) {
+    React.useEffect(() => {
+        const at: unknown = __DEV__ && live && Platform.OS === 'ios' ? Settings.get('desklinkJourney') : null;
+        if (typeof at !== 'string') return;
+        let stopped = false, typed = '';
+        // What the app renders now: up to React's current tree, then down it.
+        const find = (match: (props: any) => boolean): any => {
+            let fiber: Fiber | null = (root.current as any)?.__internalInstanceHandle ?? null;
+            while (fiber?.return) fiber = fiber.return;
+            const stack = fiber?.tag === 3 ? [fiber.stateNode.current as Fiber] : [];
+            while (stack.length) {
+                const node = stack.pop()!;
+                if (node.memoizedProps && match(node.memoizedProps)) return node.stateNode?.canonical?.currentProps ?? node.memoizedProps;
+                if (node.sibling) stack.push(node.sibling);
+                if (node.child) stack.push(node.child);
+            }
+            throw new Error('nothing on screen matches the step');
+        };
+        const run = (step: { touch?: 'start' | 'move' | 'end'; points?: [number, number][]; text?: string; press?: string }) => {
+            if (step.touch) {
+                const surface = find((props) => props.accessibilityLabel === 'desktop' && props.onResponderGrant);
+                const touches = (step.touch === 'end' ? [] : step.points ?? []).map(([x, y]) => ({ locationX: x, locationY: y, timestamp: Date.now() }));
+                ({ start: surface.onResponderGrant, move: surface.onResponderMove, end: surface.onResponderRelease })[step.touch]({ nativeEvent: { touches } });
+            } else if (step.text !== undefined) {
+                // The hidden field keeps a short suffix of what was typed, as the keyboard would.
+                const next = typed + step.text;
+                typed = next.length > 64 ? next.slice(-32) : next;
+                find((props) => props.onChangeText && props.submitBehavior === 'submit').onChangeText(next);
+            } else if (step.press) {
+                find((props) => props.testID === step.press && props.onPress).onPress();
+            }
+            return { done: Date.now() };
+        };
+        const abort = new AbortController();
+        void (async () => {
+            let reply: unknown = { ready: Date.now() };
+            while (!stopped) {
+                try {
+                    const response = await fetch(at, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reply), signal: abort.signal });
+                    const step = await response.json();
+                    if (stopped || step === null) return;
+                    reply = run(step);
+                } catch (error) { reply = { error: String(error) }; await new Promise((wait) => setTimeout(wait, 1000)); }
+            }
+        })();
+        return () => { stopped = true; abort.abort(); };
+    }, [live, root]);
 }
 
 const styles = StyleSheet.create({
