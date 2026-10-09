@@ -380,18 +380,19 @@ function useJourney(root: React.RefObject<View | null>, live: boolean) {
             }
             return { done: Date.now() };
         };
+        const abort = new AbortController();
         void (async () => {
             let reply: unknown = { ready: Date.now() };
             while (!stopped) {
                 try {
-                    const response = await fetch(at, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reply) });
+                    const response = await fetch(at, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reply), signal: abort.signal });
                     const step = await response.json();
-                    if (step === null) return;
+                    if (stopped || step === null) return;
                     reply = run(step);
                 } catch (error) { reply = { error: String(error) }; await new Promise((wait) => setTimeout(wait, 1000)); }
             }
         })();
-        return () => { stopped = true; };
+        return () => { stopped = true; abort.abort(); };
     }, [live, root]);
 }
 

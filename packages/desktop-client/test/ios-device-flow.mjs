@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
@@ -145,10 +145,13 @@ xcrun devicectl device process launch --device ${UDID} --terminate-existing -- $
 
     const evidence = async (name, note) => {
         const shot = `physical-ipad-${name}.png`;
-        mac(`${SHOT} "$HOME/${shot}" >/dev/null 2>&1; true`);
-        spawnSync('scp', ['-q', `${MAC}:${shot}`, join(out, shot)]);
+        mac(`${SHOT} "$HOME/${shot}" >/dev/null 2>&1`);
+        const copy = spawnSync('scp', ['-q', `${MAC}:${shot}`, join(out, shot)], { encoding: 'utf8' });
         mac(`rm -f "$HOME/${shot}"`);
-        spawnSync('ffmpeg', ['-loglevel', 'error', '-y', '-f', 'x11grab', '-video_size', '1280x720', '-i', claim.display, '-frames:v', '1', join(out, `desktop-${shot}`)], { env });
+        const grab = spawnSync('ffmpeg', ['-loglevel', 'error', '-y', '-f', 'x11grab', '-video_size', '1280x720', '-i', claim.display, '-frames:v', '1', join(out, `desktop-${shot}`)], { env, encoding: 'utf8' });
+        assert.equal(copy.status, 0, `scp ${shot}: ${copy.stderr}`);
+        assert.equal(grab.status, 0, `ffmpeg desktop-${shot}: ${grab.stderr}`);
+        assert(statSync(join(out, shot)).size > 0 && statSync(join(out, `desktop-${shot}`)).size > 0, `${name}: an evidence PNG is empty`);
         log(`step ${name}: ${note} (${shot})`);
     };
     await evidence('00-live', 'the iPad shows the live desktop');
