@@ -74,6 +74,7 @@ const children = [];
 let xvfb = null; let claim = null; let steps = null;
 async function cleanup() {
     steps?.close();
+    steps?.closeAllConnections();
     for (const signal of ['SIGTERM', 'SIGKILL']) {
         for (const child of children) { try { process.kill(-child.pid, signal); } catch { /* gone */ } }
         await sleep(1000);
@@ -229,7 +230,7 @@ xcrun devicectl device process launch --device ${UDID} --terminate-existing -- $
     await tapView(view({ x: 485, y: 622 }));
     const copied = await until('the page copied its line', () => page('window.copied'), (seen) => seen === 'select this line');
     await act({ press: 'desklink-copy' }).then(() => sleep(300));
-    await evidence('06-clipboard-out', `desktop clipboard ${JSON.stringify(copied)} → the app's Copy; the iPad's screen shows the confirmation`);
+    await evidence('06-clipboard-out', `desktop clipboard ${JSON.stringify(copied)} → the app's Copy pressed; the iPad's screen saved`);
     // 7. iPad → desktop: the app's Paste sends its clipboard, Ctrl+V pastes it
     await tapView(view(pad));
     await clean();

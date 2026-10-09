@@ -371,8 +371,10 @@ function useJourney(root: React.RefObject<View | null>, live: boolean) {
                 const touches = (step.touch === 'end' ? [] : step.points ?? []).map(([x, y]) => ({ locationX: x, locationY: y, timestamp: Date.now() }));
                 ({ start: surface.onResponderGrant, move: surface.onResponderMove, end: surface.onResponderRelease })[step.touch]({ nativeEvent: { touches } });
             } else if (step.text !== undefined) {
-                typed += step.text;
-                find((props) => props.onChangeText && props.submitBehavior === 'submit').onChangeText(typed);
+                // The hidden field keeps a short suffix of what was typed, as the keyboard would.
+                const next = typed + step.text;
+                typed = next.length > 64 ? next.slice(-32) : next;
+                find((props) => props.onChangeText && props.submitBehavior === 'submit').onChangeText(next);
             } else if (step.press) {
                 find((props) => props.testID === step.press && props.onPress).onPress();
             }
