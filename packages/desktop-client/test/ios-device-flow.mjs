@@ -106,10 +106,12 @@ async function main() {
     const socket = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((open) => socket.once('open', open));
     let seq = 0;
-    const page = (expression) => new Promise((done) => {
+    const page = (expression) => new Promise((done, failed) => {
         const id = ++seq;
-        const on = (raw) => { const message = JSON.parse(String(raw)); if (message.id === id) { socket.off('message', on); done(message.result?.result?.value); } };
+        const on = (raw) => { const message = JSON.parse(String(raw)); if (message.id === id) { socket.off('message', on); socket.off('close', lost); done(message.result?.result?.value); } };
+        const lost = () => { socket.off('message', on); failed(new Error('the desktop page connection closed')); };
         socket.on('message', on);
+        socket.once('close', lost);
         socket.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, returnByValue: true } }));
     });
     const token = randomBytes(24).toString('hex');
@@ -118,7 +120,11 @@ async function main() {
     { env: { ...env, DESKLINK_ENGINE: process.env.DESKLINK_ENGINE ?? join(repo, 'packages/desktop-host/engine/target/debug/desklink-host') }, stdio: ['ignore', 'pipe', 'inherit'], detached: true });
     children.push(bridge);
     let printed = '';
-    const bridgePort = await new Promise((ready) => bridge.stdout.on('data', (chunk) => { printed += chunk; const url = /open\s+http:\/\/[^:]+:(\d+)\//.exec(printed); if (url) ready(Number(url[1])); }));
+    const bridgePort = await new Promise((ready, failed) => {
+        const timer = setTimeout(() => failed(new Error('the desktop bridge never printed its address')), 30_000);
+        bridge.once('exit', (code) => { clearTimeout(timer); failed(new Error(`the desktop bridge exited ${code} before it printed its address`)); });
+        bridge.stdout.on('data', (chunk) => { printed += chunk; const url = /open\s+http:\/\/[^:]+:(\d+)\//.exec(printed); if (url) { clearTimeout(timer); ready(Number(url[1])); } });
+    });
     // ---- the step server the app polls: each POST carries the last step's reply --
     let pending = null; let arrived = () => {};
     steps = createServer(async (request, response) => { pending = { response, body: JSON.parse(await request.toArray().then((parts) => String(Buffer.concat(parts))) || '{}') }; arrived(); }).listen(0, HOST);
@@ -141,7 +147,7 @@ async function main() {
 xcrun devicectl device process launch --device ${UDID} --terminate-existing -- ${BUNDLE} -desklinkUrl '${url}' -desklinkJourney '${journey}' >/dev/null`);
     log(`launched ${BUNDLE} on the physical iPad ${UDID}; desktop bridge ${HOST}:${bridgePort}, steps at ${journey}`);
     pending = await take('its first step (it never went live)', 120_000);
-    log('the physical iPad shows the live desktop and asked for its first step');
+    log('the physical iPad went live and asked for its first step');
 
     const evidence = async (name, note) => {
         const shot = `physical-ipad-${name}.png`;
@@ -152,9 +158,9 @@ xcrun devicectl device process launch --device ${UDID} --terminate-existing -- $
         assert.equal(copy.status, 0, `scp ${shot}: ${copy.stderr}`);
         assert.equal(grab.status, 0, `ffmpeg desktop-${shot}: ${grab.stderr}`);
         assert(statSync(join(out, shot)).size > 0 && statSync(join(out, `desktop-${shot}`)).size > 0, `${name}: an evidence PNG is empty`);
-        log(`step ${name}: ${note} (${shot})`);
+        log(`step ${name}: ${note}; screens saved as ${shot} and desktop-${shot}`);
     };
-    await evidence('00-live', 'the iPad shows the live desktop');
+    await evidence('00-live', 'the iPad went live; its screen saved');
     const clean = () => page('clicks.length = keys.length = pointer.length = pastes.length = 0');
     const touch = async (phase, ...points) => act({ touch: phase, points });
     const tapView = async ([x, y]) => { await touch('start', [x, y]); await touch('end'); };
