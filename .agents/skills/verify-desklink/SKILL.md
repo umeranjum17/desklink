@@ -103,7 +103,7 @@ run directory. Add a row the day a surface is added; never silently drop one.
 | iOS phone-only control | same flow, its phone-only control section | desktop-side click, held drag with selection, wheel, typed text, a modifier chord, clipboard both ways, all recorded | `phone-control.mp4`, `step-01-click.png` … `step-07-clipboard-in.png` |
 | iOS pointer mark | same flow, over bare paper | the drawn mark is an arrow, not a rectangle, and its tip is within 2 pt of the desktop's pointer | `step-08-pointer-arrow-4x.png`, `step-08-pointer.json` |
 | iOS keyboard over a field, sideways | same flow, its keyboard section, phone turned landscape | a tapped desktop field low on the picture stays wholly above the raised keyboard, light and dark, and takes what is typed | `step-09-keyboard-landscape-{before,up,light,dark,typed}.png`, `keyboard-landscape.mp4` |
-| Network drop mid-session, and recovery | `packages/desktop-client/test/link-drop-flow.mjs`, its own run dir | four stages — live, throttled, dropped, recovered — with a capture each | `01-live.png` … `04-recovered.png`, `receipt.json`, `video/*.webm` |
+| Network drop mid-session, and recovery | `packages/desktop-client/test/link-drop-flow.mjs`, its own run dir | six stages — live, media-frozen, media-restored, throttled, dropped, recovered — with a capture each | `01-live.png` … `06-recovered.png`, `receipt.json`, `video/*.webm` |
 
 **The link-drop row shapes a userspace-shaped link, and must always be
 reported that way.** The run's shaping is a `dgram` relay in the flow's own
