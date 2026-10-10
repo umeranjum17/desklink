@@ -99,6 +99,21 @@ jobs:
       - run: node packages/desktop-host/test/encoded-flow.mjs
         env:
           DESKLINK_AXI_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/desklink-host
+      # The client hook's P3a baseline roam (12s same-address outage) on an
+      # owned Xvfb, reusing the engine build above. Report-only
+      # (continue-on-error): CI runners are small and contended, so its timing
+      # is a floor, not a gate.
+      - name: Client roam-flow (hook reattach, 12s same-address outage)
+        continue-on-error: true
+        run: |
+          chrome=$(command -v google-chrome-stable || command -v google-chrome || command -v chromium)
+          echo "chrome: $chrome"
+          env -u DISPLAY -u WAYLAND_DISPLAY DESKLINK_CHROME="$chrome" \
+            node packages/desktop-client/test/roam-flow.mjs "$RUNNER_TEMP/desklink-roam-flow" \
+              --adapter hook --outage 12000 --path same-address
+        env:
+          DESKLINK_AXI_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/desklink-host
+          DESKLINK_VERIFY_TARGET: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/examples/x11_target
 
   # Hosted transport proof only: native capture/input requires a dedicated rig.
   engine-windows:
