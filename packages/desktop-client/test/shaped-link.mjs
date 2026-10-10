@@ -350,6 +350,8 @@ function startSignalling(link, bridgePort, token, { relayOnly = false } = {}) {
                 host.once('error', fail);
                 host.once('close', () => fail(new Error('the engine channel closed before the page sent anything')));
             });
+            // A carrier the page drops before it sends anything is not a failure.
+            hostReady.catch(() => undefined);
             host.on('message', async (raw) => {
                 try {
                     const message = JSON.parse(String(raw));

@@ -272,7 +272,28 @@ view.
   reopens back off across ~60 s too instead of spending one attempt while the
   network is still down. Renegotiation transients from a restart the session
   asked for itself are expected, not a new outage: they neither flip the
-  status nor trigger another restart for a short grace window.
+  status nor trigger another restart for a short grace window. A picture
+  that keeps moving holds off the heartbeat watchdog for up to ~20 s, since
+  the control channel lags the video after an outage.
+- **Roaming keeps the session.** The signalling carrier is not the session:
+  when it closes, or a restart request on it gets no reply within 1.5 s, the
+  session drops that carrier for good (calling its optional `close()`) and
+  keeps calling `authorize()` — one dial at a time, 250 ms after a failure,
+  5 s each, with no budget and no backoff. The lost carrier does not change the
+  status by itself: the status follows the picture and the peer's transport, so
+  it reads `reconnecting` only once the picture stops or the stall watchdog
+  fires. While the loop runs, a session that has shown a picture never reports
+  `failed` or a transport failure; one that never showed a picture reports the
+  first-frame transport failure after 20 s and the loop stops. A new carrier
+  picks up the same session after a 300 ms grace for the old ICE pair, which
+  an ICE restart would drop: if the picture advanced during it, there is no
+  restart (and a `reconnecting` session returns to `live`); otherwise the
+  session moves to `reconnecting` and asks for an ICE restart. Failures caused
+  by the dead carrier wait for the next one rather than ending the session.
+  A carrier that comes back after the host's 30 s reattach window opens a new
+  session at once. A `session` or `generation` refusal (the desktop no longer
+  holds the session) also reopens at once. An `authorize()` refusal still ends
+  the session: a revoked pairing cannot roam back.
 - **Input starts disarmed.** This is a local arm against accidental touches,
   not a permission: the session already has input. `setInputEnabled(true)` arms
   pointer, keyboard and clipboard input; `setInputEnabled(false)` blocks new
@@ -315,9 +336,13 @@ candidates, state and revocation. Pixels and input do **not** use this
 channel — they are the desktop's own WebRTC session.
 
 `authorize()` must wait for the authenticated carrier to open before returning
-its `Signaling`. When that carrier is gone, reject pending and future requests
-with `code: 'transport'`; do not queue them indefinitely. An adapter may emit
-`{ kind: 'carrier-closed' }` once to notify subscribers of that loss. This is
+its `Signaling`. It rejects with `code: 'transport'` for a network or carrier
+failure; any other rejection is a refusal that ends the session, so a roam only
+keeps the session when the adapter tags its outages. When that carrier is gone,
+reject pending and future requests with `code: 'transport'`; do not queue them
+indefinitely. An adapter may emit
+`{ kind: 'carrier-closed' }` once to notify subscribers of that loss, and may
+offer `close()`, which the package calls on a carrier it has given up on. This is
 not the native peer's `closed` event or an engine revocation. Preserve the
 engine's `session.revoked` code: `transport` indicates path loss; other codes
 (or no code) are final. The demo adapter bounds connection setup to five seconds

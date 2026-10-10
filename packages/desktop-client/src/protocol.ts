@@ -122,7 +122,8 @@ export type SessionEvent =
  * The package calls these and nothing else, so an application can carry them
  * over its existing encrypted request path, a socket, or an in-process bridge.
  * `subscribe` delivers engine notifications until the returned function runs.
- * The application's authorize() resolves only once this carrier is open.
+ * The application's authorize() resolves only once this carrier is open. Its
+ * rejection rules (transport vs. refusal) are in the README's Signaling section.
  */
 export interface Signaling {
     /**
@@ -134,6 +135,8 @@ export interface Signaling {
      */
     request<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>;
     subscribe(handler: (event: SessionEvent) => void): () => void;
+    /** Optional: end this carrier now. Called once the package has declared it dead. */
+    close?(): void;
 }
 
 export type SessionStatus =
