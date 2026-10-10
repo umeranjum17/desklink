@@ -241,8 +241,12 @@ view.
   `disconnected` path reads as `reconnecting` within about a second of the
   drop — never a frozen picture that still says live — and a recovered path
   reads as `live` again once the picture is advancing again (ICE `connected`
-  alone does not restore `live` while the picture is frozen). A path that reports
-  `failed` reopens the session with fresh authority instead of staying stuck.
+  alone does not restore `live` while the picture is frozen). The peer's own ICE
+  `failed` — a lost media path, not a verdict on the session — holds the session
+  and its handle for ~30 s (the engine keeps it for about 28 s after the path
+  dies), so a roam longer than the client's own ~15 s `failed` still returns to
+  the same session; an SDP or candidate failure, which means the negotiation
+  itself is broken, reopens with fresh authority instead of staying stuck.
   Every event carries its engine session id where the carrier preserves it,
   and the session ignores anything naming a session it no longer holds, so a
   previous generation's queued offer or revocation cannot corrupt or kill a

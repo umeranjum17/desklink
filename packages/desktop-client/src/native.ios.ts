@@ -95,8 +95,13 @@ export function preferH264(sdp: string): string {
     return lines.join('\r\n');
 }
 
-function failure(id: string, error: unknown) {
-    emit(id, 'failure', { code: 'transport', message: error instanceof Error ? error.message : String(error) });
+/**
+ * One native failure, with its `reason` so the hook can tell an ICE failure
+ * (the peer's path died, which the session can be held across) from an SDP or
+ * candidate failure (the negotiation itself is broken, which stays terminal).
+ */
+function failure(id: string, error: unknown, reason: 'ice' | 'sdp' | 'candidate' | 'control') {
+    emit(id, 'failure', { code: 'transport', reason, message: error instanceof Error ? error.message : String(error) });
 }
 
 export const nativeDesklink: NativeDesklinkModule = {
@@ -121,7 +126,7 @@ export const nativeDesklink: NativeDesklinkModule = {
             };
             peer.oniceconnectionstatechange = () => {
                 emit(id, 'ice', { state: peer.iceConnectionState.toUpperCase() });
-                if (peer.iceConnectionState === 'failed') failure(id, 'the connection to the desktop was lost');
+                if (peer.iceConnectionState === 'failed') failure(id, 'the connection to the desktop was lost', 'ice');
             };
             peer.ontrack = (event) => {
                 if (session.closed || event.track.kind !== 'video') return;
@@ -148,7 +153,7 @@ export const nativeDesklink: NativeDesklinkModule = {
     setRemoteDescription(id, type, sdp) {
         const session = sessions.get(id);
         if (!session) return false;
-        if (type !== 'offer') { failure(id, 'the engine must send an offer'); return false; }
+        if (type !== 'offer') { failure(id, 'the engine must send an offer', 'sdp'); return false; }
         void (async () => {
             try {
                 await session.peer.setRemoteDescription({ type: 'offer', sdp: preferH264(sdp.replace(PLAYOUT_DELAY, '')) });
@@ -158,7 +163,7 @@ export const nativeDesklink: NativeDesklinkModule = {
                 const answer = await session.peer.createAnswer();
                 await session.peer.setLocalDescription(answer);
                 if (!session.closed) emit(id, 'answer', { sdp: session.peer.localDescription?.sdp ?? answer.sdp });
-            } catch (error) { if (!session.closed) failure(id, error); }
+            } catch (error) { if (!session.closed) failure(id, error, 'sdp'); }
         })();
         return true;
     },
@@ -167,7 +172,7 @@ export const nativeDesklink: NativeDesklinkModule = {
         if (!session) return false;
         const ice = { candidate, sdpMid, sdpMLineIndex: sdpMLineIndex ?? 0 };
         if (!session.remoteSet) session.candidates.push(ice);
-        else void session.peer.addIceCandidate(ice).catch((error) => failure(id, error));
+        else void session.peer.addIceCandidate(ice).catch((error) => failure(id, error, 'candidate'));
         return true;
     },
     sendControl(id, message) {
@@ -178,7 +183,7 @@ export const nativeDesklink: NativeDesklinkModule = {
             if (!session.input && ['pointer', 'wheel', 'key', 'text', 'clipboard_read', 'clipboard_write'].includes(String(control.kind))) return false;
             session.channel.send(JSON.stringify({ ...control, seq: ++session.seq }));
             return true;
-        } catch (error) { failure(id, error); return false; }
+        } catch (error) { failure(id, error, 'control'); return false; }
     },
     setInputEnabled(id, enabled) {
         const session = sessions.get(id);

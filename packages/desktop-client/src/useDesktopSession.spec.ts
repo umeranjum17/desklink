@@ -32,6 +32,7 @@ const remoteDescriptions: Array<{ id: string; type: string; sdp: string }> = [];
 const requests: Array<{ method: string; params?: Record<string, unknown> }> = [];
 let createdSessions = 0;
 let nativeCreation: 'ok' | 'null' | 'throw' = 'ok';
+let answerRefusal = false;
 
 vi.mock('react-native', () => ({
     AppState: {
@@ -95,12 +96,14 @@ beforeEach(() => {
     requests.length = 0;
     createdSessions = 0;
     nativeCreation = 'ok';
+    answerRefusal = false;
 });
 
 function signaling(): Signaling {
     return {
         async request<T>(method: string, params?: Record<string, unknown>): Promise<T> {
             requests.push({ method, params });
+            if (method === 'session.description' && answerRefusal) throw new Error('the desktop refused our answer');
             if (method === 'session.open') {
                 return {
                     sessionId: 'engine-1',
@@ -348,13 +351,13 @@ describe('held input across a background transition', () => {
 });
 
 describe('a transport failure the automatic reconnect cannot fix at once', () => {
-    it('keeps reopening with backoff and never holds a dead session', async () => {
+    it('keeps reopening an SDP failure with backoff and never holds a dead session', async () => {
         const session = await connectedSession();
         const first = session.current.nativeId;
         expect(first).not.toBeNull();
 
         // First failure: the hook reopens on its own after the first backoff.
-        nativeEvent('failure', first);
+        nativeEvent('failure', first, { reason: 'sdp' });
         await TestRenderer.act(async () => {
             await sleep(1300);
         });
@@ -365,7 +368,7 @@ describe('a transport failure the automatic reconnect cannot fix at once', () =>
         // Second failure: the dead handle is dropped at once and the hook
         // reopens again after the next backoff step.
         const second = session.current.nativeId;
-        nativeEvent('failure', second);
+        nativeEvent('failure', second, { reason: 'sdp' });
         await TestRenderer.act(async () => {});
         expect(session.current.snapshot.status).toBe('reconnecting');
         expect(session.current.nativeId).toBeNull();
@@ -604,19 +607,104 @@ describe('an ICE disconnection after frames were shown', () => {
         expect(session.current.snapshot.status).toBe('live');
     }, 20_000);
 
-    it('reports a duplicate failure once instead of spending the budget twice', async () => {
+    it('holds the session once on the peer ICE failure, and never spends the budget twice', async () => {
         const session = await liveSession();
         const id = session.current.nativeId;
 
         nativeEvent('ice', id, { state: 'FAILED' });
-        // The peer's failure event for the same outage is not a second outage.
-        nativeEvent('failure', id);
+        // The peer's failure event for the same outage is not a second failure.
+        nativeEvent('failure', id, { reason: 'ice' });
         await TestRenderer.act(async () => {
             await sleep(1300);
         });
         await TestRenderer.act(async () => {});
-        // Exactly one reopen: the duplicate did not consume a second attempt.
-        expect(createdSessions).toBe(2);
+        // An ICE failure is held, not reopened: the duplicate neither discarded
+        // the session nor spent a second attempt.
+        expect(createdSessions).toBe(1);
+        expect(session.current.nativeId).toBe(id);
+        expect(session.current.snapshot.status).toBe('failed');
+    }, 20_000);
+
+    it('lets a deliberate connect discard the held session and reopen', async () => {
+        const session = await liveSession();
+        const id = session.current.nativeId;
+
+        nativeEvent('ice', id, { state: 'FAILED' });
+        expect(session.current.nativeId).toBe(id);
+        expect(session.current.snapshot.status).toBe('failed');
+
+        requests.length = 0;
+        await TestRenderer.act(async () => {
+            await session.current.connect();
+        });
+        expect(session.current.nativeId).not.toBe(id);
+        expect(session.current.nativeId).not.toBeNull();
+        expect(requests.map((request) => request.method)).toContain('session.open');
+    }, 20_000);
+
+    it('leaves a recovered session alone when connect is called after the hold', async () => {
+        const session = await connectedSession();
+        const id = session.current.nativeId;
+
+        nativeEvent('ice', id, { state: 'FAILED' });
+        expect(session.current.snapshot.status).toBe('failed');
+
+        nativeEvent('presented', id);
+        expect(session.current.snapshot.status).toBe('live');
+        expect(session.current.nativeId).toBe(id);
+
+        requests.length = 0;
+        await TestRenderer.act(async () => {
+            await session.current.connect();
+        });
+        expect(session.current.nativeId).toBe(id);
+        expect(requests.map((request) => request.method)).not.toContain('session.open');
+    }, 20_000);
+
+    it('returns a presented session to live when the held path recovers', async () => {
+        const session = await liveSession();
+        const id = session.current.nativeId;
+
+        nativeEvent('ice', id, { state: 'FAILED' });
+        expect(session.current.snapshot.status).toBe('failed');
+
+        nativeEvent('ice', id, { state: 'CONNECTED' });
+        expect(session.current.snapshot.status).toBe('live');
+        expect(session.current.nativeId).toBe(id);
+        expect(createdSessions).toBe(1);
+    }, 20_000);
+
+    it('fails a non-ICE native failure terminally during the hold', async () => {
+        const session = await liveSession();
+        const id = session.current.nativeId;
+
+        nativeEvent('ice', id, { state: 'FAILED' });
+        expect(session.current.snapshot.status).toBe('failed');
+        expect(session.current.nativeId).toBe(id);
+
+        nativeEvent('failure', id, { reason: 'sdp' });
+        await TestRenderer.act(async () => {
+            await sleep(50);
+        });
+        expect(session.current.nativeId).toBeNull();
+        expect(session.current.snapshot.status).toBe('reconnecting');
+    }, 20_000);
+
+    it('reopens at once when a non-ICE transport failure arrives during the hold', async () => {
+        const session = await liveSession();
+        const id = session.current.nativeId;
+
+        nativeEvent('ice', id, { state: 'FAILED' });
+        expect(session.current.nativeId).toBe(id);
+
+        answerRefusal = true;
+        nativeEvent('answer', id, { sdp: 'an answer the desktop will refuse' });
+        await TestRenderer.act(async () => {
+            await sleep(100);
+        });
+        answerRefusal = false;
+        expect(session.current.nativeId).toBeNull();
+        expect(session.current.snapshot.status).toBe('reconnecting');
     }, 20_000);
 });
 
@@ -633,13 +721,44 @@ describe('an ICE disconnection before any frame', () => {
         });
         expect(requests.map((request) => request.method)).not.toContain('session.restart_ice');
     }, 20_000);
+
+    it('keeps the no-picture watchdog alive across a held ICE failure', async () => {
+        let session!: { current: DesktopSession };
+        let first: string | null = null;
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+        try {
+            session = await connectedSession();
+            first = session.current.nativeId;
+            nativeEvent('ice', first, { state: 'FAILED' });
+            expect(session.current.snapshot.status).toBe('failed');
+
+            await TestRenderer.act(async () => {
+                await vi.advanceTimersByTimeAsync(25_000);
+            });
+            nativeEvent('ice', first, { state: 'CONNECTED' });
+            expect(session.current.snapshot.status).toBe('connecting');
+            expect(session.current.nativeId).toBe(first);
+
+            await TestRenderer.act(async () => {
+                await vi.advanceTimersByTimeAsync(21_000);
+            });
+            await TestRenderer.act(async () => {
+                await vi.advanceTimersByTimeAsync(3_000);
+            });
+        } finally {
+            vi.useRealTimers();
+        }
+        await TestRenderer.act(async () => {});
+        expect(createdSessions).toBe(2);
+        expect(session.current.nativeId).not.toBe(first);
+    }, 25_000);
 });
 
 describe('a terminal failure that outlasts one attempt', () => {
     it('backs the reopens off instead of spending them while the outage lasts', async () => {
         const session = await liveSession();
 
-        nativeEvent('failure', session.current.nativeId);
+        nativeEvent('failure', session.current.nativeId, { reason: 'sdp' });
         await TestRenderer.act(async () => {
             await sleep(1300);
         });
@@ -648,7 +767,7 @@ describe('a terminal failure that outlasts one attempt', () => {
         expect(second).not.toBeNull();
 
         // The next failure waits out the second backoff step before reopening.
-        nativeEvent('failure', second);
+        nativeEvent('failure', second, { reason: 'sdp' });
         const started = Date.now();
         await TestRenderer.act(async () => {
             for (let waited = 0; waited < 5000 && session.current.nativeId === null; waited += 100) {
@@ -826,7 +945,7 @@ describe('the engine restore token', () => {
             }
         });
 
-        nativeEvent('failure', id);
+        nativeEvent('failure', id, { reason: 'sdp' });
         await TestRenderer.act(async () => {
             await sleep(1300);
         });
@@ -1091,7 +1210,7 @@ describe('returning to the foreground', () => {
 
     it('stops waiting out a pending reopen', async () => {
         const session = await liveSession();
-        nativeEvent('failure', session.current.nativeId);
+        nativeEvent('failure', session.current.nativeId, { reason: 'sdp' });
         await TestRenderer.act(async () => {});
         expect(session.current.nativeId).toBeNull();
         expect(session.current.snapshot.status).toBe('reconnecting');

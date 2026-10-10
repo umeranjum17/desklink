@@ -1018,7 +1018,7 @@ export const nativeDesklink: NativeDesklinkModule = {
         peer.onconnectionstatechange = () => {
             if (sessions.get(id) !== session) return;
             if (peer.connectionState === 'failed') {
-                emit(id, 'failure', { code: 'transport', message: 'the connection to the desktop was lost' });
+                emit(id, 'failure', { code: 'transport', reason: 'ice', message: 'the connection to the desktop was lost' });
             }
         };
         peer.oniceconnectionstatechange = () => {
@@ -1035,7 +1035,7 @@ export const nativeDesklink: NativeDesklinkModule = {
         const session = sessions.get(id);
         if (session === undefined) return false;
         if (type !== 'offer') {
-            emit(id, 'failure', { code: 'transport', message: 'the engine must send an offer' });
+            emit(id, 'failure', { code: 'transport', reason: 'sdp', message: 'the engine must send an offer' });
             return false;
         }
         void (async () => {
@@ -1052,6 +1052,7 @@ export const nativeDesklink: NativeDesklinkModule = {
             } catch (error) {
                 emit(id, 'failure', {
                     code: 'transport',
+                    reason: 'sdp',
                     message: error instanceof Error ? error.message : 'the desktop refused our answer',
                 });
             }

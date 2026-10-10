@@ -4,6 +4,12 @@
 // P0b: --path new-address --driver-restart uses a TEST-ONLY retention shim.
 // P1: --product-retention disables that shim and checks real bridge retention.
 // P1e: --burst-restarts 3 --product-retention sends queued restarts on reattach.
+// P3b: --stall-carrier blackholes the carrier instead of closing it (the
+//      tailnet case); --media-cut drops only the media/ICE path and keeps the
+//      signalling carrier up, so the client's own ICE reaches failed while the
+//      dial loop is idle and the held session must return to live on the same
+//      session when the path comes back; --corrupt-offer makes the restart
+//      offer fail SDP-apply, which must stay terminal rather than recover.
 // Record the standalone 20s roam's actual outcome against the unchanged 2s bar.
 // P3a: --adapter hook mounts the real hook over the demo carrier; --authorize-revoked
 // makes the app's authorize() refuse from the cut on.
@@ -29,9 +35,16 @@ const pathMode = option('--path', 'same-address');
 const burstRestarts = Number(option('--burst-restarts', '1'));
 assert(Number.isInteger(burstRestarts) && burstRestarts >= 1 && burstRestarts <= 100, '--burst-restarts must be 1..100');
 const killDuringRestart = args.includes('--kill-during-restart');
+// P3b: the carrier stalls instead of closing (a blackholed tailnet socket),
+// and/or the recovery offer is corrupted so SDP-apply fails.
+const stallCarrier = args.includes('--stall-carrier');
+const mediaCut = args.includes('--media-cut');
+const corruptOffer = args.includes('--corrupt-offer');
 const adapter = option('--adapter', 'driver');
 assert(['driver', 'demo', 'hook'].includes(adapter), 'unknown --adapter');
 const hook = adapter === 'hook';
+assert(!corruptOffer || hook, '--corrupt-offer requires --adapter hook');
+assert(!mediaCut || hook, '--media-cut requires --adapter hook');
 const authorizeRevoked = args.includes('--authorize-revoked');
 assert(!authorizeRevoked || hook, '--authorize-revoked requires --adapter hook');
 assert(!killDuringRestart || adapter === 'demo', '--kill-during-restart requires --adapter demo');
@@ -39,6 +52,7 @@ const driverRestart = args.includes('--driver-restart') || burstRestarts > 1 || 
 const productRetention = args.includes('--product-retention') || hook;
 assert(!hook || !driverRestart, 'the hook restarts on its own');
 assert(['same-address', 'new-address'].includes(pathMode), 'unknown --path');
+assert(!mediaCut || (!stallCarrier && pathMode === 'same-address'), '--media-cut cannot be combined with --stall-carrier or --path new-address');
 assert(!driverRestart || scenario === 'roam', '--driver-restart requires roam');
 assert(Number.isInteger(outage) && outage >= 1000 && outage <= 60000, '--outage must be 1000..60000 ms');
 assert(['roam', 'abandon', 'close-in-window'].includes(scenario), 'unknown --scenario');
@@ -51,7 +65,7 @@ const tap = (direction, message) => {
     appendFileSync(join(evidence, 'stdio.jsonl'), JSON.stringify(row) + '\n');
     return row;
 };
-const result = { scenario, outage, pathMode, driverRestart, burstRestarts, productRetention, adapter, authorizeRevoked, killDuringRestart, head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).stdout.trim(),
+const result = { scenario, outage, pathMode, driverRestart, burstRestarts, productRetention, adapter, authorizeRevoked, killDuringRestart, stallCarrier, mediaCut, corruptOffer, head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).stdout.trim(),
     shape: 'userspace-shaped link; no netem, privileges or firewall changes', tap: [], teardown: { strays: [], failures: [] } };
 const tag = `DESKLINK_ROAM=${process.pid}`;
 const tagged = () => readdirSync('/proc').flatMap(name => {
@@ -129,7 +143,7 @@ window.__measure = async () => {
     const remote = stats.get(pair?.remoteCandidateId);
     return { at: Date.now(), sessionId: probe.sessionId, peerId: probe.peerId, iceGeneration: probe.iceGeneration, answerAt: probe.answerAt,
         pending: probe.pending, carrierClosed: probe.carrierClosed, carrierRejection: probe.carrierRejection, restartRejected: probe.restartRejected,
-        pair: pair && { id: pair.id, state: pair.state, remotePort: remote?.port }, frames, channel: channel?.readyState, errors: probe.errors };
+        offerError: probe.offerError, pair: pair && { id: pair.id, state: pair.state, remotePort: remote?.port }, frames, channel: channel?.readyState, errors: probe.errors };
 };
 `;
 
@@ -140,9 +154,26 @@ import TestRenderer from 'react-test-renderer';
 import { bridgeSignaling } from '/@fs/${worktree}/packages/desktop-client/example/App.tsx';
 import { useDesktopSession } from '/@fs/${worktree}/packages/desktop-client/src/useDesktopSession.ts';
 import { attachSurface, nativeDesklink } from '/@fs/${worktree}/packages/desktop-client/src/native.web.ts';
-const probe = window.__probe = { status: 'boot', failure: null, sessionId: null, opens: [], authorizes: [], carriers: [], restarts: [], closes: [], log: [], errors: [], pings: [] };
+const probe = window.__probe = { status: 'boot', failure: null, holdAt: null, sessionId: null, generation: null, offerError: null, answerAt: null, iceGeneration: 0, opens: [], authorizes: [], carriers: [], restarts: [], closes: [], log: [], errors: [], pings: [] };
 // Engine heartbeats over the data channel: the control path, apart from video.
-nativeDesklink.addListener('onSessionEvent', e => { if (e.name === 'control' && String(e.payload.message).includes('"ping"')) probe.pings.push(Date.now()); });
+nativeDesklink.addListener('onSessionEvent', e => {
+    if (e.name === 'control' && String(e.payload.message).includes('"ping"')) probe.pings.push(Date.now());
+    if (e.name === 'failure' && String(e.payload.reason ?? '') === 'sdp') probe.offerError = String(e.payload.message ?? 'sdp');
+    if (e.name === 'answer') probe.answerAt = Date.now();
+});
+// P3b: corrupt the next offer the hook hands to the native binding, so the
+// terminal SDP-apply failure runs through useDesktopSession, not a test peer.
+let corruptNextOffer = false;
+const realSetRemoteDescription = nativeDesklink.setRemoteDescription.bind(nativeDesklink);
+nativeDesklink.setRemoteDescription = (id, type, sdp) => {
+    if (type === 'offer') probe.iceGeneration++;
+    if (!corruptNextOffer || type !== 'offer') return realSetRemoteDescription(id, type, sdp);
+    corruptNextOffer = false;
+    const bad = sdp
+        .replace(/^m=video[^\\r\\n]*/m, 'm=video 9 INVALID 0')
+        .replace(/^a=ice-ufrag:.*$/m, 'a=ice-ufrag:');
+    return realSetRemoteDescription(id, type, bad);
+};
 window.addEventListener('unhandledrejection', e => probe.errors.push(String(e.reason)));
 let carrier = null, session = null;
 const authorize = async () => {
@@ -161,7 +192,7 @@ const authorize = async () => {
             if (method === 'session.restart_ice') probe.restarts.push(at);
             if (method === 'session.close') probe.closes.push(at);
             const reply = await own.request(method, params);
-            if (method === 'session.open') probe.sessionId = reply.sessionId;
+            if (method === 'session.open') { probe.sessionId = reply.sessionId; probe.generation = reply.generation; }
             return reply;
         },
     } };
@@ -170,6 +201,7 @@ function Harness() {
     session = useDesktopSession({ authorize, onStateChange: s => {
         if (s.status !== probe.status) probe.log.push([Date.now(), s.status]);
         probe.status = s.status; probe.failure = s.failure?.code ?? null;
+        if (s.status === 'failed' && s.failure?.code === 'transport' && probe.holdAt === null) probe.holdAt = Date.now();
     } });
     React.useEffect(() => { void session.connect(); }, []);
     React.useEffect(() => { if (session.nativeId != null) attachSurface(session.nativeId, document.body, 'desktop'); }, [session.nativeId]);
@@ -178,11 +210,13 @@ function Harness() {
 TestRenderer.create(React.createElement(Harness));
 window.__hold = () => { session.setInputEnabled(true); session.send({ kind: 'pointer', phase: 'down', x: 320, y: 180, button: 1 }); session.send({ kind: 'key', character: 'a', down: true }); };
 window.__release = () => session.releaseHeld();
+window.__restart = () => { corruptNextOffer = true; void carrier.request('session.restart_ice', { session_id: probe.sessionId, generation: probe.generation }); };
 window.__measure = async () => {
     const frames = {};
     for (const row of await session.getStats()) if (row.type === 'inbound-rtp' && row.kind === 'video') frames[row.id] = row.framesDecoded ?? 0;
     return { at: Date.now(), sessionId: probe.sessionId, peerId: session.nativeId, frames, channel: session.snapshot.presented ? 'open' : 'closed',
-        status: probe.status, failure: probe.failure, opens: probe.opens, authorizes: probe.authorizes, carriers: probe.carriers,
+        status: probe.status, failure: probe.failure, holdAt: probe.holdAt, offerError: probe.offerError, answerAt: probe.answerAt, iceGeneration: probe.iceGeneration,
+        opens: probe.opens, authorizes: probe.authorizes, carriers: probe.carriers,
         restarts: probe.restarts, closes: probe.closes, log: probe.log, errors: probe.errors, pings: probe.pings };
 };
 `;
@@ -194,7 +228,7 @@ async function run() {
     assert(existsSync(engine) && existsSync(fixture), 'build task-owned desklink-host and x11_target first');
     const scratch = mkdtempSync(join(tmpdir(), 'dl-roam-'));
     let claim, xvfb, target, bridge, signalling, relay, vite, context;
-    let fixtureLog = '', fixtureBuffer = '', refused = 0, blocked = false, holdMetrics = false;
+    let fixtureLog = '', fixtureBuffer = '', refused = 0, blocked = false, holdMetrics = false, stalled = false;
     const observedFixture = [];
     const upstreams = new Set();
     const link = new ShapedLink((...items) => appendFileSync(join(evidence, 'link.log'), `${Date.now()} ${items.join(' ')}\n`));
@@ -261,6 +295,10 @@ async function run() {
             upstreams.add(host);
             const queue = [];
             const forward = raw => {
+                // A stalled carrier is blackholed, not closed: the socket stays
+                // open but carries nothing, which is the tailnet case the
+                // client cannot see as a close.
+                if (stalled) return;
                 if (host.readyState !== WebSocket.OPEN) { queue.push(raw); return; }
                 host.send(raw);
                 if (killDuringRestart && JSON.parse(String(raw)).method === 'session.restart_ice') {
@@ -276,6 +314,7 @@ async function run() {
                 if (holdMetrics && message.method === 'session.metrics') heldIds.add(message.id);
             });
             host.on('message', raw => {
+                if (stalled) return;
                 if (heldIds.has(JSON.parse(String(raw)).id)) return; // Withhold a real reply until the carrier cut.
                 if (client.readyState === WebSocket.OPEN) client.send(String(raw));
             });
@@ -328,7 +367,10 @@ async function run() {
         result.cutAt = Date.now(); blocked = true;
         if (authorizeRevoked) await page.evaluate(() => { window.__revoked = true; });
         if (!productRetention || scenario === 'roam') link.set({ discard: true }, 'roam cut');
-        for (const client of relay.clients) client.terminate();
+        // A stalled carrier keeps its socket open and swallows everything; the
+        // default cuts it so the relay closes upstream.
+        if (stallCarrier) stalled = true;
+        else if (!mediaCut) for (const client of relay.clients) client.terminate();
         if (adapter === 'demo') {
             await sleep(1000);
             result.carrierAfterCut = await measure();
@@ -359,6 +401,7 @@ async function run() {
         if (scenario !== 'abandon') {
             if (pathMode === 'new-address') await link.rebindBrowserSide();
             blocked = false; link.set({}, 'path back');
+            if (stallCarrier) stalled = false;
         }
         const held = result.before;
         let last = result.atPathBack, recovered = null;
@@ -375,6 +418,25 @@ async function run() {
             await page.screenshot({ path: join(evidence, 'after.png') });
         }
         result.counterReset = reset; result.firstFrameAfterPathBackMs = recovered; result.last = last;
+        if (corruptOffer) {
+            // P3b: ask for a restart on path-back; the hook corrupts the SDP
+            // it hands to the native binding, so that offer's SDP-apply fails.
+            // A failure that is not the peer's own ICE is terminal, so the
+            // held session must be discarded, not kept for the ICE hold.
+            result.restartAt = Date.now();
+            const beforeRestart = await measure();
+            await page.evaluate(() => window.__restart());
+            await wait(async () => (await measure()).offerError, 5000, 'corrupt offer SDP-apply failure');
+            const offerAfter = await measure();
+            result.offerError = offerAfter.offerError;
+            result.offerAfter = offerAfter;
+            assert(offerAfter.iceGeneration >= 2, 'the corrupt restart offer never arrived');
+            assert.equal(offerAfter.answerAt, beforeRestart.answerAt, 'an SDP-apply failure was answered instead of staying terminal');
+            await wait(async () => (await measure()).peerId !== beforeRestart.peerId, 2000, 'terminal SDP failure did not discard the held session');
+            result.corruptOfferTerminal = true;
+            await page.screenshot({ path: join(evidence, 'corrupt-offer.png') });
+            return;
+        }
         if (driverRestart) {
             result.beforeRestart = await measure();
             if (pathMode === 'new-address' && burstRestarts === 1) {
@@ -416,8 +478,11 @@ async function run() {
             assert.deepEqual(result.afterRestart.errors, []);
             await page.screenshot({ path: join(evidence, 'restart.png') });
         }
-        // A roam past the client's ICE failed (~15 s) reopens in P3a; P3b holds it.
-        const reopens = hook && outage > 15000;
+        // The host holds a detached session for its 30 s reattach window, and the
+        // hook keeps the held session inside it however the carrier failed: the
+        // P3a dial loop when the carrier closed, and the P3b ICE-failed hold when
+        // it stalled. Past the window the first carrier opens a new session.
+        const reopens = hook && outage > 30000;
         if (productRetention && scenario === 'roam' && !reopens) {
             assert.equal(result.atPathBack.sessionId, held.sessionId, 'session id changed during outage');
             assert(!result.tap.some(e => e.direction === 'bridge->engine' && e.method === 'session.close'), 'bridge closed session inside retention window');
@@ -452,6 +517,7 @@ async function run() {
             }
             const m = await measure();
             Object.assign(result, { recoveryMs: recovered, sameSession: !reopens && !authorizeRevoked && m.sessionId === held.sessionId && !closed(),
+                holdAt: m.holdAt, heldIceFailure: m.holdAt != null && m.holdAt >= result.cutAt && m.holdAt <= result.backAt,
                 opens: m.opens.length, authorizesAfterCut: m.authorizes.filter(at => at >= result.cutAt).length, restartsAfterBack: m.restarts.filter(at => at >= result.backAt).length,
                 status: m.status, failure: m.failure, statusLog: m.log, timeline: { authorizes: m.authorizes, carriers: m.carriers, opens: m.opens, restarts: m.restarts }, pageErrors: m.errors,
                 pingsAfterBack: m.pings.filter(at => at >= result.backAt).length, firstPingAfterCut: m.pings.find(at => at > result.cutAt + 1000) - result.backAt });

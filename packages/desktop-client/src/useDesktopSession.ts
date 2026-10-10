@@ -112,6 +112,16 @@ export const REOPEN_BACKOFF_MS = [1000, 2000, 4000, 8000, 8000, 8000, 8000, 8000
  */
 export const BACKGROUND_REOPEN_MS = 30_000;
 /**
+ * A peer that reaches ICE `failed` has lost its media path, not its session:
+ * the engine keeps the session alive for about 28 s after the path dies (its
+ * ICE `Failed` timer). So a client-side ICE failure holds the session — and
+ * its native handle — this long from the failure, whatever the carrier is
+ * doing, instead of throwing it away at once. A roam longer than the client's
+ * own ~15 s ICE `failed` then still returns to the same session. An SDP or
+ * candidate failure is not a lost path and stays terminal as it always was.
+ */
+export const HOLD_AFTER_FAILED_MS = 30_000;
+/**
  * A resumed app hears what queued up while it was suspended just after it
  * hears it is active again. A revocation among it decides whether a reopen is
  * allowed at all, so the long-absence reopen waits this long for it first.
@@ -374,6 +384,12 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const restartCycles = useRef(0);
     /** The last ICE state the peer or the engine reported. */
     const iceConnected = useRef(false);
+    /**
+     * When the peer's own ICE last failed while the session was held, or null
+     * when the current failure is not an ICE one. Kept across the hold so the
+     * reopen effect can measure the remaining window.
+     */
+    const heldIceFailureAt = useRef<number | null>(null);
     /** The engine's restore token, for a consent-free reopen. Unset by hand. */
     const restoreToken = useRef<string | null>(null);
     /** The latest status and presentation, read by event handlers. */
@@ -408,21 +424,29 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         optionsRef.current.onStateChange?.(next);
     }, []);
 
-    const fail = useCallback((failure: SessionFailure) => {
+    const fail = useCallback((failure: SessionFailure, ice = false) => {
+        heldIceFailureAt.current = failure.code === 'transport' && ice && nativeRef.current != null ? Date.now() : null;
         update({ status: 'failed', failure });
         optionsRef.current.onError?.(failure);
     }, [update]);
 
-    const refuse = useCallback((message: string, code: SessionFailure['code'] = 'platform') => {
-        fail({ code, message });
+    const refuse = useCallback((message: string, code: SessionFailure['code'] = 'platform', ice = false) => {
+        fail({ code, message }, ice);
     }, [fail]);
 
     /** A transport loss is one event no matter how many sides report it: the
      * peer's `failed` state and its `failure` event would otherwise spend the
-     * reopen budget twice for the same outage. While dialing, it stays `reconnecting`. */
-    const transportFailed = useCallback((message: string = UNREACHABLE_DESKTOP): boolean => {
-        if (statusRef.current === 'failed' || dialing.current !== null) return false;
-        refuse(message, 'transport');
+     * reopen budget twice for the same outage. While dialing, it stays
+     * `reconnecting`.
+     *
+     * `ice` marks a failure of the peer's own media path (its ICE `failed`
+     * state, or a `failure` event whose reason is `ice`). While the session is
+     * held and has not been revoked, that is not the end of the session: the
+     * reopen effect keeps it for `HOLD_AFTER_FAILED_MS` first. */
+    const transportFailed = useCallback((message: string = UNREACHABLE_DESKTOP, ice = false): boolean => {
+        if (dialing.current !== null) return false;
+        if (ice && statusRef.current === 'failed') return false;
+        refuse(message, 'transport', ice);
         return true;
     }, [refuse]);
 
@@ -454,13 +478,20 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
      */
     const armFirstFrame = useCallback(() => {
         cancelFirstFrame();
-        firstFrameTimer.current = setTimeout(() => {
-            firstFrameTimer.current = null;
-            const status = statusRef.current;
-            if (presentedRef.current || (status !== 'connecting' && status !== 'reconnecting')) return;
-            stopDialing();
-            transportFailed(NO_PICTURE);
-        }, FIRST_FRAME_AFTER_MS);
+        const watch: () => void = () => {
+            firstFrameTimer.current = setTimeout(() => {
+                firstFrameTimer.current = null;
+                const status = statusRef.current;
+                if (!presentedRef.current && status === 'failed' && heldIceFailureAt.current !== null) {
+                    watch();
+                    return;
+                }
+                if (presentedRef.current || (status !== 'connecting' && status !== 'reconnecting')) return;
+                stopDialing();
+                transportFailed(NO_PICTURE);
+            }, FIRST_FRAME_AFTER_MS);
+        };
+        watch();
     }, [cancelFirstFrame, stopDialing, transportFailed]);
 
     const scheduleRestartRef = useRef<(delay: number) => void>(() => undefined);
@@ -617,6 +648,11 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const onTransportState = useCallback((state: string, trackIce = true, skipGrace = false) => {
         // Synthetic stall reports say nothing about ICE itself.
         if (trackIce) iceConnected.current = state === 'connected' || state === 'completed';
+        if (heldIceFailureAt.current !== null && statusRef.current === 'failed'
+            && (state === 'connected' || state === 'completed')) {
+            heldIceFailureAt.current = null;
+            update({ status: 'reconnecting' });
+        }
         const mapped = connectionStatusFor(state, statusRef.current, presentedRef.current && !frozen.current);
         if (mapped === null) return;
         // A transport that answers while the picture is frozen is not a
@@ -689,7 +725,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 frozen.current = false;
                 // The picture advances again, so the transport can be believed
                 // for this session: live returns without waiting for it to say so.
-                if (statusRef.current === 'reconnecting') onTransportState('connected', false);
+                if (statusRef.current === 'reconnecting' || (statusRef.current === 'failed' && heldIceFailureAt.current !== null)) onTransportState('connected', false);
                 return;
             }
             if (mediaMovingAt.current === null) return;
@@ -830,6 +866,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     /** Drop everything this process holds for a session the engine has ended. */
     const discardSession = useCallback(() => {
         generationToken.current += 1;
+        cancelFirstFrame();
         const id = nativeRef.current;
         nativeRef.current = null;
         inputEnabled.current = false;
@@ -838,6 +875,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         pendingOffer.current = null;
         pendingCandidates.current = [];
         pendingCursorEvents.current = [];
+        heldIceFailureAt.current = null;
         restartGraceUntil.current = 0;
         restartCycles.current = 0;
         // A new session has its own media path: the last one's counts and its
@@ -854,7 +892,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         modifiersRef.current = NO_MODIFIERS;
         setModifiers(NO_MODIFIERS);
         if (id != null) nativeDesklink?.closeSession(id);
-    }, [dropCarrier]);
+    }, [cancelFirstFrame, dropCarrier]);
 
     /** Tell the host a session is over; a failure is nothing the user can act on. */
     const endRemote = useCallback(async (
@@ -1125,7 +1163,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                     if (opened.current !== held || dialing.current !== null) return;
                     // The picture moves: only the carrier was missing.
                     if ((mediaCounts(rows)?.frames ?? 0) > (before?.frames ?? Infinity)) {
-                        if (statusRef.current === 'reconnecting') onTransportState('connected', false);
+                        if (statusRef.current === 'reconnecting' || (statusRef.current === 'failed' && heldIceFailureAt.current !== null)) onTransportState('connected', false);
                         return;
                     }
                     if (statusRef.current !== 'reconnecting') update({ status: 'reconnecting' });
@@ -1146,8 +1184,15 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         restartAttempts.current = 0;
         restartCycles.current = 0;
         cancelRestart();
+        if (heldIceFailureAt.current !== null && statusRef.current === 'failed') {
+            const owner = signaling.current;
+            const openedRef = opened.current;
+            heldIceFailureAt.current = null;
+            discardSession();
+            void endRemote(openedRef, owner);
+        }
         await establish();
-    }, [cancelRestart, establish]);
+    }, [cancelRestart, discardSession, endRemote, establish]);
 
     // Native events: answer, candidates, control replies, presentation, failure.
     useEffect(() => {
@@ -1269,7 +1314,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                         // The peer's connection state, as it happens: Android
                         // and iOS already emit this, and web matches them.
                         const state = String(event.payload.state ?? '').toLowerCase();
-                        if (state === 'failed') transportFailed();
+                        if (state === 'failed') transportFailed(UNREACHABLE_DESKTOP, true);
                         else onTransportState(state);
                         return;
                     }
@@ -1279,7 +1324,9 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                         else if (typeof event.payload.text === 'string') typeText(event.payload.text);
                         return;
                     case 'failure':
-                        transportFailed();
+                        // Only an ICE failure is held; an SDP or candidate
+                        // failure is terminal exactly as before.
+                        transportFailed(UNREACHABLE_DESKTOP, String(event.payload.reason ?? '') === 'ice');
                         return;
                     case 'closed':
                         return;
@@ -1343,33 +1390,62 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     // across about a minute: a session that was revoked must not be reopened
     // on the strength of the old grant, and an outage that outlasts one
     // attempt must not spend the whole budget while the network is still down.
+    //
+    // An ICE failure is the one exception. It means the peer's path died, not
+    // that the engine ended the session, so the held session (and its native
+    // handle) is kept for HOLD_AFTER_FAILED_MS from the failure, whatever the
+    // carrier watch is doing; a roam that outlasts the client's own ~15 s ICE
+    // `failed` can then reattach and restart ICE on the same session. Only a
+    // failure that is not ICE — SDP, candidate, a revoked transport — drops the
+    // session at once, exactly as before.
     useEffect(() => {
         const immediate = reopenAtOnce.current;
         reopenAtOnce.current = false;
-        if (snapshot.status !== 'failed') return;
-        if (snapshot.failure?.code !== 'transport') return;
-        // The failed session is dead on the engine side. Drop its handle and
-        // close the remote session whether or not another attempt is left: a
-        // failure the user can retry by hand must not sit behind a stale
-        // native handle that makes `connect()` a no-op.
-        const owner = signaling.current;
-        const openedRef = opened.current;
-        cancelRestart();
-        discardSession();
-        void endRemote(openedRef, owner);
-        // With the carrier dead, the dial loop opens on the first one that comes up.
-        if (dialing.current !== null) {
-            update({ status: 'reconnecting' });
+        if (snapshot.status !== 'failed') {
+            heldIceFailureAt.current = null;
             return;
         }
-        const wait = immediate ? 0 : backoffDelay(REOPEN_BACKOFF_MS, attempts.current);
-        if (wait === null) return;
-        attempts.current += 1;
-        update({ status: 'reconnecting' });
-        reconnectTimer.current = setTimeout(() => {
-            reconnectTimer.current = null;
-            void establish();
-        }, wait);
+        if (snapshot.failure?.code !== 'transport') return;
+        const reopen = () => {
+            // The failed session is dead on the engine side. Drop its handle and
+            // close the remote session whether or not another attempt is left: a
+            // failure the user can retry by hand must not sit behind a stale
+            // native handle that makes `connect()` a no-op.
+            const owner = signaling.current;
+            const openedRef = opened.current;
+            cancelRestart();
+            discardSession();
+            void endRemote(openedRef, owner);
+            // With the carrier dead, the dial loop opens on the first one that comes up.
+            if (dialing.current !== null) {
+                update({ status: 'reconnecting' });
+                return;
+            }
+            const wait = immediate ? 0 : backoffDelay(REOPEN_BACKOFF_MS, attempts.current);
+            if (wait === null) return;
+            attempts.current += 1;
+            update({ status: 'reconnecting' });
+            reconnectTimer.current = setTimeout(() => {
+                reconnectTimer.current = null;
+                void establish();
+            }, wait);
+        };
+        const failedAt = heldIceFailureAt.current;
+        const remaining = failedAt === null ? 0 : HOLD_AFTER_FAILED_MS - (Date.now() - failedAt);
+        if (remaining <= 0) {
+            heldIceFailureAt.current = null;
+            reopen();
+            return;
+        }
+        // Hold: leave the session and its handle in place, and only drop them
+        // when the window lapses with no recovery. A recovery that takes the
+        // status off `failed` runs this effect's cleanup and clears the timer.
+        const holdTimer = setTimeout(() => {
+            if (statusRef.current !== 'failed') return;
+            heldIceFailureAt.current = null;
+            reopen();
+        }, remaining);
+        return () => clearTimeout(holdTimer);
     }, [establish, cancelRestart, discardSession, endRemote, snapshot.status, snapshot.failure, update]);
 
     useEffect(() => () => {
