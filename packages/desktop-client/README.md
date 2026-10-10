@@ -279,10 +279,15 @@ view.
   when it closes, or a restart request on it gets no reply within 1.5 s, the
   session drops that carrier for good (calling its optional `close()`) and
   keeps calling `authorize()` — one dial at a time, 250 ms after a failure,
-  5 s each, with no budget and no backoff. While that loop runs the status
-  stays `reconnecting`; it never reports `failed` or a transport failure. A new
-  carrier picks up the same session: if the picture is already moving, nothing
-  else happens; otherwise it asks for an ICE restart at once. Failures caused
+  5 s each, with no budget and no backoff. The lost carrier does not change the
+  status by itself: the status follows the picture and the peer's transport, so
+  it reads `reconnecting` only once the picture stops or the stall watchdog
+  fires. While the loop runs, a session that has shown a picture never reports
+  `failed` or a transport failure; one that never showed a picture reports the
+  first-frame transport failure after 20 s and the loop stops. A new carrier
+  picks up the same session: if the picture is already moving, it sends no ICE
+  restart (and a `reconnecting` session returns to `live`); otherwise it asks
+  for an ICE restart at once. Failures caused
   by the dead carrier wait for the next one rather than ending the session. The
   loop ends when a carrier reattaches the held session, or when the desktop
   refuses it (a `session` or `generation` refusal, once it no longer holds the

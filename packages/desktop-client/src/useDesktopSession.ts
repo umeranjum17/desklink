@@ -447,6 +447,12 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         firstFrameTimer.current = null;
     }, []);
 
+    const stopDialing = useCallback(() => {
+        const run = dialing.current;
+        dialing.current = null;
+        clearTimeout(run?.retry);
+    }, []);
+
     /**
      * A first connection that stays frameless for this long is not going to
      * arrive: report why instead of leaving an empty picture on screen.
@@ -455,15 +461,12 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         cancelFirstFrame();
         firstFrameTimer.current = setTimeout(() => {
             firstFrameTimer.current = null;
-            if (presentedRef.current) return;
-            if (statusRef.current === 'reconnecting' || dialing.current !== null) {
-                armFirstFrame();
-                return;
-            }
-            if (statusRef.current !== 'connecting') return;
+            const status = statusRef.current;
+            if (presentedRef.current || (status !== 'connecting' && status !== 'reconnecting')) return;
+            stopDialing();
             transportFailed(NO_PICTURE);
         }, FIRST_FRAME_AFTER_MS);
-    }, [cancelFirstFrame, transportFailed]);
+    }, [cancelFirstFrame, stopDialing, transportFailed]);
 
     const scheduleRestartRef = useRef<(delay: number) => void>(() => undefined);
     const dialRef = useRef<() => void>(() => undefined);
@@ -487,12 +490,6 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             if (epoch === carrierEpoch.current) carrierEventRef.current(event);
         });
     }, [dropCarrier]);
-
-    const stopDialing = useCallback(() => {
-        const run = dialing.current;
-        dialing.current = null;
-        clearTimeout(run?.retry);
-    }, []);
 
     /** Carrier `epoch` is dead: drop it hard and, while a session is held, dial a new one. */
     const carrierLost = useCallback((epoch: number) => {
@@ -712,6 +709,8 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         }, () => undefined);
     }, [armMedia, onTransportState]);
 
+    const pictureMoving = useCallback((): boolean => mediaMovingAt.current !== null && Date.now() - mediaMovingAt.current < STALL_AFTER_MS, []);
+
     /**
      * One stall check: quiet too long while the session should be talking
      * means the path is stalled, even when ICE has not said so yet. Only
@@ -734,13 +733,12 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             stallTimer.current = setTimeout(() => checkStallRef.current(), restartGraceUntil.current - Date.now());
             return;
         }
-        const moving = mediaMovingAt.current !== null && Date.now() - mediaMovingAt.current < STALL_AFTER_MS;
-        if (moving && !frozen.current && quietMs < QUIET_PICTURE_MS) {
+        if (pictureMoving() && !frozen.current && quietMs < QUIET_PICTURE_MS) {
             stallTimer.current = setTimeout(() => checkStallRef.current(), STALL_AFTER_MS);
             return;
         }
         onTransportState('disconnected', false);
-    }, [onTransportState]);
+    }, [onTransportState, pictureMoving]);
 
     /**
      * One engine heartbeat: the path works. It clears a stall the watchdog
@@ -1127,14 +1125,17 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 return;
             }
             // The picture already moves: only the carrier was missing.
-            if (statusRef.current === 'live' && !frozen.current) return;
+            if (pictureMoving() && !frozen.current) {
+                if (statusRef.current === 'reconnecting') onTransportState('connected', false);
+                return;
+            }
             if (statusRef.current === 'connecting') update({ status: 'reconnecting' });
             restartAttempts.current = 0;
             restartCycles.current = 0;
             cancelRestart();
             scheduleRestart(0);
         })();
-    }, [adoptCarrier, cancelReconnect, cancelRestart, establish, scheduleRestart, stopDialing, teardown, update]);
+    }, [adoptCarrier, cancelReconnect, cancelRestart, establish, onTransportState, pictureMoving, scheduleRestart, stopDialing, teardown, update]);
 
     /**
      * Open (or reopen) the session with fresh authority. A deliberate call
