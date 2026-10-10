@@ -285,7 +285,7 @@ view.
   fires. While the loop runs, a session that has shown a picture never reports
   `failed` or a transport failure; one that never showed a picture reports the
   first-frame transport failure after 20 s and the loop stops. A new carrier
-  picks up the same session: if the picture advanced within the last media poll
+  picks up the same session: if the picture advanced within the last two media polls
   and is not frozen, it sends no ICE restart (and a `reconnecting` session
   returns to `live`); otherwise it moves the session to `reconnecting` and asks
   for an ICE restart at once. Failures caused by the dead carrier wait for the

@@ -1125,7 +1125,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 return;
             }
             // The picture already moves: only the carrier was missing.
-            if (pictureMoving(MEDIA_POLL_MS) && !frozen.current) {
+            if (pictureMoving(2 * MEDIA_POLL_MS) && !frozen.current) {
                 if (statusRef.current === 'reconnecting') onTransportState('connected', false);
                 return;
             }
