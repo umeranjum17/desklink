@@ -459,8 +459,11 @@ async function run() {
             assert.deepEqual(result.afterRestart.errors, []);
             await page.screenshot({ path: join(evidence, 'restart.png') });
         }
-        // A roam past the client's ICE failed (~15 s) reopens in P3a; P3b holds it.
-        const reopens = hook && outage > 15000;
+        // The host holds a detached session for its 30 s reattach window, and the
+        // hook keeps the held session inside it however the carrier failed: the
+        // P3a dial loop when the carrier closed, and the P3b ICE-failed hold when
+        // it stalled. Past the window the first carrier opens a new session.
+        const reopens = hook && outage > 30000;
         if (productRetention && scenario === 'roam' && !reopens) {
             assert.equal(result.atPathBack.sessionId, held.sessionId, 'session id changed during outage');
             assert(!result.tap.some(e => e.direction === 'bridge->engine' && e.method === 'session.close'), 'bridge closed session inside retention window');
