@@ -178,7 +178,7 @@ export interface SessionSnapshot {
 }
 
 /**
- * Control-channel messages. `seq` is monotonic per generation; the engine
+ * Control-channel messages. `seq` is monotonic per session; the engine
  * refuses a repeat, so a replayed gesture cannot move the pointer twice.
  */
 export type ControlMessage =
