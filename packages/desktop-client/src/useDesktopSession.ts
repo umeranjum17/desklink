@@ -455,7 +455,12 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         cancelFirstFrame();
         firstFrameTimer.current = setTimeout(() => {
             firstFrameTimer.current = null;
-            if (presentedRef.current || statusRef.current !== 'connecting') return;
+            if (presentedRef.current) return;
+            if (statusRef.current === 'reconnecting' || dialing.current !== null) {
+                armFirstFrame();
+                return;
+            }
+            if (statusRef.current !== 'connecting') return;
             transportFailed(NO_PICTURE);
         }, FIRST_FRAME_AFTER_MS);
     }, [cancelFirstFrame, transportFailed]);
