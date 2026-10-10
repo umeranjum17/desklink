@@ -37,6 +37,11 @@ export interface EngineClientOptions {
      * own, longer one to `openSession`.
      */
     requestTimeoutMs?: number;
+    /**
+     * Push consumer, called with every event as it arrives. Supplying it turns
+     * off the `drainEvents` queue, so events are not retained for a reader that
+     * never comes.
+     */
     onEvent?: (event: EngineEvent) => void;
     /** Called when the engine process goes away, with whatever it said first. */
     onExit?: (detail: { code: number | null; signal: NodeJS.Signals | null }) => void;
