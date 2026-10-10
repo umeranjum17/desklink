@@ -33,6 +33,8 @@
 // DESKLINK_IOS_DIR (default fm-desklink-ios), DESKLINK_IOS_OUT (required fresh
 // dir), DESKLINK_IOS_DEVICE (simulator name, default fm-iPhone 17),
 // DESKLINK_IOS_SKIP_BUILD (1 reuses the lane's last build),
+// DESKLINK_IOS_ROAM_OFF_S (roam leg: seconds the Mac's Wi-Fi stays off,
+// default 12),
 // DESKLINK_IOS_ONLY (a comma-separated leg subset, e.g. `background60` or
 // `roam`; unset runs the proof legs, drop5 and background60 — roam stays
 // opt-in for the dl-roam-persistence follow-up),
@@ -64,7 +66,14 @@ const out = resolve(process.env.DESKLINK_IOS_OUT ?? '');
 assert(out !== '' && !existsSync(out), 'set DESKLINK_IOS_OUT to a fresh evidence directory');
 mkdirSync(out, { recursive: true });
 const SIM = process.env.DESKLINK_IOS_DEVICE ?? 'fm-iPhone 17';
+const ROAM_OFF_S = Number(process.env.DESKLINK_IOS_ROAM_OFF_S ?? '12');
+assert(Number.isInteger(ROAM_OFF_S) && ROAM_OFF_S >= 1, 'DESKLINK_IOS_ROAM_OFF_S must be a whole number of seconds');
 const BUILD = process.env.DESKLINK_IOS_SKIP_BUILD !== '1';
+// The bridge runs as its own process, so its bridge -> engine traffic is
+// tapped by loading engine-tap.cjs into it; a socket-close or a session
+// replacement can then be told from the wire instead of inferred.
+const engineTap = join(here, 'engine-tap.cjs');
+const tapLog = join(out, 'bridge-engine.log');
 const engineBin = process.env.DESKLINK_ENGINE ?? join(repo, 'packages/desktop-host/engine/target/debug/desklink-host');
 const x11Bin = process.env.DESKLINK_VERIFY_TARGET ?? join(repo, 'packages/desktop-host/engine/target/debug/examples/x11_target');
 for (const path of [engineBin, x11Bin]) assert(existsSync(path), `missing binary: ${path}`);
@@ -250,7 +259,8 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
     const token = randomBytes(24).toString('hex');
     const bridge = spawn(process.execPath, [join(repo, 'packages/desktop-host/bin/desklink-host.mjs'), 'bridge',
         '--listen', '127.0.0.1:0', '--token', token, '--source', 'x11', '--display', claim.display],
-        { env: { ...xenv, DESKLINK_ENGINE: engineBin }, stdio: ['ignore', 'pipe', 'pipe'] });
+        { env: { ...xenv, DESKLINK_ENGINE: engineBin, DESKLINK_IOS_TAP_LOG: tapLog,
+            NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${engineTap}`.trim() }, stdio: ['ignore', 'pipe', 'pipe'] });
     remember(bridge.pid); bridgePid = bridge.pid;
     let engineLog = '';
     bridge.stderr.on('data', (chunk) => { engineLog = (engineLog + chunk).slice(-8000); });
@@ -277,14 +287,23 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
 
     relay = new WebSocketServer({ host: hostAddr, port: 0, path: '/desktop' });
     const { WebSocket } = await import('ws');
+    // Every session id the bridge ever fanned out, in order: the first is the
+    // launch session, a later one means the client discarded and reopened.
+    const seenSessionIds = [];
     relay.on('connection', (client, request) => {
         const upstream = new WebSocket(`ws://127.0.0.1:${bridgePort}${request.url}`);
         const queued = [];
         upstream.on('open', () => { for (const line of queued.splice(0)) upstream.send(line); });
-        upstream.on('message', (raw) => { wireLog('engine>', raw); if (client.readyState === 1) client.send(String(raw)); });
+        upstream.on('message', (raw) => {
+            wireLog('engine>', raw);
+            let sessionId;
+            try { const message = JSON.parse(String(raw)); sessionId = message.result?.sessionId ?? message.params?.sessionId; } catch { /* not JSON */ }
+            if (sessionId && seenSessionIds.at(-1) !== sessionId) seenSessionIds.push(sessionId);
+            if (client.readyState === 1) client.send(String(raw));
+        });
         client.on('message', (raw) => { wireLog('app>', raw); if (upstream.readyState === 1) upstream.send(String(raw)); else queued.push(String(raw)); });
-        client.on('close', () => upstream.close());
-        upstream.on('close', () => client.close());
+        client.on('close', () => { wireLog('app-socket-close', 'the simulator socket to the relay closed'); upstream.close(); });
+        upstream.on('close', () => { wireLog('bridge-socket-close', 'the bridge socket to the relay closed'); client.close(); });
         upstream.on('error', () => client.close());
     });
     await new Promise((listening) => relay.once('listening', listening));
@@ -299,7 +318,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkCover 
         const until = Date.now() + 120_000;
         let status = null;
         while (status !== 'Connected') {
-            if (Date.now() > until) throw new Error(`the simulator never showed the desktop: ${status}`);
+            if (Date.now() > until) throw new Error(`the simulator never showed the desktop: ${status}${engineLog ? `\nengine: ${engineLog}` : ''}`);
             await sleep(2000);
             try { status = screenStatus(); } catch { status = 'unreadable'; }
         }
@@ -413,7 +432,7 @@ test -s "$D/tmp/rec-${name}.mov"`);
     // A suspended app cannot repaint, so the background case cannot show a
     // Reconnecting state mid-outage; its proof is the recovery, not the middle.
     const runCase = async (name, outageMs, outage, restore, background = false, reconnectMs = 20000) => {
-        const leg = { name };
+        const leg = { name, sessionIdBefore: seenSessionIds.at(-1) ?? null };
         const startedAt = Date.now();
         startRecording(name);
         try {
@@ -427,12 +446,22 @@ test -s "$D/tmp/rec-${name}.mov"`);
                 shot(join(out, `screen-${name}-reconnecting.png`));
             }
             await sleep(Math.max(0, outageMs - (Date.now() - tDrop0)));
-            await restore();
+            const pathBack = await restore();
+            leg.pathAt = pathBack?.pathAt ?? null;
             leg.outageMs = Date.now() - tDrop0;
             const frozen = hashShot(shot(join(out, `screen-${name}-frozen.png`)));
             const t0 = Date.now();
-            const firstMove = await waitAdvancing(frozen, 30000);
-            leg.recoveryMs = firstMove - t0;
+            let firstMove = null;
+            try {
+                firstMove = await waitAdvancing(frozen, 30000);
+            } finally {
+                // Record the measurement even when the picture never advanced,
+                // so a RED receipt still names the time and the session.
+                const advancedAt = firstMove ?? Date.now();
+                leg.recoveryMs = advancedAt - t0;
+                leg.recoveryFromPathMs = leg.pathAt === null ? null : advancedAt - leg.pathAt;
+                leg.sessionIdAfter = seenSessionIds.at(-1) ?? null;
+            }
             {
                 const t = Date.now();
                 await waitStatus('connected', 20000);
@@ -482,13 +511,24 @@ test -s "$D/tmp/rec-${name}.mov"`);
     // cannot do. The toggle runs detached — the ssh that fires it dies with
     // the Wi-Fi — and the Mac brings itself back; the restore waits for a TCP
     // open to the relay over that route, and only then starts the 2 s clock.
+    // DESKLINK_IOS_ROAM_OFF_S sets how long the Wi-Fi stays off.
     receipt.wifiBefore = mac('ipconfig getifaddr en0').trim();
-    if (runLeg('roam')) await runCase('roam', 12000,
-        async () => {
-            mac(`nohup bash -c "networksetup -setairportpower en0 off; sleep 12; networksetup -setairportpower en0 on" > "$D/tmp/wifi-bounce.log" 2>&1 & echo launched`);
-        },
-        async () => { receipt.wifiRoam = { before: receipt.wifiBefore, ...(await waitPathBack(90000)) }; },
-        false, 60000);
+    if (runLeg('roam')) {
+        receipt.roamOffS = ROAM_OFF_S;
+        await runCase('roam', ROAM_OFF_S * 1000,
+            async () => {
+                mac(`nohup bash -c "echo roam-off ${ROAM_OFF_S}s; networksetup -setairportpower en0 off; sleep ${ROAM_OFF_S}; networksetup -setairportpower en0 on; echo roam-on" > "$D/tmp/wifi-bounce.log" 2>&1 & echo launched`);
+            },
+            async () => {
+                const seen = await waitPathBack(90000);
+                // The bounce log is written on the Mac; copy it before any RED
+                // assertion can throw, so the off-seconds are evidence.
+                try { scpFrom('tmp/wifi-bounce.log', join(out, 'wifi-bounce.log')); } catch { /* best-effort */ }
+                receipt.wifiRoam = { before: receipt.wifiBefore, ...seen };
+                return seen;
+            },
+            false, 60000);
+    }
     // A 60 s backgrounding on the simulator's own home gesture; launching the
     // bundle again foregrounds it.
     if (runLeg('background60')) await runCase('background60', 60000,
@@ -515,7 +555,12 @@ try {
     process.exitCode = 1;
 } finally {
     saveReceipt();
-    try { writeFileSync(join(out, 'wire.log'), wire.join('')); } catch { /* evidence best-effort */ }
+    try {
+        // The bridge -> engine tap log is written by the bridge process;
+        // append it to the wire so one file carries the whole roam's evidence.
+        const tapped = existsSync(tapLog) ? readFileSync(tapLog, 'utf8') : '';
+        writeFileSync(join(out, 'wire.log'), wire.join('') + tapped);
+    } catch { /* evidence best-effort */ }
     // A case that died mid-recording leaves `recordVideo` holding the device.
     try { mac(`pkill -INT -f "simctl io .* recordVideo" 2>/dev/null || true`); } catch { /* already down */ }
     // A bounce that died mid-off would leave the Mac dark: best-effort on.
