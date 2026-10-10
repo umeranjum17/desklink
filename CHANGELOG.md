@@ -10,6 +10,9 @@ move together to preserve exact-version native engine selection.
 - A broken engine control pipe now produces catchable request failures instead
   of terminating the caller. See [control-pipe failure handling](packages/desktop-host/README.md#connecting-an-application-to-it)
   for error details and cleanup.
+- `@desklink/host` no longer retains engine events in an unbounded internal
+  queue when a consumer supplies `onEvent`; the queue now serves only the
+  pull-based `drainEvents` reader.
 
 ## 0.5.2
 

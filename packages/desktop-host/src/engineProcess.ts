@@ -37,6 +37,11 @@ export interface EngineClientOptions {
      * own, longer one to `openSession`.
      */
     requestTimeoutMs?: number;
+    /**
+     * Push consumer, called with every event as it arrives. Supplying it turns
+     * off the `drainEvents` queue, so events are not retained for a reader that
+     * never comes.
+     */
     onEvent?: (event: EngineEvent) => void;
     /** Called when the engine process goes away, with whatever it said first. */
     onExit?: (detail: { code: number | null; signal: NodeJS.Signals | null }) => void;
@@ -138,9 +143,11 @@ export class EngineClient {
         }
         if (typeof parsed.event === 'string') {
             const event = parsed as unknown as EngineEvent;
-            // Setup notifications are drained by the consumer; queue them so a
-            // slow reader cannot lose an offer or a candidate.
-            if ((event.event !== 'session.frame.changed' && event.event !== 'session.cursor') || options.onEvent === undefined) this.queue.push(event);
+            // A consumer that passed `onEvent` is fed every event as it arrives
+            // and never reads the queue; retaining them would grow it without
+            // bound. The queue exists only for the pull-based `drainEvents`
+            // consumer, which opts in by omitting `onEvent`.
+            if (options.onEvent === undefined) this.queue.push(event);
             options.onEvent?.(event);
             return;
         }

@@ -7,6 +7,7 @@ use the ownership-verified private lab.
 | User feature | Drive | Observable proof |
 |---|---|---|
 | Catchable engine control-pipe failure | `npx vitest run packages/desktop-host/src/engineProcess.pipe.spec.ts` after `npm run build` | Real Node child: healthy hello, local write-after-end and remote fd-close mid-request reject as `EngineRefused` with original code/cause; every pending request settles and stop reaps the child; no display needed |
+| Bounded engine event retention | `npx vitest run packages/desktop-host/src/engineProcess.queue.spec.ts` after `npm run build` | Real Node child streams description/candidate/frame/cursor/state: with `onEvent` set every event is delivered and `drainEvents()` stays empty; without `onEvent` the same events are retained for `drainEvents()`; no display needed |
 | [Live desktop in a browser](live-desktop-in-browser.md) | Bridge URL → real pointer click on `#video` | Numeric fixture edges and returned marker pixels; automated helper |
 | [Phone form factors](phone-form-factors.md) | Same engine, portrait 390×844 and landscape 844×390 | Measured picture fit per form factor, fixture button edge from a tap, recorded pinch zoom |
 | [iOS phone journeys](ios-phone-journeys.md) | Example app on the Mac's own simulator, driven by `test/ios-flow.mjs` | Readable live desktop with frames advancing; phone-only click, drag, scroll, typing, sticky modifiers, clipboard both ways; measured arrow tip |
