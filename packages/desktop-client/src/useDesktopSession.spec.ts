@@ -32,6 +32,7 @@ const remoteDescriptions: Array<{ id: string; type: string; sdp: string }> = [];
 const requests: Array<{ method: string; params?: Record<string, unknown> }> = [];
 let createdSessions = 0;
 let nativeCreation: 'ok' | 'null' | 'throw' = 'ok';
+let answerRefusal = false;
 
 vi.mock('react-native', () => ({
     AppState: {
@@ -95,12 +96,14 @@ beforeEach(() => {
     requests.length = 0;
     createdSessions = 0;
     nativeCreation = 'ok';
+    answerRefusal = false;
 });
 
 function signaling(): Signaling {
     return {
         async request<T>(method: string, params?: Record<string, unknown>): Promise<T> {
             requests.push({ method, params });
+            if (method === 'session.description' && answerRefusal) throw new Error('the desktop refused our answer');
             if (method === 'session.open') {
                 return {
                     sessionId: 'engine-1',
@@ -620,6 +623,40 @@ describe('an ICE disconnection after frames were shown', () => {
         expect(createdSessions).toBe(1);
         expect(session.current.nativeId).toBe(id);
         expect(session.current.snapshot.status).toBe('failed');
+    }, 20_000);
+
+    it('lets a deliberate connect discard the held session and reopen', async () => {
+        const session = await liveSession();
+        const id = session.current.nativeId;
+
+        nativeEvent('ice', id, { state: 'FAILED' });
+        expect(session.current.nativeId).toBe(id);
+        expect(session.current.snapshot.status).toBe('failed');
+
+        requests.length = 0;
+        await TestRenderer.act(async () => {
+            await session.current.connect();
+        });
+        expect(session.current.nativeId).not.toBe(id);
+        expect(session.current.nativeId).not.toBeNull();
+        expect(requests.map((request) => request.method)).toContain('session.open');
+    }, 20_000);
+
+    it('reopens at once when a non-ICE transport failure arrives during the hold', async () => {
+        const session = await liveSession();
+        const id = session.current.nativeId;
+
+        nativeEvent('ice', id, { state: 'FAILED' });
+        expect(session.current.nativeId).toBe(id);
+
+        answerRefusal = true;
+        nativeEvent('answer', id, { sdp: 'an answer the desktop will refuse' });
+        await TestRenderer.act(async () => {
+            await sleep(100);
+        });
+        answerRefusal = false;
+        expect(session.current.nativeId).toBeNull();
+        expect(session.current.snapshot.status).toBe('reconnecting');
     }, 20_000);
 });
 

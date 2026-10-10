@@ -39,6 +39,7 @@ const corruptOffer = args.includes('--corrupt-offer');
 const adapter = option('--adapter', 'driver');
 assert(['driver', 'demo', 'hook'].includes(adapter), 'unknown --adapter');
 const hook = adapter === 'hook';
+assert(!corruptOffer || hook, '--corrupt-offer requires --adapter hook');
 const authorizeRevoked = args.includes('--authorize-revoked');
 assert(!authorizeRevoked || hook, '--authorize-revoked requires --adapter hook');
 assert(!killDuringRestart || adapter === 'demo', '--kill-during-restart requires --adapter demo');
@@ -103,17 +104,6 @@ const receive = async m => {
         const ufrag = p.description.sdp.match(/a=ice-ufrag:([^\\r\\n]+)/)[1];
         if (offers.has(ufrag)) return;
         offers.add(ufrag); probe.iceGeneration++;
-        if (${corruptOffer} && offers.size > 1) {
-            // P3b: a restart offer that fails SDP-apply is not the peer's own
-            // ICE failing — it is the negotiation broken — so it must stay
-            // terminal: no answer, no recovery on the held session.
-            const bad = p.description.sdp
-                .replace(/^m=video[^\\r\\n]*/m, 'm=video 9 INVALID 0')
-                .replace(/^a=ice-ufrag:.*$/m, 'a=ice-ufrag:');
-            try { await peer.setRemoteDescription({ type: p.description.type, sdp: bad }); probe.offerError = 'the corrupt offer was accepted'; }
-            catch (error) { probe.offerError = String(error && error.message || error); }
-            return;
-        }
         await peer.setRemoteDescription(p.description);
         const answer = await peer.createAnswer(); await peer.setLocalDescription(answer);
         await request('session.description', { session_id: p.sessionId, generation: p.generation, description: answer });
@@ -158,9 +148,26 @@ import TestRenderer from 'react-test-renderer';
 import { bridgeSignaling } from '/@fs/${worktree}/packages/desktop-client/example/App.tsx';
 import { useDesktopSession } from '/@fs/${worktree}/packages/desktop-client/src/useDesktopSession.ts';
 import { attachSurface, nativeDesklink } from '/@fs/${worktree}/packages/desktop-client/src/native.web.ts';
-const probe = window.__probe = { status: 'boot', failure: null, sessionId: null, opens: [], authorizes: [], carriers: [], restarts: [], closes: [], log: [], errors: [], pings: [] };
+const probe = window.__probe = { status: 'boot', failure: null, sessionId: null, generation: null, offerError: null, answerAt: null, iceGeneration: 0, opens: [], authorizes: [], carriers: [], restarts: [], closes: [], log: [], errors: [], pings: [] };
 // Engine heartbeats over the data channel: the control path, apart from video.
-nativeDesklink.addListener('onSessionEvent', e => { if (e.name === 'control' && String(e.payload.message).includes('"ping"')) probe.pings.push(Date.now()); });
+nativeDesklink.addListener('onSessionEvent', e => {
+    if (e.name === 'control' && String(e.payload.message).includes('"ping"')) probe.pings.push(Date.now());
+    if (e.name === 'failure' && String(e.payload.reason ?? '') === 'sdp') probe.offerError = String(e.payload.message ?? 'sdp');
+    if (e.name === 'answer') probe.answerAt = Date.now();
+});
+// P3b: corrupt the next offer the hook hands to the native binding, so the
+// terminal SDP-apply failure runs through useDesktopSession, not a test peer.
+let corruptNextOffer = false;
+const realSetRemoteDescription = nativeDesklink.setRemoteDescription.bind(nativeDesklink);
+nativeDesklink.setRemoteDescription = (id, type, sdp) => {
+    if (type === 'offer') probe.iceGeneration++;
+    if (!corruptNextOffer || type !== 'offer') return realSetRemoteDescription(id, type, sdp);
+    corruptNextOffer = false;
+    const bad = sdp
+        .replace(/^m=video[^\\r\\n]*/m, 'm=video 9 INVALID 0')
+        .replace(/^a=ice-ufrag:.*$/m, 'a=ice-ufrag:');
+    return realSetRemoteDescription(id, type, bad);
+};
 window.addEventListener('unhandledrejection', e => probe.errors.push(String(e.reason)));
 let carrier = null, session = null;
 const authorize = async () => {
@@ -179,7 +186,7 @@ const authorize = async () => {
             if (method === 'session.restart_ice') probe.restarts.push(at);
             if (method === 'session.close') probe.closes.push(at);
             const reply = await own.request(method, params);
-            if (method === 'session.open') probe.sessionId = reply.sessionId;
+            if (method === 'session.open') { probe.sessionId = reply.sessionId; probe.generation = reply.generation; }
             return reply;
         },
     } };
@@ -196,11 +203,13 @@ function Harness() {
 TestRenderer.create(React.createElement(Harness));
 window.__hold = () => { session.setInputEnabled(true); session.send({ kind: 'pointer', phase: 'down', x: 320, y: 180, button: 1 }); session.send({ kind: 'key', character: 'a', down: true }); };
 window.__release = () => session.releaseHeld();
+window.__restart = () => { corruptNextOffer = true; void carrier.request('session.restart_ice', { session_id: probe.sessionId, generation: probe.generation }); };
 window.__measure = async () => {
     const frames = {};
     for (const row of await session.getStats()) if (row.type === 'inbound-rtp' && row.kind === 'video') frames[row.id] = row.framesDecoded ?? 0;
     return { at: Date.now(), sessionId: probe.sessionId, peerId: session.nativeId, frames, channel: session.snapshot.presented ? 'open' : 'closed',
-        status: probe.status, failure: probe.failure, opens: probe.opens, authorizes: probe.authorizes, carriers: probe.carriers,
+        status: probe.status, failure: probe.failure, offerError: probe.offerError, answerAt: probe.answerAt, iceGeneration: probe.iceGeneration,
+        opens: probe.opens, authorizes: probe.authorizes, carriers: probe.carriers,
         restarts: probe.restarts, closes: probe.closes, log: probe.log, errors: probe.errors, pings: probe.pings };
 };
 `;
@@ -403,17 +412,20 @@ async function run() {
         }
         result.counterReset = reset; result.firstFrameAfterPathBackMs = recovered; result.last = last;
         if (corruptOffer) {
-            // P3b: ask for a restart on path-back; the driver corrupts the
-            // resulting offer so SDP-apply fails. A failure that is not the
-            // peer's own ICE is terminal, so the session must not answer it.
+            // P3b: ask for a restart on path-back; the hook corrupts the SDP
+            // it hands to the native binding, so that offer's SDP-apply fails.
+            // A failure that is not the peer's own ICE is terminal, so the
+            // held session must be discarded, not kept for the ICE hold.
             result.restartAt = Date.now();
+            const beforeRestart = await measure();
             await page.evaluate(() => window.__restart());
             await wait(async () => (await measure()).offerError, 5000, 'corrupt offer SDP-apply failure');
             const offerAfter = await measure();
             result.offerError = offerAfter.offerError;
             result.offerAfter = offerAfter;
             assert(offerAfter.iceGeneration >= 2, 'the corrupt restart offer never arrived');
-            assert.equal(offerAfter.answerAt, result.atPathBack.answerAt, 'an SDP-apply failure was answered instead of staying terminal');
+            assert.equal(offerAfter.answerAt, beforeRestart.answerAt, 'an SDP-apply failure was answered instead of staying terminal');
+            await wait(async () => (await measure()).peerId !== beforeRestart.peerId, 2000, 'terminal SDP failure did not discard the held session');
             result.corruptOfferTerminal = true;
             await page.screenshot({ path: join(evidence, 'corrupt-offer.png') });
             return;

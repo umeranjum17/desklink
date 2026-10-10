@@ -424,13 +424,14 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         optionsRef.current.onStateChange?.(next);
     }, []);
 
-    const fail = useCallback((failure: SessionFailure) => {
+    const fail = useCallback((failure: SessionFailure, ice = false) => {
+        heldIceFailureAt.current = failure.code === 'transport' && ice && nativeRef.current != null ? Date.now() : null;
         update({ status: 'failed', failure });
         optionsRef.current.onError?.(failure);
     }, [update]);
 
-    const refuse = useCallback((message: string, code: SessionFailure['code'] = 'platform') => {
-        fail({ code, message });
+    const refuse = useCallback((message: string, code: SessionFailure['code'] = 'platform', ice = false) => {
+        fail({ code, message }, ice);
     }, [fail]);
 
     /** A transport loss is one event no matter how many sides report it: the
@@ -444,8 +445,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
      * reopen effect keeps it for `HOLD_AFTER_FAILED_MS` first. */
     const transportFailed = useCallback((message: string = UNREACHABLE_DESKTOP, ice = false): boolean => {
         if (statusRef.current === 'failed' || dialing.current !== null) return false;
-        heldIceFailureAt.current = ice && nativeRef.current != null ? Date.now() : null;
-        refuse(message, 'transport');
+        refuse(message, 'transport', ice);
         return true;
     }, [refuse]);
 
@@ -861,6 +861,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         pendingOffer.current = null;
         pendingCandidates.current = [];
         pendingCursorEvents.current = [];
+        heldIceFailureAt.current = null;
         restartGraceUntil.current = 0;
         restartCycles.current = 0;
         // A new session has its own media path: the last one's counts and its
@@ -1169,8 +1170,12 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         restartAttempts.current = 0;
         restartCycles.current = 0;
         cancelRestart();
+        if (heldIceFailureAt.current !== null) {
+            heldIceFailureAt.current = null;
+            discardSession();
+        }
         await establish();
-    }, [cancelRestart, establish]);
+    }, [cancelRestart, discardSession, establish]);
 
     // Native events: answer, candidates, control replies, presentation, failure.
     useEffect(() => {
