@@ -5,6 +5,8 @@
 // P1: --product-retention disables that shim and checks real bridge retention.
 // P1e: --burst-restarts 3 --product-retention sends queued restarts on reattach.
 // Record the standalone 20s roam's actual outcome against the unchanged 2s bar.
+// P3a: --adapter hook mounts the real hook over the demo carrier; --authorize-revoked
+// makes the app's authorize() refuse from the cut on.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -28,10 +30,14 @@ const burstRestarts = Number(option('--burst-restarts', '1'));
 assert(Number.isInteger(burstRestarts) && burstRestarts >= 1 && burstRestarts <= 100, '--burst-restarts must be 1..100');
 const killDuringRestart = args.includes('--kill-during-restart');
 const adapter = option('--adapter', 'driver');
-assert(['driver', 'demo'].includes(adapter), 'unknown --adapter');
+assert(['driver', 'demo', 'hook'].includes(adapter), 'unknown --adapter');
+const hook = adapter === 'hook';
+const authorizeRevoked = args.includes('--authorize-revoked');
+assert(!authorizeRevoked || hook, '--authorize-revoked requires --adapter hook');
 assert(!killDuringRestart || adapter === 'demo', '--kill-during-restart requires --adapter demo');
 const driverRestart = args.includes('--driver-restart') || burstRestarts > 1 || killDuringRestart;
-const productRetention = args.includes('--product-retention');
+const productRetention = args.includes('--product-retention') || hook;
+assert(!hook || !driverRestart, 'the hook restarts on its own');
 assert(['same-address', 'new-address'].includes(pathMode), 'unknown --path');
 assert(!driverRestart || scenario === 'roam', '--driver-restart requires roam');
 assert(Number.isInteger(outage) && outage >= 1000 && outage <= 60000, '--outage must be 1000..60000 ms');
@@ -45,7 +51,7 @@ const tap = (direction, message) => {
     appendFileSync(join(evidence, 'stdio.jsonl'), JSON.stringify(row) + '\n');
     return row;
 };
-const result = { scenario, outage, pathMode, driverRestart, burstRestarts, productRetention, adapter, killDuringRestart, head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).stdout.trim(),
+const result = { scenario, outage, pathMode, driverRestart, burstRestarts, productRetention, adapter, authorizeRevoked, killDuringRestart, head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).stdout.trim(),
     shape: 'userspace-shaped link; no netem, privileges or firewall changes', tap: [], teardown: { strays: [], failures: [] } };
 const tag = `DESKLINK_ROAM=${process.pid}`;
 const tagged = () => readdirSync('/proc').flatMap(name => {
@@ -127,6 +133,60 @@ window.__measure = async () => {
 };
 `;
 
+// The real hook and web binding over the demo carrier; nothing here recovers.
+const hookDriver = (port, token) => `
+import React from 'react';
+import TestRenderer from 'react-test-renderer';
+import { bridgeSignaling } from '/@fs/${worktree}/packages/desktop-client/example/App.tsx';
+import { useDesktopSession } from '/@fs/${worktree}/packages/desktop-client/src/useDesktopSession.ts';
+import { attachSurface, nativeDesklink } from '/@fs/${worktree}/packages/desktop-client/src/native.web.ts';
+const probe = window.__probe = { status: 'boot', failure: null, sessionId: null, opens: [], authorizes: [], carriers: [], restarts: [], closes: [], log: [], errors: [], pings: [] };
+// Engine heartbeats over the data channel: the control path, apart from video.
+nativeDesklink.addListener('onSessionEvent', e => { if (e.name === 'control' && String(e.payload.message).includes('"ping"')) probe.pings.push(Date.now()); });
+window.addEventListener('unhandledrejection', e => probe.errors.push(String(e.reason)));
+let carrier = null, session = null;
+const authorize = async () => {
+    probe.authorizes.push(Date.now());
+    if (window.__revoked) throw new Error('this phone is no longer paired');
+    carrier?.close();
+    const own = carrier = bridgeSignaling('ws://127.0.0.1:${port}/desktop?token=${token}');
+    await own.open;
+    probe.carriers.push(Date.now());
+    return { session: { maxWidth: 1280, maxHeight: 720, maxFps: 30 }, signaling: {
+        subscribe: handler => own.subscribe(handler),
+        close: () => own.close(),
+        request: async (method, params) => {
+            const at = Date.now();
+            if (method === 'session.open') probe.opens.push(at);
+            if (method === 'session.restart_ice') probe.restarts.push(at);
+            if (method === 'session.close') probe.closes.push(at);
+            const reply = await own.request(method, params);
+            if (method === 'session.open') probe.sessionId = reply.sessionId;
+            return reply;
+        },
+    } };
+};
+function Harness() {
+    session = useDesktopSession({ authorize, onStateChange: s => {
+        if (s.status !== probe.status) probe.log.push([Date.now(), s.status]);
+        probe.status = s.status; probe.failure = s.failure?.code ?? null;
+    } });
+    React.useEffect(() => { void session.connect(); }, []);
+    React.useEffect(() => { if (session.nativeId != null) attachSurface(session.nativeId, document.body, 'desktop'); }, [session.nativeId]);
+    return null;
+}
+TestRenderer.create(React.createElement(Harness));
+window.__hold = () => { session.setInputEnabled(true); session.send({ kind: 'pointer', phase: 'down', x: 320, y: 180, button: 1 }); session.send({ kind: 'key', character: 'a', down: true }); };
+window.__release = () => session.releaseHeld();
+window.__measure = async () => {
+    const frames = {};
+    for (const row of await session.getStats()) if (row.type === 'inbound-rtp' && row.kind === 'video') frames[row.id] = row.framesDecoded ?? 0;
+    return { at: Date.now(), sessionId: probe.sessionId, peerId: session.nativeId, frames, channel: session.snapshot.presented ? 'open' : 'closed',
+        status: probe.status, failure: probe.failure, opens: probe.opens, authorizes: probe.authorizes, carriers: probe.carriers,
+        restarts: probe.restarts, closes: probe.closes, log: probe.log, errors: probe.errors, pings: probe.pings };
+};
+`;
+
 async function run() {
     const targetDir = process.env.CARGO_TARGET_DIR ?? join(process.env.HOME, '.cache/dl-roam-persistence-target');
     const engine = process.env.DESKLINK_AXI_ENGINE ?? join(targetDir, 'debug/desklink-host');
@@ -179,9 +239,11 @@ async function run() {
             for (const line of String(values[0]).trim().split('\n')) {
                 const message = JSON.parse(line);
                 if (['session.close', 'session.restart_ice', 'session.description'].includes(message.method)) result.tap.push(tap('bridge->engine', message));
+                else if (hook) tap('bridge->engine', message);
             }
             return write(...values);
         };
+        child.stderr.on('data', chunk => appendFileSync(join(evidence, 'engine.log'), chunk));
         let buffered = '';
         child.stdout.on('data', chunk => {
             buffered += chunk;
@@ -189,9 +251,10 @@ async function run() {
             for (const line of lines) {
                 const message = JSON.parse(line);
                 if (['session.revoked', 'session.state', 'session.description'].includes(message.event)) result.tap.push(tap('engine->bridge', message));
+                else if (hook) tap('engine->bridge', message);
             }
         });
-        signalling = await startSignalling(link, bridge.port, token, { relayOnly: driverRestart });
+        signalling = await startSignalling(link, bridge.port, token, { relayOnly: driverRestart || hook });
         relay = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: () => { if (blocked) refused++; return !blocked; } });
         relay.on('connection', client => {
             const host = new WebSocket(`ws://127.0.0.1:${signalling.port}/desktop?token=${token}`);
@@ -222,12 +285,15 @@ async function run() {
         });
         await new Promise(resolve => relay.once('listening', resolve));
         writeFileSync(join(scratch, 'index.html'), '<video autoplay muted style="width:100%;height:100vh"></video><script type="module" src="/driver.js"></script>');
-        writeFileSync(join(scratch, 'driver.js'), driver(relay.address().port, token));
+        writeFileSync(join(scratch, 'driver.js'), (hook ? hookDriver : driver)(relay.address().port, token));
         const { createServer } = await import('vite');
         const stub = join(scratch, 'app-stub.js');
-        writeFileSync(stub, `export const Linking = {}, Platform = {}, Pressable = null, ScrollView = null, Settings = {}, StatusBar = null, StyleSheet = { create: x => x }, Text = null, View = null, SafeAreaProvider = null, useSafeAreaInsets = () => ({}), ClipboardConfirmation = null, DesktopView = null, ModifierKeys = null, useDesktopSession = () => ({});`);
-        vite = await createServer({ root: scratch, configFile: false, logLevel: 'error',
+        writeFileSync(stub, `export const Linking = {}, Platform = {}, Pressable = null, ScrollView = null, Settings = {}, StatusBar = null, StyleSheet = { create: x => x }, Text = null, View = null, AppState = { addEventListener: () => ({ remove() {} }) }, SafeAreaProvider = null, useSafeAreaInsets = () => ({}), ClipboardConfirmation = null, DesktopView = null, ModifierKeys = null, useDesktopSession = () => ({});`);
+        const src = join(worktree, 'packages/desktop-client/src');
+        vite = await createServer({ root: scratch, configFile: false, logLevel: 'error', define: { global: 'globalThis' },
+            plugins: [{ name: 'native-web', enforce: 'pre', resolveId: (source, importer) => source === './native' && importer?.startsWith(src) ? join(src, 'native.web.ts') : null }],
             resolve: { alias: [
+                { find: 'react-test-renderer', replacement: join(worktree, 'node_modules/react-test-renderer') },
                 ...['react-native', 'expo-clipboard', 'react-native-safe-area-context', '@desklink/react-native'].map(find => ({ find, replacement: stub })),
                 { find: /^react$/, replacement: join(worktree, 'node_modules/react/index.js') },
             ] },
@@ -260,6 +326,7 @@ async function run() {
             await wait(async () => (await measure()).pending === 1, 1000, 'real carrier request awaiting reply');
         }
         result.cutAt = Date.now(); blocked = true;
+        if (authorizeRevoked) await page.evaluate(() => { window.__revoked = true; });
         if (!productRetention || scenario === 'roam') link.set({ discard: true }, 'roam cut');
         for (const client of relay.clients) client.terminate();
         if (adapter === 'demo') {
@@ -349,10 +416,51 @@ async function run() {
             assert.deepEqual(result.afterRestart.errors, []);
             await page.screenshot({ path: join(evidence, 'restart.png') });
         }
-        if (productRetention && scenario === 'roam') {
+        // A roam past the client's ICE failed (~15 s) reopens in P3a; P3b holds it.
+        const reopens = hook && outage > 15000;
+        if (productRetention && scenario === 'roam' && !reopens) {
             assert.equal(result.atPathBack.sessionId, held.sessionId, 'session id changed during outage');
             assert(!result.tap.some(e => e.direction === 'bridge->engine' && e.method === 'session.close'), 'bridge closed session inside retention window');
             assert(!result.tap.some(e => e.event === 'session.revoked'), 'engine ended retained session');
+        }
+        if (hook && scenario === 'roam') {
+            const closed = () => result.tap.some(e => e.direction === 'bridge->engine' && e.method === 'session.close' && e.params.session_id === held.sessionId);
+            if (authorizeRevoked) {
+                await wait(async () => (await measure()).status === 'ended', 2000, 'revoked pairing ended the session');
+                // No carrier is left to carry a close: the bridge's window sends it,
+                // unless the engine's own ICE failure (~25 s) revokes the session first.
+                const ended = () => closed() || result.tap.some(e => e.direction === 'engine->bridge' && e.event === 'session.revoked' && e.params?.sessionId === held.sessionId);
+                await wait(ended, Math.max(0, result.cutAt + 32000 - Date.now()), 'held session ended');
+                await sleep(2000);
+            } else if (reopens) {
+                const backCarrier = await (async () => { await wait(async () => (await measure()).carriers.some(at => at >= result.backAt), 10000, 'carrier after path-back'); return (await measure()).carriers.find(at => at >= result.backAt); })();
+                await wait(async () => { const m = await measure(); return m.sessionId !== held.sessionId && Object.values(m.frames).some(n => n > 0); }, 10000, 'picture on a new session');
+                const m = await measure();
+                result.reopenAfterCarrierMs = m.opens.find(at => at >= backCarrier) - backCarrier;
+                result.newPictureMs = m.at - result.backAt;
+                assert(result.reopenAfterCarrierMs <= 500, `reopen ${result.reopenAfterCarrierMs}ms after the first carrier`);
+                assert(result.newPictureMs <= 3000, `new-session picture ${result.newPictureMs}ms after path-back`);
+            } else {
+                assert(recovered !== null && recovered <= 2000, `recovery ${recovered}ms after path-back`);
+                if (pathMode === 'new-address') assert(result.tap.some(e => e.direction === 'bridge->engine' && e.method === 'session.restart_ice' && e.at >= result.backAt), 'no restart_ice after path-back');
+            }
+            if (!authorizeRevoked) {
+                await sleep(Math.max(0, result.cutAt + 45000 - Date.now()));
+                const a = await measure(); await sleep(1000); const b = await measure();
+                result.at45 = { sessionId: b.sessionId, peerId: b.peerId, advanced: Object.keys(b.frames).some(id => b.frames[id] > (a.frames[id] ?? Infinity)) };
+                assert(result.at45.advanced && a.peerId === b.peerId, 'frames not advancing at cut + 45 s');
+            }
+            const m = await measure();
+            Object.assign(result, { recoveryMs: recovered, sameSession: !reopens && !authorizeRevoked && m.sessionId === held.sessionId && !closed(),
+                opens: m.opens.length, authorizesAfterCut: m.authorizes.filter(at => at >= result.cutAt).length, restartsAfterBack: m.restarts.filter(at => at >= result.backAt).length,
+                status: m.status, failure: m.failure, statusLog: m.log, timeline: { authorizes: m.authorizes, carriers: m.carriers, opens: m.opens, restarts: m.restarts }, pageErrors: m.errors,
+                pingsAfterBack: m.pings.filter(at => at >= result.backAt).length, firstPingAfterCut: m.pings.find(at => at > result.cutAt + 1000) - result.backAt });
+            if (authorizeRevoked) {
+                assert.equal(m.status, 'ended'); assert.equal(result.authorizesAfterCut, 1, 'redial after a refused pairing');
+            } else {
+                assert.equal(result.opens, reopens ? 2 : 1, 'session.open count'); assert.equal(m.status, 'live');
+                if (!reopens) assert(result.sameSession, 'session changed');
+            }
         }
         result.closeMs = result.tap.find(e => e.direction === 'bridge->engine' && e.method === 'session.close' && e.params.session_id === held.sessionId)?.at - result.cutAt;
         await wait(() => {
@@ -373,7 +481,7 @@ async function run() {
         result.inputReleaseAfterCutMs = buttonUp?.observedAt - result.cutAt;
         assert(result.refused > 0, 'outage admission was not exercised');
         assert(result.buttonUps > 0 && result.keyUps >= result.keyDowns, 'held input was not released');
-        assert(driverRestart || scenario !== 'roam' || recovered !== null, 'RED: pre-cut peer/session did not resume decoded video within 2s of path-back');
+        assert(driverRestart || hook || scenario !== 'roam' || recovered !== null, 'RED: pre-cut peer/session did not resume decoded video within 2s of path-back');
     } finally {
         writeFileSync(join(evidence, 'fixture-events.jsonl'), fixtureLog);
         writeFileSync(join(evidence, 'fixture-observed.json'), JSON.stringify(observedFixture, null, 2));

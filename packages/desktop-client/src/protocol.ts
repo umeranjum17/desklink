@@ -134,6 +134,8 @@ export interface Signaling {
      */
     request<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>;
     subscribe(handler: (event: SessionEvent) => void): () => void;
+    /** Optional: end this carrier now. Called once the package has declared it dead. */
+    close?(): void;
 }
 
 export type SessionStatus =

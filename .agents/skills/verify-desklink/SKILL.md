@@ -181,6 +181,20 @@ cut, pending/future `transport` rejection, one carrier-close event, unchanged
 before cutting its reply: inspect the engine restart tap and require rejection
 within 50ms. This proves carrier behavior, not automatic hook reattachment.
 
+## Hook reattach
+
+For changes to how `useDesktopSession` survives a lost carrier, run
+`roam-flow.mjs --adapter hook` (same engine, lock, memory gate and unset
+displays as above; a fresh evidence folder each): `--outage 12000` three times,
+`--outage 12000 --path new-address` three times, `--outage 40000`, and
+`--outage 12000 --authorize-revoked`. The page mounts the real hook through
+`native.web.ts` with the demo `bridgeSignaling`; only RN rendering is stubbed.
+Read `result.json`: `recoveryMs`, `sameSession`, `opens`, `at45`,
+`reopenAfterCarrierMs`/`newPictureMs` for 40s, and the stdio tap (`stdio.jsonl`)
+for `restart_ice`, `session.close` and `session.revoked`. Recovery timing varies
+with the engine data channel's retransmit backoff after the outage; report each
+run, never only the best.
+
 ## Motion
 
 Record video for **every interaction the change under review moves**, not
