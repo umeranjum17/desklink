@@ -122,7 +122,9 @@ export type SessionEvent =
  * The package calls these and nothing else, so an application can carry them
  * over its existing encrypted request path, a socket, or an in-process bridge.
  * `subscribe` delivers engine notifications until the returned function runs.
- * The application's authorize() resolves only once this carrier is open.
+ * The application's authorize() resolves only once this carrier is open. It
+ * rejects with `code: 'transport'` for a network or carrier failure; any other
+ * rejection is a refusal that ends the session.
  */
 export interface Signaling {
     /**

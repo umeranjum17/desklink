@@ -330,7 +330,9 @@ candidates, state and revocation. Pixels and input do **not** use this
 channel — they are the desktop's own WebRTC session.
 
 `authorize()` must wait for the authenticated carrier to open before returning
-its `Signaling`. When that carrier is gone, reject pending and future requests
+its `Signaling`. It rejects with `code: 'transport'` for a network or carrier
+failure; any other rejection is a refusal that ends the session, so a roam only
+keeps the session when the adapter tags its outages. When that carrier is gone, reject pending and future requests
 with `code: 'transport'`; do not queue them indefinitely. An adapter may emit
 `{ kind: 'carrier-closed' }` once to notify subscribers of that loss, and may
 offer `close()`, which the package calls on a carrier it has given up on. This is

@@ -1123,6 +1123,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             }
             // The picture already moves: only the carrier was missing.
             if (statusRef.current === 'live' && !frozen.current) return;
+            if (statusRef.current === 'connecting') update({ status: 'reconnecting' });
             restartAttempts.current = 0;
             restartCycles.current = 0;
             cancelRestart();
