@@ -709,7 +709,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         }, () => undefined);
     }, [armMedia, onTransportState]);
 
-    const pictureMoving = useCallback((): boolean => mediaMovingAt.current !== null && Date.now() - mediaMovingAt.current < STALL_AFTER_MS, []);
+    const pictureMoving = useCallback((within: number): boolean => mediaMovingAt.current !== null && Date.now() - mediaMovingAt.current < within, []);
 
     /**
      * One stall check: quiet too long while the session should be talking
@@ -733,7 +733,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             stallTimer.current = setTimeout(() => checkStallRef.current(), restartGraceUntil.current - Date.now());
             return;
         }
-        if (pictureMoving() && !frozen.current && quietMs < QUIET_PICTURE_MS) {
+        if (pictureMoving(STALL_AFTER_MS) && !frozen.current && quietMs < QUIET_PICTURE_MS) {
             stallTimer.current = setTimeout(() => checkStallRef.current(), STALL_AFTER_MS);
             return;
         }
@@ -1125,11 +1125,11 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 return;
             }
             // The picture already moves: only the carrier was missing.
-            if (pictureMoving() && !frozen.current) {
+            if (pictureMoving(MEDIA_POLL_MS) && !frozen.current) {
                 if (statusRef.current === 'reconnecting') onTransportState('connected', false);
                 return;
             }
-            if (statusRef.current === 'connecting') update({ status: 'reconnecting' });
+            if (statusRef.current !== 'reconnecting') update({ status: 'reconnecting' });
             restartAttempts.current = 0;
             restartCycles.current = 0;
             cancelRestart();

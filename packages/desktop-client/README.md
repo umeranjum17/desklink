@@ -285,10 +285,11 @@ view.
   fires. While the loop runs, a session that has shown a picture never reports
   `failed` or a transport failure; one that never showed a picture reports the
   first-frame transport failure after 20 s and the loop stops. A new carrier
-  picks up the same session: if the picture is already moving, it sends no ICE
-  restart (and a `reconnecting` session returns to `live`); otherwise it asks
-  for an ICE restart at once. Failures caused
-  by the dead carrier wait for the next one rather than ending the session. The
+  picks up the same session: if the picture advanced within the last media poll
+  and is not frozen, it sends no ICE restart (and a `reconnecting` session
+  returns to `live`); otherwise it moves the session to `reconnecting` and asks
+  for an ICE restart at once. Failures caused by the dead carrier wait for the
+  next one rather than ending the session. The
   loop ends when a carrier reattaches the held session, or when the desktop
   refuses it (a `session` or `generation` refusal, once it no longer holds the
   session): that reopens at once. An `authorize()` refusal still ends the
