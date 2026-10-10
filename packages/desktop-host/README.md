@@ -3,7 +3,7 @@
 <p align="center">
   <a href="https://www.npmjs.com/package/@desklink/host"><img alt="npm" src="https://img.shields.io/npm/v/@desklink/host?style=flat&label=npm" /></a>
   <a href="https://github.com/umeranjum17/desklink/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/umeranjum17/desklink/ci.yml?style=flat&branch=main" /></a>
-  <a href="LICENSE"><img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-666?style=flat" /></a>
+  <a href="https://github.com/umeranjum17/desklink/blob/main/packages/desktop-host/LICENSE"><img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-666?style=flat" /></a>
   <img alt="Linux and macOS (preview)" src="https://img.shields.io/badge/Linux%20%7C%20macOS%20%28preview%29-111?style=flat" />
 </p>
 
@@ -59,7 +59,7 @@ The engine supports Linux desktop sessions, and macOS (preview) desktop sessions
 - **Clipboard** explicitly, in both directions, only when asked. It is never
   polled and never used as a hidden way to type. On Wayland, writes require
   `wl-copy` from `wl-clipboard`; macOS uses the plain-text general pasteboard.
-  X11 uses the session's selected display; see the [clipboard protocol](docs/PROTOCOL.md#clipboard-over-the-local-protocol)
+  X11 uses the session's selected display; see the [clipboard protocol](https://github.com/umeranjum17/desklink/blob/main/packages/desktop-host/docs/PROTOCOL.md#clipboard-over-the-local-protocol)
   for supported targets, transfer limits and selection lifetime.
 
 ## What it deliberately does not do
@@ -76,7 +76,7 @@ The engine supports Linux desktop sessions, and macOS (preview) desktop sessions
 The npm badge tracks the registry version. npm installs the matching optional
 engine package: `@desklink/host-linux-x64-gnu` or `@desklink/host-darwin-arm64`.
 Supported platforms: Linux x64 with glibc 2.36 or newer and macOS arm64 (preview).
-See the [changelog](../../CHANGELOG.md) for release changes.
+See the [changelog](https://github.com/umeranjum17/desklink/blob/main/CHANGELOG.md) for release changes.
 
 ```sh
 npm install @desklink/host
@@ -178,7 +178,7 @@ Homebrew libvpx, then follow
 For a source build, `DESKLINK_VPX_STATIC_DIR` is the libvpx install prefix
 (containing `include/` and `lib/libvpx.a`), not its `lib/` directory.
 The app-bundled signed harness is for local TCC qualification, not npm
-installation. See the [macOS protocol](docs/PROTOCOL.md#macos).
+installation. See the [macOS protocol](https://github.com/umeranjum17/desklink/blob/main/packages/desktop-host/docs/PROTOCOL.md#macos).
 
 Point `DESKLINK_ENGINE` at a binary built elsewhere if you have one. (`MUXR_DESKLINK_ENGINE` still works as a deprecated fallback and will be removed in a later release.) The
 package never searches `PATH` for a same-named program: "a binary called
@@ -221,10 +221,9 @@ install:
 
 These are build prerequisites, not additional runtime requirements for the
 prebuilt package; in particular, libxcb is not a prebuilt runtime requirement.
-Nothing is downloaded by the build itself. The engine step in `yarn run check`
-skips with a list of missing prerequisites when any of these is absent; direct
-`cargo test --manifest-path engine/Cargo.toml` does not skip and needs them
-installed. Only a Linux machine with all of them compiles and tests the crate.
+Nothing is downloaded by the build itself. `cargo test --manifest-path
+engine/Cargo.toml` needs all of these installed; only a Linux machine with them
+compiles and tests the crate.
 On macOS the source build does not use these Linux native libraries or shims;
 run `cargo test --bin desklink-host --manifest-path engine/Cargo.toml` for its
 binary tests (the full test command also builds a Linux-only example).
@@ -301,7 +300,7 @@ A compositor without that protocol still captures, cursor hidden, and says so
 in `cursor.limitation`. X11 reports positions even on still
 frames and already captures root pixels without a cursor. macOS, Windows, and consumer-encoded
 sources return `cursor-unavailable` for hidden requests. Omitting the option
-preserves existing behavior. See [the cursor protocol](docs/PROTOCOL.md#cursor-free-capture).
+preserves existing behavior. See [the cursor protocol](https://github.com/umeranjum17/desklink/blob/main/packages/desktop-host/docs/PROTOCOL.md#cursor-free-capture).
 
 `myChannel` is the application's own authenticated connection, whatever that is.
 There is no second identity system, no pairing ceremony and no account: the
@@ -309,7 +308,7 @@ engine trusts the consumer's pairing. A paired consumer gets all available
 view, input and clipboard access; missing input or clipboard backends fail per
 action.
 For the application's pairing, identity and signaling transport, see the
-[BYOKit integration guidance](../../README.md#why-desklink-exists).
+[BYOKit integration guidance](https://github.com/umeranjum17/desklink/blob/main/README.md#why-desklink-exists).
 
 ### If you have no channel of your own
 
