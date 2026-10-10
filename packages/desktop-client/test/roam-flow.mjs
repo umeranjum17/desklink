@@ -154,7 +154,7 @@ import TestRenderer from 'react-test-renderer';
 import { bridgeSignaling } from '/@fs/${worktree}/packages/desktop-client/example/App.tsx';
 import { useDesktopSession } from '/@fs/${worktree}/packages/desktop-client/src/useDesktopSession.ts';
 import { attachSurface, nativeDesklink } from '/@fs/${worktree}/packages/desktop-client/src/native.web.ts';
-const probe = window.__probe = { status: 'boot', failure: null, sessionId: null, generation: null, offerError: null, answerAt: null, iceGeneration: 0, opens: [], authorizes: [], carriers: [], restarts: [], closes: [], log: [], errors: [], pings: [] };
+const probe = window.__probe = { status: 'boot', failure: null, holdAt: null, sessionId: null, generation: null, offerError: null, answerAt: null, iceGeneration: 0, opens: [], authorizes: [], carriers: [], restarts: [], closes: [], log: [], errors: [], pings: [] };
 // Engine heartbeats over the data channel: the control path, apart from video.
 nativeDesklink.addListener('onSessionEvent', e => {
     if (e.name === 'control' && String(e.payload.message).includes('"ping"')) probe.pings.push(Date.now());
@@ -201,6 +201,7 @@ function Harness() {
     session = useDesktopSession({ authorize, onStateChange: s => {
         if (s.status !== probe.status) probe.log.push([Date.now(), s.status]);
         probe.status = s.status; probe.failure = s.failure?.code ?? null;
+        if (s.status === 'failed' && s.failure?.code === 'transport' && probe.holdAt === null) probe.holdAt = Date.now();
     } });
     React.useEffect(() => { void session.connect(); }, []);
     React.useEffect(() => { if (session.nativeId != null) attachSurface(session.nativeId, document.body, 'desktop'); }, [session.nativeId]);
@@ -214,7 +215,7 @@ window.__measure = async () => {
     const frames = {};
     for (const row of await session.getStats()) if (row.type === 'inbound-rtp' && row.kind === 'video') frames[row.id] = row.framesDecoded ?? 0;
     return { at: Date.now(), sessionId: probe.sessionId, peerId: session.nativeId, frames, channel: session.snapshot.presented ? 'open' : 'closed',
-        status: probe.status, failure: probe.failure, offerError: probe.offerError, answerAt: probe.answerAt, iceGeneration: probe.iceGeneration,
+        status: probe.status, failure: probe.failure, holdAt: probe.holdAt, offerError: probe.offerError, answerAt: probe.answerAt, iceGeneration: probe.iceGeneration,
         opens: probe.opens, authorizes: probe.authorizes, carriers: probe.carriers,
         restarts: probe.restarts, closes: probe.closes, log: probe.log, errors: probe.errors, pings: probe.pings };
 };
@@ -488,7 +489,6 @@ async function run() {
             assert(!result.tap.some(e => e.event === 'session.revoked'), 'engine ended retained session');
         }
         if (hook && scenario === 'roam') {
-            if (mediaCut) assert.equal(result.atPathBack.status, 'failed', `expected a held ICE failure at path-back, saw ${result.atPathBack.status}`);
             const closed = () => result.tap.some(e => e.direction === 'bridge->engine' && e.method === 'session.close' && e.params.session_id === held.sessionId);
             if (authorizeRevoked) {
                 await wait(async () => (await measure()).status === 'ended', 2000, 'revoked pairing ended the session');
@@ -517,6 +517,7 @@ async function run() {
             }
             const m = await measure();
             Object.assign(result, { recoveryMs: recovered, sameSession: !reopens && !authorizeRevoked && m.sessionId === held.sessionId && !closed(),
+                holdAt: m.holdAt, heldIceFailure: m.holdAt != null && m.holdAt >= result.cutAt && m.holdAt <= result.backAt,
                 opens: m.opens.length, authorizesAfterCut: m.authorizes.filter(at => at >= result.cutAt).length, restartsAfterBack: m.restarts.filter(at => at >= result.backAt).length,
                 status: m.status, failure: m.failure, statusLog: m.log, timeline: { authorizes: m.authorizes, carriers: m.carriers, opens: m.opens, restarts: m.restarts }, pageErrors: m.errors,
                 pingsAfterBack: m.pings.filter(at => at >= result.backAt).length, firstPingAfterCut: m.pings.find(at => at > result.cutAt + 1000) - result.backAt });

@@ -866,6 +866,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     /** Drop everything this process holds for a session the engine has ended. */
     const discardSession = useCallback(() => {
         generationToken.current += 1;
+        cancelFirstFrame();
         const id = nativeRef.current;
         nativeRef.current = null;
         inputEnabled.current = false;
@@ -891,7 +892,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         modifiersRef.current = NO_MODIFIERS;
         setModifiers(NO_MODIFIERS);
         if (id != null) nativeDesklink?.closeSession(id);
-    }, [dropCarrier]);
+    }, [cancelFirstFrame, dropCarrier]);
 
     /** Tell the host a session is over; a failure is nothing the user can act on. */
     const endRemote = useCallback(async (
