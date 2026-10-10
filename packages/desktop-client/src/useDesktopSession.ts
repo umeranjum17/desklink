@@ -444,7 +444,8 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
      * held and has not been revoked, that is not the end of the session: the
      * reopen effect keeps it for `HOLD_AFTER_FAILED_MS` first. */
     const transportFailed = useCallback((message: string = UNREACHABLE_DESKTOP, ice = false): boolean => {
-        if (statusRef.current === 'failed' || dialing.current !== null) return false;
+        if (dialing.current !== null) return false;
+        if (ice && statusRef.current === 'failed') return false;
         refuse(message, 'transport', ice);
         return true;
     }, [refuse]);
@@ -640,6 +641,11 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const onTransportState = useCallback((state: string, trackIce = true, skipGrace = false) => {
         // Synthetic stall reports say nothing about ICE itself.
         if (trackIce) iceConnected.current = state === 'connected' || state === 'completed';
+        if (heldIceFailureAt.current !== null && statusRef.current === 'failed'
+            && (state === 'connected' || state === 'completed')) {
+            heldIceFailureAt.current = null;
+            update({ status: 'reconnecting' });
+        }
         const mapped = connectionStatusFor(state, statusRef.current, presentedRef.current && !frozen.current);
         if (mapped === null) return;
         // A transport that answers while the picture is frozen is not a
@@ -712,7 +718,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 frozen.current = false;
                 // The picture advances again, so the transport can be believed
                 // for this session: live returns without waiting for it to say so.
-                if (statusRef.current === 'reconnecting') onTransportState('connected', false);
+                if (statusRef.current === 'reconnecting' || (statusRef.current === 'failed' && heldIceFailureAt.current !== null)) onTransportState('connected', false);
                 return;
             }
             if (mediaMovingAt.current === null) return;
@@ -1149,7 +1155,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                     if (opened.current !== held || dialing.current !== null) return;
                     // The picture moves: only the carrier was missing.
                     if ((mediaCounts(rows)?.frames ?? 0) > (before?.frames ?? Infinity)) {
-                        if (statusRef.current === 'reconnecting') onTransportState('connected', false);
+                        if (statusRef.current === 'reconnecting' || (statusRef.current === 'failed' && heldIceFailureAt.current !== null)) onTransportState('connected', false);
                         return;
                     }
                     if (statusRef.current !== 'reconnecting') update({ status: 'reconnecting' });

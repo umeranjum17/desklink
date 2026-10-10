@@ -5,8 +5,11 @@
 // P1: --product-retention disables that shim and checks real bridge retention.
 // P1e: --burst-restarts 3 --product-retention sends queued restarts on reattach.
 // P3b: --stall-carrier blackholes the carrier instead of closing it (the
-//      tailnet case); --corrupt-offer makes the restart offer fail SDP-apply,
-//      which must stay terminal rather than recover.
+//      tailnet case); --media-cut drops only the media/ICE path and keeps the
+//      signalling carrier up, so the client's own ICE reaches failed while the
+//      dial loop is idle and the held session must return to live on the same
+//      session when the path comes back; --corrupt-offer makes the restart
+//      offer fail SDP-apply, which must stay terminal rather than recover.
 // Record the standalone 20s roam's actual outcome against the unchanged 2s bar.
 // P3a: --adapter hook mounts the real hook over the demo carrier; --authorize-revoked
 // makes the app's authorize() refuse from the cut on.
@@ -35,11 +38,13 @@ const killDuringRestart = args.includes('--kill-during-restart');
 // P3b: the carrier stalls instead of closing (a blackholed tailnet socket),
 // and/or the recovery offer is corrupted so SDP-apply fails.
 const stallCarrier = args.includes('--stall-carrier');
+const mediaCut = args.includes('--media-cut');
 const corruptOffer = args.includes('--corrupt-offer');
 const adapter = option('--adapter', 'driver');
 assert(['driver', 'demo', 'hook'].includes(adapter), 'unknown --adapter');
 const hook = adapter === 'hook';
 assert(!corruptOffer || hook, '--corrupt-offer requires --adapter hook');
+assert(!mediaCut || hook, '--media-cut requires --adapter hook');
 const authorizeRevoked = args.includes('--authorize-revoked');
 assert(!authorizeRevoked || hook, '--authorize-revoked requires --adapter hook');
 assert(!killDuringRestart || adapter === 'demo', '--kill-during-restart requires --adapter demo');
@@ -47,6 +52,7 @@ const driverRestart = args.includes('--driver-restart') || burstRestarts > 1 || 
 const productRetention = args.includes('--product-retention') || hook;
 assert(!hook || !driverRestart, 'the hook restarts on its own');
 assert(['same-address', 'new-address'].includes(pathMode), 'unknown --path');
+assert(!mediaCut || (!stallCarrier && pathMode === 'same-address'), '--media-cut cannot be combined with --stall-carrier or --path new-address');
 assert(!driverRestart || scenario === 'roam', '--driver-restart requires roam');
 assert(Number.isInteger(outage) && outage >= 1000 && outage <= 60000, '--outage must be 1000..60000 ms');
 assert(['roam', 'abandon', 'close-in-window'].includes(scenario), 'unknown --scenario');
@@ -59,7 +65,7 @@ const tap = (direction, message) => {
     appendFileSync(join(evidence, 'stdio.jsonl'), JSON.stringify(row) + '\n');
     return row;
 };
-const result = { scenario, outage, pathMode, driverRestart, burstRestarts, productRetention, adapter, authorizeRevoked, killDuringRestart, stallCarrier, corruptOffer, head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).stdout.trim(),
+const result = { scenario, outage, pathMode, driverRestart, burstRestarts, productRetention, adapter, authorizeRevoked, killDuringRestart, stallCarrier, mediaCut, corruptOffer, head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).stdout.trim(),
     shape: 'userspace-shaped link; no netem, privileges or firewall changes', tap: [], teardown: { strays: [], failures: [] } };
 const tag = `DESKLINK_ROAM=${process.pid}`;
 const tagged = () => readdirSync('/proc').flatMap(name => {
@@ -363,7 +369,7 @@ async function run() {
         // A stalled carrier keeps its socket open and swallows everything; the
         // default cuts it so the relay closes upstream.
         if (stallCarrier) stalled = true;
-        else for (const client of relay.clients) client.terminate();
+        else if (!mediaCut) for (const client of relay.clients) client.terminate();
         if (adapter === 'demo') {
             await sleep(1000);
             result.carrierAfterCut = await measure();
@@ -482,6 +488,7 @@ async function run() {
             assert(!result.tap.some(e => e.event === 'session.revoked'), 'engine ended retained session');
         }
         if (hook && scenario === 'roam') {
+            if (mediaCut) assert.equal(result.atPathBack.status, 'failed', `expected a held ICE failure at path-back, saw ${result.atPathBack.status}`);
             const closed = () => result.tap.some(e => e.direction === 'bridge->engine' && e.method === 'session.close' && e.params.session_id === held.sessionId);
             if (authorizeRevoked) {
                 await wait(async () => (await measure()).status === 'ended', 2000, 'revoked pairing ended the session');
