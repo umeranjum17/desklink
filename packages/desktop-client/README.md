@@ -279,14 +279,15 @@ view.
   when it closes, or a restart request on it gets no reply within 1.5 s, the
   session drops that carrier for good (calling its optional `close()`) and
   keeps calling `authorize()` — one dial at a time, 250 ms after a failure,
-  5 s each — whatever the status. A new carrier picks up the same session:
-  if the picture is already moving, nothing else happens; otherwise it asks
-  for an ICE restart at once. Failures caused by the dead carrier wait for the
-  next one rather than ending the session. If the desktop no longer holds the
-  session (a `session` or `generation` refusal), it reopens at once. After
-  ~30 s without a carrier, the host has let the session go, so the first
-  carrier opens a new one. An `authorize()` refusal still ends the session:
-  a revoked pairing cannot roam back.
+  5 s each, with no budget and no backoff. While that loop runs the status
+  stays `reconnecting`; it never reports `failed` or a transport failure. A new
+  carrier picks up the same session: if the picture is already moving, nothing
+  else happens; otherwise it asks for an ICE restart at once. Failures caused
+  by the dead carrier wait for the next one rather than ending the session. The
+  loop ends when a carrier reattaches the held session, or when the desktop
+  refuses it (a `session` or `generation` refusal, once it no longer holds the
+  session): that reopens at once. An `authorize()` refusal still ends the
+  session: a revoked pairing cannot roam back.
 - **Input starts disarmed.** This is a local arm against accidental touches,
   not a permission: the session already has input. `setInputEnabled(true)` arms
   pointer, keyboard and clipboard input; `setInputEnabled(false)` blocks new

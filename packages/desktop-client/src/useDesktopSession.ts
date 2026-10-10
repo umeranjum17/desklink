@@ -66,8 +66,6 @@ const RESTART_REQUEST_DEADLINE_MS = 1500;
 const DIAL_RETRY_MS = 250;
 /** One dial's bound. Not shorter: Chromium throttles refused WebSocket handshakes. */
 const DIAL_TIMEOUT_MS = 5000;
-/** How long the host holds a session with no carrier (the bridge's `reattachMs`); past it, reopen. */
-const REATTACH_WINDOW_MS = 30_000;
 /**
  * How long the media path may carry nothing at all before a session that says
  * `live` stops saying so. The engine's transport state reaches the client over
@@ -391,9 +389,9 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     /** Bumped per carrier adopted or dropped: an older carrier's events and replies are ignored. */
     const carrierEpoch = useRef(0);
     const unsubscribeCarrier = useRef<(() => void) | null>(null);
-    /** While the carrier is dead, whatever the status: the dial in flight, its retry, the reattach window. */
-    const dialing = useRef<{ inFlight: boolean; retry?: ReturnType<typeof setTimeout>; window: ReturnType<typeof setTimeout> } | null>(null);
-    /** The next reopen skips its backoff: the host no longer holds the session at all. */
+    /** While the carrier is dead, whatever the status: the dial in flight and its retry. */
+    const dialing = useRef<{ inFlight: boolean; retry?: ReturnType<typeof setTimeout> } | null>(null);
+    /** Set with a reopen that skips its backoff: the host no longer holds the session at all. */
     const reopenAtOnce = useRef(false);
     const optionsRef = useRef(options);
     optionsRef.current = options;
@@ -421,10 +419,12 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
 
     /** A transport loss is one event no matter how many sides report it: the
      * peer's `failed` state and its `failure` event would otherwise spend the
-     * reopen budget twice for the same outage. */
-    const transportFailed = useCallback((message: string = UNREACHABLE_DESKTOP) => {
-        if (statusRef.current === 'failed') return;
+     * reopen budget twice for the same outage. While the dial loop is still
+     * recovering, the session stays `reconnecting` and reports nothing. */
+    const transportFailed = useCallback((message: string = UNREACHABLE_DESKTOP): boolean => {
+        if (statusRef.current === 'failed' || dialing.current !== null) return false;
         refuse(message, 'transport');
+        return true;
     }, [refuse]);
 
     const cancelRestart = useCallback(() => {
@@ -487,7 +487,6 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         const run = dialing.current;
         dialing.current = null;
         clearTimeout(run?.retry);
-        clearTimeout(run?.window);
     }, []);
 
     /** Carrier `epoch` is dead: drop it hard and, while a session is held, dial a new one. */
@@ -495,17 +494,9 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         if (epoch !== carrierEpoch.current || signaling.current == null) return;
         dropCarrier(true);
         if (dialing.current !== null || opened.current == null) return;
-        const run: NonNullable<typeof dialing.current> = {
-            inFlight: false,
-            window: setTimeout(() => {
-                if (dialing.current === run && opened.current != null) {
-                    transportFailed('the desktop stayed unreachable; reopening the session');
-                }
-            }, REATTACH_WINDOW_MS),
-        };
-        dialing.current = run;
+        dialing.current = { inFlight: false };
         dialRef.current();
-    }, [dropCarrier, transportFailed]);
+    }, [dropCarrier]);
 
     /** Whether a request on carrier `epoch` failed because that carrier is gone; the dial loop then owns it. */
     const carrierFailed = useCallback((epoch: number, error: unknown): boolean => {
@@ -573,8 +564,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                     // only way back, and waiting out a backoff buys nothing.
                     if (errorCode(error) === 'session' || errorCode(error) === 'generation') {
                         attempts.current = 0;
-                        reopenAtOnce.current = true;
-                        transportFailed('the desktop no longer holds this session; reopening it');
+                        reopenAtOnce.current = transportFailed('the desktop no longer holds this session; reopening it');
                         return;
                     }
                     spendRestartAttempt();
@@ -1348,6 +1338,8 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     // on the strength of the old grant, and an outage that outlasts one
     // attempt must not spend the whole budget while the network is still down.
     useEffect(() => {
+        const immediate = reopenAtOnce.current;
+        reopenAtOnce.current = false;
         if (snapshot.status !== 'failed') return;
         if (snapshot.failure?.code !== 'transport') return;
         // The failed session is dead on the engine side. Drop its handle and
@@ -1364,8 +1356,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             update({ status: 'reconnecting' });
             return;
         }
-        const wait = reopenAtOnce.current ? 0 : backoffDelay(REOPEN_BACKOFF_MS, attempts.current);
-        reopenAtOnce.current = false;
+        const wait = immediate ? 0 : backoffDelay(REOPEN_BACKOFF_MS, attempts.current);
         if (wait === null) return;
         attempts.current += 1;
         update({ status: 'reconnecting' });
