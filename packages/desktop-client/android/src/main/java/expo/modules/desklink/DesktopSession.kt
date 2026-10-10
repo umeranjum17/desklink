@@ -111,7 +111,7 @@ class DesktopSession(
         emit("ready", emptyMap())
       } catch (error: Throwable) {
         Log.w(TAG, "Could not start the desktop session", error)
-        fail("transport", error.message ?: "the desktop session could not start")
+        fail("transport", error.message ?: "the desktop session could not start", "session")
       }
     }
   }
@@ -146,7 +146,7 @@ class DesktopSession(
       val connection = peer ?: return@execute
       val target = epoch
       if (type != "offer") {
-        fail("transport", "the engine must send an offer")
+        fail("transport", "the engine must send an offer", "sdp")
         return@execute
       }
       connection.setRemoteDescription(
@@ -171,23 +171,23 @@ class DesktopSession(
                         }
                       }
 
-                      override fun onCreateFailure(error: String?) = fail("transport", error)
-                      override fun onSetFailure(error: String?) = fail("transport", error)
+                      override fun onCreateFailure(error: String?) = fail("transport", error, "sdp")
+                      override fun onSetFailure(error: String?) = fail("transport", error, "sdp")
                     },
                     answer,
                   )
                 }
 
                 override fun onSetSuccess() = Unit
-                override fun onCreateFailure(error: String?) = fail("transport", error)
-                override fun onSetFailure(error: String?) = fail("transport", error)
+                override fun onCreateFailure(error: String?) = fail("transport", error, "sdp")
+                override fun onSetFailure(error: String?) = fail("transport", error, "sdp")
               },
               MediaConstraints(),
             )
           }
 
-          override fun onCreateFailure(error: String?) = fail("transport", error)
-          override fun onSetFailure(error: String?) = fail("transport", error)
+          override fun onCreateFailure(error: String?) = fail("transport", error, "sdp")
+          override fun onSetFailure(error: String?) = fail("transport", error, "sdp")
         },
         SessionDescription(SessionDescription.Type.OFFER, sdp),
       )
@@ -233,7 +233,7 @@ class DesktopSession(
       ByteBuffer.wrap(message.toString().toByteArray(StandardCharsets.UTF_8)), false,
     ))
     if (!sent) {
-      fail("transport", "the desktop control channel could not send")
+      fail("transport", "the desktop control channel could not send", "control")
       close()
     }
   }
@@ -425,7 +425,7 @@ class DesktopSession(
         ui.postDelayed(sample, 2000)
       }
       if (state == PeerConnection.IceConnectionState.FAILED) {
-        fail("transport", "the connection to the desktop was lost")
+        fail("transport", "the connection to the desktop was lost", "ice")
       }
     }
 
@@ -495,8 +495,16 @@ class DesktopSession(
     ui.post { onEvent(name, payload) }
   }
 
-  private fun fail(code: String, message: String?) {
-    ui.post { onEvent("failure", mapOf("code" to code, "message" to (message ?: "unknown"))) }
+  /**
+   * One native failure, with its `reason` so the hook can tell an ICE failure
+   * (the peer's path died, which the session can be held across) from an SDP,
+   * candidate or control failure (the session itself is broken, which stays
+   * terminal).
+   */
+  private fun fail(code: String, message: String?, reason: String? = null) {
+    val payload = mutableMapOf<String, Any?>("code" to code, "message" to (message ?: "unknown"))
+    if (reason != null) payload["reason"] = reason
+    ui.post { onEvent("failure", payload) }
   }
 
   companion object {

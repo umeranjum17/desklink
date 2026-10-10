@@ -4,6 +4,9 @@
 // P0b: --path new-address --driver-restart uses a TEST-ONLY retention shim.
 // P1: --product-retention disables that shim and checks real bridge retention.
 // P1e: --burst-restarts 3 --product-retention sends queued restarts on reattach.
+// P3b: --stall-carrier blackholes the carrier instead of closing it (the
+//      tailnet case); --corrupt-offer makes the restart offer fail SDP-apply,
+//      which must stay terminal rather than recover.
 // Record the standalone 20s roam's actual outcome against the unchanged 2s bar.
 // P3a: --adapter hook mounts the real hook over the demo carrier; --authorize-revoked
 // makes the app's authorize() refuse from the cut on.
@@ -29,6 +32,10 @@ const pathMode = option('--path', 'same-address');
 const burstRestarts = Number(option('--burst-restarts', '1'));
 assert(Number.isInteger(burstRestarts) && burstRestarts >= 1 && burstRestarts <= 100, '--burst-restarts must be 1..100');
 const killDuringRestart = args.includes('--kill-during-restart');
+// P3b: the carrier stalls instead of closing (a blackholed tailnet socket),
+// and/or the recovery offer is corrupted so SDP-apply fails.
+const stallCarrier = args.includes('--stall-carrier');
+const corruptOffer = args.includes('--corrupt-offer');
 const adapter = option('--adapter', 'driver');
 assert(['driver', 'demo', 'hook'].includes(adapter), 'unknown --adapter');
 const hook = adapter === 'hook';
@@ -51,7 +58,7 @@ const tap = (direction, message) => {
     appendFileSync(join(evidence, 'stdio.jsonl'), JSON.stringify(row) + '\n');
     return row;
 };
-const result = { scenario, outage, pathMode, driverRestart, burstRestarts, productRetention, adapter, authorizeRevoked, killDuringRestart, head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).stdout.trim(),
+const result = { scenario, outage, pathMode, driverRestart, burstRestarts, productRetention, adapter, authorizeRevoked, killDuringRestart, stallCarrier, corruptOffer, head: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).stdout.trim(),
     shape: 'userspace-shaped link; no netem, privileges or firewall changes', tap: [], teardown: { strays: [], failures: [] } };
 const tag = `DESKLINK_ROAM=${process.pid}`;
 const tagged = () => readdirSync('/proc').flatMap(name => {
@@ -96,6 +103,17 @@ const receive = async m => {
         const ufrag = p.description.sdp.match(/a=ice-ufrag:([^\\r\\n]+)/)[1];
         if (offers.has(ufrag)) return;
         offers.add(ufrag); probe.iceGeneration++;
+        if (${corruptOffer} && offers.size > 1) {
+            // P3b: a restart offer that fails SDP-apply is not the peer's own
+            // ICE failing — it is the negotiation broken — so it must stay
+            // terminal: no answer, no recovery on the held session.
+            const bad = p.description.sdp
+                .replace(/^m=video[^\\r\\n]*/m, 'm=video 9 INVALID 0')
+                .replace(/^a=ice-ufrag:.*$/m, 'a=ice-ufrag:');
+            try { await peer.setRemoteDescription({ type: p.description.type, sdp: bad }); probe.offerError = 'the corrupt offer was accepted'; }
+            catch (error) { probe.offerError = String(error && error.message || error); }
+            return;
+        }
         await peer.setRemoteDescription(p.description);
         const answer = await peer.createAnswer(); await peer.setLocalDescription(answer);
         await request('session.description', { session_id: p.sessionId, generation: p.generation, description: answer });
@@ -129,7 +147,7 @@ window.__measure = async () => {
     const remote = stats.get(pair?.remoteCandidateId);
     return { at: Date.now(), sessionId: probe.sessionId, peerId: probe.peerId, iceGeneration: probe.iceGeneration, answerAt: probe.answerAt,
         pending: probe.pending, carrierClosed: probe.carrierClosed, carrierRejection: probe.carrierRejection, restartRejected: probe.restartRejected,
-        pair: pair && { id: pair.id, state: pair.state, remotePort: remote?.port }, frames, channel: channel?.readyState, errors: probe.errors };
+        offerError: probe.offerError, pair: pair && { id: pair.id, state: pair.state, remotePort: remote?.port }, frames, channel: channel?.readyState, errors: probe.errors };
 };
 `;
 
@@ -194,7 +212,7 @@ async function run() {
     assert(existsSync(engine) && existsSync(fixture), 'build task-owned desklink-host and x11_target first');
     const scratch = mkdtempSync(join(tmpdir(), 'dl-roam-'));
     let claim, xvfb, target, bridge, signalling, relay, vite, context;
-    let fixtureLog = '', fixtureBuffer = '', refused = 0, blocked = false, holdMetrics = false;
+    let fixtureLog = '', fixtureBuffer = '', refused = 0, blocked = false, holdMetrics = false, stalled = false;
     const observedFixture = [];
     const upstreams = new Set();
     const link = new ShapedLink((...items) => appendFileSync(join(evidence, 'link.log'), `${Date.now()} ${items.join(' ')}\n`));
@@ -261,6 +279,10 @@ async function run() {
             upstreams.add(host);
             const queue = [];
             const forward = raw => {
+                // A stalled carrier is blackholed, not closed: the socket stays
+                // open but carries nothing, which is the tailnet case the
+                // client cannot see as a close.
+                if (stalled) return;
                 if (host.readyState !== WebSocket.OPEN) { queue.push(raw); return; }
                 host.send(raw);
                 if (killDuringRestart && JSON.parse(String(raw)).method === 'session.restart_ice') {
@@ -276,6 +298,7 @@ async function run() {
                 if (holdMetrics && message.method === 'session.metrics') heldIds.add(message.id);
             });
             host.on('message', raw => {
+                if (stalled) return;
                 if (heldIds.has(JSON.parse(String(raw)).id)) return; // Withhold a real reply until the carrier cut.
                 if (client.readyState === WebSocket.OPEN) client.send(String(raw));
             });
@@ -328,7 +351,10 @@ async function run() {
         result.cutAt = Date.now(); blocked = true;
         if (authorizeRevoked) await page.evaluate(() => { window.__revoked = true; });
         if (!productRetention || scenario === 'roam') link.set({ discard: true }, 'roam cut');
-        for (const client of relay.clients) client.terminate();
+        // A stalled carrier keeps its socket open and swallows everything; the
+        // default cuts it so the relay closes upstream.
+        if (stallCarrier) stalled = true;
+        else for (const client of relay.clients) client.terminate();
         if (adapter === 'demo') {
             await sleep(1000);
             result.carrierAfterCut = await measure();
@@ -359,6 +385,7 @@ async function run() {
         if (scenario !== 'abandon') {
             if (pathMode === 'new-address') await link.rebindBrowserSide();
             blocked = false; link.set({}, 'path back');
+            if (stallCarrier) stalled = false;
         }
         const held = result.before;
         let last = result.atPathBack, recovered = null;
@@ -375,6 +402,22 @@ async function run() {
             await page.screenshot({ path: join(evidence, 'after.png') });
         }
         result.counterReset = reset; result.firstFrameAfterPathBackMs = recovered; result.last = last;
+        if (corruptOffer) {
+            // P3b: ask for a restart on path-back; the driver corrupts the
+            // resulting offer so SDP-apply fails. A failure that is not the
+            // peer's own ICE is terminal, so the session must not answer it.
+            result.restartAt = Date.now();
+            await page.evaluate(() => window.__restart());
+            await wait(async () => (await measure()).offerError, 5000, 'corrupt offer SDP-apply failure');
+            const offerAfter = await measure();
+            result.offerError = offerAfter.offerError;
+            result.offerAfter = offerAfter;
+            assert(offerAfter.iceGeneration >= 2, 'the corrupt restart offer never arrived');
+            assert.equal(offerAfter.answerAt, result.atPathBack.answerAt, 'an SDP-apply failure was answered instead of staying terminal');
+            result.corruptOfferTerminal = true;
+            await page.screenshot({ path: join(evidence, 'corrupt-offer.png') });
+            return;
+        }
         if (driverRestart) {
             result.beforeRestart = await measure();
             if (pathMode === 'new-address' && burstRestarts === 1) {
