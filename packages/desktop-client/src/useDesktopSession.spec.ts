@@ -721,6 +721,37 @@ describe('an ICE disconnection before any frame', () => {
         });
         expect(requests.map((request) => request.method)).not.toContain('session.restart_ice');
     }, 20_000);
+
+    it('keeps the no-picture watchdog alive across a held ICE failure', async () => {
+        let session!: { current: DesktopSession };
+        let first: string | null = null;
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+        try {
+            session = await connectedSession();
+            first = session.current.nativeId;
+            nativeEvent('ice', first, { state: 'FAILED' });
+            expect(session.current.snapshot.status).toBe('failed');
+
+            await TestRenderer.act(async () => {
+                await vi.advanceTimersByTimeAsync(25_000);
+            });
+            nativeEvent('ice', first, { state: 'CONNECTED' });
+            expect(session.current.snapshot.status).toBe('connecting');
+            expect(session.current.nativeId).toBe(first);
+
+            await TestRenderer.act(async () => {
+                await vi.advanceTimersByTimeAsync(21_000);
+            });
+            await TestRenderer.act(async () => {
+                await vi.advanceTimersByTimeAsync(3_000);
+            });
+        } finally {
+            vi.useRealTimers();
+        }
+        await TestRenderer.act(async () => {});
+        expect(createdSessions).toBe(2);
+        expect(session.current.nativeId).not.toBe(first);
+    }, 25_000);
 });
 
 describe('a terminal failure that outlasts one attempt', () => {

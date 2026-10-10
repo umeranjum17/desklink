@@ -478,13 +478,20 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
      */
     const armFirstFrame = useCallback(() => {
         cancelFirstFrame();
-        firstFrameTimer.current = setTimeout(() => {
-            firstFrameTimer.current = null;
-            const status = statusRef.current;
-            if (presentedRef.current || (status !== 'connecting' && status !== 'reconnecting')) return;
-            stopDialing();
-            transportFailed(NO_PICTURE);
-        }, FIRST_FRAME_AFTER_MS);
+        const watch: () => void = () => {
+            firstFrameTimer.current = setTimeout(() => {
+                firstFrameTimer.current = null;
+                const status = statusRef.current;
+                if (!presentedRef.current && status === 'failed' && heldIceFailureAt.current !== null) {
+                    watch();
+                    return;
+                }
+                if (presentedRef.current || (status !== 'connecting' && status !== 'reconnecting')) return;
+                stopDialing();
+                transportFailed(NO_PICTURE);
+            }, FIRST_FRAME_AFTER_MS);
+        };
+        watch();
     }, [cancelFirstFrame, stopDialing, transportFailed]);
 
     const scheduleRestartRef = useRef<(delay: number) => void>(() => undefined);
