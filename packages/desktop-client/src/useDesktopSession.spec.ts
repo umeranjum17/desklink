@@ -642,6 +642,25 @@ describe('an ICE disconnection after frames were shown', () => {
         expect(requests.map((request) => request.method)).toContain('session.open');
     }, 20_000);
 
+    it('leaves a recovered session alone when connect is called after the hold', async () => {
+        const session = await connectedSession();
+        const id = session.current.nativeId;
+
+        nativeEvent('ice', id, { state: 'FAILED' });
+        expect(session.current.snapshot.status).toBe('failed');
+
+        nativeEvent('presented', id);
+        expect(session.current.snapshot.status).toBe('live');
+        expect(session.current.nativeId).toBe(id);
+
+        requests.length = 0;
+        await TestRenderer.act(async () => {
+            await session.current.connect();
+        });
+        expect(session.current.nativeId).toBe(id);
+        expect(requests.map((request) => request.method)).not.toContain('session.open');
+    }, 20_000);
+
     it('reopens at once when a non-ICE transport failure arrives during the hold', async () => {
         const session = await liveSession();
         const id = session.current.nativeId;

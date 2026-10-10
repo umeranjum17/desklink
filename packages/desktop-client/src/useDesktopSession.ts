@@ -1170,7 +1170,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         restartAttempts.current = 0;
         restartCycles.current = 0;
         cancelRestart();
-        if (heldIceFailureAt.current !== null) {
+        if (heldIceFailureAt.current !== null && statusRef.current === 'failed') {
             heldIceFailureAt.current = null;
             discardSession();
         }
@@ -1384,7 +1384,10 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     useEffect(() => {
         const immediate = reopenAtOnce.current;
         reopenAtOnce.current = false;
-        if (snapshot.status !== 'failed') return;
+        if (snapshot.status !== 'failed') {
+            heldIceFailureAt.current = null;
+            return;
+        }
         if (snapshot.failure?.code !== 'transport') return;
         const reopen = () => {
             // The failed session is dead on the engine side. Drop its handle and
