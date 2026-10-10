@@ -64,3 +64,11 @@ cc = "1"
 [profile.release]
 lto = "thin"
 opt-level = 2
+
+# The engine needs an ICE restart that does not interrupt media already flowing
+# on the current selected pair (roam persistence, < 200 ms gap). rtc-ice 0.21.0
+# clears the selected pair and every candidate pair in `Agent::apply_restart`,
+# and exposes no setting to keep them, so a patched copy is vendored here. See
+# vendor/rtc-ice/DESKLINK-PATCH.md for what changed and how to drop it.
+[patch.crates-io]
+rtc-ice = { path = "vendor/rtc-ice" }
