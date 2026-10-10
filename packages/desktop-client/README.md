@@ -285,15 +285,15 @@ view.
   fires. While the loop runs, a session that has shown a picture never reports
   `failed` or a transport failure; one that never showed a picture reports the
   first-frame transport failure after 20 s and the loop stops. A new carrier
-  picks up the same session: if the picture advanced within the last two media polls
-  and is not frozen, it sends no ICE restart (and a `reconnecting` session
-  returns to `live`); otherwise it moves the session to `reconnecting` and asks
-  for an ICE restart at once. Failures caused by the dead carrier wait for the
-  next one rather than ending the session. The
-  loop ends when a carrier reattaches the held session, or when the desktop
-  refuses it (a `session` or `generation` refusal, once it no longer holds the
-  session): that reopens at once. An `authorize()` refusal still ends the
-  session: a revoked pairing cannot roam back.
+  picks up the same session after a 300 ms grace for the old ICE pair, which
+  an ICE restart would drop: if the picture advanced during it, there is no
+  restart (and a `reconnecting` session returns to `live`); otherwise the
+  session moves to `reconnecting` and asks for an ICE restart. Failures caused
+  by the dead carrier wait for the next one rather than ending the session.
+  A carrier that comes back after the host's 30 s reattach window opens a new
+  session at once. A `session` or `generation` refusal (the desktop no longer
+  holds the session) also reopens at once. An `authorize()` refusal still ends
+  the session: a revoked pairing cannot roam back.
 - **Input starts disarmed.** This is a local arm against accidental touches,
   not a permission: the session already has input. `setInputEnabled(true)` arms
   pointer, keyboard and clipboard input; `setInputEnabled(false)` blocks new

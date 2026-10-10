@@ -66,6 +66,10 @@ const RESTART_REQUEST_DEADLINE_MS = 1500;
 const DIAL_RETRY_MS = 250;
 /** One dial's bound. Not shorter: Chromium throttles refused WebSocket handshakes. */
 const DIAL_TIMEOUT_MS = 5000;
+/** How long the host holds a session with no carrier (the bridge's `reattachMs`); past it, reopen. */
+const REATTACH_WINDOW_MS = 30_000;
+/** How long a reattached carrier waits for the old ICE pair before asking for a restart. */
+const REATTACH_GRACE_MS = 300;
 /**
  * How long the media path may carry nothing at all before a session that says
  * `live` stops saying so. The engine's transport state reaches the client over
@@ -118,15 +122,11 @@ const DEADLINE = new Error('no reply in time');
 
 /** `promise`, or a DEADLINE rejection after `ms`; a value that lands later goes to `late`. */
 function withDeadline<T>(promise: Promise<T>, ms: number, late?: (value: T) => void): Promise<T> {
-    return new Promise((resolve, reject) => {
-        let expired = false;
-        const timer = setTimeout(() => { expired = true; reject(DEADLINE); }, ms);
-        promise.then((value) => {
-            clearTimeout(timer);
-            if (expired) late?.(value);
-            else resolve(value);
-        }, (error) => { clearTimeout(timer); reject(error); });
-    });
+    let expired = false;
+    return Promise.race([
+        promise.then((value) => { if (expired) late?.(value); return value; }),
+        new Promise<never>((_, reject) => setTimeout(() => { expired = true; reject(DEADLINE); }, ms)),
+    ]);
 }
 
 const errorCode = (error: unknown): unknown => (error as { code?: unknown } | null)?.code;
@@ -390,7 +390,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const carrierEpoch = useRef(0);
     const unsubscribeCarrier = useRef<(() => void) | null>(null);
     /** While the carrier is dead, whatever the status: the dial in flight and its retry. */
-    const dialing = useRef<{ inFlight: boolean; retry?: ReturnType<typeof setTimeout> } | null>(null);
+    const dialing = useRef<{ inFlight: boolean; since: number; retry?: ReturnType<typeof setTimeout> } | null>(null);
     /** Set with a reopen that skips its backoff: the host no longer holds the session at all. */
     const reopenAtOnce = useRef(false);
     const optionsRef = useRef(options);
@@ -419,8 +419,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
 
     /** A transport loss is one event no matter how many sides report it: the
      * peer's `failed` state and its `failure` event would otherwise spend the
-     * reopen budget twice for the same outage. While the dial loop is still
-     * recovering, the session stays `reconnecting` and reports nothing. */
+     * reopen budget twice for the same outage. While dialing, it stays `reconnecting`. */
     const transportFailed = useCallback((message: string = UNREACHABLE_DESKTOP): boolean => {
         if (statusRef.current === 'failed' || dialing.current !== null) return false;
         refuse(message, 'transport');
@@ -447,11 +446,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         firstFrameTimer.current = null;
     }, []);
 
-    const stopDialing = useCallback(() => {
-        const run = dialing.current;
-        dialing.current = null;
-        clearTimeout(run?.retry);
-    }, []);
+    const stopDialing = useCallback(() => { clearTimeout(dialing.current?.retry); dialing.current = null; }, []);
 
     /**
      * A first connection that stays frameless for this long is not going to
@@ -496,7 +491,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         if (epoch !== carrierEpoch.current || signaling.current == null) return;
         dropCarrier(true);
         if (dialing.current !== null || opened.current == null) return;
-        dialing.current = { inFlight: false };
+        dialing.current = { inFlight: false, since: Date.now() };
         dialRef.current();
     }, [dropCarrier]);
 
@@ -562,8 +557,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                     }), RESTART_REQUEST_DEADLINE_MS);
                 } catch (error) {
                     if (token !== generationToken.current || carrierFailed(epoch, error)) return;
-                    // The host no longer holds this session: a reopen is the
-                    // only way back, and waiting out a backoff buys nothing.
+                    // The host no longer holds this session: reopen without waiting out a backoff.
                     if (errorCode(error) === 'session' || errorCode(error) === 'generation') {
                         attempts.current = 0;
                         reopenAtOnce.current = transportFailed('the desktop no longer holds this session; reopening it');
@@ -1085,11 +1079,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         }
     }, [adoptCarrier, armFirstFrame, discardSession, endRemote, refuse, update]);
 
-    /**
-     * Dial a carrier to replace a dead one: one authorize() at a time, retried
-     * soon after a failure. The held session is then reattached, or, once it
-     * is gone, a new one opens on the first carrier that comes up.
-     */
+    /** Dial a carrier to replace a dead one, one authorize() at a time; reattach the session or open anew. */
     const dial = useCallback(() => {
         const run = dialing.current;
         if (run === null || run.inFlight) return;
@@ -1117,6 +1107,8 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 return;
             }
             stopDialing();
+            // Past the reattach window the host has ended the held session: open anew on this carrier.
+            if (Date.now() - run.since >= REATTACH_WINDOW_MS) discardSession();
             adoptCarrier(authorization.signaling);
             if (opened.current == null) {
                 attempts.current = 0;
@@ -1124,18 +1116,25 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 void establish(authorization);
                 return;
             }
-            // The picture already moves: only the carrier was missing.
-            if (pictureMoving(2 * MEDIA_POLL_MS) && !frozen.current) {
-                if (statusRef.current === 'reconnecting') onTransportState('connected', false);
-                return;
-            }
-            if (statusRef.current !== 'reconnecting') update({ status: 'reconnecting' });
-            restartAttempts.current = 0;
-            restartCycles.current = 0;
+            // A restart drops the old pair, which on an unchanged path resumes in ~100 ms: give it a moment.
+            const held = opened.current, before = mediaRef.current;
             cancelRestart();
-            scheduleRestart(0);
+            restartTimer.current = setTimeout(() => {
+                restartTimer.current = null;
+                void getStats().catch(() => []).then((rows) => {
+                    if (opened.current !== held || dialing.current !== null) return;
+                    // The picture moves: only the carrier was missing.
+                    if ((mediaCounts(rows)?.frames ?? 0) > (before?.frames ?? Infinity)) {
+                        if (statusRef.current === 'reconnecting') onTransportState('connected', false);
+                        return;
+                    }
+                    if (statusRef.current !== 'reconnecting') update({ status: 'reconnecting' });
+                    restartAttempts.current = restartCycles.current = 0;
+                    scheduleRestart(0);
+                });
+            }, REATTACH_GRACE_MS);
         })();
-    }, [adoptCarrier, cancelReconnect, cancelRestart, establish, onTransportState, pictureMoving, scheduleRestart, stopDialing, teardown, update]);
+    }, [adoptCarrier, cancelReconnect, cancelRestart, discardSession, establish, getStats, onTransportState, scheduleRestart, stopDialing, teardown, update]);
 
     /**
      * Open (or reopen) the session with fresh authority. A deliberate call
