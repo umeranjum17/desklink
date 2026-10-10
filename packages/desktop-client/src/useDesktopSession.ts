@@ -1177,11 +1177,14 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         restartCycles.current = 0;
         cancelRestart();
         if (heldIceFailureAt.current !== null && statusRef.current === 'failed') {
+            const owner = signaling.current;
+            const openedRef = opened.current;
             heldIceFailureAt.current = null;
             discardSession();
+            void endRemote(openedRef, owner);
         }
         await establish();
-    }, [cancelRestart, discardSession, establish]);
+    }, [cancelRestart, discardSession, endRemote, establish]);
 
     // Native events: answer, candidates, control replies, presentation, failure.
     useEffect(() => {

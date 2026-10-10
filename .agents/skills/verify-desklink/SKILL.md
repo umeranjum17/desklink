@@ -189,8 +189,11 @@ displays as above; a fresh evidence folder each): `--outage 12000` three times,
 `--outage 12000 --path new-address` three times, `--outage 1500` (the short
 roam: the picture must advance within 2 s of path-back), `--outage 20000
 --media-cut` (carrier alive, media/ICE path cut: the held ICE failure must
-return to live on the same session), `--outage 40000`, and
-`--outage 12000 --authorize-revoked`. The page mounts the real hook through
+return to live on the same session), `--outage 20000 --stall-carrier` (the
+carrier blackholes instead of closing: the held session must recover on the
+same session and each side must keep a single ice-ufrag, P1e), `--outage 12000
+--corrupt-offer` (a restart offer that fails SDP-apply stays terminal),
+`--outage 40000`, and `--outage 12000 --authorize-revoked`. The page mounts the real hook through
 `native.web.ts` with the demo `bridgeSignaling`; only RN rendering is stubbed.
 Read `result.json`: `recoveryMs`, `sameSession`, `opens`, `at45`,
 `reopenAfterCarrierMs`/`newPictureMs` for 40s, and the stdio tap (`stdio.jsonl`)
