@@ -33,6 +33,20 @@ const WIDTH: u16 = 1280;
 #[cfg(target_os = "linux")]
 const HEIGHT: u16 = 720;
 
+// Where the animated marker sits. The phone's portrait cover view is pinned to
+// the desktop's top-left corner and crops the rest, so a marker in the middle
+// or the far corner is cut away and a motion check on that picture sees nothing
+// move. This puts it in the top-left region both that crop and the recovery
+// probe sample: three cells sweep x 132-228 at y 216-248.
+#[cfg(target_os = "linux")]
+const MARKER_X: i16 = 132;
+#[cfg(target_os = "linux")]
+const MARKER_Y: i16 = 216;
+#[cfg(target_os = "linux")]
+const MARKER_SIZE: u16 = 32;
+#[cfg(target_os = "linux")]
+const MARKER_STEPS: usize = 3;
+
 #[cfg(target_os = "linux")]
 fn main() -> Result<()> {
     let (connection, screen_number) =
@@ -272,13 +286,13 @@ fn main() -> Result<()> {
                     window,
                     graphics,
                     &[Rectangle {
-                        x: (1168 + position * 32) as i16,
-                        y: 48,
-                        width: 32,
-                        height: 32,
+                        x: MARKER_X + (position * MARKER_SIZE as usize) as i16,
+                        y: MARKER_Y,
+                        width: MARKER_SIZE,
+                        height: MARKER_SIZE,
                     }],
                 )?;
-                position = (position + 1) % 3;
+                position = (position + 1) % MARKER_STEPS;
             }
             bright = !bright;
             connection.change_gc(
@@ -294,13 +308,13 @@ fn main() -> Result<()> {
                 graphics,
                 &[Rectangle {
                     x: if moving {
-                        (1168 + position * 32) as i16
+                        MARKER_X + (position * MARKER_SIZE as usize) as i16
                     } else {
-                        1200
+                        MARKER_X + MARKER_SIZE as i16
                     },
-                    y: 48,
-                    width: 32,
-                    height: 32,
+                    y: MARKER_Y,
+                    width: MARKER_SIZE,
+                    height: MARKER_SIZE,
                 }],
             )?;
             connection.flush()?;
