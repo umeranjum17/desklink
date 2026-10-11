@@ -1,7 +1,8 @@
-// J3 recovery on a Mac simulator: this checkout's example app on one of the
-// Mac's own fm-iPhone simulators, driven through a 5 s engine silence, a
-// task-owned userspace-shaped path cut, and a 60 s backgrounding, against a
-// bridge on this Linux host.
+// The `live` baseline slice on a Mac simulator: this checkout's example app on
+// one of the Mac's own fm-iPhone simulators, against a bridge on this Linux
+// host. It proves the transport seed; the recovery legs (a 5 s engine silence
+// and a 60 s backgrounding) are the proof legs this file already carried, and
+// the Wi-Fi path cut belongs to the dl-roam-mac-cut follow-up.
 //
 // The path: the app reaches a userspace-shaped relay running ON THE MAC
 // (`mac-relay.mjs`, the same ShapedLink the browser journeys use) over the Mac's
@@ -24,10 +25,10 @@
 // its deadline. (X11 captures have no consent UI; the legs prove a reopen
 // completes with zero user action.)
 //
-// The `live` leg proves the baseline the roam follow-up builds on: the app holds
-// Connected through the Mac-local relay, the decoded picture keeps advancing in
-// the default portrait cover crop, and a pointer down+up and a key down+up land
-// in the fixture. It cuts nothing.
+// The `live` leg is THIS PR's subject: the app holds Connected through the
+// Mac-local relay, the decoded picture keeps advancing in the default portrait
+// cover crop, and a pointer down+up and a key down+up land in the fixture. It
+// cuts nothing. drop5/background60 are unchanged from main.
 //
 // The simulators are the Mac's own fm-iPhones: they are reused and left in
 // place, never created or deleted here. Only this lane's build directory
