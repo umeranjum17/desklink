@@ -289,10 +289,10 @@ view.
   fires. While the loop runs, a session that has shown a picture never reports
   `failed` or a transport failure; one that never showed a picture reports the
   first-frame transport failure after 20 s and the loop stops. A new carrier
-  picks up the same session after a 300 ms grace for the old ICE pair, which
-  an ICE restart would drop: if the picture advanced during it, there is no
-  restart (and a `reconnecting` session returns to `live`); otherwise the
-  session moves to `reconnecting` and asks for an ICE restart. Failures caused
+  picks up the same session after a 300 ms grace for the old ICE pair: if the
+  picture advanced during it, there is no restart (and a `reconnecting`
+  session returns to `live`); otherwise the session moves to `reconnecting`
+  and asks for an ICE restart. Failures caused
   by the dead carrier wait for the next one rather than ending the session.
   A carrier that comes back after the host's 30 s reattach window opens a new
   session at once. A `session` or `generation` refusal (the desktop no longer

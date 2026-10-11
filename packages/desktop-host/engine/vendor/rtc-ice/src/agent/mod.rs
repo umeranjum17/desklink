@@ -834,10 +834,7 @@ impl Agent {
             // desklink patch: once the connection has failed or closed there is
             // no reachable pair, so media must stop instead of keeping the pair
             // preserved for a restart that will not nominate one.
-            if matches!(
-                new_state,
-                ConnectionState::Failed | ConnectionState::Closed
-            ) {
+            if matches!(new_state, ConnectionState::Failed | ConnectionState::Closed) {
                 self.restart_media_pair = None;
             }
 
