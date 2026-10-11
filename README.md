@@ -76,7 +76,8 @@ See which capture and input options are available.
 ### 2. Start the desktop bridge
 
 ```sh
-npx @desklink/host bridge --source x11
+npx @desklink/host bridge \
+  --source x11
 ```
 
 Keep this terminal open. The bridge shares this X11 desktop on this computer only.
