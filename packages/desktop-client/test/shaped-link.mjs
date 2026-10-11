@@ -1,6 +1,11 @@
 import { createSocket } from 'node:dgram';
 import { networkInterfaces } from 'node:os';
-import { WebSocket, WebSocketServer } from 'ws';
+import { createRequire } from 'node:module';
+// `ws` resolves to the installed copy beside whichever process loads this file:
+// Node's ESM `import 'ws'` needs ws>=8 named exports, but the simulator app
+// pins ws 7, whose CommonJS export is the constructor itself with `.Server`.
+const ws = createRequire(import.meta.url)('ws');
+const { WebSocket = ws, WebSocketServer = ws.Server } = ws;
 
 // The userspace-shaped link the drop-and-recover journeys run on: a datagram
 // relay between a browser's ICE agent and the engine's, which decides per
@@ -98,8 +103,13 @@ class ShapedLink {
     /** Candidates are taken one at a time, in arrival order. */
     #queue = Promise.resolve();
 
-    constructor(log) {
+    constructor(log, { appAddress = '127.0.0.1', engineAddress = '127.0.0.1', remoteBrowser = false, remoteEngine = false } = {}) {
         this.log = log;
+        this.appAddress = appAddress; this.engineAddress = engineAddress;
+        // When a peer is remote, its candidates are not this host's own addresses,
+        // so the local-address guard would drop them all. The relay then forwards
+        // to the peer source it actually sees, not the candidate it advertised.
+        this.remoteBrowser = remoteBrowser; this.remoteEngine = remoteEngine;
         this.counters = { toEngine: 0, toBrowser: 0, delayed: 0, discarded: 0, unroutable: 0, mediaDiscarded: 0 };
         /** `{}` forwards at once, `{ delayMs }` slows it, `{ discard: true }` drops it. */
         this.shape = {};
@@ -131,6 +141,9 @@ class ShapedLink {
         this.log(`link ${why}: ${JSON.stringify(this.counters)}; host ${this.host?.ip ?? '-'}:${this.host?.port ?? '-'} browser ${this.browser?.ip ?? '-'}:${this.browser?.port ?? '-'}`);
     }
 
+    /** The counters and learned peers, for a receipt produced on another host. */
+    snapshot() { return { counters: { ...this.counters }, host: this.host, browser: this.browser }; }
+
     /**
      * A new `session.open` from the client.
      *
@@ -151,8 +164,8 @@ class ShapedLink {
         this.log(`link → ${JSON.stringify(shape)} (${why})`);
     }
 
-    #listen(socket) {
-        return new Promise((ready) => socket.bind(0, '127.0.0.1', () => ready(socket.address().port)));
+    #listen(socket, address) {
+        return new Promise((ready) => socket.bind(0, address, () => ready(socket.address().port)));
     }
 
     #open() {
@@ -165,10 +178,16 @@ class ShapedLink {
     async #ready(generation) {
         let route = this.#routes.get(generation);
         if (!route) {
-            route = { generation, host: null, browser: null, advertised: false, toBrowser: this.#open() };
+            route = { generation, host: null, browser: null, advertised: false, engineAdvertised: false, toBrowser: this.#open() };
             this.#routes.set(generation, route);
-            route.toBrowser.on('message', payload => this.#forward(payload, route.browser, route.toEngine, 'toBrowser', route));
-            route.ready = Promise.all([this.#browserSide(route), this.#listen(route.toBrowser)]);
+            route.toBrowser.on('message', (payload, from) => {
+                // A remote engine is reached at the source it actually sends from
+                // (the relay's own advertised tuple, if the engine pinned it), not
+                // at the candidate in its SDP — which on another host is not routable.
+                if (this.remoteEngine) route.host = { ip: from.address, port: from.port };
+                this.#forward(payload, route.browser, route.toEngine, 'toBrowser', route);
+            });
+            route.ready = Promise.all([this.#browserSide(route), this.#listen(route.toBrowser, this.engineAddress)]);
         }
         await route.ready;
         return route;
@@ -181,7 +200,7 @@ class ShapedLink {
             this.browser = route.browser;
             this.#forward(payload, route.host, route.toBrowser, 'toEngine', route);
         });
-        return this.#listen(route.toEngine);
+        return this.#listen(route.toEngine, this.appAddress);
     }
 
     // Retire the advertised browser-facing address. No packets on the old
@@ -224,7 +243,7 @@ class ShapedLink {
                 socket.send(payload, to.port, to.ip);
                 if (direction === 'toBrowser' && isMedia(payload) && !route.mediaSeen) {
                     route.mediaSeen = true;
-                    this.log(`link generation ${route.generation} media through 127.0.0.1:${socket.address().port}`);
+                    this.log(`link generation ${route.generation} media through ${socket.address().address}:${socket.address().port}`);
                 }
             } catch {
                 // A datagram still inside a delay when the run ended. Nothing is
@@ -254,7 +273,7 @@ class ShapedLink {
     async down(line, generation) {
         const candidate = parseCandidate(line);
         if (candidate === null || candidate.type !== 'host' || candidate.proto.toLowerCase() !== 'udp') return null;
-        if (!this.local.has(candidate.ip)) {
+        if (!this.remoteEngine && !this.local.has(candidate.ip)) {
             this.log(`link engine candidate ${candidate.ip}:${candidate.port} is not a local address; dropping it`);
             return null;
         }
@@ -263,11 +282,14 @@ class ShapedLink {
         // and the rest are dropped rather than each opening a relay.
         const answer = this.#queue.then(async () => {
             const route = await this.#ready(generation);
-            if (route.host !== null) return null;
+            if (route.engineAdvertised) return null;
+            route.engineAdvertised = true;
+            // A local engine is reached at its own candidate; a remote one at the
+            // source of the datagrams it sends, learned when they arrive.
+            if (!this.remoteEngine) this.host = route.host = { ip: candidate.ip, port: candidate.port, generation };
             const toEngine = route.toEngine.address().port;
-            this.host = route.host = { ip: candidate.ip, port: candidate.port, generation };
-            this.log(`link engine candidate ${candidate.ip}:${candidate.port} (generation ${generation}) → browser through 127.0.0.1:${toEngine}`);
-            return renderCandidate(candidate, '127.0.0.1', toEngine);
+            this.log(`link engine candidate ${candidate.ip}:${candidate.port} (generation ${generation}) → browser through ${this.appAddress}:${toEngine}`);
+            return renderCandidate(candidate, this.appAddress, toEngine);
         });
         this.#queue = answer.then(() => undefined, () => undefined);
         return answer;
@@ -283,7 +305,7 @@ class ShapedLink {
     async up(line, generation) {
         const candidate = parseCandidate(line);
         if (candidate === null || candidate.type !== 'host' || candidate.proto.toLowerCase() !== 'udp') return null;
-        if (!this.local.has(candidate.ip)) {
+        if (!this.remoteBrowser && !this.local.has(candidate.ip)) {
             this.log(`link browser candidate ${candidate.ip}:${candidate.port} is not a local address; dropping it`);
             return null;
         }
@@ -293,8 +315,8 @@ class ShapedLink {
         const toBrowser = route.toBrowser.address().port;
         // A hint only, and taken over by the first packet the browser sends,
         // which is how ICE itself finds a peer.
-        this.log(`link browser candidate ${candidate.ip}:${candidate.port} → engine through 127.0.0.1:${toBrowser}`);
-        return renderCandidate(candidate, '127.0.0.1', toBrowser);
+        this.log(`link browser candidate ${candidate.ip}:${candidate.port} → engine through ${this.engineAddress}:${toBrowser}`);
+        return renderCandidate(candidate, this.engineAddress, toBrowser);
     }
 
     close() {

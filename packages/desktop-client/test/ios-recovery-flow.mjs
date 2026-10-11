@@ -1,15 +1,19 @@
-// J3 recovery on a Mac simulator: this checkout's example app on one of the
-// Mac's own fm-iPhone simulators, driven through a 5 s engine silence, a
-// roam-equivalent Wi-Fi bounce on the Mac, and a 60 s backgrounding against a
-// bridge on this Linux host.
+// The `live` baseline slice on a Mac simulator: this checkout's example app on
+// one of the Mac's own fm-iPhone simulators, against a bridge on this Linux
+// host. It proves the transport seed; the recovery legs (a 5 s engine silence
+// and a 60 s backgrounding) are the proof legs this file already carried, and
+// the Wi-Fi path cut belongs to the dl-roam-mac-cut follow-up.
 //
-// The path: the simulator reaches a WebSocket relay on this host (the Mac's
-// route back here), which taps the loopback bridge; the engine captures the
-// repository's animated x11_target on a private Xvfb. Media is ordinary host
-// candidates between the simulator and this host. The 5 s drop is SIGSTOP on
-// the bridge and the engine together (host-unreachable silence, signalling
-// relay included — harsher than a radio drop, and user-space only). The 60 s
-// backgrounding is the simulator's own home gesture.
+// The path: the app reaches a userspace-shaped relay running ON THE MAC
+// (`mac-relay.mjs`, the same ShapedLink the browser journeys use) over the Mac's
+// own LAN address, which is always present — never an intermittent Tailscale
+// candidate, and never a shared-network change. The relay reaches this host's
+// loopback bridge over a task-owned SSH reverse-forward; the engine captures the
+// repository's animated x11_target on a private Xvfb on this host. Roam media
+// candidates in trickle AND SDP are rewritten through the relay. The 5 s drop is
+// SIGSTOP on the bridge and the engine together (host-unreachable silence,
+// signalling relay included — harsher than a radio drop, and user-space only).
+// The 60 s backgrounding is the simulator's own home gesture.
 //
 // Each case measures, on the simulator's own screen: the human Reconnecting
 // state through the accessibility tree and in stills, the picture advancing
@@ -20,6 +24,11 @@
 // tapped during a recovery, so a blocking consent prompt would stall it past
 // its deadline. (X11 captures have no consent UI; the legs prove a reopen
 // completes with zero user action.)
+//
+// The `live` leg is THIS PR's subject: the app holds Connected through the
+// Mac-local relay, the decoded picture keeps advancing in the default portrait
+// cover crop, and a pointer down+up and a key down+up land in the fixture. It
+// cuts nothing. drop5/background60 are unchanged from main.
 //
 // The simulators are the Mac's own fm-iPhones: they are reused and left in
 // place, never created or deleted here. Only this lane's build directory
@@ -33,22 +42,19 @@
 // DESKLINK_IOS_DIR (default fm-desklink-ios), DESKLINK_IOS_OUT (required fresh
 // dir), DESKLINK_IOS_DEVICE (simulator name, default fm-iPhone 17),
 // DESKLINK_IOS_SKIP_BUILD (1 reuses the lane's last build),
-// DESKLINK_IOS_ROAM_OFF_S (roam leg: seconds the Mac's Wi-Fi stays off,
-// default 12),
-// DESKLINK_IOS_ONLY (a comma-separated leg subset, e.g. `background60` or
-// `roam`; unset runs the proof legs, drop5 and background60 — roam stays
-// opt-in for the dl-roam-persistence follow-up),
+// DESKLINK_IOS_ONLY (a comma-separated leg subset, e.g. `live` or
+// `background60`; unset runs the proof legs, drop5 and background60),
 // DESKLINK_ENGINE, DESKLINK_VERIFY_TARGET (x11_target).
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createInterface } from 'node:readline';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { PNG } from 'pngjs';
-import { WebSocketServer } from 'ws';
 import { macLane, CLEAN_SCRIPT } from './mac-lane.mjs';
 import { pictureBox } from './picture-box.mjs';
 import {
@@ -66,8 +72,6 @@ const out = resolve(process.env.DESKLINK_IOS_OUT ?? '');
 assert(out !== '' && !existsSync(out), 'set DESKLINK_IOS_OUT to a fresh evidence directory');
 mkdirSync(out, { recursive: true });
 const SIM = process.env.DESKLINK_IOS_DEVICE ?? 'fm-iPhone 17';
-const ROAM_OFF_S = Number(process.env.DESKLINK_IOS_ROAM_OFF_S ?? '12');
-assert(Number.isInteger(ROAM_OFF_S) && ROAM_OFF_S >= 1, 'DESKLINK_IOS_ROAM_OFF_S must be a whole number of seconds');
 const BUILD = process.env.DESKLINK_IOS_SKIP_BUILD !== '1';
 // The bridge runs as its own process, so its bridge -> engine traffic is
 // tapped by loading engine-tap.cjs into it; a socket-close or a session
@@ -101,17 +105,15 @@ const scpFrom = (remote, local) => {
     assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/${remote}`, local]).status, 0, `copy ${remote} back`);
 };
 
-const receipt = { journey: 'ios-recovery-j3', mac: MAC, lane: `${LANE.base}/${LANE.lane}`, simulator: SIM, out };
+const sha = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
+const receipt = { journey: 'ios-recovery-j3', deviceKind: 'simulator', mac: MAC, lane: `${LANE.base}/${LANE.lane}`, simulator: SIM, out,
+    sourceHead: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim(),
+    engineSha256: sha(engineBin), fixtureSha256: sha(x11Bin), harnessSha256: sha(fileURLToPath(import.meta.url)),
+    macRelaySha256: sha(join(here, 'mac-relay.mjs')), shapedLinkSha256: sha(join(here, 'shaped-link.mjs')) };
 const saveReceipt = () => writeFileSync(join(out, 'receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`);
 
 let claim = null; let xvfb = null; let xvfbPid = 0; let bridgePid = 0; let enginePid = 0;
-let relay = null; let udid = ''; let bootedByMe = false;
-// The wire, for forensics: every line the relay proxies, timestamped, tail kept.
-const wire = [];
-const wireLog = (dir, raw) => {
-    wire.push(`${Date.now()} ${dir} ${String(raw).slice(0, 500)}\n`);
-    if (wire.length > 3000) wire.splice(0, wire.length - 3000);
-};
+let forward = null; let macRelay = null; let udid = ''; let bootedByMe = false; let authority = ''; let recording = null;
 const owned = new Map();
 const statOf = (pid) => {
     try {
@@ -166,8 +168,10 @@ function shot(local) {
 }
 const hashShot = (png) => {
     let h = 0;
-    for (let y = 0; y < png.height; y += 4) {
-        for (let x = 0; x < png.width; x += 8) {
+    // Only decoded picture, not the status bar or reconnecting/deck chrome: the
+    // fixture's animated marker lands in this window under portrait cover.
+    for (let y = Math.floor(png.height * 0.15); y < png.height * 0.55; y += 4) {
+        for (let x = Math.floor(png.width * 0.2); x < png.width * 0.8; x += 8) {
             const i = (y * png.width + x) * 4;
             h = (h * 31 + png.data[i] + png.data[i + 1] * 2 + png.data[i + 2] * 3) >>> 0;
         }
@@ -212,7 +216,6 @@ async function main() {
             `${join(repo, 'packages/desktop-client')}/`, `${MAC}:${LANE.dir}/desktop-client/`],
             { encoding: 'utf8', timeout: 180_000 });
         assert.equal(copy.status, 0, `rsync to the Mac failed: ${copy.stderr}`);
-        log('building the example app on the Mac');
         mac(`cd "$D/desktop-client/example"
 [ node_modules/.package-lock.json -nt package.json ] || npm install --no-audit --no-fund
 PACKED="$D/tmp/$(cd .. && npm pack --silent --pack-destination "$D/tmp")"
@@ -234,7 +237,7 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
     mac(`test -d "${app}"`);
 
     claim = claimPrivateDisplay({ from: 170, count: 60 });
-    const authority = join(tmpdir(), `dl-ios-rec-${process.pid}-Xauthority`);
+    authority = join(tmpdir(), `dl-ios-rec-${process.pid}-Xauthority`);
     assert.equal(spawnSync('xauth', ['-f', authority, 'add', claim.display, '.', randomBytes(16).toString('hex')]).status, 0);
     const xenv = { ...process.env, DISPLAY: claim.display, XAUTHORITY: authority, WAYLAND_DISPLAY: '', XDG_SESSION_TYPE: 'x11' };
     xvfb = spawn('Xvfb', [claim.display, '-auth', authority, '-screen', '0', `${DESKTOP.width}x${DESKTOP.height}x24`, '-nolisten', 'tcp'], { stdio: 'ignore' });
@@ -283,53 +286,61 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
         } catch { /* vanished */ }
     }
     assert(enginePid !== 0, 'the bridge started no engine');
-    log(`bridge 127.0.0.1:${bridgePort} pid ${bridgePid}, engine pid ${enginePid}`);
 
-    relay = new WebSocketServer({ host: hostAddr, port: 0, path: '/desktop' });
-    const { WebSocket } = await import('ws');
-    // Every session id the bridge ever fanned out, in order: the first is the
-    // launch session, a later one means the client discarded and reopened.
+    // --- the relay runs on the Mac, reached on its own always-present LAN ---
+    const macLan = mac('ipconfig getifaddr en0 2>/dev/null || echo 127.0.0.1').trim();
+    const macTail = mac("ifconfig 2>/dev/null | awk '/inet 100[.]/{print $2}' | head -1").trim();
+    // The app's own package carries `ws`; put the relay beside it so its imports
+    // resolve the same way on the Mac as they do in this checkout.
+    assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', join(here, 'shaped-link.mjs'), join(here, 'mac-relay.mjs'), `${MAC}:${LANE.dir}/desktop-client/example/`]).status, 0, 'copy the relay modules to the Mac');
+
+    // A task-owned reverse-forward keeps the Linux bridge on loopback: only this
+    // ssh process can reach it, from the Mac's own loopback.
     const seenSessionIds = [];
-    relay.on('connection', (client, request) => {
-        const upstream = new WebSocket(`ws://127.0.0.1:${bridgePort}${request.url}`);
-        const queued = [];
-        upstream.on('open', () => { for (const line of queued.splice(0)) upstream.send(line); });
-        upstream.on('message', (raw) => {
-            wireLog('engine>', raw);
-            let sessionId;
-            try { const message = JSON.parse(String(raw)); sessionId = message.result?.sessionId ?? message.params?.sessionId; } catch { /* not JSON */ }
-            if (sessionId && seenSessionIds.at(-1) !== sessionId) seenSessionIds.push(sessionId);
-            if (client.readyState === 1) client.send(String(raw));
-        });
-        client.on('message', (raw) => { wireLog('app>', raw); if (upstream.readyState === 1) upstream.send(String(raw)); else queued.push(String(raw)); });
-        client.on('close', () => { wireLog('app-socket-close', 'the simulator socket to the relay closed'); upstream.close(); });
-        upstream.on('close', () => { wireLog('bridge-socket-close', 'the bridge socket to the relay closed'); client.close(); });
-        upstream.on('error', () => client.close());
+    let forwardPort = 0;
+    for (let attempt = 0; attempt < 5 && forwardPort === 0; attempt++) {
+        const port = 41000 + Math.floor(Math.random() * 18000);
+        forward = spawn('ssh', ['-o', 'BatchMode=yes', '-o', 'ExitOnForwardFailure=yes', '-N', '-R', `127.0.0.1:${port}:127.0.0.1:${bridgePort}`, MAC], { stdio: 'ignore' });
+        await sleep(1500);
+        if (forward.exitCode === null) forwardPort = port; else forward = null;
+    }
+    assert(forwardPort !== 0, 'no SSH reverse-forward to the bridge on the Mac');
+    macRelay = spawn('ssh', ['-o', 'BatchMode=yes', MAC,
+        `export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; cd "$HOME/${LANE.dir}/desktop-client/example" && exec node mac-relay.mjs --bridge-port ${forwardPort} --token ${token} --app-address ${macLan} --engine-address ${macTail}`],
+        { stdio: ['pipe', 'pipe', 'pipe'] });
+    let relayError = '';
+    macRelay.stderr.on('data', (chunk) => { relayError = (relayError + chunk).slice(-4000); });
+    let ready = null;
+    createInterface({ input: macRelay.stdout }).on('line', (line) => {
+        let message;
+        try { message = JSON.parse(line); } catch { return; }
+        if (message.type === 'log') appendFileSync(join(out, 'link.log'), `${Date.now()} ${message.line}\n`);
+        if (message.type === 'report') receipt.macRelay = message.link;
+        if (message.type === 'error') relayError = message.message;
+        if (message.type === 'ready') ready = message;
     });
-    await new Promise((listening) => relay.once('listening', listening));
-    const relayUrl = `ws://${hostAddr}:${relay.address().port}/desktop?token=${token}`;
-    log(`relay on ${hostAddr}:${relay.address().port}`);
+    for (let waited = 0; ready === null && waited < 20000 && macRelay.exitCode === null; waited += 200) await sleep(200);
+    assert(ready !== null, `the Mac relay never reported ready: ${relayError}`);
+    const relayUrl = `ws://127.0.0.1:${ready.relayPort}/desktop?token=${token}`;
+    log(`Mac-local relay on 127.0.0.1:${ready.relayPort} (app ${macLan}, engine ${macTail})`);
 
     mac(`xcrun simctl install ${udid} "${app}"
 xcrun simctl terminate ${udid} ${BUNDLE} 2>/dev/null || true
 xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkCover 1`, 300_000);
-    log('launched');
     {
-        const until = Date.now() + 120_000;
-        let status = null;
-        while (status !== 'Connected') {
-            if (Date.now() > until) throw new Error(`the simulator never showed the desktop: ${status}${engineLog ? `\nengine: ${engineLog}` : ''}`);
-            await sleep(2000);
+        // The app reads `live` from its first stats sample, so it can show
+        // "Connected" a beat before the engine has sent a frame, then fall back
+        // to "Reconnecting" when none arrives inside its freeze window. The
+        // engine's first frame can trail the ICE connect by ten seconds or more,
+        // so a single "Connected" is not a live desktop: wait until it holds.
+        const until = Date.now() + 180_000;
+        let status = null; let heldSince = null;
+        for (;;) {
+            if (Date.now() > until) throw new Error(`the simulator never held a live desktop (last: ${status})${engineLog ? `\nengine: ${engineLog}` : ''}`);
             try { status = screenStatus(); } catch { status = 'unreadable'; }
+            if (status === 'Connected') { heldSince ??= Date.now(); if (Date.now() - heldSince >= 6_000) break; } else heldSince = null;
+            await sleep(1000);
         }
-    }
-    log('simulator Connected');
-    // The fixture animates, or later "advancing" checks are meaningless.
-    {
-        const a = hashShot(shot(join(out, 'screen-live.png')));
-        await sleep(1500);
-        const b = hashShot(shot(join(out, 'screen-live-b.png')));
-        assert(a !== b, 'the simulator picture never changes');
     }
     const tapPicture = async () => {
         // The fixture paints saturated primaries, not near-white, so the band
@@ -347,8 +358,27 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkCover 
             const fresh = fixtureLines().slice(before);
             const downs = fresh.filter((l) => l.includes('"button"') && l.includes('"down"')).length;
             const ups = fresh.filter((l) => l.includes('"button"') && l.includes('"up"')).length;
+            if (downs > 0 && ups > 0) return { downs, ups, at };
+            if (Date.now() >= until) {
+                writeFileSync(join(out, 'fixture.log'), fixtureLog);
+                throw new Error(`the tap left ${downs} down(s) and ${ups} up(s) at ${JSON.stringify(at)}`);
+            }
+            await sleep(300);
+        }
+    };
+    // A hardware key pressed on the simulator reaches the app's native input
+    // view and the desktop as itself, exactly as the ios-flow keyboard proof
+    // does; HID usage 0x52 is the up arrow.
+    const tapKey = async () => {
+        const before = fixtureLines().length;
+        mac(`axe key 82 --udid ${udid}`);
+        const until = Date.now() + 10000;
+        for (;;) {
+            const fresh = fixtureLines().slice(before);
+            const downs = fresh.filter((l) => l.includes('"key"') && l.includes('"down"')).length;
+            const ups = fresh.filter((l) => l.includes('"key"') && l.includes('"up"')).length;
             if (downs > 0 && ups > 0) return { downs, ups };
-            if (Date.now() >= until) throw new Error(`the tap left ${downs} down(s) and ${ups} up(s)`);
+            if (Date.now() >= until) throw new Error(`the key left ${downs} down(s) and ${ups} up(s)`);
             await sleep(300);
         }
     };
@@ -372,9 +402,11 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkCover 
     // not stills. `recordVideo` writes its file only when it is interrupted,
     // so the stop sends SIGINT and waits for the exit.
     const startRecording = (name) => {
+        recording = name;
         mac(`rm -f "$D/tmp/rec-${name}.mov" "$D/tmp/rec-${name}.pid"
 nohup xcrun simctl io ${udid} recordVideo --codec=h264 "$D/tmp/rec-${name}.mov" > "$D/tmp/rec-${name}.log" 2>&1 & echo $! > "$D/tmp/rec-${name}.pid"
-sleep 2
+for i in $(seq 1 50); do grep -q 'Recording started' "$D/tmp/rec-${name}.log" && break; sleep 0.2; done
+grep -q 'Recording started' "$D/tmp/rec-${name}.log"
 kill -0 "$(cat "$D/tmp/rec-${name}.pid")" 2>/dev/null || { cat "$D/tmp/rec-${name}.log"; exit 1; }`);
     };
     const stopRecording = (name) => {
@@ -382,6 +414,7 @@ kill -0 "$(cat "$D/tmp/rec-${name}.pid")" 2>/dev/null || { cat "$D/tmp/rec-${nam
 for i in $(seq 1 50); do kill -0 "$(cat "$D/tmp/rec-${name}.pid")" 2>/dev/null || break; sleep 0.2; done
 test -s "$D/tmp/rec-${name}.mov"`);
         scpFrom(`tmp/rec-${name}.mov`, join(out, `${name}.mov`));
+        recording = null;
     };
     // The longest run of dark pixels down three screen columns, 8–70% of the
     // height: with cover the picture runs to the deck, so only overlaid
@@ -403,31 +436,6 @@ test -s "$D/tmp/rec-${name}.mov"`);
             }
         }
         return longest / density;
-    };
-    // The roam's restore: ssh dies with the Mac's Wi-Fi, so every probe here
-    // may fail until the Mac is back. DHCP first, then the real thing: a TCP
-    // open to the relay, the simulator's own route here. The J3 clock starts
-    // when the path works end to end, not when the interface merely has an
-    // address back. Returns { address, wifiAt, pathAt } on this clock.
-    const waitPathBack = async (ms) => {
-        const seen = {};
-        const until = Date.now() + ms;
-        for (;;) {
-            try {
-                if (!seen.wifiAt) {
-                    const status = mac('networksetup -getairportpower en0; ipconfig getifaddr en0');
-                    if (/On/.test(status) && /\d+\.\d+\.\d+\.\d+/.test(status)) {
-                        seen.wifiAt = Date.now();
-                        seen.address = status.trim().split('\n').pop();
-                    }
-                } else if (!seen.pathAt) {
-                    mac(`nc -z -G 3 ${hostAddr} ${relay.address().port}`);
-                    seen.pathAt = Date.now();
-                } else return seen;
-            } catch { /* the Mac is still dark, or the path with it; retry */ }
-            if (Date.now() >= until) throw new Error('the simulator path never came back');
-            await sleep(1000);
-        }
     };
     // A suspended app cannot repaint, so the background case cannot show a
     // Reconnecting state mid-outage; its proof is the recovery, not the middle.
@@ -494,41 +502,40 @@ test -s "$D/tmp/rec-${name}.mov"`);
         try { process.kill(enginePid, 'SIGCONT'); } catch { /* gone */ }
         try { process.kill(bridgePid, 'SIGCONT'); } catch { /* gone */ }
     };
-    // DESKLINK_IOS_ONLY names a leg subset for diagnosis; unset runs the
-    // proof legs (everything but roam). Roam is opt-in — it needs the
-    // dl-roam-persistence follow-up and its 2 s bar is unchanged for that
-    // lane — so it runs only when explicitly listed. Filtered receipts name
-    // their legs.
+    // A baseline leg that cuts nothing: the app holds Connected through the
+    // Mac-local relay, the decoded picture keeps advancing in the default
+    // portrait cover crop, and a pointer down+up and a key down+up land in the
+    // fixture. This is the seed the roam follow-up builds on, not a recovery.
+    const liveCase = async () => {
+        const leg = { name: 'live' };
+        const startedAt = Date.now();
+        startRecording('live');
+        try {
+            const samples = [];
+            for (let i = 0; i < 6; i++) { samples.push(hashShot(shot(join(out, `screen-live-${i}.png`)))); await sleep(1200); }
+            leg.pictureDistinct = new Set(samples).size;
+            assert(leg.pictureDistinct >= 3, `the settled picture did not keep advancing: ${leg.pictureDistinct} distinct frames of ${samples.length}`);
+            leg.pointer = await tapPicture();
+            leg.key = await tapKey();
+            stopRecording('live');
+            leg.recording = 'live.mov';
+        } finally {
+            receipt.cases.live = { ...leg, elapsedMs: Date.now() - startedAt };
+            saveReceipt();
+        }
+        log(`live: ${leg.pictureDistinct} distinct picture frames; pointer ${JSON.stringify(leg.pointer)}; key ${JSON.stringify(leg.key)}`);
+    };
+
+    // DESKLINK_IOS_ONLY names a leg subset for diagnosis; unset runs the proof
+    // legs (drop5 and background60). The `live` baseline leg is the seed the
+    // roam follow-up builds on, so it is opt-in.
     const only = (process.env.DESKLINK_IOS_ONLY ?? '').split(',').map((name) => name.trim()).filter(Boolean);
     receipt.only = only.length === 0 ? 'drop5,background60' : only;
-    const runLeg = (name) => only.length === 0 ? name !== 'roam' : only.includes(name);
+    const runLeg = (name) => only.length === 0 ? name !== 'live' : only.includes(name);
+    if (runLeg('live')) await liveCase();
     if (runLeg('drop5')) await runCase('drop5', 5000,
         async () => { process.kill(bridgePid, 'SIGSTOP'); process.kill(enginePid, 'SIGSTOP'); },
         async () => { unstop(); });
-    // A roam-equivalent path change: the simulator reaches this host through
-    // the Mac, so the Mac's own Wi-Fi off/on (interface down, address lost,
-    // DHCP on return) stands in for the Wi-Fi to cellular handoff a simulator
-    // cannot do. The toggle runs detached — the ssh that fires it dies with
-    // the Wi-Fi — and the Mac brings itself back; the restore waits for a TCP
-    // open to the relay over that route, and only then starts the 2 s clock.
-    // DESKLINK_IOS_ROAM_OFF_S sets how long the Wi-Fi stays off.
-    receipt.wifiBefore = mac('ipconfig getifaddr en0').trim();
-    if (runLeg('roam')) {
-        receipt.roamOffS = ROAM_OFF_S;
-        await runCase('roam', ROAM_OFF_S * 1000,
-            async () => {
-                mac(`nohup bash -c "echo roam-off ${ROAM_OFF_S}s; networksetup -setairportpower en0 off; sleep ${ROAM_OFF_S}; networksetup -setairportpower en0 on; echo roam-on" > "$D/tmp/wifi-bounce.log" 2>&1 & echo launched`);
-            },
-            async () => {
-                const seen = await waitPathBack(90000);
-                // The bounce log is written on the Mac; copy it before any RED
-                // assertion can throw, so the off-seconds are evidence.
-                try { scpFrom('tmp/wifi-bounce.log', join(out, 'wifi-bounce.log')); } catch { /* best-effort */ }
-                receipt.wifiRoam = { before: receipt.wifiBefore, ...seen };
-                return seen;
-            },
-            false, 60000);
-    }
     // A 60 s backgrounding on the simulator's own home gesture; launching the
     // bundle again foregrounds it.
     if (runLeg('background60')) await runCase('background60', 60000,
@@ -554,23 +561,37 @@ try {
     try { if (bridgePid) process.kill(bridgePid, 'SIGCONT'); } catch { /* gone */ }
     process.exitCode = 1;
 } finally {
+    receipt.outcome ??= 'FAIL';
     saveReceipt();
     try {
-        // The bridge -> engine tap log is written by the bridge process;
-        // append it to the wire so one file carries the whole roam's evidence.
+        // The bridge -> engine tap log is written by the bridge process; append
+        // it so one file carries the whole session's signalling evidence.
         const tapped = existsSync(tapLog) ? readFileSync(tapLog, 'utf8') : '';
-        writeFileSync(join(out, 'wire.log'), wire.join('') + tapped);
+        appendFileSync(join(out, 'wire.log'), tapped);
     } catch { /* evidence best-effort */ }
-    // A case that died mid-recording leaves `recordVideo` holding the device.
-    try { mac(`pkill -INT -f "simctl io .* recordVideo" 2>/dev/null || true`); } catch { /* already down */ }
-    // A bounce that died mid-off would leave the Mac dark: best-effort on.
-    try { mac('networksetup -setairportpower en0 on'); } catch { /* already on, or the Mac is dark */ }
+    // Stop only this lane's recording, and preserve a RED clip before cleanup.
+    if (recording) {
+        try {
+            mac(`kill -INT "$(cat "$D/tmp/rec-${recording}.pid")"
+for i in $(seq 1 50); do kill -0 "$(cat "$D/tmp/rec-${recording}.pid")" 2>/dev/null || break; sleep 0.2; done
+test -s "$D/tmp/rec-${recording}.mov"`);
+            scpFrom(`tmp/rec-${recording}.mov`, join(out, `${recording}.mov`));
+        } catch (error) { receipt.recordingError = error.message; }
+    }
     try { mac(`xcrun simctl uninstall ${udid} ${BUNDLE} 2>/dev/null || true`); } catch { /* already gone */ }
     if (udid && bootedByMe) { try { mac(`xcrun simctl shutdown ${udid}`); } catch { /* already down */ } }
+    // Ask the Mac relay to flush its counters and quit; fall back to a signal.
+    if (macRelay) {
+        try { macRelay.stdin.write('quit\n'); } catch { /* gone */ }
+        for (let i = 0; i < 50 && macRelay.exitCode === null; i++) await sleep(100);
+        if (macRelay.exitCode === null) macRelay.kill('SIGTERM');
+    }
+    if (forward) forward.kill('SIGTERM');
     if (bridgePid) await stopProcess(bridgePid, 'bridge');
     if (enginePid && alive(enginePid)) await stopProcess(enginePid, 'engine');
     if (xvfb) await stopOwnedXvfb(xvfb);
     claim?.release();
+    if (authority && existsSync(authority)) unlinkSync(authority);
     // A failed run keeps its lane directory for forensics; a passed run
     // reclaims it. DESKLINK_IOS_KEEP=1 keeps it either way.
     if (process.env.DESKLINK_IOS_KEEP !== '1' && receipt.outcome === 'PASS') {
@@ -578,5 +599,5 @@ try {
     } else {
         log(`lane directory kept at ${LANE.dir}`);
     }
-    relay?.close();
+    saveReceipt();
 }

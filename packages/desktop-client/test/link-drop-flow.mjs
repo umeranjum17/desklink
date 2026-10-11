@@ -285,8 +285,9 @@ const readRegion = (video, x, y, width, height) => {
         readyState: video.readyState,
         decoded: quality.totalVideoFrames ?? null,
         ...readRegion(video, 0, 0, video.videoWidth, video.videoHeight),
-        // The fixture's animated marker lives at (1200,48) in desktop pixels.
-        marker: readRegion(video, 1195, 43, 45, 42),
+        // The fixture's animated marker sits in the desktop's top-left, sweeping
+        // x 132-228 at y 216-248 (the phone's cover crop keeps that corner).
+        marker: readRegion(video, 128, 212, 104, 40),
         frames: probe.frames,
         status: probe.status,
     };
