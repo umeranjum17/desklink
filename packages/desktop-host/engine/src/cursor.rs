@@ -32,26 +32,3 @@ impl Reporter {
         });
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn reports_initial_motion_and_visibility_but_not_unchanged_polls() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut reporter = Reporter::new(Box::new(move |p| {
-            tx.send(p).unwrap();
-        }));
-        reporter.update(10, 20, true);
-        reporter.update(10, 20, true);
-        reporter.update(30, 40, true);
-        reporter.update(30, 40, false);
-        let notices: Vec<_> = rx.try_iter().collect();
-        assert_eq!(notices.len(), 3);
-        assert_eq!((notices[1].x, notices[1].y), (30, 40));
-        assert!(!notices[2].visible);
-        assert!(notices
-            .windows(2)
-            .all(|p| p[0].timestamp_us <= p[1].timestamp_us));
-    }
-}

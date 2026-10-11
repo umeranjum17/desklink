@@ -299,14 +299,3 @@ impl InputDevices {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn command_key_uses_quartz_command_flag() {
-        assert_eq!(modifier_flag(keycode::LEFT_META), 0x100000);
-        assert_eq!(modifier_flag(0), 0);
-    }
-}

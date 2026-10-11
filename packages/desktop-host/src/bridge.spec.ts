@@ -373,7 +373,12 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   if (request.method === 'hello') return out({ id: request.id, result: { protocol: 2 } });
   if (request.method === 'session.open') return out({ id: request.id, result: { sessionId: 'engine-1', generation: 7 } });
   if (request.method === 'session.metrics') {
-    if (request.params.revoke) setTimeout(() => out({event:'session.revoked',params:{sessionId:'engine-1',code:'lease',reason:'expired'}}), 100);
+    if (request.params.revoke) setTimeout(() => {
+        // Mark the moment the notice leaves the engine, so the test can wait for
+        // it rather than guess a sleep long enough to cover a loaded runner.
+        fs.appendFileSync(${JSON.stringify(log)}, 'revoked-emitted\\n');
+        out({event:'session.revoked',params:{sessionId:'engine-1',code:'lease',reason:'expired'}});
+    }, 500);
     return out({ id: request.id, result: {} });
   }
   if (request.method === 'session.restart_ice') return out({id:request.id,result:{accepted:true}});
@@ -396,7 +401,9 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
             engineCommand: process.execPath,
             engineArgs: [script],
             serveExample: false,
-            reattachMs: scenario === 'immediate' ? 0 : 300,
+            // A window far wider than any scheduler delay: the check is that a
+            // reattaching socket clears the timer, not how fast the test runs.
+            reattachMs: scenario === 'immediate' ? 0 : 2000,
         });
         bridges.push(bridge);
         const first = await connect(bridge.port, 'token=t');
@@ -413,40 +420,49 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
         if (scenario === 'revoked') await requestOn(second, 3, 'session.metrics', { revoke: true });
         second.close();
         await new Promise<void>(resolve => second.once('close', resolve));
-        await new Promise(resolve => setTimeout(resolve, 150));
-        if (scenario === 'immediate') {
+
+        if (scenario === 'immediate' || scenario === 'expires') {
+            // Both close on their own: wait for the observable close rather than
+            // sleeping and hoping it has (or has not) happened by then.
+            const deadline = Date.now() + 8000;
+            while (!sent().some((line) => line.startsWith('session.close')) && Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 25));
+            }
             expect(sent()).toContain('session.close {"session_id":"engine-1","generation":7}');
             return;
         }
-        expect(sent().filter(line => line.startsWith('session.close'))).toEqual([]);
-        if (scenario !== 'expires') {
-            // Install the listener before open: replay arrives as soon as the
-            // authenticated handshake completes, without a new session.open.
-            const next = new WebSocket(`ws://127.0.0.1:${bridge.port}${BRIDGE_PATH}?token=t`);
-            servers.add(next);
-            const events: unknown[] = [];
-            next.on('message', raw => events.push(JSON.parse(String(raw))));
-            await new Promise<void>(resolve => next.once('open', resolve));
-            if (scenario === 'reattaches') {
-                expect(await requestOn(next, 4, 'session.restart_ice', { session_id: 'engine-1', generation: 7 })).toEqual({ accepted: true });
-                expect(sent()).toContain('session.restart_ice {"session_id":"engine-1","generation":7}');
-            } else {
-                await requestOn(next, 4, 'session.metrics');
-                expect(events).toContainEqual({event:'session.revoked',params:{sessionId:'engine-1',code:'lease',reason:'expired'}});
-                const other = await connect(bridge.port, 'token=t');
-                const repeated: unknown[] = [];
-                other.on('message', raw => repeated.push(JSON.parse(String(raw))));
-                await requestOn(other, 5, 'session.metrics');
-                expect(repeated).not.toContainEqual(events[0]);
+        if (scenario === 'revoked') {
+            // The revocation must land while no controller is attached, or the
+            // bridge has nowhere to retain it. Wait for the engine's own marker
+            // that it was emitted, rather than a sleep guessed to cover it.
+            const deadline = Date.now() + 8000;
+            while (!sent().includes('revoked-emitted') && Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 10));
             }
-            await new Promise(resolve => setTimeout(resolve, 350));
-            expect(sent().filter(line => line.startsWith('session.close'))).toEqual([]);
-            return;
+            expect(sent()).toContain('revoked-emitted');
         }
-        const deadline = Date.now() + 5000;
-        while (!sent().some((line) => line.startsWith('session.close')) && Date.now() < deadline) {
-            await new Promise((resolve) => setTimeout(resolve, 25));
+        // A reattaching socket is what proves the session was still retained:
+        // connecting it clears the reattach timer, so no wall-clock race decides
+        // this. Install the listener before open: replay arrives as soon as the
+        // authenticated handshake completes, without a new session.open.
+        const next = new WebSocket(`ws://127.0.0.1:${bridge.port}${BRIDGE_PATH}?token=t`);
+        servers.add(next);
+        const events: unknown[] = [];
+        next.on('message', raw => events.push(JSON.parse(String(raw))));
+        await new Promise<void>(resolve => next.once('open', resolve));
+        expect(sent().filter(line => line.startsWith('session.close'))).toEqual([]);
+        if (scenario === 'reattaches') {
+            expect(await requestOn(next, 4, 'session.restart_ice', { session_id: 'engine-1', generation: 7 })).toEqual({ accepted: true });
+            expect(sent()).toContain('session.restart_ice {"session_id":"engine-1","generation":7}');
+        } else {
+            await requestOn(next, 4, 'session.metrics');
+            expect(events).toContainEqual({event:'session.revoked',params:{sessionId:'engine-1',code:'lease',reason:'expired'}});
+            const other = await connect(bridge.port, 'token=t');
+            const repeated: unknown[] = [];
+            other.on('message', raw => repeated.push(JSON.parse(String(raw))));
+            await requestOn(other, 5, 'session.metrics');
+            expect(repeated).not.toContainEqual(events[0]);
         }
-        expect(sent()).toContain('session.close {"session_id":"engine-1","generation":7}');
+        expect(sent().filter(line => line.startsWith('session.close'))).toEqual([]);
     }, 20_000);
 });

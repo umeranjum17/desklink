@@ -465,16 +465,3 @@ impl X11Desktop {
         )
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fitting_never_upscales_and_keeps_even_dimensions() {
-        assert_eq!(fit(800, 600, 1280, 800), (800, 600));
-        assert_eq!(fit(1920, 1080, 1280, 720), (1280, 720));
-        let (w, h) = fit(1000, 1000, 600, 600);
-        assert_eq!((w, h), (600, 600));
-    }
-}

@@ -471,7 +471,10 @@ async function startChrome(binary, pageUrl) {
             // process is gone, so a restart of the flow never inherits it. A
             // browser that already exited will not fire 'exit' a second time.
             if (stopped === null) await exited;
-            rmSync(profile, { recursive: true, force: true });
+            // Windows keeps a handle on the profile's files for a moment after
+            // the process exits; retry until the tree is gone instead of
+            // failing the run on a transient ENOTEMPTY/EBUSY.
+            rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
         },
     };
 }

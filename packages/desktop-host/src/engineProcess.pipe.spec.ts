@@ -36,7 +36,11 @@ it('keeps real control-pipe failures catchable, settles every request and reaps 
         // The report's public-JS reproduction constructs a client around its
         // own child; Reflect exercises that same runtime entry point.
         const client = Reflect.construct(EngineClient, [child, {
-            requestTimeoutMs: 2000,
+            // An upper bound, not a pace: the OS must surface the broken pipe
+            // (EPIPE / write-after-end) before this elapses. Under a contended
+            // CI runner a 2 s bound let the request time out first, which read
+            // as a failed assertion rather than the EPIPE the test is proving.
+            requestTimeoutMs: 10_000,
             onDiagnostic: (line: string) => { if (line === 'control closed') closed(); },
         }]) as EngineClient;
         try {
@@ -67,4 +71,4 @@ it('keeps real control-pipe failures catchable, settles every request and reaps 
             await exited;
         }
     }
-}, 10000);
+}, 30000);

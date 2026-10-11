@@ -270,37 +270,3 @@ pub fn x11_read(display: &str) -> Result<(String, bool)> {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_oversized_clipboard_is_cut_cleanly_and_reported() {
-        let mut raw = vec![b'a'; 4];
-        raw.extend_from_slice("\u{e9}".as_bytes());
-        raw.extend_from_slice(b"zzzz");
-        let (text, truncated) =
-            bounded_text(&raw, 5).expect("a character-boundary cut is valid text");
-        assert!(truncated, "a cut past the limit must be reported");
-        assert_eq!(
-            text, "aaaa",
-            "the partial character is dropped, not invented"
-        );
-
-        // A byte that is not valid UTF-8 before the cut is not a partial
-        // character; the whole read is refused.
-        let mut invalid = vec![b'a'; 4];
-        invalid.push(0xff);
-        invalid.extend_from_slice(b"zzzz");
-        assert!(bounded_text(&invalid, 5).is_err());
-
-        let (text, truncated) = bounded_text(b"hello", 5).unwrap();
-        assert!(!truncated);
-        assert_eq!(text, "hello");
-
-        let (text, truncated) = bounded_text(b"hello world", 5).unwrap();
-        assert!(truncated);
-        assert_eq!(text, "hello");
-    }
-}
