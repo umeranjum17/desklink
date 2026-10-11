@@ -186,8 +186,6 @@ jobs:
             ~/.rustup
             packages/desktop-host/engine/target
           key: engine-windows-${{ hashFiles('packages/desktop-host/engine/Cargo.lock') }}
-      - run: cargo build --locked --target x86_64-pc-windows-msvc --manifest-path packages/desktop-host/engine/Cargo.toml
-      - run: cargo test --locked --target x86_64-pc-windows-msvc --manifest-path packages/desktop-host/engine/Cargo.toml
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -242,10 +240,10 @@ jobs:
         run: node packages/desktop-host/test/windows-resolver.mjs
         env:
           DESKLINK_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/x86_64-pc-windows-msvc/debug/desklink-host.exe
-      # A consumer installs the published packages into an empty project and
-      # starts the engine. Installation and startup on a hosted machine only:
-      # capture, input, encoding quality and the desktop stay with the rig lanes.
-      - name: Windows clean-project install of the packed packages, then engine startup
+      # A consumer installs the packed host into an empty project and starts the
+      # engine. Installation and startup on a hosted machine only: capture, input,
+      # encoding quality and the desktop stay with the rig lanes.
+      - name: Windows clean-project install of the packed host, then engine startup
         run: node packages/desktop-host/test/windows-install.mjs
         env:
           DESKLINK_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/x86_64-pc-windows-msvc/debug/desklink-host.exe
