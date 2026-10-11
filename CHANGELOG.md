@@ -13,6 +13,10 @@ move together to preserve exact-version native engine selection.
 - `@desklink/host` no longer retains engine events in an unbounded internal
   queue when a consumer supplies `onEvent`; the queue now serves only the
   pull-based `drainEvents` reader.
+- Media keeps flowing on the selected ICE pair through a client-requested
+  `session.restart_ice`, instead of stalling until the restarted generation
+  nominates a new pair. See [the vendored rtc-ice patch](packages/desktop-host/engine/vendor/rtc-ice/DESKLINK-PATCH.md)
+  for the exact behavior and how to drop it.
 
 ## 0.5.2
 

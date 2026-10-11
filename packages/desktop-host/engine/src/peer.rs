@@ -1153,6 +1153,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
 
     #[test]
     fn a_standing_queue_is_measured_and_one_frames_burst_is_not() {
@@ -1587,6 +1588,229 @@ pub(crate) mod tests {
         peer.accept_answer(reanswer.sdp)
             .await
             .expect("the restart answer is accepted");
+    }
+
+    /// A receiver peer that records when each inbound RTP packet arrives and
+    /// reports its own ICE candidates, so two peers can really connect.
+    struct MediaReceiver {
+        candidates: tokio::sync::mpsc::UnboundedSender<RTCIceCandidateInit>,
+        arrivals: Arc<Mutex<Vec<Instant>>>,
+        connected: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl PeerConnectionEventHandler for MediaReceiver {
+        async fn on_ice_candidate(&self, event: RTCPeerConnectionIceEvent) {
+            if let Ok(init) = event.candidate.to_json() {
+                let _ = self.candidates.send(init);
+            }
+        }
+
+        async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+            self.connected.store(
+                matches!(state, RTCPeerConnectionState::Connected),
+                Ordering::SeqCst,
+            );
+        }
+
+        async fn on_track(&self, track: Arc<dyn TrackRemote>) {
+            let arrivals = Arc::clone(&self.arrivals);
+            tokio::spawn(async move {
+                while let Some(event) = track.poll().await {
+                    if matches!(event, TrackRemoteEvent::OnRtpPacket(_)) {
+                        arrivals.lock().unwrap().push(Instant::now());
+                    }
+                }
+            });
+        }
+    }
+
+    async fn media_receiver(receiver: Arc<MediaReceiver>) -> Arc<dyn PeerConnection> {
+        let mut media_engine = MediaEngine::default();
+        media_engine
+            .register_codec(vp9_codec(), RtpCodecKind::Video)
+            .expect("the codec registers");
+        let registry = register_default_interceptors(Registry::new(), &mut media_engine)
+            .expect("interceptors register");
+        let peer = PeerConnectionBuilder::<std::net::SocketAddr>::new()
+            .with_media_engine(media_engine)
+            .with_interceptor_registry(registry)
+            .with_runtime(default_runtime().expect("a runtime"))
+            .with_handler(receiver)
+            .with_udp_addrs(vec![std::net::SocketAddr::from(([0, 0, 0, 0], 0))])
+            .build()
+            .await
+            .expect("a receiving peer");
+        Arc::new(peer)
+    }
+
+    /// A restart offer/answer round must not interrupt media already flowing on
+    /// the selected pair: the picture keeps advancing (no gap over 200 ms) while
+    /// the old pair stays reachable, and the ICE generation still turns over.
+    #[tokio::test]
+    async fn a_restart_keeps_media_flowing_on_the_selected_pair_until_the_new_one_nominates() {
+        let (events, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (engine, offer) = VideoPeer::offer(transport(), events, VideoCodec::Vp9)
+            .await
+            .expect("an offering peer");
+        let engine = Arc::new(engine);
+
+        let arrivals: Arc<Mutex<Vec<Instant>>> = Arc::new(Mutex::new(Vec::new()));
+        let connected = Arc::new(AtomicBool::new(false));
+        let (client_candidates_tx, mut client_candidates_rx) =
+            tokio::sync::mpsc::unbounded_channel();
+        let receiver = Arc::new(MediaReceiver {
+            candidates: client_candidates_tx,
+            arrivals: Arc::clone(&arrivals),
+            connected: Arc::clone(&connected),
+        });
+        let client = media_receiver(Arc::clone(&receiver)).await;
+
+        client
+            .set_remote_description(RTCSessionDescription::offer(offer.clone()).expect("an offer"))
+            .await
+            .expect("the offer applies");
+        let answer = client.create_answer(None).await.expect("an answer");
+        client
+            .set_local_description(answer.clone())
+            .await
+            .expect("a local answer");
+        engine
+            .accept_answer(answer.sdp.clone())
+            .await
+            .expect("the answer is accepted");
+
+        // The engine's candidates reach the client.
+        let client_for_engine_candidates = Arc::clone(&client);
+        tokio::spawn(async move {
+            while let Some(event) = events_rx.recv().await {
+                if let PeerEvent::Candidate {
+                    candidate,
+                    sdp_mid,
+                    sdp_m_line_index,
+                } = event
+                {
+                    let _ = client_for_engine_candidates
+                        .add_ice_candidate(RTCIceCandidateInit {
+                            candidate,
+                            sdp_mid,
+                            sdp_mline_index: sdp_m_line_index,
+                            username_fragment: None,
+                            url: None,
+                        })
+                        .await;
+                }
+            }
+        });
+        // The client's candidates reach the engine.
+        let engine_for_client_candidates = Arc::clone(&engine);
+        tokio::spawn(async move {
+            while let Some(init) = client_candidates_rx.recv().await {
+                let _ = engine_for_client_candidates
+                    .add_candidate(init.candidate, init.sdp_mid, init.sdp_mline_index)
+                    .await;
+            }
+        });
+
+        // Wait for the ICE path to come up on both ends.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !(engine.is_connected() && connected.load(Ordering::SeqCst)) {
+            assert!(Instant::now() < deadline, "the peers never connected");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Any bytes the VP9 packetizer turns into one access unit.
+        let frame: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
+        let sending = Arc::new(AtomicBool::new(true));
+        let engine_for_sending = Arc::clone(&engine);
+        let sending_for_task = Arc::clone(&sending);
+        let frame_for_task = frame.clone();
+        tokio::spawn(async move {
+            while sending_for_task.load(Ordering::SeqCst) {
+                let _ = engine_for_sending
+                    .send_frame(&frame_for_task, true, Instant::now())
+                    .await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+
+        // Let the picture flow, then take a clean baseline.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        arrivals.lock().unwrap().clear();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let flowing = arrivals.lock().unwrap().len();
+        assert!(
+            flowing >= 5,
+            "media was not flowing before the restart: {flowing} packets"
+        );
+
+        // The restart a client drives when its carrier comes back on a roam.
+        let restart = engine.restart_ice().await.expect("a restart offer");
+        let ufrag = |sdp: &str| {
+            sdp.lines()
+                .find_map(|line| line.strip_prefix("a=ice-ufrag:"))
+                .expect("ICE credentials")
+                .to_owned()
+        };
+        assert_ne!(
+            ufrag(&restart),
+            ufrag(&offer),
+            "the restart must turn the ICE generation over"
+        );
+
+        let restart_at = Instant::now();
+        arrivals.lock().unwrap().clear();
+
+        // The restart offer crosses the consumer's signaling channel before the
+        // client answers, and the engine applies the restart at
+        // `set_local_description` — inside `restart_ice` above, before the offer
+        // has even left. It must keep feeding media on the old pair for that
+        // whole round trip, not only until its own teardown. A real channel
+        // costs more than a loopback hop, so hold this window for the bar's
+        // length: a teardown shows up here, a preserved pair does not.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        client
+            .set_remote_description(RTCSessionDescription::offer(restart).expect("a restart offer"))
+            .await
+            .expect("the restart offer applies");
+        let reanswer = client.create_answer(None).await.expect("an answer");
+        client
+            .set_local_description(reanswer.clone())
+            .await
+            .expect("a local answer");
+        engine
+            .accept_answer(reanswer.sdp)
+            .await
+            .expect("the restart answer is accepted");
+
+        // Keep the picture advancing across and after the restart.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        sending.store(false, Ordering::SeqCst);
+
+        let stamps = arrivals.lock().unwrap().clone();
+        assert!(
+            !stamps.is_empty(),
+            "no media arrived at all after the restart"
+        );
+        let mut previous = restart_at;
+        let mut worst = Duration::ZERO;
+        for stamp in &stamps {
+            worst = worst.max(stamp.duration_since(previous));
+            previous = *stamp;
+        }
+        eprintln!(
+            "restart: {} packets after the offer, worst media gap {worst:?}",
+            stamps.len()
+        );
+        assert!(
+            worst < Duration::from_millis(200),
+            "media stalled for {worst:?} through the restart: {:?}",
+            stamps
+        );
+
+        engine.close().await;
+        let _ = client.close().await;
     }
 
     #[tokio::test]

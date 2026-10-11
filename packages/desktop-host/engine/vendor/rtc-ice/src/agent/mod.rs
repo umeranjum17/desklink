@@ -152,6 +152,13 @@ pub struct Agent {
     pub(crate) nominated_pair: Option<usize>,
     pub(crate) selected_pair: Option<usize>,
 
+    // desklink patch: the selected pair media keeps using through an ICE
+    // restart, until the restarted generation nominates a new one. Held as
+    // owned clones because `apply_restart` clears `candidate_pairs`,
+    // `local_candidates` and `remote_candidates`, so the old indexes dangle.
+    // See DESKLINK-PATCH.md.
+    pub(crate) restart_media_pair: Option<(Candidate, Candidate)>,
+
     // LRU of outbound Binding request Transaction IDs
     pub(crate) pending_binding_requests: Vec<BindingRequest>,
 
@@ -268,6 +275,8 @@ impl Agent {
 
             nominated_pair: None,
             selected_pair: None,
+            // desklink patch: nothing is preserved across a restart yet.
+            restart_media_pair: None,
             candidate_pairs: vec![],
 
             connection_state: ConnectionState::New,
@@ -620,6 +629,13 @@ impl Agent {
                 &self.local_candidates[candidate_pair.local_index],
                 &self.remote_candidates[candidate_pair.remote_index],
             ))
+        } else if let Some((local, remote)) = &self.restart_media_pair {
+            // desklink patch: an ICE restart is in flight and has not nominated
+            // its new pair yet, so media keeps flowing on the pair it was on.
+            // RFC 8445 keeps the previous selected pair until the new one is
+            // validated. The transport layer reads this to stamp outgoing
+            // DTLS/SRTP and to pass up inbound packets.
+            Some((local, remote))
         } else {
             None
         }
@@ -708,6 +724,16 @@ impl Agent {
     /// pair, and restarts the agent's timers. With nothing staged, the current credentials are
     /// kept and only the session is restarted.
     pub fn apply_restart(&mut self, now: Instant, keep_local_candidates: bool) -> Result<()> {
+        // desklink patch: remember the pair media is on before the teardown
+        // below clears it, so the ICE transport keeps sending and receiving on
+        // it until the restarted generation nominates a pair (see
+        // `get_selected_candidate_pair`). Cleared when a new pair is selected,
+        // or when the connection fails or closes.
+        let keep_media_on = self
+            .get_selected_candidate_pair()
+            .map(|(local, remote)| (local.clone(), remote.clone()));
+        self.restart_media_pair = keep_media_on;
+
         if let Some(credentials) = self.ufrag_pwd.pending_local_credentials.take() {
             self.ufrag_pwd.local_credentials = credentials;
         }
@@ -805,6 +831,12 @@ impl Agent {
                 self.set_selected_pair(now, None);
                 self.delete_all_candidates(false);
             }
+            // desklink patch: once the connection has failed or closed there is
+            // no reachable pair, so media must stop instead of keeping the pair
+            // preserved for a restart that will not nominate one.
+            if matches!(new_state, ConnectionState::Failed | ConnectionState::Closed) {
+                self.restart_media_pair = None;
+            }
 
             info!(
                 "[{}]: Setting new connection state: {}",
@@ -831,6 +863,9 @@ impl Agent {
 
             self.candidate_pairs[pair_index].nominated = true;
             self.selected_pair = Some(pair_index);
+            // desklink patch: the restarted generation now has a nominated pair,
+            // so media moves onto it and the preserved pair is released.
+            self.restart_media_pair = None;
 
             self.update_connection_state(now, ConnectionState::Connected);
 

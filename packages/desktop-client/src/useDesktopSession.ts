@@ -1154,7 +1154,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 void establish(authorization);
                 return;
             }
-            // A restart drops the old pair, which on an unchanged path resumes in ~100 ms: give it a moment.
+            // The old pair on an unchanged path resumes in ~100 ms: give it a moment before spending a restart.
             const held = opened.current, before = mediaRef.current;
             cancelRestart();
             restartTimer.current = setTimeout(() => {
