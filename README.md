@@ -186,10 +186,10 @@ forward has to follow it: `adb reverse tcp:<port> tcp:<port>` or
 | See what's changed | [Changelog](CHANGELOG.md) |
 | Report a problem or suggest an idea | [Issues](https://github.com/umeranjum17/desklink/issues) |
 
+## Develop
+
 <details>
 <summary>Contribute and test safely</summary>
-
-## Develop
 
 ```sh
 npm install
