@@ -198,10 +198,20 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+      # The static libvpx (/MT) MSVC build is a ~3 min step that only changes
+      # with its script, so cache the prefix and rebuild only on a miss.
+      - uses: actions/cache@v4
+        id: vpx
+        with:
+          path: ${{ runner.temp }}/desklink-vpx
+          key: libvpx-win-${{ hashFiles('packages/desktop-host/release/build-libvpx-win.ps1') }}
       - name: Build static MSVC libvpx (/MT)
+        if: steps.vpx.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./packages/desktop-host/release/build-libvpx-win.ps1 -OutDir "$env:RUNNER_TEMP/desklink-vpx"
+      - name: Point the engine build at the static libvpx (/MT)
         shell: pwsh
         run: |
-          ./packages/desktop-host/release/build-libvpx-win.ps1 -OutDir "$env:RUNNER_TEMP/desklink-vpx"
           "DESKLINK_VPX_STATIC_DIR=$env:RUNNER_TEMP/desklink-vpx/prefix" >> $env:GITHUB_ENV
           "RUSTFLAGS=-Ctarget-feature=+crt-static" >> $env:GITHUB_ENV
       - name: Build and test Windows serving engine
