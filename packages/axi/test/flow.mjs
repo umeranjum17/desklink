@@ -541,8 +541,12 @@ try {
   await new Promise((resolve,reject)=>{target.stdout.once('data',resolve);target.once('error',reject);});
   await new Promise(r=>setTimeout(r,3000)); // The CLI is absent; captured frames must still build the mask.
   const animated = await run('diff');
-  const corner = /animating: (\d+),(\d+),(\d+),(\d+)/.exec(animated);
-  assert(corner && Number(corner[1]) >= 1152 && Number(corner[2]) < 96, animated);
+  // The x11_target marker sweeps three 32px cells at x11_target.rs's MARKER_X/MARKER_Y
+  // (132,216), so its damaged tiles are the fixed box below. A marker in the
+  // far corner is cropped out of the phone's default portrait cover; this one is
+  // not, so the motion mask must report it here.
+  const marker = /animating: (\d+),(\d+),(\d+),(\d+)/.exec(animated);
+  assert(marker && marker.slice(1).join(',') === '128,192,128,64', animated);
   const once = await run('click','100,100','--wait','1000');
   assert.match(once,/input: applied; frame: ready/, events);
   assert.match(await run('diff'),/regions\[[1-9]/, events);
