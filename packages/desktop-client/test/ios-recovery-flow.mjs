@@ -1,8 +1,11 @@
 // The `live` baseline slice on a Mac simulator: this checkout's example app on
 // one of the Mac's own fm-iPhone simulators, against a bridge on this Linux
 // host. It proves the transport seed; the recovery legs (a 5 s engine silence
-// and a 60 s backgrounding) are the proof legs this file already carried, and
-// the Wi-Fi path cut belongs to the dl-roam-mac-cut follow-up.
+// and a 60 s backgrounding) are the proof legs this file already carried; the
+// `cut` leg is the owned path cut (retire the app's tuple, discard both native
+// UDP directions and signalling, restore on generation 2 against a 12 s
+// outage) that the dl-roam-mac-cut slice adds, with a `cut` negative control
+// that restores signalling but leaves the media cut.
 //
 // The path: the app reaches a userspace-shaped relay running ON THE MAC
 // (`mac-relay.mjs`, the same ShapedLink the browser journeys use) over the Mac's
@@ -25,10 +28,17 @@
 // its deadline. (X11 captures have no consent UI; the legs prove a reopen
 // completes with zero user action.)
 //
-// The `live` leg is THIS PR's subject: the app holds Connected through the
-// Mac-local relay, the decoded picture keeps advancing in the default portrait
-// cover crop, and a pointer down+up and a key down+up land in the fixture. It
-// cuts nothing. drop5/background60 are unchanged from main.
+// The `cut` leg is THIS PR's subject. First it holds the landed stable baseline
+// (picture advancing in the default portrait cover crop, pointer and key
+// down+up landing in the fixture), then it retires the app's UDP tuple, adopts
+// the discard shape on BOTH native directions and cuts signalling, holds a
+// 12 s outage, and restores on generation 2. The same session must survive
+// under one open, no close or revoke, the picture must advance within 2000 ms
+// of the path returning, and after it a key down+up and a pointer down+up must
+// again land in the fixture. `DESKLINK_IOS_CUT_NEGATIVE=1` runs the same cut but
+// restores signalling with the media left cut: the picture verdict must fail.
+// The `live` leg is the opt-in plain baseline; drop5/background60 are unchanged
+// from main.
 //
 // The simulators are the Mac's own fm-iPhones: they are reused and left in
 // place, never created or deleted here. Only this lane's build directory
@@ -42,8 +52,10 @@
 // DESKLINK_IOS_DIR (default fm-desklink-ios), DESKLINK_IOS_OUT (required fresh
 // dir), DESKLINK_IOS_DEVICE (simulator name, default fm-iPhone 17),
 // DESKLINK_IOS_SKIP_BUILD (1 reuses the lane's last build),
-// DESKLINK_IOS_ONLY (a comma-separated leg subset, e.g. `live` or
+// DESKLINK_IOS_ONLY (a comma-separated leg subset, e.g. `cut` or
 // `background60`; unset runs the proof legs, drop5 and background60),
+// DESKLINK_IOS_CUT_NEGATIVE (1 restores signalling but leaves the media cut:
+// the cut leg's picture verdict must then fail),
 // DESKLINK_ENGINE, DESKLINK_VERIFY_TARGET (x11_target).
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -297,6 +309,27 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
     // A task-owned reverse-forward keeps the Linux bridge on loopback: only this
     // ssh process can reach it, from the Mac's own loopback.
     const seenSessionIds = [];
+    // Every wire frame the relay names (session id, open/close/restart_ice,
+    // ICE credentials) is collected here, and the relay's answers to the cut
+    // commands resolve the waits below, so a stalled cut names what the relay
+    // said rather than hanging.
+    const wire = [];
+    const relayWaiters = [];
+    const awaitRelay = (type, ms) => new Promise((resolve, reject) => {
+        const entry = { type };
+        const timer = setTimeout(() => {
+            const at = relayWaiters.indexOf(entry);
+            if (at >= 0) relayWaiters.splice(at, 1);
+            reject(new Error(`the Mac relay never answered ${type}: ${relayError}`));
+        }, ms);
+        entry.resolve = (message) => {
+            clearTimeout(timer);
+            const at = relayWaiters.indexOf(entry);
+            if (at >= 0) relayWaiters.splice(at, 1);
+            resolve(message);
+        };
+        relayWaiters.push(entry);
+    });
     let forwardPort = 0;
     for (let attempt = 0; attempt < 5 && forwardPort === 0; attempt++) {
         const port = 41000 + Math.floor(Math.random() * 18000);
@@ -318,6 +351,9 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
         if (message.type === 'report') receipt.macRelay = message.link;
         if (message.type === 'error') relayError = message.message;
         if (message.type === 'ready') ready = message;
+        if (message.type === 'wire') wire.push(message.wire);
+        const waiter = relayWaiters.find((entry) => entry.type === message.type);
+        if (waiter) waiter.resolve(message);
     });
     for (let waited = 0; ready === null && waited < 20000 && macRelay.exitCode === null; waited += 200) await sleep(200);
     assert(ready !== null, `the Mac relay never reported ready: ${relayError}`);
@@ -526,13 +562,148 @@ test -s "$D/tmp/rec-${name}.mov"`);
         log(`live: ${leg.pictureDistinct} distinct picture frames; pointer ${JSON.stringify(leg.pointer)}; key ${JSON.stringify(leg.key)}`);
     };
 
+    // The owned path cut, and the slice's subject. One leg holds the landed
+    // stable baseline first, then retires the app's old UDP tuple, discards BOTH
+    // native UDP directions and cuts signalling, holds a 12 s outage, and
+    // restores on generation 2: the relay closes the advertised browser-facing
+    // tuple and re-advertises a new one only on the fresh ICE offer, so a
+    // resumed old pair is impossible and the proof requires a new generation.
+    // `negative` restores signalling but leaves the media cut, so the same
+    // picture verdict must fail.
+    const CUT_OFF_MS = 12000;
+    const cutCase = async (negative) => {
+        const name = 'cut';
+        const leg = { name, negative };
+        const startedAt = Date.now();
+        startRecording(name);
+        try {
+            // The landed stable baseline on this candidate, before any cut: the
+            // picture keeps advancing in the default portrait cover crop, and a
+            // pointer down+up and a key down+up reach the fixture.
+            const baseline = [];
+            for (let i = 0; i < 6; i++) { baseline.push(hashShot(shot(join(out, `screen-${name}-live-${i}.png`)))); await sleep(1200); }
+            leg.pictureDistinctBefore = new Set(baseline).size;
+            assert(leg.pictureDistinctBefore >= 3, `the settled picture did not keep advancing before the cut: ${leg.pictureDistinctBefore} of ${baseline.length}`);
+            leg.preTap = await tapPicture();
+            leg.preKey = await tapKey();
+            const idsBefore = [...new Set(wire.filter((w) => w.sessionId).map((w) => w.sessionId))];
+            assert(idsBefore.length === 1, `before the cut the wire named ${idsBefore.length} session id(s)`);
+            leg.sessionIdBefore = idsBefore[0];
+
+            // Cut: both native UDP directions discarded and signalling down.
+            assert(macRelay && macRelay.exitCode === null, 'the Mac relay is not running to cut');
+            const waitCut = awaitRelay('cut', 10000);
+            const tCut = Date.now();
+            macRelay.stdin.write('cut\n');
+            const cut = await waitCut;
+            assert(cut.link.counters.toEngine > 0 && cut.link.counters.toBrowser > 0, 'native traffic did not traverse both relay directions before the cut');
+            leg.cutAt = tCut;
+            leg.cutCounters = { ...cut.link.counters };
+            {
+                const t = Date.now();
+                await waitStatus('econnecting', 20000);
+                leg.reconnectingAt = Date.now() - t;
+                shot(join(out, `screen-${name}-reconnecting.png`));
+            }
+            await sleep(Math.max(0, CUT_OFF_MS - (Date.now() - tCut)));
+
+            // Both directions must actually have been dropped during the cut: a
+            // single shared total cannot prove a real cut, so each direction has
+            // a counter of its own.
+            const waitPath = awaitRelay('report', 10000);
+            macRelay.stdin.write('report\n');
+            const atPath = await waitPath;
+            leg.atPathCounters = { ...atPath.link.counters };
+            assert(atPath.link.counters.discardedToEngine > leg.cutCounters.discardedToEngine,
+                `the cut discarded no toEngine datagrams (${leg.cutCounters.discardedToEngine} → ${atPath.link.counters.discardedToEngine})`);
+            assert(atPath.link.counters.discardedToBrowser > leg.cutCounters.discardedToBrowser,
+                `the cut discarded no toBrowser datagrams (${leg.cutCounters.discardedToBrowser} → ${atPath.link.counters.discardedToBrowser})`);
+
+            // Restore, timed from the harness sending it: the 2000 ms bar is
+            // measured from the path returning, with no observer or load cost
+            // compensated away.
+            const frozen = hashShot(shot(join(out, `screen-${name}-frozen.png`)));
+            const waitRestored = awaitRelay('restored', 15000);
+            const pathAt = Date.now();
+            macRelay.stdin.write(negative ? 'restore negative\n' : 'restore\n');
+            const restored = await waitRestored;
+            leg.pathAt = pathAt;
+            leg.restoredAt = Date.now();
+            leg.restoreCounters = { ...restored.link.counters };
+
+            let firstMove = null;
+            try { firstMove = await waitAdvancing(frozen, 30000); }
+            finally {
+                const advancedAt = firstMove ?? Date.now();
+                leg.recoveryMs = advancedAt - pathAt;
+                leg.sessionIdAfter = [...new Set(wire.filter((w) => w.sessionId).map((w) => w.sessionId))].at(-1) ?? null;
+                leg.wire = wire.slice();
+            }
+            await waitStatus('connected', 20000);
+            const recovered = shot(join(out, `screen-${name}-recovered.png`));
+            leg.letterboxPt = longestDarkRun(recovered, screenPoints());
+            assert(leg.letterboxPt < 130, `a ${leg.letterboxPt.toFixed(0)} pt black run splits the recovered picture: letterboxed, not cover`);
+            await sleep(1500);
+            assert(hashShot(shot(join(out, `screen-${name}-recovered-b.png`))) !== frozen, 'the picture stuck on the outage frame after the recovery');
+            leg.postTap = await tapPicture();
+            leg.postKey = await tapKey();
+            assert(leg.recoveryMs <= 2000, `the picture took ${leg.recoveryMs}ms to advance again (J3 allows 2000)`);
+
+            // A final snapshot names the generation and the endpoints the
+            // recovery actually used.
+            const waitFinal = awaitRelay('report', 10000);
+            macRelay.stdin.write('report\n');
+            const final = (await waitFinal).link;
+            leg.finalCounters = { ...final.counters };
+            leg.generation = final.generation;
+            leg.routes = final.routes;
+
+            // Same session, one open, no close and no revoke, a new ICE
+            // generation (new ufrag and media endpoint) on the same DTLS peer.
+            const opens = wire.filter((w) => w.dir === 'app>' && w.method === 'session.open').length;
+            const restartIce = wire.filter((w) => w.dir === 'app>' && w.method === 'session.restart_ice');
+            const closes = wire.filter((w) => w.dir === 'app>' && w.method === 'session.close');
+            const revoked = wire.filter((w) => w.event === 'session.revoked');
+            const offers = wire.filter((w) => w.dir === 'engine>' && w.event === 'session.description' && w.descriptionType === 'offer' && w.ufrag);
+            const ufrags = [...new Set(offers.map((w) => w.ufrag))];
+            const fingerprints = [...new Set(offers.map((w) => w.fingerprint).filter(Boolean))];
+            leg.wireOps = { opens, restartIce: restartIce.length, closes: closes.length, revoked: revoked.length };
+            leg.iceUfrags = ufrags;
+            leg.peerFingerprints = fingerprints.length;
+            assert.equal(opens, 1, `the cut journey opened ${opens} sessions; it must stay on the one open`);
+            assert.equal(closes.length, 0, 'a session.close crossed during the cut');
+            assert.equal(revoked.length, 0, 'a session.revoked crossed during the outage');
+            assert(leg.sessionIdBefore !== null && leg.sessionIdAfter === leg.sessionIdBefore,
+                `the session changed over the cut (${leg.sessionIdBefore} → ${leg.sessionIdAfter})`);
+            assert(restartIce.length >= 1, 'no native session.restart_ice after the path returned');
+            assert(ufrags.length >= 2, `the offer never turned over its ICE credentials: ${JSON.stringify(ufrags)}`);
+            assert(leg.generation >= 2, `the relay only reached generation ${leg.generation}`);
+            const gen1 = leg.routes.find((r) => r.generation === 1);
+            const gen2 = leg.routes.find((r) => r.generation === 2);
+            assert(gen2 && gen2.mediaSeen, 'no generation-2 media traversed the relay');
+            assert(gen1 && gen2 && gen1.appPort !== gen2.appPort, 'the restored media endpoint is the old tuple relabelled');
+            if (fingerprints.length > 0) {
+                assert.equal(fingerprints.length, 1, `the DTLS peer identity changed across the cut: ${JSON.stringify(fingerprints)}`);
+                leg.peerProof = 'same DTLS fingerprint across both generations';
+            } else {
+                leg.peerProof = 'not available: the offer named no DTLS fingerprint; peer identity rests on the unchanged session id and one open';
+            }
+            stopRecording(name);
+            leg.recording = `${name}.mov`;
+        } finally {
+            receipt.cases[name] = { ...leg, elapsedMs: Date.now() - startedAt };
+            saveReceipt();
+        }
+        log(`${name}: recovery ${leg.recoveryMs}ms, generation ${leg.generation}; counters ${JSON.stringify(leg.finalCounters)}`);
+    };
+
     // DESKLINK_IOS_ONLY names a leg subset for diagnosis; unset runs the proof
-    // legs (drop5 and background60). The `live` baseline leg is the seed the
-    // roam follow-up builds on, so it is opt-in.
+    // legs (drop5 and background60). The `live` and `cut` legs are opt-in.
     const only = (process.env.DESKLINK_IOS_ONLY ?? '').split(',').map((name) => name.trim()).filter(Boolean);
     receipt.only = only.length === 0 ? 'drop5,background60' : only;
-    const runLeg = (name) => only.length === 0 ? name !== 'live' : only.includes(name);
+    const runLeg = (name) => only.length === 0 ? !['live', 'cut'].includes(name) : only.includes(name);
     if (runLeg('live')) await liveCase();
+    if (runLeg('cut')) await cutCase(process.env.DESKLINK_IOS_CUT_NEGATIVE === '1');
     if (runLeg('drop5')) await runCase('drop5', 5000,
         async () => { process.kill(bridgePid, 'SIGSTOP'); process.kill(enginePid, 'SIGSTOP'); },
         async () => { unstop(); });
