@@ -3,8 +3,9 @@ import { networkInterfaces } from 'node:os';
 import { createRequire } from 'node:module';
 // `ws` resolves to the installed copy beside whichever process loads this file:
 // Node's ESM `import 'ws'` needs ws>=8 named exports, but the simulator app
-// pins ws 7, so require it and take the named members off the CommonJS export.
-const { WebSocket, WebSocketServer } = createRequire(import.meta.url)('ws');
+// pins ws 7, whose CommonJS export is the constructor itself with `.Server`.
+const ws = createRequire(import.meta.url)('ws');
+const { WebSocket = ws, WebSocketServer = ws.Server } = ws;
 
 // The userspace-shaped link the drop-and-recover journeys run on: a datagram
 // relay between a browser's ICE agent and the engine's, which decides per
