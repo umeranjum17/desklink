@@ -5,6 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from './lab-safety.mjs';
 
 assertNoAmbientDesktop();
@@ -25,7 +26,16 @@ async function start() {
   await verifyOwnedXvfb(child);
   return child;
 }
-function gone(child) {
+// A killed process is a zombie until Node's event loop reaps it, so /proc can
+// still list it after the kill that made it not-alive. Wait on the real
+// condition — the reaped process and its files gone — bounded so a genuine
+// leak still fails loudly.
+async function gone(child) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline
+    && (existsSync(`/proc/${child.pid}`) || existsSync(socket) || existsSync(lock))) {
+    await sleep(20);
+  }
   assert(!existsSync(`/proc/${child.pid}`), `owned PID ${child.pid} survived`);
   assert(!existsSync(socket) && !existsSync(lock), 'owned socket/lock survived');
 }
@@ -36,12 +46,12 @@ try {
     try { throw new Error('injected workload failure'); }
     finally { await stopOwnedXvfb(failed); }
   }, /injected workload failure/);
-  gone(failed);
+  await gone(failed);
 
   const stopped = await start();
   stopped.kill('SIGSTOP'); // Forces bounded SIGKILL fallback, with stale files.
   await stopOwnedXvfb(stopped);
-  gone(stopped);
+  await gone(stopped);
 
   const replacement = await start();
   const originalLock = readFileSync(lock, 'utf8');
@@ -64,7 +74,7 @@ try {
   writeFileSync(lock, originalLock);
   chmodSync(lock, lockMode);
   await stopOwnedXvfb(replacement);
-  gone(replacement);
+  await gone(replacement);
   console.log(JSON.stringify({ safety: 'passed', display, owned_pids: children.map(child => child.pid),
     cases: ['failure cleanup', 'SIGKILL fallback', 'replacement preserved', 'unrecorded PID refused', 'wrong lock refused'] }));
 } finally {
