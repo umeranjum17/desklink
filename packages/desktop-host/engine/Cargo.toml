@@ -21,6 +21,10 @@ anyhow = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "sync", "time", "signal"] }
 libc = "0.2"
 bytes = "1"
+# rtc-sctp 0.21.1 is required through this stack: 0.21.0 replaces an
+# expired-but-unhandled T3 retransmission deadline, so the data channel stalls
+# on the new nominated pair after an ICE restart and the client reopens the
+# session. Cargo.lock pins 0.21.1; drop the pin when a later release carries it.
 webrtc = { version = "0.21", default-features = false, features = ["runtime-tokio", "crypto-ring"] }
 rtc = { version = "0.21", default-features = false, features = ["crypto-ring"] }
 log = "0.4"

@@ -17,6 +17,12 @@ move together to preserve exact-version native engine selection.
   `session.restart_ice`, instead of stalling until the restarted generation
   nominates a new pair. See [the vendored rtc-ice patch](packages/desktop-host/engine/vendor/rtc-ice/DESKLINK-PATCH.md)
   for the exact behavior and how to drop it.
+- The data channel resumes on the freshly nominated ICE pair after a
+  client-requested `session.restart_ice`, instead of stalling until the client
+  reopens the desktop session. The engine now builds against `rtc-sctp`
+  0.21.1, whose timer fix no longer overwrites an elapsed T3 retransmission
+  deadline before it is handled; see the pin note in
+  `packages/desktop-host/engine/Cargo.toml`.
 
 ## 0.5.2
 

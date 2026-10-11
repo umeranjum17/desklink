@@ -74,7 +74,7 @@ const tagged = () => readdirSync('/proc').flatMap(name => {
 });
 const driver = (port, token) => `
 ${adapter === 'demo' ? `import { bridgeSignaling } from '/@fs/${worktree}/packages/desktop-client/example/App.tsx';` : ''}
-const probe = window.__probe = { sessionId: null, peerId: 1, iceGeneration: 0, answerAt: null, errors: [] };
+const probe = window.__probe = { sessionId: null, peerId: 1, iceGeneration: 0, answerAt: null, errors: [], controls: [], pings: [] };
 window.addEventListener('unhandledrejection', e => probe.errors.push(String(e.reason)));
 const peer = new RTCPeerConnection({ iceServers: [] });
 let socket, demo;
@@ -99,7 +99,14 @@ async function flush() {
     for (const c of candidates.splice(0)) await request('session.candidate', { session_id: probe.sessionId, candidate: c.candidate, sdp_mid: c.sdpMid, sdp_m_line_index: c.sdpMLineIndex });
 }
 peer.ontrack = e => { const video = document.querySelector('video'); video.srcObject = new MediaStream([e.track]); void video.play(); };
-peer.ondatachannel = e => { channel = e.channel; channel.onmessage = () => {}; };
+peer.ondatachannel = e => {
+    channel = e.channel;
+    channel.onmessage = e => {
+        const message = JSON.parse(e.data), at = Date.now();
+        probe.controls.push({ at, ...message });
+        if (message.kind === 'ping') probe.pings.push(at);
+    };
+};
 function connect(restart = false) {
 ${adapter === 'demo' ? '' : `socket = new WebSocket('ws://127.0.0.1:${port}/desktop?token=${token}');`}
 if (socket) socket.onclose = () => { for (const p of pending.values()) p.reject(new Error('bridge closed')); pending.clear(); };
@@ -135,6 +142,7 @@ window.__carrierRequest = () => { void request('session.metrics', { session_id: 
 const send = message => channel.send(JSON.stringify({ ...message, seq: ++inputSeq }));
 window.__hold = () => { send({ kind: 'pointer', phase: 'down', x: 320, y: 180, button: 1 }); send({ kind: 'key', character: 'a', down: true }); };
 window.__release = () => send({ kind: 'release_all' });
+window.__clipboard = (kind, request, text) => send({ kind, request, ...(text === undefined ? {} : { text }) });
 window.__measure = async () => {
     const stats = await peer.getStats(); const frames = {};
     stats.forEach(row => { if (row.type === 'inbound-rtp' && row.kind === 'video') frames[row.id] = row.framesDecoded ?? 0; });
@@ -143,7 +151,8 @@ window.__measure = async () => {
     const remote = stats.get(pair?.remoteCandidateId);
     return { at: Date.now(), sessionId: probe.sessionId, peerId: probe.peerId, iceGeneration: probe.iceGeneration, answerAt: probe.answerAt,
         pending: probe.pending, carrierClosed: probe.carrierClosed, carrierRejection: probe.carrierRejection, restartRejected: probe.restartRejected,
-        offerError: probe.offerError, pair: pair && { id: pair.id, state: pair.state, remotePort: remote?.port }, frames, channel: channel?.readyState, errors: probe.errors };
+        offerError: probe.offerError, pair: pair && { id: pair.id, state: pair.state, remotePort: remote?.port }, frames, channel: channel?.readyState,
+        pings: probe.pings, controls: probe.controls, errors: probe.errors };
 };
 `;
 
@@ -154,10 +163,14 @@ import TestRenderer from 'react-test-renderer';
 import { bridgeSignaling } from '/@fs/${worktree}/packages/desktop-client/example/App.tsx';
 import { useDesktopSession } from '/@fs/${worktree}/packages/desktop-client/src/useDesktopSession.ts';
 import { attachSurface, nativeDesklink } from '/@fs/${worktree}/packages/desktop-client/src/native.web.ts';
-const probe = window.__probe = { status: 'boot', failure: null, holdAt: null, sessionId: null, generation: null, offerError: null, answerAt: null, iceGeneration: 0, opens: [], authorizes: [], carriers: [], restarts: [], closes: [], log: [], errors: [], pings: [] };
+const probe = window.__probe = { status: 'boot', failure: null, holdAt: null, sessionId: null, generation: null, offerError: null, answerAt: null, iceGeneration: 0, opens: [], authorizes: [], carriers: [], restarts: [], closes: [], log: [], errors: [], pings: [], controls: [] };
 // Engine heartbeats over the data channel: the control path, apart from video.
 nativeDesklink.addListener('onSessionEvent', e => {
-    if (e.name === 'control' && String(e.payload.message).includes('"ping"')) probe.pings.push(Date.now());
+    if (e.name === 'control') {
+        const message = JSON.parse(String(e.payload.message));
+        probe.controls.push({ at: Date.now(), ...message });
+        if (message.kind === 'ping') probe.pings.push(Date.now());
+    }
     if (e.name === 'failure' && String(e.payload.reason ?? '') === 'sdp') probe.offerError = String(e.payload.message ?? 'sdp');
     if (e.name === 'answer') probe.answerAt = Date.now();
 });
@@ -210,6 +223,8 @@ function Harness() {
 TestRenderer.create(React.createElement(Harness));
 window.__hold = () => { session.setInputEnabled(true); session.send({ kind: 'pointer', phase: 'down', x: 320, y: 180, button: 1 }); session.send({ kind: 'key', character: 'a', down: true }); };
 window.__release = () => session.releaseHeld();
+window.__clipboardWrite = async text => { session.setInputEnabled(true); await session.pasteLocalToRemote(text); };
+window.__clipboardRead = async () => { session.setInputEnabled(true); return session.copyRemoteToLocal(async () => {}); };
 window.__restart = () => { corruptNextOffer = true; void carrier.request('session.restart_ice', { session_id: probe.sessionId, generation: probe.generation }); };
 window.__measure = async () => {
     const frames = {};
@@ -217,7 +232,8 @@ window.__measure = async () => {
     return { at: Date.now(), sessionId: probe.sessionId, peerId: session.nativeId, frames, channel: session.snapshot.presented ? 'open' : 'closed',
         status: probe.status, failure: probe.failure, holdAt: probe.holdAt, offerError: probe.offerError, answerAt: probe.answerAt, iceGeneration: probe.iceGeneration,
         opens: probe.opens, authorizes: probe.authorizes, carriers: probe.carriers,
-        restarts: probe.restarts, closes: probe.closes, log: probe.log, errors: probe.errors, pings: probe.pings };
+        restarts: probe.restarts, closes: probe.closes, log: probe.log, errors: probe.errors, pings: probe.pings,
+        controls: probe.controls, clipboard: session.clipboard };
 };
 `;
 
@@ -272,7 +288,7 @@ async function run() {
         child.stdin.write = (...values) => {
             for (const line of String(values[0]).trim().split('\n')) {
                 const message = JSON.parse(line);
-                if (['session.close', 'session.restart_ice', 'session.description'].includes(message.method)) result.tap.push(tap('bridge->engine', message));
+                if (['session.open', 'session.close', 'session.restart_ice', 'session.description'].includes(message.method)) result.tap.push(tap('bridge->engine', message));
                 else if (hook) tap('bridge->engine', message);
             }
             return write(...values);
@@ -344,6 +360,8 @@ async function run() {
             env: { ...process.env, DISPLAY: '', WAYLAND_DISPLAY: '' }, viewport: { width: 1280, height: 720 },
             args: ['--no-sandbox', '--autoplay-policy=no-user-gesture-required', '--disable-features=WebRtcHideLocalIpsWithMdns'] });
         const page = context.pages()[0];
+        page.on('pageerror', error => appendFileSync(join(evidence, 'browser.log'), `${Date.now()} ${error}\n`));
+        page.on('requestfailed', request => appendFileSync(join(evidence, 'browser.log'), `${Date.now()} ${request.url()} ${request.failure()?.errorText}\n`));
         await page.goto(vite.resolvedUrls.local[0]);
         await page.waitForFunction(() => typeof window.__measure === 'function');
         const measure = () => page.evaluate(() => window.__measure());
@@ -476,6 +494,35 @@ async function run() {
             assert.equal(result.afterRestart.sessionId, held.sessionId);
             assert.equal(result.afterRestart.peerId, held.peerId);
             assert.deepEqual(result.afterRestart.errors, []);
+            await wait(async () => {
+                result.controlAfterRestart = await measure();
+                return result.controlAfterRestart.pings.some(at => at >= result.connected.at);
+            }, 10000, 'heartbeat returns on the new nominated pair');
+            const controlAt = Date.now();
+            await verifyOwnedXvfb(xvfb);
+            await page.evaluate(() => { window.__hold(); window.__release(); });
+            await wait(() => ['button', 'key'].every(kind => ['down', 'up'].every(phase =>
+                observedFixture.some(e => e.observedAt >= controlAt && e.kind === kind && e.phase === phase))),
+            3000, 'fixture-confirmed key and pointer after restart');
+            const clipboardText = 'Umer: control after ICE restart';
+            await page.evaluate(text => window.__clipboard('clipboard_write', 'roam-write', text), clipboardText);
+            await wait(async () => (await measure()).controls.some(m => m.request === 'roam-write'), 3000, 'clipboard write reply');
+            await page.evaluate(() => window.__clipboard('clipboard_read', 'roam-read'));
+            await wait(async () => (await measure()).controls.some(m => m.request === 'roam-read'), 3000, 'clipboard read reply');
+            result.controlProof = await measure();
+            const clipboard = result.controlProof.controls.find(m => m.request === 'roam-read');
+            assert.equal(clipboard.error, undefined, 'clipboard read refused');
+            assert.equal(clipboard.text, clipboardText, 'clipboard round trip after restart');
+            assert(Object.keys(held.frames).some(id => result.controlProof.frames[id] > result.afterRestart.frames[id]), 'frames stopped during control proof');
+            assert.equal(result.controlProof.sessionId, held.sessionId);
+            assert.equal(result.controlProof.peerId, held.peerId);
+            assert.equal(result.controlProof.pair.remotePort, result.generation2Port);
+            result.firstPingAfterRestartMs = result.controlAfterRestart.pings.find(at => at >= result.connected.at) - result.backAt;
+            result.controlMarkers = observedFixture.filter(e => e.observedAt >= controlAt);
+            result.sessionCounts = { opens: result.tap.filter(e => e.method === 'session.open').length,
+                closes: result.tap.filter(e => e.method === 'session.close').length };
+            assert.deepEqual(result.sessionCounts, { opens: 1, closes: 0 }, 'recovery replaced the desktop session');
+            assert(!result.tap.some(e => e.event === 'session.revoked'), 'recovery revoked the session');
             await page.screenshot({ path: join(evidence, 'restart.png') });
         }
         // The host holds a detached session for its 30 s reattach window, and the
@@ -508,6 +555,41 @@ async function run() {
             } else {
                 assert(recovered !== null && recovered <= 2000, `recovery ${recovered}ms after path-back`);
                 if (pathMode === 'new-address') assert(result.tap.some(e => e.direction === 'bridge->engine' && e.method === 'session.restart_ice' && e.at >= result.backAt), 'no restart_ice after path-back');
+            }
+            // The real hook resumes input and clipboard on the new nominated pair
+            // without replacing the desktop session: fixture-confirmed key and
+            // pointer, an exact clipboard round trip, and decoded frames still
+            // advancing while they finish.
+            if (!authorizeRevoked && !reopens) {
+                const controlAt = Date.now();
+                await verifyOwnedXvfb(xvfb);
+                const framesBeforeControl = (await measure()).frames;
+                await page.evaluate(() => window.__hold());
+                await wait(() => ['button', 'key'].every(kind =>
+                    observedFixture.some(e => e.observedAt >= controlAt && e.kind === kind && e.phase === 'down')), 3000, 'fixture-confirmed key and pointer down after recovery');
+                await page.evaluate(() => window.__release());
+                await wait(() => ['button', 'key'].every(kind =>
+                    observedFixture.some(e => e.observedAt >= controlAt && e.kind === kind && e.phase === 'up')), 3000, 'fixture-confirmed key and pointer up after recovery');
+                const clipboardText = 'Umer: control after ICE restart';
+                await page.evaluate(text => window.__clipboardWrite(text), clipboardText);
+                await wait(async () => (await measure()).controls.some(m => m.kind === 'clipboard' && m.request != null), 3000, 'clipboard write reply after recovery');
+                const read = await page.evaluate(() => window.__clipboardRead());
+                assert.equal(read.error, undefined, 'clipboard read refused after recovery');
+                assert.equal(read.text, clipboardText, 'clipboard round trip after recovery');
+                result.controlProof = await measure();
+                assert(Object.keys(framesBeforeControl).some(id => result.controlProof.frames[id] > framesBeforeControl[id]), 'frames stopped during hook control proof');
+                assert.equal(result.controlProof.sessionId, held.sessionId, 'hook control proof changed the session');
+                assert.equal(result.controlProof.peerId, held.peerId, 'hook control proof changed the peer');
+                // A new-address recovery restarts ICE and moves to the nominated
+                // generation-2 pair; a same-address recovery keeps generation 1.
+                if (pathMode === 'new-address') {
+                    assert(result.controlProof.iceGeneration >= 2, 'hook control proof ran before the generation-2 restart');
+                    const linkLog = readFileSync(join(evidence, 'link.log'), 'utf8');
+                    result.hookGeneration2Port = Number(linkLog.match(/\(generation 2\) → browser through 127\.0\.0\.1:(\d+)/)?.[1]);
+                    assert(Number.isInteger(result.hookGeneration2Port) && linkLog.includes(`link generation 2 media through 127.0.0.1:${result.hookGeneration2Port}`), 'no generation-2 relay media in hook run');
+                }
+                result.hookControlMarkers = observedFixture.filter(e => e.observedAt >= controlAt);
+                result.hookControlAfterRecoveryMs = result.controlProof.at - result.backAt;
             }
             if (!authorizeRevoked) {
                 await sleep(Math.max(0, result.cutAt + 45000 - Date.now()));

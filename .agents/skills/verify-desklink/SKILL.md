@@ -197,9 +197,14 @@ same session and each side must keep a single ice-ufrag, P1e), `--outage 12000
 `native.web.ts` with the demo `bridgeSignaling`; only RN rendering is stubbed.
 Read `result.json`: `recoveryMs`, `sameSession`, `opens`, `at45`,
 `reopenAfterCarrierMs`/`newPictureMs` for 40s, and the stdio tap (`stdio.jsonl`)
-for `restart_ice`, `session.close` and `session.revoked`. Recovery timing varies
-with the engine data channel's retransmit backoff after the outage; report each
-run, never only the best.
+for `restart_ice`, `session.close` and `session.revoked`. A same-session recovery
+also asserts the data channel resumed on the new pair, not only the picture: on a
+new-address run `controlProof`, `hookGeneration2Port`, `hookControlMarkers` and
+`hookControlAfterRecoveryMs` record fixture-confirmed key and pointer, an exact
+clipboard round trip through the real hook, decoded frames still advancing, and
+generation-2 relay media, all under one `session.open` and no `session.close`.
+Recovery timing varies with the engine data channel's retransmit backoff after the
+outage; report each run, never only the best.
 
 ## Motion
 
