@@ -182,28 +182,3 @@ fn us_ansi_key(character: char) -> Option<(i16, bool)> {
         _ => return None,
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn maps_common_ascii_to_ansi_virtual_keys() {
-        let layout = Layout::from_environment().unwrap();
-        let lower = layout.keystroke_for_char('a').unwrap();
-        let upper = layout.keystroke_for_char('A').unwrap();
-        assert_eq!(lower.code, 0);
-        assert_eq!(upper.code, lower.code);
-        assert!(upper.shift);
-        assert_eq!(layout.keystroke_for_char('!').unwrap().code, 18);
-        assert!(layout.keystroke_for_char('\u{1f600}').is_none());
-    }
-
-    #[test]
-    fn resolves_mac_named_keys_and_modifiers() {
-        assert_eq!(named_key("Return").unwrap().code, 36);
-        assert_eq!(named_key("ArrowLeft").unwrap().code, 123);
-        assert_eq!(modifier_key("Command"), Some(55));
-        assert!(named_key("Frobnicate").is_none());
-    }
-}

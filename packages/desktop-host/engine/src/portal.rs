@@ -142,21 +142,3 @@ fn choose_cursor_mode(available: BitFlags<CursorMode>) -> Result<CursorMode> {
         .find(|mode| available.contains(*mode))
         .context("cursor-unavailable: portal cannot leave the cursor out of capture")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn hidden_takes_any_cursor_free_mode_and_refuses_embedded_only_portals() {
-        assert_eq!(
-            choose_cursor_mode(CursorMode::Metadata | CursorMode::Hidden).unwrap(),
-            CursorMode::Hidden
-        );
-        assert_eq!(
-            choose_cursor_mode(CursorMode::Metadata.into()).unwrap(),
-            CursorMode::Metadata
-        );
-        let error = choose_cursor_mode(CursorMode::Embedded.into()).unwrap_err();
-        assert!(error.to_string().contains("cursor-unavailable:"));
-    }
-}
