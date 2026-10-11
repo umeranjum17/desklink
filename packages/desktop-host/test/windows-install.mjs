@@ -19,9 +19,13 @@ assert.ok(existsSync(engine), `the compiled engine is missing: ${engine}`);
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 // Windows engines are an opt-in preview, exactly as a consumer installs them.
 process.env.DESKLINK_WINDOWS = '1';
-// Every package release/pack.mjs publishes for a release, so this installs the
-// set a consumer installs rather than a convenient subset.
+// Pack every package release/pack.mjs publishes, so a package that stops
+// packing fails here. Install only the host: it carries the engine this
+// Windows proof is about, and installing the CLI as well would resolve its
+// playwright-core and node-datachannel trees into an empty project the
+// consumer never uses.
 const published = ['desktop-host', 'desktop-client', 'axi'];
+const installSet = ['desktop-host'];
 
 // npm and the installed bin shims are .cmd files on Windows, which Node will
 // not exec directly.
@@ -60,19 +64,20 @@ try {
     const tarballs = published.map((name) => {
         const dir = join(repo, 'packages', name);
         const { name: spec, version } = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-        return { spec, version, file: join(release, packJson(['--pack-destination', release], dir).filename) };
+        return { name, spec, version, file: join(release, packJson(['--pack-destination', release], dir).filename) };
     });
     // What would be published, so an install that silently lost a file shows here.
     const packed = packJson(['--dry-run'], join(repo, 'packages', 'desktop-host'));
     const expected = new Set(packed.files.map((file) => file.path));
 
+    const installTarballs = tarballs.filter((tarball) => installSet.includes(tarball.name));
     npm(['init', '-y'], project);
-    npm(['install', '--ignore-scripts', '--no-audit', '--no-fund', ...tarballs.map((tarball) => tarball.file)], project);
+    npm(['install', '--ignore-scripts', '--no-audit', '--no-fund', ...installTarballs.map((tarball) => tarball.file)], project);
 
-    for (const { spec, version } of tarballs) {
-        const installed = JSON.parse(readFileSync(join(project, 'node_modules', ...spec.split('/'), 'package.json'), 'utf8'));
-        assert.equal(installed.name, spec);
-        assert.equal(installed.version, version, `installed ${spec} is not the release version`);
+    for (const { spec, version } of installTarballs) {
+        const manifest = JSON.parse(readFileSync(join(project, 'node_modules', ...spec.split('/'), 'package.json'), 'utf8'));
+        assert.equal(manifest.name, spec);
+        assert.equal(manifest.version, version, `installed ${spec} is not the release version`);
     }
     // The pack manifest is what a user actually gets: same files, no more.
     const hostRoot = join(project, 'node_modules', '@desklink', 'host');
