@@ -1,4 +1,10 @@
-<h1 align="center">desklink</h1>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme/logo-dark.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/readme/logo-light.svg" />
+    <img src="docs/assets/readme/logo-light.svg" alt="desklink" width="320" height="64" />
+  </picture>
+</p>
 
 <p align="center"><strong>Your desktop, right where you need it — in a browser, on a phone, or with an agent.</strong></p>
 
@@ -48,12 +54,12 @@ and the [local protocol](packages/desktop-host/docs/PROTOCOL.md).
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/assets/readme/browser.webp" alt="Browser reference client with the Reading list open on a private demo desktop." width="480" /><br/><strong>In your browser</strong><br/>Click, type and scroll. No client build needed.</td>
-    <td width="50%"><img src="docs/assets/readme/phone.webp" alt="React Native example app on a landscape Android emulator: a tap selects Groceries, with touch pointer and key controls visible." width="480" /><br/><strong>In your phone app</strong><br/>The React Native view, on an Android emulator.</td>
+    <td width="50%" valign="top"><img src="docs/assets/readme/browser.webp" alt="Browser reference client with the Reading list open on a private demo desktop." width="480" /><br/><strong>In your browser</strong><br/>Click, type and scroll. No client build needed.</td>
+    <td width="50%" valign="top"><img src="docs/assets/readme/phone.webp" alt="React Native example app on a landscape Android emulator: a tap selects Groceries, with touch pointer and key controls visible." width="480" /><br/><strong>In your phone app</strong><br/>The React Native view, on an Android emulator.</td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/assets/readme/agent.webp" alt="Real agent CLI commands read Groceries as text, click Bread, type and butter, and request an image crop." width="480" /><br/><strong>With your agent</strong><br/>Read the screen as text. Ask for pixels when needed.</td>
-    <td width="50%"><img src="docs/assets/readme/clipboard.webp" alt="Android emulator example app with Ctrl armed and a Sent to desktop confirmation after copying demo text to the phone and back." width="480" /><br/><strong>Keys and clipboard, too</strong><br/>Hold Ctrl. Copy text over and send it back.</td>
+    <td width="50%" valign="top"><img src="docs/assets/readme/agent.webp" alt="A close-up of the real agent CLI: read Groceries as text, click the Bread item, then press End." width="480" /><br/><strong>With your agent</strong><br/>Read the screen as text. Ask for pixels when needed.</td>
+    <td width="50%" valign="top"><img src="docs/assets/readme/clipboard.webp" alt="A close-up of the Android emulator example app's key controls and Sent to desktop confirmation after copying demo text to the phone and back." width="480" /><br/><strong>Keys and clipboard, too</strong><br/>Use key controls. Copy text over and send it back.</td>
   </tr>
 </table>
 
