@@ -1,180 +1,94 @@
 <h1 align="center">desklink</h1>
 
+<p align="center"><strong>Your desktop, right where you need it — in a browser, on a phone, or with an agent.</strong></p>
+
 <p align="center">
-  <a href="https://www.npmjs.com/package/@desklink/host"><img alt="npm" src="https://img.shields.io/npm/v/@desklink/host?style=flat&label=npm" /></a>
+  <a href="https://www.npmjs.com/package/@desklink/host"><img alt="npm version" src="https://img.shields.io/npm/v/@desklink/host?style=flat&label=npm" /></a>
   <a href="https://github.com/umeranjum17/desklink/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/umeranjum17/desklink/ci.yml?style=flat&branch=main" /></a>
-  <a href="LICENSE"><img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-666?style=flat" /></a>
-  <img alt="Linux and macOS (preview)" src="https://img.shields.io/badge/Linux%20%7C%20macOS%20%28preview%29-111?style=flat" />
+  <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-666?style=flat" /></a>
 </p>
 
 <p align="center">
-  <strong>Your own desktop, live in a browser or an app, over a channel you already trust.</strong><br/>
-  desklink captures a Linux desktop (macOS in preview), encodes it, carries it over WebRTC and applies the viewer's pointer, keyboard and clipboard back to the same desktop. It is a per-user process with a documented local protocol, not a service: no account, no pairing ceremony, no second identity system. Your application carries the offer and answer over the connection it already has, and a React Native view and an agent CLI sit on the same engine.
+  <img src="docs/assets/readme/hero.webp" alt="The live browser client: open Groceries, type Fresh basil, save, then open the Reading list." width="960" />
 </p>
 
-<h3 align="center"><a href="#try-it"><ins>Try it in one command</ins></a></h3>
-
-<p align="center">
-  <a href="https://www.npmjs.com/package/@desklink/host">@desklink/host on npm</a> ·
-  <a href="https://www.npmjs.com/package/@desklink/react-native">@desklink/react-native on npm</a> ·
-  <a href="packages/axi">@desklink/axi</a> ·
-  <a href="packages/desktop-host/docs/PROTOCOL.md">The protocol</a>
-</p>
-
-<p align="center">
-  <picture><source srcset="docs/assets/readme/hero.webp" type="image/webp"><img src="docs/assets/readme/hero.jpg" alt="The reference client in a browser showing a private desktop live: the pointer picks notes in a notes app, clicks into a checklist, types a new line and presses Save" width="960" /></picture>
-</p>
-
-## Install
-
-```sh
-npm install @desklink/host               # the engine
-npx expo install @desklink/react-native  # the view and session
-```
-
-The package supports Expo SDK 55 and later, including the SDK a fresh
-`npx create-expo-app` resolves today: no SDK pin is needed.
-
-The npm version badges track the registry, and npm verifies package integrity
-on install. See the [host installation guide](packages/desktop-host/README.md#install-and-run)
-for supported desktop platforms and the [receiver installation guide](packages/desktop-client/README.md#install)
-for Android, iOS and web setup. Release changes are in the [changelog](CHANGELOG.md).
-
-Install the agent CLI with `npm install -g @desklink/axi`; see its [README](packages/axi/README.md#install).
+<p align="center"><a href="#try-it">Try it</a> · <a href="packages/desktop-client">Build it into your app</a> · <a href="packages/axi">Give your agent a desktop</a></p>
 
 ## Why desklink exists
 
-Reaching your own computer from somewhere else usually means handing it to someone else's service: an account, a relay, a pairing flow, and a second identity system beside the one your application already has. desklink turns that inside out. The engine runs as you, starts when asked and stops when told, and trusts the application that started it to decide who may see the desktop.
+You already have an app and a way to trust the people using it.
+You shouldn't need another account just to bring a desktop into it.
+Desklink handles the live picture, clicks, keys and clipboard.
+Your app stays in charge of who gets in — and when the session ends.
 
-What it does own is the hard middle: capture with the compositor's consent, a real-time encoder tuned for text that has to stay readable on a phone, WebRTC transport, and input and clipboard that reach only the session a paired client opened.
+<details>
+<summary>How it fits your app's connection</summary>
 
-An application supplies pairing, identity and signaling transport through the BYOKit kits — [@byokit/link](https://www.npmjs.com/package/@byokit/link) for pairing and revocation, [@byokit/relay](https://www.npmjs.com/package/@byokit/relay) for the relay, [@byokit/reach](https://www.npmjs.com/package/@byokit/reach) for reachable addresses. desklink implements none of those pieces; the app adapts its authenticated channel to the client's [`Signaling` interface](packages/desktop-client/README.md#signaling). The app maps each pairing to the sessions it opened; on revocation it explicitly closes those sessions and refuses future opens from that pairing (dropping signaling alone does not revoke a retained bridge session). WebRTC media and input use a separate session, with app-supplied `iceServers` when needed; a signaling relay alone does not relay that traffic.
+The engine is a per-user process, not a service. Your application starts and
+stops it, and carries the offer and answer over its own authenticated channel.
 
-## See it in action
+An application supplies pairing, identity and signaling transport through the
+BYOKit kits — [@byokit/link](https://www.npmjs.com/package/@byokit/link) for pairing
+and revocation, [@byokit/relay](https://www.npmjs.com/package/@byokit/relay) for the
+relay, [@byokit/reach](https://www.npmjs.com/package/@byokit/reach) for reachable
+addresses. Desklink implements none of those pieces; the app adapts its channel
+to the client's [Signaling interface](packages/desktop-client/README.md#signaling).
+The app maps each pairing to the sessions it opened; on revocation it explicitly
+closes those sessions and refuses future opens from that pairing. Dropping
+signaling alone does not revoke a retained bridge session. WebRTC media and input
+use a separate session, with app-supplied `iceServers` when needed; a signaling
+relay alone does not relay that traffic.
 
-### A desktop in a browser tab
+See [where each piece's responsibility ends](packages/desktop-host/docs/BOUNDARY.md)
+and the [local protocol](packages/desktop-host/docs/PROTOCOL.md).
 
-`desklink-host bridge` re-serves the engine over a WebSocket and serves the reference client, one HTML file with no build step. Open the URL it prints and the desktop is live: click, type and scroll on the picture, open the on-screen keyboard, and copy or paste when the capture source supports the clipboard.
+</details>
 
-<p align="center">
-  <picture><source srcset="docs/assets/readme/reference-client.webp" type="image/webp"><img src="docs/assets/readme/reference-client.jpg" alt="The reference client showing a private desktop live: a notes app with a new line typed through the browser" width="720" /></picture>
-</p>
+## One desktop. A few ways in.
 
-### The same desktop in a React Native app
+<table>
+  <tr>
+    <td width="50%"><img src="docs/assets/readme/browser.webp" alt="Browser reference client with the Reading list open on a private demo desktop." width="480" /><br/><strong>In your browser</strong><br/>Click, type and scroll. No client build needed.</td>
+    <td width="50%"><img src="docs/assets/readme/phone.webp" alt="React Native example app on a landscape Android emulator: a tap selects Groceries, with touch pointer and key controls visible." width="480" /><br/><strong>In your phone app</strong><br/>The React Native view, on an Android emulator.</td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/assets/readme/agent.webp" alt="Real agent CLI commands read Groceries as text, click Bread, type and butter, and request an image crop." width="480" /><br/><strong>With your agent</strong><br/>Read the screen as text. Ask for pixels when needed.</td>
+    <td width="50%"><img src="docs/assets/readme/clipboard.webp" alt="Android emulator example app with Ctrl armed and a Sent to desktop confirmation after copying demo text to the phone and back." width="480" /><br/><strong>Keys and clipboard, too</strong><br/>Hold Ctrl. Copy text over and send it back.</td>
+  </tr>
+</table>
 
-`@desklink/react-native` is a view and a session, not a screen: it draws the picture, turns touch into a desktop pointer the phone can see, and leaves the buttons to the app. Below, its web build in a landscape phone viewport: a tap selected the note, the drawn pointer shows where it landed, and the key row is the app's own, using the package's sticky modifiers.
-
-<p align="center">
-  <picture><source srcset="docs/assets/readme/react-native.webp" type="image/webp"><img src="docs/assets/readme/react-native.jpg" alt="The React Native view in a phone-sized landscape viewport: the desktop fills the view with a large drawn pointer, above an app-drawn row of Ctrl, Shift, Esc, Tab and Keyboard keys" width="640" /></picture>
-</p>
-
-### A desktop an agent can drive
-
-`desklink-axi` gives a coding agent the desktop as text first: OCR items with refs it can click, changed regions since the last look, and pixels only when it asks for a crop. This transcript is generated by a real agent turn on a private Reading list window (the OCR fixture in `packages/axi/test/flow.mjs`):
-
-```text
-$ desklink-axi screen --query "Reading list"
-screen: 1280x720 frame=1 settled=true estimated_tokens=~24
-text[1 of 1]{ref,text,x,y}:
-  "@1.1","Reading list A book on typography and remote desktops today",33,37
-help[1]:
-  desklink-axi click @1.<n>
-$ desklink-axi screen --query typography
-screen: 1280x720 frame=1 settled=true estimated_tokens=~24
-text[1 of 1]{ref,text,x,y}:
-  "@1.1","Reading list A book on typography and remote desktops today",33,37
-help[1]:
-  desklink-axi click @1.<n>
-$ desklink-axi click 200,625
-input: applied
-$ desklink-axi type "Notes on remote desktops" --wait settle
-input: applied; frame: ready
-$ desklink-axi diff
-changed: 1 region since frame 1
-regions[1]{ref,box}:
-  @r1,"0,0,1280,720"
-appeared[1 of 1]{ref,text,x,y}:
-  "@4.21","Notes on remote desktops",36,612
-gone: 1 text items
-help[2]:
-  desklink-axi look @r1
-  desklink-axi screen --query "<words>"
-$ desklink-axi screen --query "Notes on remote desktops"
-screen: 1280x720 frame=8 settled=true estimated_tokens=~15
-text[1 of 1]{ref,text,x,y}:
-  "@8.3","Notes on remote desktops",36,613
-help[1]:
-  desklink-axi click @8.<n>
-$ desklink-axi screen --query "Notes on remote desktops" --full
-screen: 1280x720 frame=17 settled=true estimated_tokens=~15
-text[1 of 1]{ref,text,x,y}:
-  "@17.21","Notes on remote desktops",36,612
-help[1]:
-  desklink-axi click @17.<n>
-$ desklink-axi click @17.21
-input: applied
-$ desklink-axi press End
-input: applied
-$ desklink-axi type " today" --wait settle
-input: applied; frame: ready
-$ desklink-axi screen --query "Notes on remote desktops today"
-screen: 1280x720 frame=26 settled=true estimated_tokens=~17
-text[1 of 1]{ref,text,x,y}:
-  "@26.21","Notes on remote desktops today",36,612
-help[1]:
-  desklink-axi click @26.<n>
-$ desklink-axi look --region 32,600,880,110 --out showcase.png
-image: showcase.png
-region: 32,600,880,110 cost: ~129 tokens to view
-```
-
-<p align="center">
-  <picture><source srcset="docs/assets/readme/axi-look.webp" type="image/webp"><img src="docs/assets/readme/axi-look.jpg" alt="The crop the agent asked for: the Reading list note with the line it just typed" width="422" /></picture>
-</p>
-
-### Measured, not guessed
-
-A glass-to-glass lab runs the engine against a private X display showing a stamp window: its top row encodes the wall clock at the moment it was painted, and a headless browser decodes that stamp from every presented frame, so latency is measured from pixel to pixel. When the current motion encoder landed, the lab measured, at 60 fps maximum on a shared 32-thread host (load 26–76), median of four interleaved runs ([the numbers and method](https://github.com/umeranjum17/desklink/pull/28)):
-
-| Scenario | fps | Glass-to-glass p50 | p95 |
-| --- | --- | --- | --- |
-| 1920×1080, typing | 52.3 | 41.5 ms | 53 ms |
-| 1920×1080, full-screen motion | 54.6 | 46 ms | 60.5 ms |
-| 2560×1440, full-screen motion | 42.0 | 56.5 ms | 71 ms |
-
-Load moves these numbers, which is why every lab run records it: rerun for this page on a host at load 125–140, 1080p typing measured 26.5 fps and 95 ms p50, and full-screen motion 9.5 fps and 288 ms p50. [`portal-g2g-flow.mjs`](packages/desktop-host/test/portal-g2g-flow.mjs) measures the ScreenCast portal and PipeWire path the same way, inside a private namespace cage.
-
-<p align="center">
-  <picture><source srcset="docs/assets/readme/lab.webp" type="image/webp"><img src="docs/assets/readme/lab.jpg" alt="The lab's stamp window seen through the reference client: a top row of black and white clock blocks above a full-screen field of moving marks" width="560" /></picture>
-</p>
-
-## Packages
-
-| Package | What it is |
-| --- | --- |
-| [`@desklink/host`](packages/desktop-host) | The per-user engine: screen capture, VP9/H.264 encode, WebRTC, pointer/keyboard/clipboard input, behind a [versioned local protocol](packages/desktop-host/docs/PROTOCOL.md). A prebuilt engine ships for Linux x64 (glibc 2.36+), and a preview prebuilt engine ships for macOS arm64 (`@desklink/host-darwin-arm64`). |
-| [`@desklink/react-native`](packages/desktop-client) | A view and a session that render that desktop in a React Native app (Android, iOS, web) and turn touch, keyboard and clipboard into its input. |
-| [`@desklink/axi`](packages/axi) | A [desktop CLI](packages/axi/README.md) for agents: text and changed regions by default, image crops on request. |
-
-Where each piece's responsibility ends is in
-[docs/BOUNDARY.md](packages/desktop-host/docs/BOUNDARY.md).
+<sub>Real captures from the current build, on a private demo desktop and Android emulator. Seed notes only. The hero draws the viewer's mouse so you can follow along. The clients currently have dark controls, not separate light and dark themes.</sub>
 
 ## Try it
 
-On a Linux x64 desktop session (macOS arm64 works too, as a preview):
+For a Linux x64 X11 desktop (glibc 2.36+), with Node.js 22+.
+Using Wayland or macOS arm64 (preview)? Follow the [host setup guide](packages/desktop-host/README.md#install-and-run).
+
+### 1. Check your computer
 
 ```sh
-npx @desklink/host bridge
+npx @desklink/host capabilities
 ```
 
-Open the `open` URL it prints, and your desktop appears in a browser tab. The page
-is [`examples/reference-client.html`](packages/desktop-host/examples/reference-client.html):
-one file, no build step, a complete client of the protocol. Portal capture asks
-the compositor for consent first; input needs [kernel input access](packages/desktop-host/README.md#kernel-input-access).
-If the desktop does not appear, `npx @desklink/host capabilities` prints what this
-machine can do.
+See which capture and input options are available.
+[Platform setup](packages/desktop-host/README.md#install-and-run) covers the details.
 
-### On a phone
+### 2. Start the desktop bridge
+
+```sh
+npx @desklink/host bridge --source x11
+```
+
+Keep this terminal open. The bridge shares this X11 desktop on this computer only.
+
+### 3. Open the printed link
+
+Open the line labeled `open` in a browser on the same computer. Your desktop is
+live: click the picture, type, or use the keyboard and clipboard buttons.
+Stop the bridge with **Ctrl+C** when you're done. Keep its access token private.
+
+<details>
+<summary>Put it in a phone app</summary>
 
 Start the bridge where the phone can reach it, on a private network:
 
@@ -182,7 +96,7 @@ Start the bridge where the phone can reach it, on a private network:
 npx @desklink/host bridge --listen 0.0.0.0:19400
 ```
 
-Then make a new Expo app (SDK 57 today; SDK 55 and later are supported). One
+Then make a new Expo app (SDK 55 and later are supported). One
 `expo install` adds the view, its WebRTC binding, the
 [`@byokit/signaling`](https://www.npmjs.com/package/@byokit/signaling)
 WebSocket adapter for the bridge, and both config plugins to `app.json`:
@@ -221,7 +135,7 @@ export default function App() {
 }
 ```
 
-Run it on the phone with `npx expo run:android` or `npx expo run:ios --device`;
+Run it on an emulator with `npx expo run:android` or an iOS simulator with `npx expo run:ios`;
 the view is native code, so it needs a development build, not Expo Go. Tap
 Connect, approve the screen-sharing prompt if the computer shows one, and the desktop
 appears; tap it to click. The [receiver README](packages/desktop-client/README.md#what-the-package-guarantees)
@@ -247,35 +161,58 @@ forward has to follow it: `adb reverse tcp:<port> tcp:<port>` or
 `session.candidate` the engine offers. A session that shows no picture within
 20 seconds now says so, instead of leaving a black screen.
 
+</details>
+
+## Small pieces, ready to use
+
+- **Live, readable video** — sharp still text, smooth motion, and pinch to zoom on a phone.
+- **Touch becomes a pointer** — tap, drag, scroll and type on the same desktop.
+- **Clipboard by choice** — transfer text either way, only when you ask.
+- **Your app owns access** — bring your connection; close sessions when access ends.
+- **One engine, three entry points** — browser reference client, React Native view, agent CLI.
+
+[Measured latency and the lab method](https://github.com/umeranjum17/desklink/pull/28) ·
+[Capture, codecs and platform support](packages/desktop-host/README.md#what-it-does)
+
+## Keep going
+
+| I want to… | Start here |
+| --- | --- |
+| Run or embed the desktop engine | [@desklink/host](packages/desktop-host) |
+| Add a view to an Android, iOS or web app | [@desklink/react-native](packages/desktop-client) |
+| Let an agent see and control a desktop | [@desklink/axi](packages/axi) |
+| Understand the wire format | [Protocol](packages/desktop-host/docs/PROTOCOL.md) |
+| See what's changed | [Changelog](CHANGELOG.md) |
+| Report a problem or suggest an idea | [Issues](https://github.com/umeranjum17/desklink/issues) |
+
+<details>
+<summary>Contribute and test safely</summary>
+
 ## Develop
 
 ```sh
 npm install
-npm run build          # compile @desklink/host and @desklink/axi
-npm test               # the TypeScript packages' tests
-npm run test:engine    # the Rust engine's tests; needs the native libraries CI installs
+npm run build
+npm test
+npm run test:engine
 ```
 
+Engine tests need the native libraries [CI installs](.github/workflows/ci.yml).
 Desktop integration checks refuse ambient `DISPLAY`/`WAYLAND_DISPLAY` before
 contact; unset both before running them. Use only verified, high-display,
 task-owned Xvfb labs; `Xvfb -displayfd` can choose the live Xwayland `:0`.
 The labs authenticate clients and verify Xvfb PID/socket ownership; cleanup
-never adopts an unknown session-tagged PID. Unit/compile
-checks need no desktop. On Linux, prove refusal and owned teardown with:
+never adopts an unknown session-tagged PID. Compile checks need no desktop.
+On Linux, prove refusal and owned teardown with:
 
 ```sh
 env -u DISPLAY -u WAYLAND_DISPLAY npm run test:lab-safety
 ```
 
-For browser session ownership and migration, see the
-[AXI browser lane](packages/axi/README.md#browser-lane-opt-in-loopback-only).
+See the [private-lab verification guide](.agents/skills/verify-desklink/SKILL.md),
+[AXI browser lane](packages/axi/README.md#browser-lane-opt-in-loopback-only), and
+[release guide](packages/desktop-host/README.md#building-and-packing-a-release).
 
-Releasing, including the reproducible engine build, is in
-[packages/desktop-host/README.md](packages/desktop-host/README.md#building-and-packing-a-release).
+</details>
 
-The pictures on this page are real captures from a private X display, never the
-machine's own desktop, and live in [`docs/assets/readme/`](docs/assets/readme).
-
-## License
-
-[Apache-2.0](LICENSE).
+[Apache-2.0](LICENSE)
