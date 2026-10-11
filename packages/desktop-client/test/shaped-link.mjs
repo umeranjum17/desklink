@@ -1,6 +1,10 @@
 import { createSocket } from 'node:dgram';
 import { networkInterfaces } from 'node:os';
-import { WebSocket, WebSocketServer } from 'ws';
+import { createRequire } from 'node:module';
+// `ws` resolves to the installed copy beside whichever process loads this file:
+// Node's ESM `import 'ws'` needs ws>=8 named exports, but the simulator app
+// pins ws 7, so require it and take the named members off the CommonJS export.
+const { WebSocket, WebSocketServer } = createRequire(import.meta.url)('ws');
 
 // The userspace-shaped link the drop-and-recover journeys run on: a datagram
 // relay between a browser's ICE agent and the engine's, which decides per
@@ -100,13 +104,11 @@ class ShapedLink {
 
     constructor(log, { appAddress = '127.0.0.1', engineAddress = '127.0.0.1', remoteBrowser = false, remoteEngine = false } = {}) {
         this.log = log;
-        this.appAddress = appAddress;
-        this.engineAddress = engineAddress;
+        this.appAddress = appAddress; this.engineAddress = engineAddress;
         // When a peer is remote, its candidates are not this host's own addresses,
         // so the local-address guard would drop them all. The relay then forwards
         // to the peer source it actually sees, not the candidate it advertised.
-        this.remoteBrowser = remoteBrowser;
-        this.remoteEngine = remoteEngine;
+        this.remoteBrowser = remoteBrowser; this.remoteEngine = remoteEngine;
         this.counters = { toEngine: 0, toBrowser: 0, delayed: 0, discarded: 0, unroutable: 0, mediaDiscarded: 0 };
         /** `{}` forwards at once, `{ delayMs }` slows it, `{ discard: true }` drops it. */
         this.shape = {};
@@ -139,9 +141,7 @@ class ShapedLink {
     }
 
     /** The counters and learned peers, for a receipt produced on another host. */
-    snapshot() {
-        return { counters: { ...this.counters }, host: this.host, browser: this.browser };
-    }
+    snapshot() { return { counters: { ...this.counters }, host: this.host, browser: this.browser }; }
 
     /**
      * A new `session.open` from the client.

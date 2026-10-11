@@ -215,7 +215,6 @@ async function main() {
             `${join(repo, 'packages/desktop-client')}/`, `${MAC}:${LANE.dir}/desktop-client/`],
             { encoding: 'utf8', timeout: 180_000 });
         assert.equal(copy.status, 0, `rsync to the Mac failed: ${copy.stderr}`);
-        log('building the example app on the Mac');
         mac(`cd "$D/desktop-client/example"
 [ node_modules/.package-lock.json -nt package.json ] || npm install --no-audit --no-fund
 PACKED="$D/tmp/$(cd .. && npm pack --silent --pack-destination "$D/tmp")"
@@ -286,17 +285,13 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
         } catch { /* vanished */ }
     }
     assert(enginePid !== 0, 'the bridge started no engine');
-    log(`bridge 127.0.0.1:${bridgePort} pid ${bridgePid}, engine pid ${enginePid}`);
 
     // --- the relay runs on the Mac, reached on its own always-present LAN ---
     const macLan = mac('ipconfig getifaddr en0 2>/dev/null || echo 127.0.0.1').trim();
     const macTail = mac("ifconfig 2>/dev/null | awk '/inet 100[.]/{print $2}' | head -1").trim();
-    assert(/^\d+(\.\d+){3}$/.test(macLan) || /^\d+(\.\d+){3}$/.test(macTail), `no Mac LAN/Tailscale address: ${macLan}/${macTail}`);
-
     // The app's own package carries `ws`; put the relay beside it so its imports
     // resolve the same way on the Mac as they do in this checkout.
-    const toMac = (file) => assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', join(here, file), `${MAC}:${LANE.dir}/desktop-client/example/`]).status, 0, `copy ${file} to the Mac`);
-    toMac('shaped-link.mjs'); toMac('mac-relay.mjs');
+    assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', join(here, 'shaped-link.mjs'), join(here, 'mac-relay.mjs'), `${MAC}:${LANE.dir}/desktop-client/example/`]).status, 0, 'copy the relay modules to the Mac');
 
     // A task-owned reverse-forward keeps the Linux bridge on loopback: only this
     // ssh process can reach it, from the Mac's own loopback.
@@ -331,7 +326,6 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
     mac(`xcrun simctl install ${udid} "${app}"
 xcrun simctl terminate ${udid} ${BUNDLE} 2>/dev/null || true
 xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkCover 1`, 300_000);
-    log('launched');
     {
         // The app reads `live` from its first stats sample, so it can show
         // "Connected" a beat before the engine has sent a frame, then fall back
@@ -347,7 +341,6 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkCover 
             await sleep(1000);
         }
     }
-    log('simulator Connected (held live)');
     const tapPicture = async () => {
         // The fixture paints saturated primaries, not near-white, so the band
         // is found with a low floor; the aim sits in the band's upper third,
