@@ -14,7 +14,10 @@ desktop this machine serves through the bridge:
   landscape launch, with the app shrinking its surface the way a consumer's
   keyboard-avoiding screen does, the picture pans so the focused field stays
   wholly above the raised keyboard instead of snapping back to the desktop's
-  top-left corner. Proven over five fresh launches, light and dark.
+  top-left corner. Proven over five fresh launches, light and dark. Upright,
+  one fresh launch proves the portrait sibling: the shortened band flips the
+  view's own aspect while the window stays portrait, and the picture still pans
+  the tapped low field into sight instead of mistaking the flip for a rotation.
 
 ## How to get to it (user POV)
 
@@ -68,6 +71,13 @@ the whole field above the raised keyboard (`step-09-keyboard-{1..5}-{closed,open
 `step-09-keyboard-{1..5}.json`). A picture that snaps back to the desktop's
 top-left corner fails every launch. The section then checks the light and dark
 looks and that typing reaches the field, and copies `keyboard-landscape.mp4`.
+
+A portrait sibling on one fresh launch taps a field placed low on the picture
+itself, shortens the surface the same way and requires the same pan: the
+shortened band flips the view's own aspect while the window stays portrait, so
+mistaking that flip for a rotation would snap the picture back to the desktop's
+top-left instead (`step-09-keyboard-portrait-{closed,open,typed}.png`,
+`step-09-keyboard-portrait.json`, `keyboard-portrait.mp4`).
 
 ## What the run does not claim, and how it avoids fooling itself
 
