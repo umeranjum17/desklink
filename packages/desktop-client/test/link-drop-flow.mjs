@@ -468,7 +468,15 @@ async function main() {
         mkdirSync(pageDir, { recursive: true });
         writeFileSync(join(pageDir, 'index.html'), INDEX_HTML);
         writeFileSync(join(pageDir, 'rn-stub.js'), RN_STUB);
-        signalling = await startSignalling(link, bridge.port, 'link-drop-lab');
+        // relayOnly: an ICE restart embeds its candidates in the SDP offer
+        // itself, not just the trickle, and unrewritten those reach the peer
+        // as direct host tuples that bypass this relay entirely. The mid-cut
+        // restart then nominates a direct pair, media resumes off the relay,
+        // and the "whole-link" cut is only a relay-path cut while the status
+        // reads live again mid-cut. Rewriting the SDP as well as the trickle
+        // keeps every generation on relayed tuples, so the cut below stays
+        // total across the restart.
+        signalling = await startSignalling(link, bridge.port, 'link-drop-lab', { relayOnly: true });
         writeFileSync(
             join(pageDir, 'driver.ts'),
             DRIVER_TS.replaceAll('__SRC__', SRC).replaceAll('__PORT__', String(signalling.port)).replaceAll('__TOKEN__', 'link-drop-lab'),
@@ -706,14 +714,14 @@ async function main() {
         });
 
         // ---- stage 5: cut ----------------------------------------------------
-        // Worth saying plainly what this stage cuts and what it does not: the
-        // relay is one path between the peers, and the engine's offer carries
-        // its real host candidates as well as the trickled ones, so the two
-        // also reach each other directly. Measured in this run, the picture
-        // keeps advancing through this cut for that reason, and the status
-        // stays `live` because the picture really is still moving. What this
-        // stage proves is the notice and the same-session recovery of the
-        // relay's path; stage 2 is the one that stops the picture.
+        // Worth saying plainly what this stage cuts: everything. The
+        // signalling relay rewrites every candidate — trickled and
+        // SDP-embedded alike (relayOnly above) — into a relayed tuple, so
+        // both peers know only the relay and the mid-cut ICE restart cannot
+        // nominate a direct pair around it. The picture really stops, and the
+        // status must stay out of `live` for the whole cut. Stage 2 is the
+        // narrower case: only the picture stops there, with ICE consent and
+        // control still up.
         link.set({}, 'unshape, so the cut starts from a healthy path');
         await until('the link to settle after the throttle', `window.__probe.frames > ${throttled.frames + 20}`, 20_000);
         const forwardedBeforeCut = link.counters.toEngine + link.counters.toBrowser;
@@ -734,7 +742,22 @@ async function main() {
         // arrives, and how many is timing nobody controls — so counting frames
         // here would measure Chromium's jitter buffer, not the link. What the
         // relay knows is that it forwarded nothing, and that is asserted below.
-        await sleep(CUT_MS);
+        // The cut must stay total for its whole length: no status read while
+        // the relay forwards nothing may be `live`. Before the SDP-rewrite
+        // path was enabled, the mid-cut ICE restart nominated a direct pair
+        // off the relay and the status returned to `live` ~5s into the cut —
+        // this loop fails the stage on exactly that signature. Other states
+        // are fine: heartbeats over the uncut signalling channel can read
+        // `connecting` while the picture is frozen.
+        const cutEnd = Date.now() + CUT_MS;
+        while (Date.now() < cutEnd) {
+            await sleep(500);
+            const midCut = await probe();
+            assert(
+                midCut.status !== 'live',
+                `the cut leaked ${Date.now() - cutAt}ms in: status live while the relay forwarded nothing — a non-relay pair was nominated: ${JSON.stringify({ status: midCut.status, frames: midCut.frames })}`,
+            );
+        }
         const frozen = await sample();
         const forwardedDuringCut = link.counters.toEngine + link.counters.toBrowser - forwardedBeforeCut;
         assert(forwardedDuringCut === 0, `the relay forwarded ${forwardedDuringCut} datagrams through a cut link`);
@@ -756,12 +779,12 @@ async function main() {
         // a while after the last datagram arrives, and how many is Chromium's
         // buffer, not the link's behaviour — the counts above are what prove the
         // cut. What the cut has to leave behind is the picture itself.
-        // The status at the end of the cut is recorded, not asserted. The engine
-        // reports its transport over the signalling channel, which this flow
-        // deliberately leaves up, and the hook reads that as `connected` — so
-        // while the media link is dead the session can read `live` again with a
-        // frozen picture under it. That is a real finding about the product, not
-        // something to paper over by asserting either way; see the report.
+        // The status at the end of the cut follows from the loop above: never
+        // `live` while the relay forwards nothing, and recorded here for the
+        // receipt. The engine reports its transport over the signalling channel,
+        // which this flow deliberately leaves up, but with every pair on
+        // relayed tuples a dead relay means a dead transport on both peers, so
+        // no `connected` arrives to contradict the frozen picture.
         const settled = await sample();
         const bufferedFramesAfterCut = typeof settled.decoded === 'number' && typeof held.decoded === 'number'
             ? settled.decoded - held.decoded
