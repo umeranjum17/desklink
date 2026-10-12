@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Image, Keyboard, StyleSheet, TextInput, View, type GestureResponderEvent, type LayoutChangeEvent, type ViewProps } from 'react-native';
+import { Image, Keyboard, StyleSheet, TextInput, View, useWindowDimensions, type GestureResponderEvent, type LayoutChangeEvent, type ViewProps } from 'react-native';
 import pointerArrow from './pointer.png';
 import { requireNativeViewManager, requireOptionalNativeModule } from 'expo-modules-core';
 import type { DesktopViewProps } from './DesktopView';
@@ -161,7 +161,8 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
     // keyboard also changes the view, by taking height away, and that must
     // move the picture (below) rather than snap it back to the corner and
     // leave the field the tap just put the caret in hidden under the keyboard.
-    const portrait = bounds.width <= bounds.height;
+    const window = useWindowDimensions();
+    const portrait = window.width <= window.height;
     React.useEffect(() => { setZoom(null); setOffset(TOP_LEFT); }, [size.width, size.height]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
     React.useEffect(() => { if (zoom === null) setOffset(TOP_LEFT); }, [portrait]);
