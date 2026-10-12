@@ -1526,14 +1526,15 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     await pictureNow('the portrait keyboard step');
     const portraitScale = scale;
     const portraitOrigin = { ...origin };
-    const portraitDeckTop = Math.min(...visibleNodes(udid).filter((entry) => entry.id?.startsWith('desklink-'))
-        .map((entry) => Number(/\{\{-?[\d.]+,\s*(-?[\d.]+)\}/.exec(entry.frame ?? '')?.[1] ?? Infinity)));
-    assert(Number.isFinite(portraitDeckTop), 'the app\'s controls have a place on the portrait screen');
+    // Low ON the picture: centered horizontally, about 50 desktop px above the
+    // desktop's bottom edge, derived from the picture's own origin and scale
+    // (as the landscape section derives its field from the fill box). Placing
+    // it relative to the control deck lands below the ~30%-tall picture band,
+    // off the picture, where the tap is letterbox and focuses nothing.
     const portraitField = { width: 300, height: 44 };
-    const portraitFieldScreenTop = Math.round(portraitDeckTop - 8 - portraitField.height);
     const portraitFieldCenterDesktop = {
-        x: (screenWidth / 2 - portraitOrigin.x) / portraitScale,
-        y: (portraitFieldScreenTop + portraitField.height / 2 - portraitOrigin.y) / portraitScale,
+        x: geometry.width / 2,
+        y: geometry.height - 50 - portraitField.height / 2,
     };
     await page.evaluate(`(() => {
         document.getElementById('email')?.remove();
