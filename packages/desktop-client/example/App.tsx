@@ -16,7 +16,7 @@
  */
 import * as React from 'react';
 import * as Clipboard from 'expo-clipboard';
-import { Linking, Platform, Pressable, ScrollView, Settings, StatusBar, StyleSheet, Text, View } from 'react-native';
+import { KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView, Settings, StatusBar, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
     ClipboardConfirmation,
@@ -33,14 +33,14 @@ const DECK_TALL = 560;
 /** The shortest edge that makes a screen a tablet's rather than a phone's. */
 const TABLET_MIN = 500;
 
-function connectionLink(link: string | null): { url: string; report: string | null; cover: boolean; key: string } | null {
+function connectionLink(link: string | null): { url: string; report: string | null; cover: boolean; keyboardFit: boolean; key: string } | null {
     if (!link) return null;
     try {
         const parsed = new URL(link);
         const url = parsed.searchParams.get('url');
         // A demo journey opts the picture into covering the view (`cover=1`)
         // instead of fitting the portrait width; anywhere else it is off.
-        return url ? { url, report: parsed.searchParams.get('report'), cover: parsed.searchParams.get('cover') === '1', key: link } : null;
+        return url ? { url, report: parsed.searchParams.get('report'), cover: parsed.searchParams.get('cover') === '1', keyboardFit: false, key: link } : null;
     } catch { return null; }
 }
 
@@ -163,8 +163,13 @@ export default function App() {
         // (`-desklinkCover 1` at launch), mirroring the Android deep link's
         // `cover=1`; anywhere else it is off.
         const coverSetting: unknown = Platform.OS === 'ios' ? Settings.get('desklinkCover') : null;
+        // A journey that checks the picture against a keyboard can ask the app
+        // to shrink its surface the way a consumer with a keyboard-avoiding
+        // screen does (`-desklinkKeyboardFit 1` at launch); off by default, so
+        // the reference app keeps the whole screen.
+        const keyboardFitSetting: unknown = Platform.OS === 'ios' ? Settings.get('desklinkKeyboardFit') : null;
         return typeof url === 'string'
-            ? { url, report: null as string | null, cover: coverSetting === '1' || coverSetting === 'true' || coverSetting === 1, key: url }
+            ? { url, report: null as string | null, cover: coverSetting === '1' || coverSetting === 'true' || coverSetting === 1, keyboardFit: keyboardFitSetting === '1' || keyboardFitSetting === 'true' || keyboardFitSetting === 1, key: url }
             : null;
     });
     React.useEffect(() => {
@@ -177,12 +182,12 @@ export default function App() {
     if (!connection) return <View style={[styles.root, styles.idle]}><StatusBar hidden /><Text style={styles.messageText}>Open a desktop connection link to connect.</Text></View>;
     return (
         <SafeAreaProvider>
-            <ConnectedDesktop key={connection.key} url={connection.url} report={connection.report} cover={connection.cover} />
+            <ConnectedDesktop key={connection.key} url={connection.url} report={connection.report} cover={connection.cover} keyboardFit={connection.keyboardFit} />
         </SafeAreaProvider>
     );
 }
 
-function ConnectedDesktop({ url, report, cover }: { url: string; report: string | null; cover: boolean }) {
+function ConnectedDesktop({ url, report, cover, keyboardFit }: { url: string; report: string | null; cover: boolean; keyboardFit: boolean }) {
     const startedAt = React.useRef(Date.now());
     const root = React.useRef<View>(null);
     const presentedAt = React.useRef<number | null>(null);
@@ -293,8 +298,16 @@ function ConnectedDesktop({ url, report, cover }: { url: string; report: string 
     return (
         <View ref={root} style={styles.root} onLayout={(event) => setScreen(event.nativeEvent.layout)}>
             <StatusBar hidden />
-            <DesktopView sessionId={desktop.nativeId} style={StyleSheet.absoluteFill} insets={insets} accessibilityLabel="desktop"
-                cover={cover} onPictureFrame={(frame) => setPictureBottom(frame.top + frame.height)} />
+            {keyboardFit
+                // A consumer whose screen makes room for the keyboard shrinks
+                // the surface; the picture must pan inside what is left rather
+                // than snap back to the desktop's top-left corner.
+                ? <KeyboardAvoidingView behavior="height" style={StyleSheet.absoluteFill}>
+                    <DesktopView sessionId={desktop.nativeId} style={StyleSheet.absoluteFill} insets={insets} accessibilityLabel="desktop"
+                        cover={cover} onPictureFrame={(frame) => setPictureBottom(frame.top + frame.height)} />
+                </KeyboardAvoidingView>
+                : <DesktopView sessionId={desktop.nativeId} style={StyleSheet.absoluteFill} insets={insets} accessibilityLabel="desktop"
+                    cover={cover} onPictureFrame={(frame) => setPictureBottom(frame.top + frame.height)} />}
 
             <View pointerEvents="box-none" style={styles.confirmation}>
                 {copyError ? (

@@ -1337,12 +1337,18 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     writeFileSync(join(out, 'desklink-receiver-fill-portrait-panned.png'), PNG.sync.write(pannedShot));
     log(`panned: the marker moved right from x ${dotFirst.toFixed(1)} to ${dotPanned.toFixed(1)} pt without a click`);
 
-    // ---- the keyboard over a field, sideways -----------------------------------------------
+    // ---- the keyboard over a field, sideways, fresh launches --------------------------------
     // A phone on its side, a sign-in field tapped, the on-screen keyboard up:
     // the field stays in sight above the keyboard, and what is typed lands in
-    // it. A fresh launch starts from the default fill, not the zoom above.
-    mac(`xcrun simctl terminate ${udid} ${BUNDLE} 2>/dev/null || true
-xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`);
+    // it. The app shrinks its surface to make room for the keyboard, as a
+    // consumer's keyboard-avoiding screen does, so the picture must pan inside
+    // what is left rather than snap back to the desktop's top-left corner and
+    // hide the field. That must hold on a fresh launch, every time, not only
+    // once the view has warmed up — so it is proven over five fresh launches.
+    const LAUNCHES = 5;
+    const launchFresh = () => mac(`xcrun simctl terminate ${udid} ${BUNDLE} 2>/dev/null || true
+xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboardFit 1`);
+    launchFresh();
     await until('the relaunched app shows the desktop again', async () => screen(udid).status, (status) => status === 'Connected', 90_000);
     const appearance = mac(`xcrun simctl ui ${udid} appearance`).trim();
     startRecording();
@@ -1367,33 +1373,6 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`);
         window.reset();
     })()`);
     const fieldCenter = { x: field.left + field.width / 2, y: field.top + field.height / 2 };
-    // axe's coordinates are not the turned screen's: three taps on bare paper,
-    // read back where the desktop says each landed, give the mapping, and the
-    // field is aimed through its inverse.
-    const aiming = [];
-    for (const aimed of [{ x: 360, y: 150 }, { x: 560, y: 150 }, { x: 360, y: 260 }]) {
-        await page.evaluate('window.reset()');
-        mac(`axe tap -x ${aimed.x} -y ${aimed.y} --udid ${udid}`);
-        const click = await until(`the aiming tap at (${aimed.x}, ${aimed.y}) reached the desktop`, () => page.evaluate('clicks.at(-1)'), (seen) => seen?.type === 'mouseup');
-        aiming.push({ aimed, at: { x: fillBox.left + (click.x + 0.5) * fillScale, y: fillBox.top + (click.y + 0.5) * fillScale } });
-    }
-    const [k0, k1, k2] = aiming;
-    const kax = (k1.at.x - k0.at.x) / (k1.aimed.x - k0.aimed.x); const kbx = (k2.at.x - k0.at.x) / (k2.aimed.y - k0.aimed.y);
-    const kay = (k1.at.y - k0.at.y) / (k1.aimed.x - k0.aimed.x); const kby = (k2.at.y - k0.at.y) / (k2.aimed.y - k0.aimed.y);
-    const kdet = kax * kby - kbx * kay;
-    /** Where to aim axe for a point on the turned screen. */
-    const sidewaysAim = (spot) => {
-        const kdx = spot.x - k0.at.x; const kdy = spot.y - k0.at.y;
-        return { x: k0.aimed.x + (kby * kdx - kbx * kdy) / kdet, y: k0.aimed.y + (kax * kdy - kay * kdx) / kdet };
-    };
-    const fieldAt = { x: fillBox.left + fieldCenter.x * fillScale, y: fillBox.top + fieldCenter.y * fillScale };
-    const fieldAim = sidewaysAim(fieldAt);
-    log(`sideways aiming: ${JSON.stringify(aiming)}; the field at (${fieldAt.x.toFixed(1)}, ${fieldAt.y.toFixed(1)}) pt is aimed at (${fieldAim.x.toFixed(1)}, ${fieldAim.y.toFixed(1)})`);
-    await page.evaluate('window.reset()');
-    mac(`axe tap -x ${fieldAim.x.toFixed(1)} -y ${fieldAim.y.toFixed(1)} --udid ${udid}`);
-    await until(`the tap focused the sign-in field at desktop (${fieldCenter.x}, ${fieldCenter.y})`,
-        () => page.evaluate('({ focused: document.activeElement && document.activeElement.id, click: clicks.at(-1) })'), (seen) => seen.focused === 'email');
-    pointerSteps(udid, [{ action: 'tapButton', id: 'desklink-keyboard', x: 0, y: 0 }]);
     /**
      * The top of the on-screen keyboard's first row of keys on the turned
      * screen; null while it is down. The keyboard reports its keys in the
@@ -1405,10 +1384,6 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`);
             .filter(Boolean).map(([, x, width]) => wide.height - (Number(x) + Number(width)));
         return keys.length > 0 ? Math.min(...keys) : null;
     };
-    await sleep(1500);
-    writeFileSync(join(out, 'step-09-keyboard-tree.json'), JSON.stringify(describeTree(udid), null, 1));
-    landscapeCapture('step-09-keyboard-landscape-up.png');
-    const keyRow = await until('the on-screen keyboard came up', async () => keyboardKeys(), (top) => top !== null);
     /**
      * The click's dot, which the page drew at the field's middle: its navy is
      * nothing else on the screen. Its lowest row and the keyboard's first key
@@ -1428,6 +1403,64 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`);
         }
         return rows;
     };
+    /**
+     * axe's coordinates are not the turned screen's: three taps on bare paper,
+     * read back where the desktop says each landed, give the mapping, and the
+     * field is aimed through its inverse. Aimed again on every launch, because
+     * the picture's place is read from the screen, not assumed.
+     */
+    const aimThrough = async (box, scale) => {
+        const aiming = [];
+        for (const aimed of [{ x: 360, y: 150 }, { x: 560, y: 150 }, { x: 360, y: 260 }]) {
+            await page.evaluate('window.reset()');
+            mac(`axe tap -x ${aimed.x} -y ${aimed.y} --udid ${udid}`);
+            const click = await until(`the aiming tap at (${aimed.x}, ${aimed.y}) reached the desktop`, () => page.evaluate('clicks.at(-1)'), (seen) => seen?.type === 'mouseup');
+            aiming.push({ aimed, at: { x: box.left + (click.x + 0.5) * scale, y: box.top + (click.y + 0.5) * scale } });
+        }
+        const [k0, k1, k2] = aiming;
+        const kax = (k1.at.x - k0.at.x) / (k1.aimed.x - k0.aimed.x); const kbx = (k2.at.x - k0.at.x) / (k2.aimed.y - k0.aimed.y);
+        const kay = (k1.at.y - k0.at.y) / (k1.aimed.x - k0.aimed.x); const kby = (k2.at.y - k0.at.y) / (k2.aimed.y - k0.aimed.y);
+        const kdet = kax * kby - kbx * kay;
+        return (spot) => {
+            const kdx = spot.x - k0.at.x; const kdy = spot.y - k0.at.y;
+            return { x: k0.aimed.x + (kby * kdx - kbx * kdy) / kdet, y: k0.aimed.y + (kax * kdy - kay * kdx) / kdet };
+        };
+    };
+    let lastKeyRow = null;
+    for (let launch = 1; launch <= LAUNCHES; launch++) {
+        if (launch > 1) {
+            launchFresh();
+            await until(`fresh launch ${launch} shows the desktop again`, async () => screen(udid).status, (status) => status === 'Connected', 90_000);
+            pointerSteps(udid, [{ action: 'landscape', x: 0, y: 0 }]);
+            await sleep(1500);
+        }
+        const closed = landscapeCapture(`step-09-keyboard-${launch}-closed.png`);
+        const box = pictureBox(closed, wide.width);
+        const scale = Math.max(wide.width / geometry.width, wide.height / geometry.height);
+        const fieldAt = { x: box.left + fieldCenter.x * scale, y: box.top + fieldCenter.y * scale };
+        const sidewaysAim = await aimThrough(box, scale);
+        const aim = sidewaysAim(fieldAt);
+        log(`fresh launch ${launch}: the field at (${fieldAt.x.toFixed(1)}, ${fieldAt.y.toFixed(1)}) pt is aimed at (${aim.x.toFixed(1)}, ${aim.y.toFixed(1)})`);
+        await page.evaluate('window.reset()');
+        mac(`axe tap -x ${aim.x.toFixed(1)} -y ${aim.y.toFixed(1)} --udid ${udid}`);
+        await until(`fresh launch ${launch} focused the sign-in field at desktop (${fieldCenter.x}, ${fieldCenter.y})`,
+            () => page.evaluate('({ focused: document.activeElement && document.activeElement.id, click: clicks.at(-1) })'), (seen) => seen.focused === 'email');
+        pointerSteps(udid, [{ action: 'tapButton', id: 'desklink-keyboard', x: 0, y: 0 }]);
+        await sleep(1500);
+        writeFileSync(join(out, `step-09-keyboard-tree-${launch}.json`), JSON.stringify(describeTree(udid), null, 1));
+        const open = landscapeCapture(`step-09-keyboard-${launch}-open.png`);
+        const keyRow = await until(`the on-screen keyboard came up on fresh launch ${launch}`, async () => keyboardKeys(), (top) => top !== null);
+        lastKeyRow = keyRow;
+        const rows = dotRows(open);
+        assert(rows.length > 0, `fresh launch ${launch}: the tapped field is on the screen with the keyboard up: its dot is nowhere in step-09-keyboard-${launch}-open.png, the keyboard's keys start at ${keyRow.toFixed(0)} pt`);
+        const dot = { top: Math.min(...rows), bottom: Math.max(...rows) };
+        const fieldBottom = (dot.top + dot.bottom) / 2 + (field.height / 2) * (dot.bottom - dot.top) / 36;
+        // The keyboard's suggestion strip sits above its first row of keys.
+        const keyboardTop = keyRow - 50;
+        assert(fieldBottom <= keyboardTop, `fresh launch ${launch}: the whole field is above the keyboard: it ends at ${fieldBottom.toFixed(0)} pt, the keyboard starts near ${keyboardTop.toFixed(0)} pt`);
+        writeFileSync(join(out, `step-09-keyboard-${launch}.json`), JSON.stringify({ launch, fieldBottom, keyboardTop, keyRow, dot }, null, 1));
+        log(`step 09 fresh launch ${launch}/${LAUNCHES}: sideways, keyboard up, the tapped field ends at ${fieldBottom.toFixed(0)} pt, above the keyboard near ${keyboardTop.toFixed(0)} pt`);
+    }
     const themed = {};
     for (const theme of ['light', 'dark']) {
         mac(`xcrun simctl ui ${udid} appearance ${theme}`);
@@ -1436,11 +1469,10 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`);
         const shot = landscapeCapture(name);
         themed[theme] = shot;
         const rows = dotRows(shot);
-        assert(rows.length > 0, `the tapped field is on the screen with the keyboard up (${theme}): its dot is nowhere in ${name}, the keyboard's keys start at ${keyRow.toFixed(0)} pt`);
+        assert(rows.length > 0, `the tapped field is on the screen with the keyboard up (${theme}): its dot is nowhere in ${name}, the keyboard's keys start at ${lastKeyRow.toFixed(0)} pt`);
         const dot = { top: Math.min(...rows), bottom: Math.max(...rows) };
         const fieldBottom = (dot.top + dot.bottom) / 2 + (field.height / 2) * (dot.bottom - dot.top) / 36;
-        // The keyboard's suggestion strip sits above its first row of keys.
-        const keyboardTop = keyRow - 50;
+        const keyboardTop = lastKeyRow - 50;
         assert(fieldBottom <= keyboardTop, `the whole field is above the keyboard (${theme}): it ends at ${fieldBottom.toFixed(0)} pt, the keyboard starts near ${keyboardTop.toFixed(0)} pt`);
         log(`step 09-keyboard-${theme}: sideways, keyboard up (${theme}): the tapped field ends at ${fieldBottom.toFixed(0)} pt, above the keyboard near ${keyboardTop.toFixed(0)} pt (${name})`);
     }
@@ -1459,7 +1491,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`);
     pointerSteps(udid, [{ action: 'portrait', x: 0, y: 0 }]);
     assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/tmp/phone-control.mp4`, join(out, 'keyboard-landscape.mp4')]).status, 0,
         'copy the keyboard recording back');
-    log('sideways with the keyboard up, the tapped field stays in sight and takes what is typed');
+    log(`sideways with the keyboard up, the tapped field stays in sight and takes what is typed (${LAUNCHES}/${LAUNCHES} fresh launches)`);
     console.log(`ok: the iOS receiver shows the live desktop, answers ${codec} with NACK, its taps click the host and its hardware input drives it${IPAD ? ', trackpad included' : ''} (${out})`);
 }
 

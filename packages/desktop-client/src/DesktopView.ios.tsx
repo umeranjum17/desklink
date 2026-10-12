@@ -155,11 +155,16 @@ export function DesktopView({ sessionId, style, placeholder, accessibilityLabel,
     const scale = zoom === null ? fill : fit * zoom;
     /** The zoom over the whole-desktop fit the picture is at now. */
     const zoomed = fit > 0 ? scale / fit : 1;
-    // A new desktop size fills the view again, and a new fill (a rotation)
-    // starts again, at the desktop's top-left corner, where a page's first words are.
+    // A new desktop size fills the view again, and a rotation starts again at
+    // the desktop's top-left corner, where a page's first words are. Only an
+    // orientation change resets it: the application making room for the
+    // keyboard also changes the view, by taking height away, and that must
+    // move the picture (below) rather than snap it back to the corner and
+    // leave the field the tap just put the caret in hidden under the keyboard.
+    const portrait = bounds.width <= bounds.height;
     React.useEffect(() => { setZoom(null); setOffset(TOP_LEFT); }, [size.width, size.height]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    React.useEffect(() => { if (zoom === null) setOffset(TOP_LEFT); }, [fill, bounds.width, bounds.height, top, left, insets?.right, insets?.bottom]);
+    React.useEffect(() => { if (zoom === null) setOffset(TOP_LEFT); }, [portrait]);
     const pictureWidth = size.width * scale;
     const pictureHeight = size.height * scale;
     const point = (x: number, y: number, clamp = false): Point | null => {

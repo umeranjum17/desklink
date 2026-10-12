@@ -9,7 +9,12 @@ desktop this machine serves through the bridge:
   carries no diagnostic text, and its decoded frames keep advancing;
 - **controlling that desktop from the phone alone** — pointer, click, drag,
   two-finger scroll, typing, sticky modifiers and the clipboard both ways, with
-  no input sent to the desktop from this machine.
+  no input sent to the desktop from this machine;
+- **a tapped desktop field stays in sight over the keyboard** — on a fresh
+  landscape launch, with the app shrinking its surface the way a consumer's
+  keyboard-avoiding screen does, the picture pans so the focused field stays
+  wholly above the raised keyboard instead of snapping back to the desktop's
+  top-left corner. Proven over five fresh launches, light and dark.
 
 ## How to get to it (user POV)
 
@@ -53,6 +58,16 @@ turn the wheel; typed characters land in the desktop's own field; a latched
 modifier chords the next key and clears; the clipboard round-trips through the
 engine in both directions; and the drawn mark is an arrow (0.3 pt at its tip,
 13.9 pt at its widest) whose tip is within 2 pt of the desktop's pointer.
+
+The keyboard section launches the app five times fresh, each with
+`-desklinkKeyboardFit 1` (the example wraps the picture in a keyboard-avoiding
+container, so the surface shrinks as a consumer's does), turns the phone
+sideways, taps a field the page placed low on the desktop, raises the keyboard
+and reads the tap's own dot and the keyboard's first key row: every launch keeps
+the whole field above the raised keyboard (`step-09-keyboard-{1..5}-{closed,open}.png`,
+`step-09-keyboard-{1..5}.json`). A picture that snaps back to the desktop's
+top-left corner fails every launch. The section then checks the light and dark
+looks and that typing reaches the field, and copies `keyboard-landscape.mp4`.
 
 ## What the run does not claim, and how it avoids fooling itself
 
