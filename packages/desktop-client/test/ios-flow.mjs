@@ -1508,6 +1508,90 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/tmp/phone-control.mp4`, join(out, 'keyboard-landscape.mp4')]).status, 0,
         'copy the keyboard recording back');
     log(`sideways with the keyboard up, the tapped field stays in sight and takes what is typed (${LAUNCHES}/${LAUNCHES} fresh launches)`);
+
+    // ---- the keyboard over a field, upright, one fresh launch --------------------------
+    // The portrait sibling of the sideways proof above: a keyboard-avoiding
+    // consumer shortens the surface to a ~30% band for the keyboard, which flips
+    // the shrunken view's own aspect while the window stays portrait. The picture
+    // must pan the tapped low field into sight, not mistake the aspect flip for
+    // a rotation and snap back to the desktop's top-left corner (hiding the
+    // field under the keyboard). The true-rotation reset above stays: only a
+    // window orientation change resets the picture.
+    startRecording();
+    launchFresh();
+    await until('the relaunched app shows the desktop again', async () => screen(udid).status, (status) => status === 'Connected', 90_000);
+    pointerSteps(udid, [{ action: 'portrait', x: 0, y: 0 }]);
+    await sleep(1500);
+    seen = screen(udid);
+    await pictureNow('the portrait keyboard step');
+    const portraitScale = scale;
+    const portraitOrigin = { ...origin };
+    const portraitDeckTop = Math.min(...visibleNodes(udid).filter((entry) => entry.id?.startsWith('desklink-'))
+        .map((entry) => Number(/\{\{-?[\d.]+,\s*(-?[\d.]+)\}/.exec(entry.frame ?? '')?.[1] ?? Infinity)));
+    assert(Number.isFinite(portraitDeckTop), 'the app\'s controls have a place on the portrait screen');
+    const portraitField = { width: 300, height: 44 };
+    const portraitFieldScreenTop = Math.round(portraitDeckTop - 8 - portraitField.height);
+    const portraitFieldCenterDesktop = {
+        x: (screenWidth / 2 - portraitOrigin.x) / portraitScale,
+        y: (portraitFieldScreenTop + portraitField.height / 2 - portraitOrigin.y) / portraitScale,
+    };
+    await page.evaluate(`(() => {
+        document.getElementById('email')?.remove();
+        const input = document.createElement('input');
+        input.id = 'email'; input.placeholder = 'Email'; input.autocomplete = 'off';
+        input.style.cssText = 'position:fixed;left:${Math.round(portraitFieldCenterDesktop.x - portraitField.width / 2)}px;top:${Math.round(portraitFieldCenterDesktop.y - portraitField.height / 2)}px;width:${portraitField.width}px;height:${portraitField.height}px;box-sizing:border-box;font:22px system-ui,sans-serif;border:2px solid #4a4a52;border-radius:8px;background:#fff;padding:0 10px';
+        document.body.append(input);
+        window.reset();
+    })()`);
+    const portraitDotRows = (png) => {
+        const density = png.width / screenWidth;
+        const rows = [];
+        for (let y = 0; y < png.height; y++) {
+            let n = 0;
+            for (let x = 0; x < png.width; x++) {
+                const i = (y * png.width + x) * 4;
+                const [r, g, b] = [png.data[i], png.data[i + 1], png.data[i + 2]];
+                if (r < 40 && g < 45 && b < 75 && b - r >= 10) n++;
+            }
+            if (n >= 6 * density) rows.push(y / density);
+        }
+        return rows;
+    };
+    const portraitKeyboardTop = () => {
+        const keys = visibleNodes(udid).filter((entry) => /^(q|w|e|r|t|y|u|i|o|p)$/.test(entry.text) && entry.id === null)
+            .map((entry) => Number(/\{\{-?[\d.]+,\s*(-?[\d.]+)\}/.exec(entry.frame ?? '')?.[1] ?? NaN))
+            .filter((y) => Number.isFinite(y));
+        return keys.length > 0 ? Math.min(...keys) : null;
+    };
+    await page.evaluate('window.reset()');
+    mac(`axe tap -x ${(portraitOrigin.x + portraitFieldCenterDesktop.x * portraitScale).toFixed(1)} -y ${(portraitOrigin.y + portraitFieldCenterDesktop.y * portraitScale).toFixed(1)} --udid ${udid}`);
+    await until('the portrait tap focused the low field',
+        () => page.evaluate('({ focused: document.activeElement && document.activeElement.id, click: clicks.at(-1) })'), (seen) => seen.focused === 'email');
+    const portraitClosed = capture('step-09-keyboard-portrait-closed.png');
+    const portraitClosedRows = portraitDotRows(portraitClosed);
+    assert(portraitClosedRows.length > 0, 'portrait: the tapped low field is on the screen before the keyboard opens');
+    const portraitClosedBottom = Math.max(...portraitClosedRows);
+    pointerSteps(udid, [{ action: 'tapButton', id: 'desklink-keyboard', x: 0, y: 0 }]);
+    await sleep(1500);
+    await until('the on-screen keyboard came up in portrait', async () => portraitKeyboardTop(), (top) => top !== null);
+    await sleep(400);
+    writeFileSync(join(out, 'step-09-keyboard-portrait-tree.json'), JSON.stringify(describeTree(udid), null, 1));
+    const portraitOpen = capture('step-09-keyboard-portrait-open.png');
+    const portraitRows = portraitDotRows(portraitOpen);
+    assert(portraitRows.length > 0, `portrait: with the surface shortened for the keyboard the picture panned the tapped field into sight; its dot is nowhere in step-09-keyboard-portrait-open.png, where it was at ${portraitClosedBottom.toFixed(0)} pt before`);
+    const portraitOpenBottom = Math.max(...portraitRows);
+    assert(portraitOpenBottom < portraitClosedBottom - 20, `portrait: the picture panned the field up when the surface shortened for the keyboard: it moved from ${portraitClosedBottom.toFixed(0)} pt to ${portraitOpenBottom.toFixed(0)} pt`);
+    writeFileSync(join(out, 'step-09-keyboard-portrait.json'), JSON.stringify({ closedBottom: portraitClosedBottom, openBottom: portraitOpenBottom }, null, 1));
+    mac(`axe type 'umer' --udid ${udid}`);
+    const portraitTyped = await until('what the phone typed reached the portrait field',
+        () => page.evaluate('document.getElementById("email").value'), (value) => value === 'umer');
+    assert.equal(portraitTyped, 'umer', 'portrait: what the phone typed is in the field');
+    await sleep(800);
+    capture('step-09-keyboard-portrait-typed.png');
+    stopRecording();
+    assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/tmp/phone-control.mp4`, join(out, 'keyboard-portrait.mp4')]).status, 0,
+        'copy the portrait keyboard recording back');
+    log(`portrait with the keyboard up, the tapped low field stays in sight and takes what is typed (field moved from ${portraitClosedBottom.toFixed(0)} to ${portraitOpenBottom.toFixed(0)} pt)`);
     console.log(`ok: the iOS receiver shows the live desktop, answers ${codec} with NACK, its taps click the host and its hardware input drives it${IPAD ? ', trackpad included' : ''} (${out})`);
 }
 
