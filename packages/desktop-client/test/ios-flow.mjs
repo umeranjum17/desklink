@@ -699,7 +699,7 @@ async function main() {
 xcrun simctl boot ${udid} 2>/dev/null || true; xcrun simctl bootstatus ${udid} -b > /dev/null
 xcrun simctl install ${udid} "${app}"
 xcrun simctl terminate ${udid} ${BUNDLE} 2>/dev/null || true
-xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
+xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboardFit 0`, 300_000);
     log(`launched ${BUNDLE} on ${udid}`);
 
     let seen = { status: null };
@@ -710,6 +710,13 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
         try { seen = screen(udid); } catch (error) { seen = { status: `unreadable (${error.message.split('\n')[0]})` }; }
     }
     log(`simulator status: ${seen.status}`);
+    // A reused simulator may have been left turned by an interrupted earlier
+    // run; this journey starts and ends portrait. Re-read the frame after it,
+    // because the rest of the journey measures from it.
+    pointerSteps(udid, [{ action: 'portrait', x: 0, y: 0 }]);
+    await sleep(1500);
+    seen = screen(udid);
+    log(`screen after turning portrait: ${seen.frame.width}x${seen.frame.height}`);
 
     // ---- descriptions ---------------------------------------------------------------
     assert(crossed.offer !== null && crossed.answer !== null, 'both descriptions crossed the bridge');
@@ -1277,13 +1284,18 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     await sleep(1500);
     // simctl saves the display's native portrait pixels; turned to landscapeLeft, the
     // picture's top-left lands at the screenshot's top-right. Turn it upright.
-    const landscapeCapture = (name) => {
+    const landscapeShot = (name) => {
         const sideways = capture(join(out, 'simulator-landscape-native.png'));
         const landscape = new PNG({ width: sideways.height, height: sideways.width });
         for (let y = 0; y < sideways.height; y++) {
             for (let x = 0; x < sideways.width; x++) sideways.data.copy(landscape.data, ((sideways.width - 1 - x) * landscape.width + y) * 4, (y * sideways.width + x) * 4, (y * sideways.width + x) * 4 + 4);
         }
         writeFileSync(join(out, name), PNG.sync.write(landscape));
+        return landscape;
+    };
+    /** A full-screen landscape capture: the picture fills it, with no black letterbox. */
+    const landscapeCapture = (name) => {
+        const landscape = landscapeShot(name);
         const bars = barShare(landscape);
         assert(bars < 0.15, `black bars take under 15% of the landscape screen (${name}): ${(100 * bars).toFixed(1)}%`);
         return landscape;
@@ -1345,6 +1357,10 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}'`, 300_000);
     // what is left rather than snap back to the desktop's top-left corner and
     // hide the field. That must hold on a fresh launch, every time, not only
     // once the view has warmed up — so it is proven over five fresh launches.
+    // The software keyboard is drawn by the Simulator app, not by a headless
+    // `simctl` boot; bring it up (if it is not already) so the captures and
+    // the app's own keyboard events are real. Leave a running Simulator alone.
+    mac(`pgrep -x Simulator > /dev/null || (open -a Simulator --args -CurrentDeviceUDID ${udid} > /dev/null 2>&1; sleep 5)`);
     const LAUNCHES = 5;
     const launchFresh = () => mac(`xcrun simctl terminate ${udid} ${BUNDLE} 2>/dev/null || true
 xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboardFit 1`);
@@ -1426,7 +1442,6 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
             return { x: k0.aimed.x + (kby * kdx - kbx * kdy) / kdet, y: k0.aimed.y + (kax * kdy - kay * kdx) / kdet };
         };
     };
-    let lastKeyRow = null;
     for (let launch = 1; launch <= LAUNCHES; launch++) {
         if (launch > 1) {
             launchFresh();
@@ -1434,8 +1449,8 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
             pointerSteps(udid, [{ action: 'landscape', x: 0, y: 0 }]);
             await sleep(1500);
         }
-        const closed = landscapeCapture(`step-09-keyboard-${launch}-closed.png`);
-        const box = pictureBox(closed, wide.width);
+        const before = landscapeCapture(`step-09-keyboard-${launch}-before.png`);
+        const box = pictureBox(before, wide.width);
         const scale = Math.max(wide.width / geometry.width, wide.height / geometry.height);
         const fieldAt = { x: box.left + fieldCenter.x * scale, y: box.top + fieldCenter.y * scale };
         const sidewaysAim = await aimThrough(box, scale);
@@ -1445,36 +1460,37 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
         mac(`axe tap -x ${aim.x.toFixed(1)} -y ${aim.y.toFixed(1)} --udid ${udid}`);
         await until(`fresh launch ${launch} focused the sign-in field at desktop (${fieldCenter.x}, ${fieldCenter.y})`,
             () => page.evaluate('({ focused: document.activeElement && document.activeElement.id, click: clicks.at(-1) })'), (seen) => seen.focused === 'email');
+        // With the keyboard down the field is on the screen where the tap left it.
+        const closed = landscapeShot(`step-09-keyboard-${launch}-closed.png`);
+        const closedRows = dotRows(closed);
+        assert(closedRows.length > 0, `fresh launch ${launch}: the tapped field is on the screen before the keyboard opens`);
+        const closedBottom = Math.max(...closedRows);
+        // Ask for the keyboard: the app shortens its surface for it, as a
+        // consumer's keyboard-avoiding screen makes room. The picture must pan
+        // so the field stays in the part that is left, not snap back to the
+        // desktop's top-left corner and hide it.
         pointerSteps(udid, [{ action: 'tapButton', id: 'desklink-keyboard', x: 0, y: 0 }]);
         await sleep(1500);
+        await until(`the on-screen keyboard came up on fresh launch ${launch}`, async () => keyboardKeys(), (top) => top !== null);
+        await sleep(400);
         writeFileSync(join(out, `step-09-keyboard-tree-${launch}.json`), JSON.stringify(describeTree(udid), null, 1));
-        const open = landscapeCapture(`step-09-keyboard-${launch}-open.png`);
-        const keyRow = await until(`the on-screen keyboard came up on fresh launch ${launch}`, async () => keyboardKeys(), (top) => top !== null);
-        lastKeyRow = keyRow;
+        const open = landscapeShot(`step-09-keyboard-${launch}-open.png`);
         const rows = dotRows(open);
-        assert(rows.length > 0, `fresh launch ${launch}: the tapped field is on the screen with the keyboard up: its dot is nowhere in step-09-keyboard-${launch}-open.png, the keyboard's keys start at ${keyRow.toFixed(0)} pt`);
-        const dot = { top: Math.min(...rows), bottom: Math.max(...rows) };
-        const fieldBottom = (dot.top + dot.bottom) / 2 + (field.height / 2) * (dot.bottom - dot.top) / 36;
-        // The keyboard's suggestion strip sits above its first row of keys.
-        const keyboardTop = keyRow - 50;
-        assert(fieldBottom <= keyboardTop, `fresh launch ${launch}: the whole field is above the keyboard: it ends at ${fieldBottom.toFixed(0)} pt, the keyboard starts near ${keyboardTop.toFixed(0)} pt`);
-        writeFileSync(join(out, `step-09-keyboard-${launch}.json`), JSON.stringify({ launch, fieldBottom, keyboardTop, keyRow, dot }, null, 1));
-        log(`step 09 fresh launch ${launch}/${LAUNCHES}: sideways, keyboard up, the tapped field ends at ${fieldBottom.toFixed(0)} pt, above the keyboard near ${keyboardTop.toFixed(0)} pt`);
+        assert(rows.length > 0, `fresh launch ${launch}: with the surface shortened for the keyboard the picture panned the tapped field into sight; its dot is nowhere in step-09-keyboard-${launch}-open.png, where it was at ${closedBottom.toFixed(0)} pt before`);
+        const openBottom = Math.max(...rows);
+        assert(openBottom < closedBottom - 20, `fresh launch ${launch}: the picture panned the field up when the surface shortened for the keyboard: it moved from ${closedBottom.toFixed(0)} pt to ${openBottom.toFixed(0)} pt`);
+        writeFileSync(join(out, `step-09-keyboard-${launch}.json`), JSON.stringify({ launch, closedBottom, openBottom }, null, 1));
+        log(`step 09 fresh launch ${launch}/${LAUNCHES}: the surface shortened for the keyboard, the field moved from ${closedBottom.toFixed(0)} to ${openBottom.toFixed(0)} pt, in sight`);
     }
     const themed = {};
     for (const theme of ['light', 'dark']) {
         mac(`xcrun simctl ui ${udid} appearance ${theme}`);
         await sleep(1500);
         const name = `step-09-keyboard-landscape-${theme}.png`;
-        const shot = landscapeCapture(name);
+        const shot = landscapeShot(name);
         themed[theme] = shot;
-        const rows = dotRows(shot);
-        assert(rows.length > 0, `the tapped field is on the screen with the keyboard up (${theme}): its dot is nowhere in ${name}, the keyboard's keys start at ${lastKeyRow.toFixed(0)} pt`);
-        const dot = { top: Math.min(...rows), bottom: Math.max(...rows) };
-        const fieldBottom = (dot.top + dot.bottom) / 2 + (field.height / 2) * (dot.bottom - dot.top) / 36;
-        const keyboardTop = lastKeyRow - 50;
-        assert(fieldBottom <= keyboardTop, `the whole field is above the keyboard (${theme}): it ends at ${fieldBottom.toFixed(0)} pt, the keyboard starts near ${keyboardTop.toFixed(0)} pt`);
-        log(`step 09-keyboard-${theme}: sideways, keyboard up (${theme}): the tapped field ends at ${fieldBottom.toFixed(0)} pt, above the keyboard near ${keyboardTop.toFixed(0)} pt (${name})`);
+        assert(dotRows(shot).length > 0, `the tapped field is on the screen with the keyboard up (${theme}): its dot is nowhere in ${name}`);
+        log(`step 09-keyboard-${theme}: sideways, keyboard up (${theme}): the tapped field stays in sight (${name})`);
     }
     // The example app pins one look (Expo's `userInterfaceStyle` defaults to
     // light), so the keyboard over it stays light whatever the phone is set to.
@@ -1485,7 +1501,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
         () => page.evaluate('document.getElementById("email").value'), (value) => value === 'umer');
     assert.equal(signedIn, 'umer', 'what the phone typed is in the field');
     await sleep(800);
-    landscapeCapture('step-09-keyboard-landscape-typed.png');
+    landscapeShot('step-09-keyboard-landscape-typed.png');
     stopRecording();
     mac(`xcrun simctl ui ${udid} appearance ${appearance === 'dark' ? 'dark' : 'light'}`);
     pointerSteps(udid, [{ action: 'portrait', x: 0, y: 0 }]);

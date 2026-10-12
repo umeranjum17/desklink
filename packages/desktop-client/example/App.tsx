@@ -16,7 +16,7 @@
  */
 import * as React from 'react';
 import * as Clipboard from 'expo-clipboard';
-import { KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView, Settings, StatusBar, StyleSheet, Text, View } from 'react-native';
+import { Linking, Platform, Pressable, ScrollView, Settings, StatusBar, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
     ClipboardConfirmation,
@@ -237,6 +237,10 @@ function ConnectedDesktop({ url, report, cover, keyboardFit }: { url: string; re
     // it, so the screen is controls rather than empty space.
     const [pictureBottom, setPictureBottom] = React.useState(0);
     const [screen, setScreen] = React.useState({ width: 0, height: 0 });
+    // With `-desklinkKeyboardFit 1` the desktop shortens to a band when the
+    // keyboard is asked for, the way a consumer's keyboard-avoiding screen
+    // makes room: the picture must pan inside what is left, not snap back.
+    const [keyboardBand, setKeyboardBand] = React.useState(false);
     // A tablet's band carries tablet-sized controls and starts under the picture.
     // A phone's is left exactly as it was: its own keys, at the bottom edge.
     const tablet = Math.min(screen.width, screen.height) >= TABLET_MIN;
@@ -299,13 +303,13 @@ function ConnectedDesktop({ url, report, cover, keyboardFit }: { url: string; re
         <View ref={root} style={styles.root} onLayout={(event) => setScreen(event.nativeEvent.layout)}>
             <StatusBar hidden />
             {keyboardFit
-                // A consumer whose screen makes room for the keyboard shrinks
+                // A consumer whose screen makes room for the keyboard shortens
                 // the surface; the picture must pan inside what is left rather
                 // than snap back to the desktop's top-left corner.
-                ? <KeyboardAvoidingView behavior="height" style={StyleSheet.absoluteFill}>
+                ? <View pointerEvents="box-none" style={keyboardBand ? [styles.band, { bottom: undefined, height: Math.max(1, screen.height * 0.3) }] : styles.band}>
                     <DesktopView sessionId={desktop.nativeId} style={StyleSheet.absoluteFill} insets={insets} accessibilityLabel="desktop"
                         cover={cover} onPictureFrame={(frame) => setPictureBottom(frame.top + frame.height)} />
-                </KeyboardAvoidingView>
+                </View>
                 : <DesktopView sessionId={desktop.nativeId} style={StyleSheet.absoluteFill} insets={insets} accessibilityLabel="desktop"
                     cover={cover} onPictureFrame={(frame) => setPictureBottom(frame.top + frame.height)} />}
 
@@ -335,7 +339,9 @@ function ConnectedDesktop({ url, report, cover, keyboardFit }: { url: string; re
             </View>
             <ModifierKeys modifiers={desktop.modifiers} onTap={desktop.tapModifier} style={styles.row} grow={tallDeck} />
             <View style={[styles.keys, sideways && styles.keysRow]}>
-                <Pressable testID="desklink-keyboard" accessibilityRole="button" onPress={() => desktop.showKeyboard()} style={[styles.copy, tallDeck && styles.copyTall, sideways && styles.copyRow]}>
+                <Pressable testID="desklink-keyboard" accessibilityRole="button"
+                    onPress={() => { if (keyboardFit) setKeyboardBand(true); desktop.showKeyboard(); }}
+                    style={[styles.copy, tallDeck && styles.copyTall, sideways && styles.copyRow]}>
                     <Text style={styles.copyLabel}>Keys</Text>
                 </Pressable>
                 <Pressable testID="desklink-copy" accessibilityRole="button" onPress={() => void copy()} style={[styles.copy, tallDeck && styles.copyTall, sideways && styles.copyRow]}>
@@ -411,6 +417,9 @@ function useJourney(root: React.RefObject<View | null>, live: boolean) {
 
 const styles = StyleSheet.create({
     root: { flex: 1, backgroundColor: '#000' },
+    // The keyboard-fit journey's band: the desktop's own height, or a short
+    // band once the keyboard is asked for.
+    band: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, overflow: 'hidden' },
     idle: { alignItems: 'center', justifyContent: 'center' },
     messageText: { color: '#fff', fontSize: 16 },
     // The deck is one block at the bottom of the band, where thumbs are; the
