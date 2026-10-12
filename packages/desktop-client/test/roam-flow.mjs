@@ -16,7 +16,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -243,7 +243,7 @@ async function run() {
     const fixture = process.env.DESKLINK_VERIFY_TARGET ?? join(targetDir, 'debug/examples/x11_target');
     assert(existsSync(engine) && existsSync(fixture), 'build task-owned desklink-host and x11_target first');
     const scratch = mkdtempSync(join(tmpdir(), 'dl-roam-'));
-    let claim, xvfb, target, bridge, signalling, relay, vite, context;
+    let claim, xvfb, target, bridge, signalling, relay, vite, context, pageVideo;
     let fixtureLog = '', fixtureBuffer = '', refused = 0, blocked = false, holdMetrics = false, stalled = false;
     const observedFixture = [];
     const upstreams = new Set();
@@ -358,8 +358,12 @@ async function run() {
         // Chromium keeps the real runtime dir; only its profile is isolated.
         context = await chromium.launchPersistentContext(join(scratch, 'profile'), { executablePath: process.env.DESKLINK_CHROME ?? '/usr/bin/chromium', headless: true,
             env: { ...process.env, DISPLAY: '', WAYLAND_DISPLAY: '' }, viewport: { width: 1280, height: 720 },
+            recordVideo: { dir: evidence, size: { width: 1280, height: 720 } },
             args: ['--no-sandbox', '--autoplay-policy=no-user-gesture-required', '--disable-features=WebRtcHideLocalIpsWithMdns'] });
         const page = context.pages()[0];
+        // Motion clip of the roam journey, saved beside the stills/receipts.
+        result.video = null;
+        pageVideo = page.video();
         page.on('pageerror', error => appendFileSync(join(evidence, 'browser.log'), `${Date.now()} ${error}\n`));
         page.on('requestfailed', request => appendFileSync(join(evidence, 'browser.log'), `${Date.now()} ${request.url()} ${request.failure()?.errorText}\n`));
         await page.goto(vite.resolvedUrls.local[0]);
@@ -637,6 +641,23 @@ async function run() {
         writeFileSync(join(evidence, 'fixture-observed.json'), JSON.stringify(observedFixture, null, 2));
         for (const [name, cleanup] of [
             ['browser', () => context?.close()],
+            ['video', async () => {
+                // Playwright finalizes the .webm on page/context close; keep a
+                // deterministic name beside before.png/after.png/result.json.
+                try { await pageVideo?.path(); } catch { /* path resolves after close */ }
+                const found = readdirSync(evidence).filter(f => f.endsWith('.webm'));
+                if (found.length > 0) {
+                    const dest = join(evidence, 'roam.webm');
+                    if (found.length === 1 && found[0] === 'roam.webm') result.video = 'roam.webm';
+                    else {
+                        for (const [i, file] of found.entries()) {
+                            const name = found.length === 1 ? dest : join(evidence, `roam-${i}.webm`);
+                            if (resolve(evidence, file) !== resolve(name)) renameSync(join(evidence, file), name);
+                        }
+                        result.video = found.length === 1 ? 'roam.webm' : found.map((_, i) => `roam-${i}.webm`);
+                    }
+                }
+            }],
             ['relay', async () => { for (const client of relay?.clients ?? []) client.terminate(); for (const host of upstreams) host.terminate(); if (relay) await new Promise(resolve => relay.close(resolve)); }],
             ['signalling', () => signalling?.close()], ['link', () => link.close()], ['vite', () => vite?.close()], ['bridge', () => bridge?.close()],
             ['fixture', async () => { if (target?.exitCode === null) { target.kill('SIGTERM'); await wait(() => target.exitCode !== null || target.signalCode !== null, 3000, 'fixture exit'); } }],
