@@ -1,8 +1,8 @@
 name: release
 
 # A release is a merge of a version-bump PR. Pushing to main (or the manual
-# button) runs the tests, then publishes every workspace package whose exact
-# version is not yet on the npm registry. Trusted publishing only: OIDC via
+# button) runs the tests, then publishes every public workspace package whose
+# exact version is not yet on the npm registry. Trusted publishing only: OIDC via
 # `id-token: write` below, `--provenance` on every publish, no NPM_TOKEN and
 # no key material anywhere in this file or its logs.
 #
@@ -78,10 +78,9 @@ jobs:
       # file (engine sources, android/ios sources) fails before publish.
       - run: npm pack --dry-run --workspaces
 
-  # Publishes, in dependency order, every package whose exact version is new
-  # on the registry: @desklink/host, then @desklink/axi (which pins host
-  # 0.5.3), then the independent @desklink/react-native. Already-published
-  # versions are skipped, so re-runs are safe.
+  # Publishes every public workspace package (packages/*) whose exact version
+  # is new on the registry, @desklink/host first since @desklink/axi pins it.
+  # Already-published versions are skipped, so re-runs are safe.
   publish:
     name: publish new versions
     needs: [test, build-pack]
@@ -105,39 +104,26 @@ jobs:
       - run: npm ci
       # dist/ is gitignored, so publish the build this run just proved.
       - run: npm run build
-      - name: Publish @desklink/host when the version is new
-        working-directory: packages/desktop-host
+      - name: Publish each public workspace package when its version is new
         run: |
-          PKG="$(node -p "require('./package.json').name")"
-          VER="$(node -p "require('./package.json').version")"
-          echo "Registry check: $PKG@$VER"
-          if npm view "$PKG@$VER" version >/dev/null 2>&1; then
-            echo "$PKG@$VER is already on the registry; skipping publish."
-          else
-            echo "Publishing $PKG@$VER ..."
-            npm publish --provenance --access public
-          fi
-      - name: Publish @desklink/axi when the version is new
-        working-directory: packages/axi
-        run: |
-          PKG="$(node -p "require('./package.json').name")"
-          VER="$(node -p "require('./package.json').version")"
-          echo "Registry check: $PKG@$VER"
-          if npm view "$PKG@$VER" version >/dev/null 2>&1; then
-            echo "$PKG@$VER is already on the registry; skipping publish."
-          else
-            echo "Publishing $PKG@$VER ..."
-            npm publish --provenance --access public
-          fi
-      - name: Publish @desklink/react-native when the version is new
-        working-directory: packages/desktop-client
-        run: |
-          PKG="$(node -p "require('./package.json').name")"
-          VER="$(node -p "require('./package.json').version")"
-          echo "Registry check: $PKG@$VER"
-          if npm view "$PKG@$VER" version >/dev/null 2>&1; then
-            echo "$PKG@$VER is already on the registry; skipping publish."
-          else
-            echo "Publishing $PKG@$VER ..."
-            npm publish --provenance --access public
-          fi
+          # @desklink/axi pins @desklink/host, so host is published first.
+          DIRS=(packages/desktop-host)
+          for d in packages/*/; do
+            [ "${d%/}" = packages/desktop-host ] || DIRS+=("${d%/}")
+          done
+          for dir in "${DIRS[@]}"; do
+            [ -f "$dir/package.json" ] || continue
+            PKG="$(node -p "require('./$dir/package.json').name")"
+            VER="$(node -p "require('./$dir/package.json').version")"
+            if [ "$(node -p "Boolean(require('./$dir/package.json').private)")" = true ]; then
+              echo "$PKG is private; not published."
+              continue
+            fi
+            echo "Registry check: $PKG@$VER"
+            if npm view "$PKG@$VER" version >/dev/null 2>&1; then
+              echo "$PKG@$VER is already on the registry; skipping publish."
+            else
+              echo "Publishing $PKG@$VER ..."
+              npm publish "$dir" --provenance --access public
+            fi
+          done
