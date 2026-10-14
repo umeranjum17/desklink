@@ -2,6 +2,11 @@
     "name": "@desklink/react-native",
     "version": "0.5.4",
     "license": "Apache-2.0",
+    "repository": {
+      "type": "git",
+      "url": "https://github.com/umeranjum17/desklink.git",
+      "directory": "packages/desktop-client"
+    },
     "description": "Render and drive a desktop session from a React Native app",
     "main": "index.ts",
     "types": "index.ts",

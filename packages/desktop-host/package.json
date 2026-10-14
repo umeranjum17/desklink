@@ -2,6 +2,11 @@
     "name": "@desklink/host",
     "version": "0.5.3",
     "license": "Apache-2.0",
+    "repository": {
+      "type": "git",
+      "url": "https://github.com/umeranjum17/desklink.git",
+      "directory": "packages/desktop-host"
+    },
     "description": "Per-user, on-demand desktop capture, encode and input engine with a versioned local control protocol",
     "type": "module",
     "main": "./dist/index.js",

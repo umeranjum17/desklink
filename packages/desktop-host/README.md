@@ -436,14 +436,18 @@ The package smoke instead uses `npm pack` on this checkout's host package as a
 registry stand-in, without Docker or a native build. `check-install.sh` installs
 the current platform's host and engine tarballs into an empty project and checks both installed versions. On Linux it uses a clean container with no Rust toolchain, display or `/dev/uinput`, and checks the typed missing-library error before installing runtime libraries. On macOS it uses a temporary project. Both checks resolve the prebuilt engine, perform the protocol handshake and probe capabilities without opening a capture session.
 
-Publishing is by hand, from an `npm login` with publish rights on the scope.
-`release/publish.mjs` verifies the complete tarball set, publishes both platform packages first and waits until the
-registry serves each before publishing `@desklink/host`, so the host never points
-at an engine npm does not have. It then publishes the React Native receiver and AXI CLI. A version already on npm with the same bytes is
-skipped; with different bytes it is refused. `--dry-run` does everything but the
-upload:
+Publishing is automatic. Merging a version bump to `main` runs
+`.github/workflows/release.yml`: the test, build and build-pack jobs gate a
+publish job that releases `@desklink/axi` and `@desklink/react-native` whose
+exact versions are not yet on npm, with `--provenance`. `@desklink/host` stays
+on the pack path until the engine follow-up lands. A package that pins an
+unpublished host version, or a host version bump not yet on npm, fails the job
+closed instead of shipping pin-less. The workflow uses trusted publishing (OIDC)
+and no npm token. Re-runs skip versions already published.
+
+`release/publish.mjs` is an older manual upload of the `pack.mjs` tarballs. It
+is not the release route. `--dry-run` still checks that tarball set:
 
 ```sh
 node packages/desktop-host/release/publish.mjs --dry-run
-node packages/desktop-host/release/publish.mjs
 ```
