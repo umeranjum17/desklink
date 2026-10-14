@@ -30,12 +30,16 @@ registry_state() {
 }
 
 # Wait up to the shared budget for a just-published spec to be served. Returns 0
-# once it is published, 1 if it is still absent (or errored) at the bound.
+# once it is published, 1 if the last check answered E404 (still absent) at the
+# bound, and 2 if the last check failed (registry, auth or network) - an error
+# the caller reports as such, never as a version that is not on the registry.
 wait_published() {
-    local attempt
+    local attempt state
     for attempt in $(seq 1 "$READBACK_ATTEMPTS"); do
-        [ "$(registry_state "$1")" = published ] && return 0
+        state="$(registry_state "$1")"
+        [ "$state" = published ] && return 0
         [ "$attempt" -eq "$READBACK_ATTEMPTS" ] || sleep "$READBACK_INTERVAL_SECONDS"
     done
-    return 1
+    [ "$state" = missing ] && return 1
+    return 2
 }

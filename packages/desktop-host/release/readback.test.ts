@@ -12,10 +12,21 @@ const budget = JSON.parse(readFileSync(join(releaseDir, 'readback-budget.json'),
     intervalSeconds: number;
 };
 
+// readback.sh only runs in the ubuntu publish job, so its tests need a real
+// POSIX shell; the windows-2025 vitest lane has none (a bare `bash` there is
+// the WSL placeholder), so resolve one and skip with a reason where none exists.
+const shell = process.platform === 'win32' ? undefined : ['bash', '/bin/bash', '/usr/bin/bash'].find((candidate) => {
+    const probe = spawnSync(candidate, ['-c', 'printf ok'], { encoding: 'utf8' });
+    return !probe.error && probe.status === 0 && probe.stdout === 'ok';
+});
+if (shell === undefined) console.warn(`readback.sh tests skipped: no usable POSIX shell on ${process.platform}`);
+const shellIt = it.skipIf(shell === undefined);
+
 // A registry we control for the shell path: a real `npm` executable on PATH
 // that logs every `view` call and answers per STUB_MODE, so registry_state and
 // wait_published run unchanged. The 20x3s budget this replaced is 20 calls.
 function runShell(body: string, env: Record<string, string>): { status: number | null; stdout: string } {
+    if (shell === undefined) throw new Error('no POSIX shell to source readback.sh with');
     const setup = `
 set -uo pipefail
 work="$(mktemp -d)"
@@ -40,7 +51,7 @@ sleep() { :; }
 ${body}
 rm -rf "$work"
 `;
-    const result = spawnSync('bash', ['-c', setup], {
+    const result = spawnSync(shell, ['-c', setup], {
         encoding: 'utf8',
         env: { ...process.env, READBACK_SH: readbackSh, ...env },
     });
@@ -50,7 +61,7 @@ rm -rf "$work"
 
 const stubEnv = (mode: string, extra: Record<string, string> = {}) => ({ STUB_MODE: mode, ...extra });
 
-it('waits past the old 20-poll budget for a slow read and proceeds', () => {
+shellIt('waits past the old 20-poll budget for a slow read and proceeds', () => {
     const { status, stdout } = runShell(
         `wait_published "@desklink/host@0.5.4"; printf 'rc=%s calls=%s\\n' "$?" "$(cat "$COUNT")"`,
         stubEnv('slow', { SLOW_AFTER: '25' }),
@@ -59,7 +70,7 @@ it('waits past the old 20-poll budget for a slow read and proceeds', () => {
     expect(stdout).toContain(`rc=0 calls=26`);
 });
 
-it('fails a genuinely missing package at the new bound, after more polls than the old budget', () => {
+shellIt('fails a genuinely missing package at the new bound, after more polls than the old budget', () => {
     const { stdout } = runShell(
         `wait_published "@desklink/host@0.5.4"; printf 'rc=%s calls=%s attempts=%s\\n' "$?" "$(cat "$COUNT")" "$READBACK_ATTEMPTS"`,
         stubEnv('missing'),
@@ -68,13 +79,22 @@ it('fails a genuinely missing package at the new bound, after more polls than th
     expect(stdout).not.toContain('rc=0');
 });
 
-it('classifies a served version, an E404 and a registry error distinctly', () => {
+shellIt('classifies a served version, an E404 and a registry error distinctly', () => {
     const body = `out="$(registry_state "@desklink/host@0.5.4" 2>"$work/err")"; printf 'state=%s stderr=%s\\n' "$out" "$(cat "$work/err")"`;
     expect(runShell(body, stubEnv('published')).stdout).toContain('state=published stderr=');
     expect(runShell(body, stubEnv('missing')).stdout).toContain('state=missing stderr=');
     const errored = runShell(body, stubEnv('error')).stdout;
     expect(errored).toContain('state=error');
     expect(errored).toContain('not a missing version');
+});
+
+shellIt('fails a persistent registry error at the bound instead of reporting a missing version', () => {
+    const { stdout } = runShell(
+        `wait_published "@desklink/host@0.5.4"; printf 'rc=%s calls=%s\\n' "$?" "$(cat "$COUNT")"`,
+        stubEnv('error'),
+    );
+    expect(stdout).toContain(`rc=2 calls=${budget.attempts}`);
+    expect(stdout).not.toContain('rc=1');
 });
 
 it('waits the same budget in release/publish.mjs and reports it in one place', async () => {

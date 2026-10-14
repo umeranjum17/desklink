@@ -17,10 +17,10 @@ export const READBACK_INTERVAL_MS = budget.intervalSeconds * 1000;
  * A `read` that throws is not swallowed: a registry, auth or network failure
  * aborts the caller rather than masquerading as an unpublished version.
  */
-export async function waitForReadback(read, accept, { attempts = READBACK_ATTEMPTS, intervalMs = READBACK_INTERVAL_MS } = {}) {
+export async function waitForReadback(read, accept) {
     let value;
-    for (let attempt = 0; attempt < attempts && !accept(value); attempt += 1) {
-        if (attempt > 0) await new Promise((done) => setTimeout(done, intervalMs));
+    for (let attempt = 0; attempt < READBACK_ATTEMPTS && !accept(value); attempt += 1) {
+        if (attempt > 0) await new Promise((done) => setTimeout(done, READBACK_INTERVAL_MS));
         value = read();
     }
     return value;

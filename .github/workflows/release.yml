@@ -269,21 +269,44 @@ jobs:
           # Hold the host until every engine platform it pins is on the
           # registry, so npm never serves a host whose pins cannot resolve.
           host_ready=true
+          registry_error=false
           [ -n "$PLATFORMS" ] || host_ready=false
           while IFS=$'\t' read -r PNAME PVER; do
             [ -n "$PNAME" ] || continue
-            wait_published "${PNAME}@${PVER}" || host_ready=false
+            rc=0
+            wait_published "${PNAME}@${PVER}" || rc=$?
+            case "$rc" in
+              0) ;;
+              1) host_ready=false ;;
+              *) host_ready=false; registry_error=true ;;
+            esac
           done <<< "$PLATFORMS"
           if [ "$host_ready" = true ]; then
             publish_one "$HOST_TGZ"
+          elif [ "$registry_error" = true ]; then
+            echo "::error::@desklink/host@$HOST_VER is held and not published: the registry check above failed (registry, auth or network), so whether an engine platform package it pins is on the registry is unknown. Fix the registry failure above, then re-run this workflow."
+            failed=1
           else
             echo "::error::@desklink/host@$HOST_VER is held: an engine platform package it pins is not on the registry, and publishing the host now would name a pin npm cannot resolve. Fix the failed package above, then re-run this workflow."
             failed=1
           fi
           # @desklink/axi pins @desklink/host, so it goes out only once the host
           # it names is on the registry.
-          if [ "$host_ready" = true ] && wait_published "@desklink/host@$HOST_VER"; then
+          axi_ready=false
+          if [ "$host_ready" = true ]; then
+            rc=0
+            wait_published "@desklink/host@$HOST_VER" || rc=$?
+            case "$rc" in
+              0) axi_ready=true ;;
+              1) ;;
+              *) registry_error=true ;;
+            esac
+          fi
+          if [ "$axi_ready" = true ]; then
             publish_one "dist-desklink/desklink-axi-$AXI_VER.tgz"
+          elif [ "$registry_error" = true ]; then
+            echo "::error::@desklink/axi@$AXI_VER is held and not published: the registry check for @desklink/host@$HOST_VER above failed (registry, auth or network), so whether it is on the registry is unknown. Fix the registry failure above, then re-run this workflow."
+            failed=1
           else
             echo "::error::@desklink/axi@$AXI_VER is held: @desklink/host@$HOST_VER is not on the registry, and publishing axi now would name a pin npm cannot resolve. Fix @desklink/host, then re-run this workflow."
             failed=1
