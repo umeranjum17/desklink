@@ -123,17 +123,17 @@ jobs:
       - name: Publish axi and react-native when their versions are new
         run: |
           failed=0
-          registry_has() {
+          registry_state() {
             local out
             if out="$(npm view "$1" version 2>&1)"; then
-              return 0
+              echo published
+            elif grep -q E404 <<<"$out"; then
+              echo missing
+            else
+              echo "::error::npm registry check for $1 failed (registry, auth or network), not a missing version:" >&2
+              echo "$out" >&2
+              echo error
             fi
-            if grep -q E404 <<<"$out"; then
-              return 1
-            fi
-            echo "::error::npm registry check for $1 failed (registry, auth or network), not a missing version:" >&2
-            echo "$out" >&2
-            exit 1
           }
           for dir in packages/axi packages/desktop-client; do
             PKG="$(node -p "require('./$dir/package.json').name")"
@@ -141,22 +141,31 @@ jobs:
             HOST_PIN="$(node -p "require('./$dir/package.json').dependencies?.['@desklink/host'] ?? ''")"
             # Fail closed (G6): a package pinning an unpublished host version is held
             # with the follow-up named. Other packages in the loop still publish.
-            if [ -n "$HOST_PIN" ] && ! registry_has "@desklink/host@$HOST_PIN"; then
-              echo "::error::$PKG@$VER pins @desklink/host@$HOST_PIN, which is not on the registry. This workflow never publishes the host: it would ship without the platform engine optionalDependencies pins. Cut the host + engine release on the pack path (packages/desktop-host/release/pack.mjs + publish.mjs) in the engine follow-up lane, then re-run this workflow."
-              failed=1
-              continue
+            if [ -n "$HOST_PIN" ]; then
+              case "$(registry_state "@desklink/host@$HOST_PIN")" in
+                published) ;;
+                missing)
+                  echo "::error::$PKG@$VER pins @desklink/host@$HOST_PIN, which is not on the registry. This workflow never publishes the host: it would ship without the platform engine optionalDependencies pins. Cut the host + engine release on the pack path (packages/desktop-host/release/pack.mjs + publish.mjs) in the engine follow-up lane, then re-run this workflow."
+                  failed=1
+                  continue ;;
+                *) failed=1; continue ;;
+              esac
             fi
             echo "Registry check: $PKG@$VER"
-            if registry_has "$PKG@$VER"; then
-              echo "$PKG@$VER is already on the registry; skipping publish."
-            else
-              echo "Publishing $PKG@$VER ..."
-              npm publish "$dir" --provenance --access public
-            fi
+            case "$(registry_state "$PKG@$VER")" in
+              published) echo "$PKG@$VER is already on the registry; skipping publish." ;;
+              missing)
+                echo "Publishing $PKG@$VER ..."
+                npm publish "$dir" --provenance --access public || { echo "::error::npm publish of $PKG@$VER failed; the other packages were still attempted."; failed=1; } ;;
+              *) failed=1 ;;
+            esac
           done
           HOST_VER="$(node -p "require('./packages/desktop-host/package.json').version")"
-          if ! registry_has "@desklink/host@$HOST_VER"; then
-            echo "::error::@desklink/host@$HOST_VER is not on the registry. This workflow never publishes the host: it would ship without the platform engine optionalDependencies pins. Cut the host + engine release on the pack path (packages/desktop-host/release/pack.mjs + publish.mjs) in the engine follow-up lane, then re-run this workflow."
-            failed=1
-          fi
+          case "$(registry_state "@desklink/host@$HOST_VER")" in
+            published) ;;
+            missing)
+              echo "::error::@desklink/host@$HOST_VER is not on the registry. This workflow never publishes the host: it would ship without the platform engine optionalDependencies pins. Cut the host + engine release on the pack path (packages/desktop-host/release/pack.mjs + publish.mjs) in the engine follow-up lane, then re-run this workflow."
+              failed=1 ;;
+            *) failed=1 ;;
+          esac
           exit $failed
