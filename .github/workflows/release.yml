@@ -94,7 +94,8 @@ jobs:
       - run: npm pack --dry-run --workspaces
 
   # Installs and builds without id-token, so dependency lifecycle scripts
-  # cannot mint a publish token. The publish job receives only the built dist.
+  # cannot mint a publish token. The publish job downloads the built axi dist
+  # and runs no npm ci or build step.
   build:
     name: build (dist artifact)
     needs: test
