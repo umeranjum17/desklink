@@ -438,9 +438,12 @@ the current platform's host and engine tarballs into an empty project and checks
 
 Publishing is automatic. Merging a version bump to `main` runs
 `.github/workflows/release.yml`: the test and build-pack jobs gate a publish job
-that releases each public workspace package whose exact version is not yet on
-npm, with `--provenance`. The workflow uses trusted publishing (OIDC) and no npm
-token. Re-runs skip versions already published.
+that releases `@desklink/axi` and `@desklink/react-native` whose exact versions
+are not yet on npm, with `--provenance`. `@desklink/host` stays on the pack path
+until the engine follow-up lands, so a package that pins an unpublished host
+version fails the job closed instead of shipping pin-less. The workflow uses
+trusted publishing (OIDC) and no npm token. Re-runs skip versions already
+published.
 
 `release/publish.mjs` is an older manual upload of the `pack.mjs` tarballs. It
 is not the release route. `--dry-run` still checks that tarball set:

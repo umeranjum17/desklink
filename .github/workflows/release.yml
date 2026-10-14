@@ -5,8 +5,9 @@ name: release
 # @desklink/react-native whose exact versions are not yet on the npm
 # registry. @desklink/host plus the platform engine packages stay on the
 # pack path (packages/desktop-host/release/pack.mjs + publish.mjs) until the
-# engine follow-up lane: this workflow never publishes the host, and a new
-# host version fails the publish job closed instead of shipping pin-less.
+# engine follow-up lane: this workflow never publishes the host, and a package
+# that pins an unpublished host version fails the publish job closed instead
+# of shipping pin-less.
 # Trusted publishing only: OIDC via `id-token: write` below, `--provenance`
 # on every publish, no NPM_TOKEN and no key material anywhere in this file
 # or its logs.
@@ -33,9 +34,11 @@ name: release
 #       publish separately on the pack path (engine follow-up lane).
 #   G6. Host hold (fail-closed, never a silent skip): this workflow never
 #       publishes @desklink/host, which would ship without the platform
-#       engine optionalDependencies pins. When the host version is not yet on
-#       the registry, the publish job fails with the engine follow-up lane
-#       named, instead of publishing a pin-less host or skipping silently.
+#       engine optionalDependencies pins. A package whose pinned host version
+#       is not yet on the registry (today: @desklink/axi) is not published and
+#       the publish job fails with the engine follow-up lane named, instead of
+#       publishing a pin-less host or skipping silently. Packages without a
+#       host dependency (@desklink/react-native) still publish.
 
 on:
   push:
@@ -108,38 +111,42 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
           cache: npm
-      - name: Ensure npm 11.5+
-        run: |
-          npm install -g "npm@^11"
-          NPM_V="$(npm --version)"
-          echo "npm $NPM_V"
-          node -e "const m = /^(\d+)\.(\d+)/.exec(process.argv[1]); const major = +m[1], minor = +m[2]; if (major < 11 || (major === 11 && minor < 5)) { console.error('requires npm >= 11.5, have ' + process.argv[1]); process.exit(1); }" "$NPM_V"
+      - run: npm install -g "npm@^11.5"
       - run: npm ci
       # dist/ is gitignored, so publish the build this run just proved.
       - run: npm run build
-      # Fail-closed host guard (G6): the host ships only via the pack path
-      # with its engine pins, so a new host version stops this job here with
-      # the follow-up named, instead of publishing pin-less or skipping.
-      - name: Fail closed when @desklink/host has an unpublished version
-        run: |
-          PKG="$(node -p "require('./packages/desktop-host/package.json').name")"
-          VER="$(node -p "require('./packages/desktop-host/package.json').version")"
-          if npm view "$PKG@$VER" version >/dev/null 2>&1; then
-            echo "$PKG@$VER is already on the registry; host needs no engine release."
-          else
-            echo "::error::$PKG@$VER is not on the registry. This workflow never publishes the host: it would ship without the platform engine optionalDependencies pins. Cut the host + engine release on the pack path (packages/desktop-host/release/pack.mjs + publish.mjs) in the engine follow-up lane, then re-run this workflow."
-            exit 1
-          fi
       - name: Publish axi and react-native when their versions are new
         run: |
+          failed=0
+          registry_has() {
+            local out
+            if out="$(npm view "$1" version 2>&1)"; then
+              return 0
+            fi
+            if grep -q E404 <<<"$out"; then
+              return 1
+            fi
+            echo "::error::npm registry check for $1 failed (registry, auth or network), not a missing version:" >&2
+            echo "$out" >&2
+            exit 1
+          }
           for dir in packages/axi packages/desktop-client; do
             PKG="$(node -p "require('./$dir/package.json').name")"
             VER="$(node -p "require('./$dir/package.json').version")"
+            HOST_PIN="$(node -p "require('./$dir/package.json').dependencies?.['@desklink/host'] ?? ''")"
+            # Fail closed (G6): a package pinning an unpublished host version is held
+            # with the follow-up named. Other packages in the loop still publish.
+            if [ -n "$HOST_PIN" ] && ! registry_has "@desklink/host@$HOST_PIN"; then
+              echo "::error::$PKG@$VER pins @desklink/host@$HOST_PIN, which is not on the registry. This workflow never publishes the host: it would ship without the platform engine optionalDependencies pins. Cut the host + engine release on the pack path (packages/desktop-host/release/pack.mjs + publish.mjs) in the engine follow-up lane, then re-run this workflow."
+              failed=1
+              continue
+            fi
             echo "Registry check: $PKG@$VER"
-            if npm view "$PKG@$VER" version >/dev/null 2>&1; then
+            if registry_has "$PKG@$VER"; then
               echo "$PKG@$VER is already on the registry; skipping publish."
             else
               echo "Publishing $PKG@$VER ..."
               npm publish "$dir" --provenance --access public
             fi
           done
+          exit $failed
