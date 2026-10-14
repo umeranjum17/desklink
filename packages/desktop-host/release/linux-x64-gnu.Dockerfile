@@ -74,6 +74,11 @@ RUN set -eu; bin=target/release/desklink-host; \
 FROM ${NODE_IMAGE} AS notices
 ARG RUST_VERSION
 COPY --from=build /opt/cargo/registry/src /opt/cargo/registry/src
+# The patched rtc-ice crate is a path dependency, so cargo metadata names its
+# manifest directory under /src/engine/vendor. Reproduce that tree so the crate
+# text step can read the licence files beside its manifest; registry crates
+# come from the copied registry src above.
+COPY engine/vendor /src/engine/vendor
 COPY --from=build /opt/rustup/toolchains/${RUST_VERSION}-x86_64-unknown-linux-gnu/share/doc/rust/COPYRIGHT-library.html \
     /out/COPYRIGHT-rust-library.html
 COPY --from=build /opt/libvpx-src/LICENSE /opt/libvpx-src/PATENTS /inputs/libvpx/
