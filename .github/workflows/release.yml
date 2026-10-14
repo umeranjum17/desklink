@@ -35,7 +35,7 @@ name: release
 #       publishes @desklink/host, which would ship without the platform
 #       engine optionalDependencies pins. Two checks fail the publish job
 #       with the engine follow-up lane named: (a) a package whose pinned host
-#       version is not on the registry (today: @desklink/axi) is held, not
+#       version is not on the registry is held, not
 #       published; (b) after the loop, the host's own version is not on the
 #       registry (a host-only bump). Packages without a host dependency
 #       (@desklink/react-native) still publish in the same run.
@@ -93,6 +93,26 @@ jobs:
       # file (engine sources, android/ios sources) fails before publish.
       - run: npm pack --dry-run --workspaces
 
+  # Installs and builds without id-token, so dependency lifecycle scripts
+  # cannot mint a publish token. The publish job receives only the built dist.
+  build:
+    name: build (dist artifact)
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: axi-dist
+          path: packages/axi/dist
+          if-no-files-found: error
+
   # Publishes @desklink/axi and @desklink/react-native whose exact versions
   # are new on the registry. @desklink/host is held, never published here
   # (see G6): it needs the platform engine packages from the pack path.
@@ -100,7 +120,7 @@ jobs:
   publish:
     name: publish new versions
     if: github.ref == 'refs/heads/main'
-    needs: [test, build-pack]
+    needs: [test, build, build-pack]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -111,15 +131,15 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-          cache: npm
       - name: Assert npm 11.5+ for --provenance
         run: |
           NPM_V="$(npm --version)"
           echo "npm $NPM_V"
           printf '11.5.0\n%s\n' "$NPM_V" | sort -CV || { echo "::error::npm $NPM_V is below 11.5, which --provenance requires"; exit 1; }
-      - run: npm ci
-      # dist/ is gitignored, so publish the build this run just proved.
-      - run: npm run build
+      - uses: actions/download-artifact@v4
+        with:
+          name: axi-dist
+          path: packages/axi/dist
       - name: Publish axi and react-native when their versions are new
         run: |
           failed=0
