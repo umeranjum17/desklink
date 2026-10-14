@@ -228,29 +228,12 @@ jobs:
           path: dist-desklink
       - name: Publish new versions in dependency order
         run: |
+          # registry_state, wait_published and the read-back budget live in one
+          # place, shared with release/publish.mjs, so both routes agree.
+          source packages/desktop-host/release/readback.sh
           failed=0
-          registry_state() {
-            local out
-            if out="$(npm view "$1" version 2>&1)"; then
-              echo published
-            elif grep -q E404 <<<"$out"; then
-              echo missing
-            else
-              echo "::error::npm registry check for $1 failed (registry, auth or network), not a missing version:" >&2
-              echo "$out" >&2
-              echo error
-            fi
-          }
           spec_of() {
             tar -xzOf "$1" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d).on("end",()=>{const m=JSON.parse(s);process.stdout.write(m.name+"@"+m.version)})'
-          }
-          wait_published() {
-            local attempt
-            for attempt in $(seq 1 20); do
-              [ "$(registry_state "$1")" = published ] && return 0
-              [ "$attempt" -eq 20 ] || sleep 3
-            done
-            return 1
           }
           publish_one() {
             local tarball="$1" spec
@@ -286,21 +269,44 @@ jobs:
           # Hold the host until every engine platform it pins is on the
           # registry, so npm never serves a host whose pins cannot resolve.
           host_ready=true
+          registry_error=false
           [ -n "$PLATFORMS" ] || host_ready=false
           while IFS=$'\t' read -r PNAME PVER; do
             [ -n "$PNAME" ] || continue
-            wait_published "${PNAME}@${PVER}" || host_ready=false
+            rc=0
+            wait_published "${PNAME}@${PVER}" || rc=$?
+            case "$rc" in
+              0) ;;
+              1) host_ready=false ;;
+              *) host_ready=false; registry_error=true ;;
+            esac
           done <<< "$PLATFORMS"
           if [ "$host_ready" = true ]; then
             publish_one "$HOST_TGZ"
+          elif [ "$registry_error" = true ]; then
+            echo "::error::@desklink/host@$HOST_VER is held and not published: the registry check above failed (registry, auth or network), so whether an engine platform package it pins is on the registry is unknown. Fix the registry failure above, then re-run this workflow."
+            failed=1
           else
             echo "::error::@desklink/host@$HOST_VER is held: an engine platform package it pins is not on the registry, and publishing the host now would name a pin npm cannot resolve. Fix the failed package above, then re-run this workflow."
             failed=1
           fi
           # @desklink/axi pins @desklink/host, so it goes out only once the host
           # it names is on the registry.
-          if [ "$host_ready" = true ] && wait_published "@desklink/host@$HOST_VER"; then
+          axi_ready=false
+          if [ "$host_ready" = true ]; then
+            rc=0
+            wait_published "@desklink/host@$HOST_VER" || rc=$?
+            case "$rc" in
+              0) axi_ready=true ;;
+              1) ;;
+              *) registry_error=true ;;
+            esac
+          fi
+          if [ "$axi_ready" = true ]; then
             publish_one "dist-desklink/desklink-axi-$AXI_VER.tgz"
+          elif [ "$registry_error" = true ]; then
+            echo "::error::@desklink/axi@$AXI_VER is held and not published: the registry check for @desklink/host@$HOST_VER above failed (registry, auth or network), so whether it is on the registry is unknown. Fix the registry failure above, then re-run this workflow."
+            failed=1
           else
             echo "::error::@desklink/axi@$AXI_VER is held: @desklink/host@$HOST_VER is not on the registry, and publishing axi now would name a pin npm cannot resolve. Fix @desklink/host, then re-run this workflow."
             failed=1
