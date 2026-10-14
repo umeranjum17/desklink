@@ -3,9 +3,8 @@ name: release
 # A release is a merge of a version-bump PR. Pushing to main (or the manual
 # button, from main only) runs the tests, builds the per-OS engine platform
 # packages, packs every tarball, then publishes what is new in dependency
-# order: the engine platform packages, @desklink/axi and @desklink/react-native,
-# and finally @desklink/host once its pinned engine packages and @desklink/axi
-# are on the registry. Pull requests run the same jobs except publish (main
+# order: the engine platform packages, @desklink/host, @desklink/axi and
+# @desklink/react-native. Pull requests run the same jobs except publish (main
 # only), so the build and pack matrix is proven before the merge.
 # Trusted publishing only: OIDC via `id-token: write` below, `--provenance` on
 # every publish, and no token or key material anywhere in this file or its logs.
@@ -31,11 +30,12 @@ name: release
 #       @desklink/react-native, @desklink/host and the engine platform
 #       packages as npm trusted publishers; until then the publish steps fail
 #       on OIDC authorization, which is the known limitation, not a defect.
-#   G6. Ordered, fail-soft publish: @desklink/host goes last and only after
-#       every engine platform package it pins and @desklink/axi are on the
-#       registry. One package's failure never stops the others, the job still
-#       ends red, and every hold or failure prints an ::error:: naming the
-#       package, the version and what to do.
+#   G6. Ordered, fail-soft publish: the engine platform packages go first,
+#       then @desklink/host, then @desklink/axi, so a dependent only ever
+#       names a pin the registry already serves. @desklink/react-native pins
+#       neither and always publishes. One package's failure never stops the
+#       others, the job still ends red, and every hold or failure prints an
+#       ::error:: naming the package, the version and what to do.
 
 on:
   push:
@@ -244,6 +244,14 @@ jobs:
           spec_of() {
             tar -xzOf "$1" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d).on("end",()=>{const m=JSON.parse(s);process.stdout.write(m.name+"@"+m.version)})'
           }
+          wait_published() {
+            local attempt
+            for attempt in $(seq 1 20); do
+              [ "$(registry_state "$1")" = published ] && return 0
+              [ "$attempt" -eq 20 ] || sleep 3
+            done
+            return 1
+          }
           publish_one() {
             local tarball="$1" spec
             if [ ! -f "$tarball" ]; then
@@ -272,21 +280,28 @@ jobs:
             MANGLE="${PNAME#@}"; MANGLE="${MANGLE//\//-}"
             publish_one "dist-desklink/${MANGLE}-${PVER}.tgz"
           done <<< "$PLATFORMS"
-          publish_one "dist-desklink/desklink-axi-$AXI_VER.tgz"
-          publish_one "dist-desklink/desklink-react-native-$RN_VER.tgz"
-          # Hold the host until every engine platform it pins and axi are on the
+          # Hold the host until every engine platform it pins is on the
           # registry, so npm never serves a host whose pins cannot resolve.
           host_ready=true
           [ -n "$PLATFORMS" ] || host_ready=false
           while IFS=$'\t' read -r PNAME PVER; do
             [ -n "$PNAME" ] || continue
-            [ "$(registry_state "${PNAME}@${PVER}")" = published ] || host_ready=false
+            wait_published "${PNAME}@${PVER}" || host_ready=false
           done <<< "$PLATFORMS"
-          [ "$(registry_state "@desklink/axi@$AXI_VER")" = published ] || host_ready=false
           if [ "$host_ready" = true ]; then
             publish_one "$HOST_TGZ"
           else
-            echo "::error::@desklink/host@$HOST_VER is held: an engine platform package it pins or @desklink/axi is not on the registry, and publishing the host now would name a pin npm cannot resolve. Fix the failed package above, then re-run this workflow."
+            echo "::error::@desklink/host@$HOST_VER is held: an engine platform package it pins is not on the registry, and publishing the host now would name a pin npm cannot resolve. Fix the failed package above, then re-run this workflow."
             failed=1
           fi
+          # @desklink/axi pins @desklink/host, so it goes out only once the host
+          # it names is on the registry.
+          if [ "$host_ready" = true ] && wait_published "@desklink/host@$HOST_VER"; then
+            publish_one "dist-desklink/desklink-axi-$AXI_VER.tgz"
+          else
+            echo "::error::@desklink/axi@$AXI_VER is held: @desklink/host@$HOST_VER is not on the registry, and publishing axi now would name a pin npm cannot resolve. Fix @desklink/host, then re-run this workflow."
+            failed=1
+          fi
+          # @desklink/react-native pins neither the host nor axi, so it always publishes.
+          publish_one "dist-desklink/desklink-react-native-$RN_VER.tgz"
           exit $failed
