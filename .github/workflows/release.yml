@@ -1,10 +1,15 @@
 name: release
 
 # A release is a merge of a version-bump PR. Pushing to main (or the manual
-# button) runs the tests, then publishes every public workspace package whose
-# exact version is not yet on the npm registry. Trusted publishing only: OIDC via
-# `id-token: write` below, `--provenance` on every publish, no NPM_TOKEN and
-# no key material anywhere in this file or its logs.
+# button) runs the tests, then publishes @desklink/axi and
+# @desklink/react-native whose exact versions are not yet on the npm
+# registry. @desklink/host plus the platform engine packages stay on the
+# pack path (packages/desktop-host/release/pack.mjs + publish.mjs) until the
+# engine follow-up lane: this workflow never publishes the host, and a new
+# host version fails the publish job closed instead of shipping pin-less.
+# Trusted publishing only: OIDC via `id-token: write` below, `--provenance`
+# on every publish, no NPM_TOKEN and no key material anywhere in this file
+# or its logs.
 #
 # Out of scope: rtc-sctp-source (a Rust workspace with no npm packages), any
 # version bump, and the npm-side trusted-publisher linking (Main does that
@@ -21,9 +26,16 @@ name: release
 #       are built nowhere in CI; neither workflow proves them.
 #   G4. macOS signing/TCC qualification and all capture/input rig proofs stay
 #       on their dedicated rig lanes.
-#   G5. End-to-end publish cannot pass until Main links the three packages as
-#       npm trusted publishers; until then the publish steps fail on OIDC
-#       authorization, which is the known limitation, not a workflow defect.
+#   G5. End-to-end publish cannot pass until Main links @desklink/axi and
+#       @desklink/react-native as npm trusted publishers; until then the
+#       publish steps fail on OIDC authorization, which is the known
+#       limitation, not a workflow defect. Host and engine packages link and
+#       publish separately on the pack path (engine follow-up lane).
+#   G6. Host hold (fail-closed, never a silent skip): this workflow never
+#       publishes @desklink/host, which would ship without the platform
+#       engine optionalDependencies pins. When the host version is not yet on
+#       the registry, the publish job fails with the engine follow-up lane
+#       named, instead of publishing a pin-less host or skipping silently.
 
 on:
   push:
@@ -78,8 +90,9 @@ jobs:
       # file (engine sources, android/ios sources) fails before publish.
       - run: npm pack --dry-run --workspaces
 
-  # Publishes every public workspace package (packages/*) whose exact version
-  # is new on the registry, @desklink/host first since @desklink/axi pins it.
+  # Publishes @desklink/axi and @desklink/react-native whose exact versions
+  # are new on the registry. @desklink/host is held, never published here
+  # (see G6): it needs the platform engine packages from the pack path.
   # Already-published versions are skipped, so re-runs are safe.
   publish:
     name: publish new versions
@@ -104,21 +117,24 @@ jobs:
       - run: npm ci
       # dist/ is gitignored, so publish the build this run just proved.
       - run: npm run build
-      - name: Publish each public workspace package when its version is new
+      # Fail-closed host guard (G6): the host ships only via the pack path
+      # with its engine pins, so a new host version stops this job here with
+      # the follow-up named, instead of publishing pin-less or skipping.
+      - name: Fail closed when @desklink/host has an unpublished version
         run: |
-          # @desklink/axi pins @desklink/host, so host is published first.
-          DIRS=(packages/desktop-host)
-          for d in packages/*/; do
-            [ "${d%/}" = packages/desktop-host ] || DIRS+=("${d%/}")
-          done
-          for dir in "${DIRS[@]}"; do
-            [ -f "$dir/package.json" ] || continue
+          PKG="$(node -p "require('./packages/desktop-host/package.json').name")"
+          VER="$(node -p "require('./packages/desktop-host/package.json').version")"
+          if npm view "$PKG@$VER" version >/dev/null 2>&1; then
+            echo "$PKG@$VER is already on the registry; host needs no engine release."
+          else
+            echo "::error::$PKG@$VER is not on the registry. This workflow never publishes the host: it would ship without the platform engine optionalDependencies pins. Cut the host + engine release on the pack path (packages/desktop-host/release/pack.mjs + publish.mjs) in the engine follow-up lane, then re-run this workflow."
+            exit 1
+          fi
+      - name: Publish axi and react-native when their versions are new
+        run: |
+          for dir in packages/axi packages/desktop-client; do
             PKG="$(node -p "require('./$dir/package.json').name")"
             VER="$(node -p "require('./$dir/package.json').version")"
-            if [ "$(node -p "Boolean(require('./$dir/package.json').private)")" = true ]; then
-              echo "$PKG is private; not published."
-              continue
-            fi
             echo "Registry check: $PKG@$VER"
             if npm view "$PKG@$VER" version >/dev/null 2>&1; then
               echo "$PKG@$VER is already on the registry; skipping publish."
