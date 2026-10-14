@@ -437,13 +437,17 @@ registry stand-in, without Docker or a native build. `check-install.sh` installs
 the current platform's host and engine tarballs into an empty project and checks both installed versions. On Linux it uses a clean container with no Rust toolchain, display or `/dev/uinput`, and checks the typed missing-library error before installing runtime libraries. On macOS it uses a temporary project. Both checks resolve the prebuilt engine, perform the protocol handshake and probe capabilities without opening a capture session.
 
 Publishing is automatic. Merging a version bump to `main` runs
-`.github/workflows/release.yml`: the test, build and build-pack jobs gate a
-publish job that releases `@desklink/axi` and `@desklink/react-native` whose
-exact versions are not yet on npm, with `--provenance`. `@desklink/host` stays
-on the pack path until the engine follow-up lands. A package that pins an
-unpublished host version, or a host version bump not yet on npm, fails the job
-closed instead of shipping pin-less. The workflow uses trusted publishing (OIDC)
-and no npm token. Re-runs skip versions already published.
+`.github/workflows/release.yml`: the test, build, build-pack and per-OS engine
+jobs gate a publish job that releases every package whose exact version is not
+yet on npm, in dependency order — the engine platform packages first, then
+`@desklink/axi` and `@desklink/react-native`, and `@desklink/host` last, only
+after the engine packages it pins and `@desklink/axi` are on the registry — all
+with `--provenance`. A version lockstep check fails the workflow when
+`@desklink/host`, `@desklink/react-native` and `@desklink/axi` disagree, so a
+half-bump never reaches publish. One package's failure never stops the others,
+but the job ends red and every hold or failure names the package and version.
+The workflow uses trusted publishing (OIDC) and no npm token. Re-runs skip
+versions already published.
 
 `release/publish.mjs` is an older manual upload of the `pack.mjs` tarballs. It
 is not the release route. `--dry-run` still checks that tarball set:

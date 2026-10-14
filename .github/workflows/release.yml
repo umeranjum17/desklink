@@ -1,15 +1,14 @@
 name: release
 
 # A release is a merge of a version-bump PR. Pushing to main (or the manual
-# button, from main only) runs the tests, then publishes @desklink/axi and
-# @desklink/react-native whose exact versions are not yet on the npm
-# registry. @desklink/host plus the platform engine packages stay on the
-# pack path (packages/desktop-host/release/pack.mjs + publish.mjs) until the
-# engine follow-up lane: this workflow never publishes the host, and the
-# publish job fails closed instead of shipping pin-less.
-# Trusted publishing only: OIDC via `id-token: write` below, `--provenance`
-# on every publish, no NPM_TOKEN and no key material anywhere in this file
-# or its logs.
+# button, from main only) runs the tests, builds the per-OS engine platform
+# packages, packs every tarball, then publishes what is new in dependency
+# order: the engine platform packages, @desklink/axi and @desklink/react-native,
+# and finally @desklink/host once its pinned engine packages and @desklink/axi
+# are on the registry. Pull requests run the same jobs except publish (main
+# only), so the build and pack matrix is proven before the merge.
+# Trusted publishing only: OIDC via `id-token: write` below, `--provenance` on
+# every publish, and no token or key material anywhere in this file or its logs.
 #
 # Out of scope: rtc-sctp-source (a Rust workspace with no npm packages), any
 # version bump, and the npm-side trusted-publisher linking (Main does that
@@ -20,28 +19,28 @@ name: release
 #       (engine/src, Cargo.toml/lock, build.rs) and @desklink/react-native
 #       ships android/ios *sources*; the build-pack matrix below only proves
 #       the TypeScript build and `npm pack --dry-run` contents per OS.
-#   G2. Rust engine per-OS binaries (Linux/Windows/MSVC+static libvpx/macOS
-#       ARM64) are built and tested by the `engine*` jobs in ci.yml, not here.
+#   G2. The Windows/MSVC engine is built and tested by the `engine-windows`
+#       job in ci.yml, not here. This workflow builds the Linux x64 (glibc)
+#       and macOS arm64 release engines that back the published platform
+#       packages; capture and input still require a dedicated rig.
 #   G3. Android Gradle and iOS Xcode compilation of the react-native sources
 #       are built nowhere in CI; neither workflow proves them.
 #   G4. macOS signing/TCC qualification and all capture/input rig proofs stay
 #       on their dedicated rig lanes.
-#   G5. End-to-end publish cannot pass until Main links @desklink/axi and
-#       @desklink/react-native as npm trusted publishers; until then the
-#       publish steps fail on OIDC authorization, which is the known
-#       limitation, not a workflow defect. Host and engine packages link and
-#       publish separately on the pack path (engine follow-up lane).
-#   G6. Host hold (fail-closed, never a silent skip): this workflow never
-#       publishes @desklink/host, which would ship without the platform
-#       engine optionalDependencies pins. Two checks fail the publish job
-#       with the engine follow-up lane named: (a) a package whose pinned host
-#       version is not on the registry is held, not
-#       published; (b) after the loop, the host's own version is not on the
-#       registry (a host-only bump). Packages without a host dependency
-#       (@desklink/react-native) still publish in the same run.
+#   G5. End-to-end publish cannot pass until Main links @desklink/axi,
+#       @desklink/react-native, @desklink/host and the engine platform
+#       packages as npm trusted publishers; until then the publish steps fail
+#       on OIDC authorization, which is the known limitation, not a defect.
+#   G6. Ordered, fail-soft publish: @desklink/host goes last and only after
+#       every engine platform package it pins and @desklink/axi are on the
+#       registry. One package's failure never stops the others, the job still
+#       ends red, and every hold or failure prints an ::error:: naming the
+#       package, the version and what to do.
 
 on:
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
@@ -54,8 +53,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Gate: the repo's own test suite (root `npm test`, vitest). The workflow
-  # fails here when tests fail; nothing publishes.
+  # Gate: the repo's test suite plus the version lockstep invariant. The
+  # workflow fails here when either fails; nothing builds or publishes.
   test:
     name: test (vitest)
     runs-on: ubuntu-24.04
@@ -65,6 +64,10 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # @desklink/host, @desklink/react-native and @desklink/axi ship as one
+      # release; a half-bump fails here instead of at publish time.
+      - name: Version lockstep across host, react-native and axi
+        run: node packages/desktop-host/release/check-lockstep.mjs
       - run: npm ci
       - run: npm run build
       - run: npm test
@@ -93,11 +96,9 @@ jobs:
       # file (engine sources, android/ios sources) fails before publish.
       - run: npm pack --dry-run --workspaces
 
-  # Installs and builds without id-token, so dependency lifecycle scripts
-  # cannot mint a publish token. The publish job downloads the built axi dist
-  # and runs no npm ci or build step.
+  # Builds the compiled dist for the pack job, without id-token.
   build:
-    name: build (dist artifact)
+    name: build (dist artifacts)
     needs: test
     runs-on: ubuntu-24.04
     steps:
@@ -113,15 +114,99 @@ jobs:
           name: axi-dist
           path: packages/axi/dist
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: host-dist
+          path: packages/desktop-host/dist
+          if-no-files-found: error
 
-  # Publishes @desklink/axi and @desklink/react-native whose exact versions
-  # are new on the registry. @desklink/host is held, never published here
-  # (see G6): it needs the platform engine packages from the pack path.
-  # Already-published versions are skipped, so re-runs are safe.
+  # Per-OS engine build: the prebuilt platform packages the host pins. Each OS
+  # builds with its pinned release script and uploads the engine output for the
+  # pack job, without id-token.
+  engine:
+    name: engine (${{ matrix.platform }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64-gnu
+            os: ubuntu-24.04
+          - platform: darwin-arm64
+            os: macos-15
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Provenance must name the candidate, not GitHub's merge commit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Build the Linux engine in the pinned container
+        if: matrix.platform == 'linux-x64-gnu'
+        run: packages/desktop-host/release/build-engine.sh
+      - name: Rust (the version the release build pins)
+        if: matrix.platform == 'darwin-arm64'
+        run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
+      - name: Build the macOS arm64 engine with static libvpx
+        if: matrix.platform == 'darwin-arm64'
+        shell: bash
+        run: |
+          brew install libvpx
+          test -f "$(brew --prefix libvpx)/lib/libvpx.a"
+          packages/desktop-host/release/build-engine-macos-arm64.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-${{ matrix.platform }}
+          path: dist-desklink/engine-${{ matrix.platform }}
+          if-no-files-found: error
+
+  # Packs the platform packages and the host with its engine pins, no id-token.
+  pack:
+    name: pack tarballs
+    needs: [build, engine]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/download-artifact@v4
+        with:
+          name: host-dist
+          path: packages/desktop-host/dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: axi-dist
+          path: packages/axi/dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-linux-x64-gnu
+          path: dist-desklink/engine-linux-x64-gnu
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-darwin-arm64
+          path: dist-desklink/engine-darwin-arm64
+      # Each call packs that platform's package and the host, whose
+      # optionalDependencies pin both engine platforms to this version.
+      - run: node packages/desktop-host/release/pack.mjs --engine dist-desklink/engine-linux-x64-gnu --platform linux-x64-gnu
+      - run: node packages/desktop-host/release/pack.mjs --engine dist-desklink/engine-darwin-arm64 --platform darwin-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desklink-tarballs
+          path: dist-desklink/*.tgz
+          if-no-files-found: error
+
+  # Publishes every package in dependency order (G6), on main only; a manual run
+  # from any other ref builds but never publishes. Downloads the packed tarballs
+  # and runs no install or build step.
   publish:
     name: publish new versions
     if: github.ref == 'refs/heads/main'
-    needs: [test, build, build-pack]
+    needs: [test, build, build-pack, engine, pack]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -139,9 +224,9 @@ jobs:
           printf '11.5.0\n%s\n' "$NPM_V" | sort -CV || { echo "::error::npm $NPM_V is below 11.5, which --provenance requires"; exit 1; }
       - uses: actions/download-artifact@v4
         with:
-          name: axi-dist
-          path: packages/axi/dist
-      - name: Publish axi and react-native when their versions are new
+          name: desklink-tarballs
+          path: dist-desklink
+      - name: Publish new versions in dependency order
         run: |
           failed=0
           registry_state() {
@@ -156,37 +241,52 @@ jobs:
               echo error
             fi
           }
-          for dir in packages/axi packages/desktop-client; do
-            PKG="$(node -p "require('./$dir/package.json').name")"
-            VER="$(node -p "require('./$dir/package.json').version")"
-            HOST_PIN="$(node -p "require('./$dir/package.json').dependencies?.['@desklink/host'] ?? ''")"
-            # Fail closed (G6): a package pinning an unpublished host version is held
-            # with the follow-up named. Other packages in the loop still publish.
-            if [ -n "$HOST_PIN" ]; then
-              case "$(registry_state "@desklink/host@$HOST_PIN")" in
-                published) ;;
-                missing)
-                  echo "::error::$PKG@$VER pins @desklink/host@$HOST_PIN, which is not on the registry. This workflow never publishes the host: it would ship without the platform engine optionalDependencies pins. Cut the host + engine release on the pack path (packages/desktop-host/release/pack.mjs + publish.mjs) in the engine follow-up lane, then re-run this workflow."
-                  failed=1
-                  continue ;;
-                *) failed=1; continue ;;
-              esac
+          spec_of() {
+            tar -xzOf "$1" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d).on("end",()=>{const m=JSON.parse(s);process.stdout.write(m.name+"@"+m.version)})'
+          }
+          publish_one() {
+            local tarball="$1" spec
+            if [ ! -f "$tarball" ]; then
+              echo "::error::$tarball was not produced by the pack job; nothing was published for it. Re-run the workflow."
+              failed=1
+              return
             fi
-            echo "Registry check: $PKG@$VER"
-            case "$(registry_state "$PKG@$VER")" in
-              published) echo "$PKG@$VER is already on the registry; skipping publish." ;;
+            spec="$(spec_of "$tarball")"
+            case "$(registry_state "$spec")" in
+              published) echo "$spec is already on the registry; skipping publish." ;;
               missing)
-                echo "Publishing $PKG@$VER ..."
-                npm publish "$dir" --provenance --access public || { echo "::error::npm publish of $PKG@$VER failed; the other packages were still attempted."; failed=1; } ;;
+                echo "Publishing $spec ..."
+                npm publish "$tarball" --provenance --access public || { echo "::error::npm publish of $spec failed; the other packages were still attempted. Fix the cause and re-run the workflow."; failed=1; } ;;
               *) failed=1 ;;
             esac
-          done
+          }
           HOST_VER="$(node -p "require('./packages/desktop-host/package.json').version")"
-          case "$(registry_state "@desklink/host@$HOST_VER")" in
-            published) ;;
-            missing)
-              echo "::error::@desklink/host@$HOST_VER is not on the registry. This workflow never publishes the host: it would ship without the platform engine optionalDependencies pins. Cut the host + engine release on the pack path (packages/desktop-host/release/pack.mjs + publish.mjs) in the engine follow-up lane, then re-run this workflow."
-              failed=1 ;;
-            *) failed=1 ;;
-          esac
+          AXI_VER="$(node -p "require('./packages/axi/package.json').version")"
+          RN_VER="$(node -p "require('./packages/desktop-client/package.json').version")"
+          HOST_TGZ="dist-desklink/desklink-host-$HOST_VER.tgz"
+          if [ ! -f "$HOST_TGZ" ]; then echo "::error::$HOST_TGZ is missing from the pack job; nothing was published. Re-run the workflow."; exit 1; fi
+          # The engine platform packages, exactly the pins the packed host declares.
+          PLATFORMS="$(tar -xzOf "$HOST_TGZ" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d).on("end",()=>{const m=JSON.parse(s);for(const [n,v] of Object.entries(m.optionalDependencies??{}))process.stdout.write(n+"\t"+v+"\n")})')"
+          while IFS=$'\t' read -r PNAME PVER; do
+            [ -n "$PNAME" ] || continue
+            MANGLE="${PNAME#@}"; MANGLE="${MANGLE//\//-}"
+            publish_one "dist-desklink/${MANGLE}-${PVER}.tgz"
+          done <<< "$PLATFORMS"
+          publish_one "dist-desklink/desklink-axi-$AXI_VER.tgz"
+          publish_one "dist-desklink/desklink-react-native-$RN_VER.tgz"
+          # Hold the host until every engine platform it pins and axi are on the
+          # registry, so npm never serves a host whose pins cannot resolve.
+          host_ready=true
+          [ -n "$PLATFORMS" ] || host_ready=false
+          while IFS=$'\t' read -r PNAME PVER; do
+            [ -n "$PNAME" ] || continue
+            [ "$(registry_state "${PNAME}@${PVER}")" = published ] || host_ready=false
+          done <<< "$PLATFORMS"
+          [ "$(registry_state "@desklink/axi@$AXI_VER")" = published ] || host_ready=false
+          if [ "$host_ready" = true ]; then
+            publish_one "$HOST_TGZ"
+          else
+            echo "::error::@desklink/host@$HOST_VER is held: an engine platform package it pins or @desklink/axi is not on the registry, and publishing the host now would name a pin npm cannot resolve. Fix the failed package above, then re-run this workflow."
+            failed=1
+          fi
           exit $failed

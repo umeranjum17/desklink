@@ -110,6 +110,9 @@ writeJson(join(platformStage, 'package.json'), {
     version: manifest.version,
     description: `Prebuilt ${manifest.name} engine for ${platform.description}`,
     license: manifest.license,
+    // Provenance: npm rejects a publish whose package.json repository does not
+    // match the repository it is published from.
+    repository: manifest.repository,
     os: [platform.os],
     cpu: [platform.cpu],
     ...(platform.libc === undefined ? {} : { libc: [platform.libc] }),
