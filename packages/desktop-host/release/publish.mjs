@@ -17,6 +17,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
+import { waitForReadback } from './readback.mjs';
+
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { values } = parseArgs({ options: { 'dry-run': { type: 'boolean', default: false } } });
 const dryRun = values['dry-run'];
@@ -73,12 +75,9 @@ for (const { spec, tarball } of order) {
         process.stdout.write(`${spec} would be published from ${tarball}\n`);
         continue;
     }
-    // The registry is eventually consistent; the next package waits for this one.
-    let seen;
-    for (let attempt = 0; attempt < 20 && seen !== integrity; attempt += 1) {
-        if (attempt > 0) await new Promise((done) => setTimeout(done, 3000));
-        seen = published(spec);
-    }
+    // The registry is eventually consistent; the next package waits for this
+    // one within the shared read-back budget (npm says a few minutes).
+    const seen = await waitForReadback(() => published(spec), (value) => value === integrity);
     if (seen !== integrity) throw new Error(`${spec} was published but the registry does not serve these bytes yet; re-run to confirm`);
     process.stdout.write(`published ${spec}\n`);
 }

@@ -447,6 +447,10 @@ fails the workflow when `@desklink/host`, `@desklink/react-native` and
 `@desklink/axi` disagree, so a half-bump never reaches publish. One package's
 failure never stops the others, but the job ends red and every hold or failure
 names the package and version.
+A dependent waits for a just-published package within npm's own availability
+window, shared through `release/readback-budget.json` with the manual
+`release/publish.mjs` route, so a fresh release publishes in one run instead of
+holding each package until the next re-run.
 The workflow uses trusted publishing (OIDC) and no npm token. Re-runs skip
 versions already published.
 

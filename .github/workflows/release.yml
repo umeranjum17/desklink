@@ -228,29 +228,12 @@ jobs:
           path: dist-desklink
       - name: Publish new versions in dependency order
         run: |
+          # registry_state, wait_published and the read-back budget live in one
+          # place, shared with release/publish.mjs, so both routes agree.
+          source packages/desktop-host/release/readback.sh
           failed=0
-          registry_state() {
-            local out
-            if out="$(npm view "$1" version 2>&1)"; then
-              echo published
-            elif grep -q E404 <<<"$out"; then
-              echo missing
-            else
-              echo "::error::npm registry check for $1 failed (registry, auth or network), not a missing version:" >&2
-              echo "$out" >&2
-              echo error
-            fi
-          }
           spec_of() {
             tar -xzOf "$1" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d).on("end",()=>{const m=JSON.parse(s);process.stdout.write(m.name+"@"+m.version)})'
-          }
-          wait_published() {
-            local attempt
-            for attempt in $(seq 1 20); do
-              [ "$(registry_state "$1")" = published ] && return 0
-              [ "$attempt" -eq 20 ] || sleep 3
-            done
-            return 1
           }
           publish_one() {
             local tarball="$1" spec
