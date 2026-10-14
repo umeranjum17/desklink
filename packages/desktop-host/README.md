@@ -440,8 +440,9 @@ Publishing is automatic. Merging a version bump to `main` runs
 `.github/workflows/release.yml`: the test and build-pack jobs gate a publish job
 that releases `@desklink/axi` and `@desklink/react-native` whose exact versions
 are not yet on npm, with `--provenance`. `@desklink/host` stays on the pack path
-until the engine follow-up lands, so a package that pins an unpublished host
-version fails the job closed instead of shipping pin-less. The workflow uses
+until the engine follow-up lands. A package that pins an unpublished host
+version, or a host version bump not yet on npm, fails the job closed instead of
+shipping pin-less. The workflow uses
 trusted publishing (OIDC) and no npm token. Re-runs skip versions already
 published.
 
