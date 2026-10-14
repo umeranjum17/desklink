@@ -1,0 +1,143 @@
+name: release
+
+# A release is a merge of a version-bump PR. Pushing to main (or the manual
+# button) runs the tests, then publishes every workspace package whose exact
+# version is not yet on the npm registry. Trusted publishing only: OIDC via
+# `id-token: write` below, `--provenance` on every publish, no NPM_TOKEN and
+# no key material anywhere in this file or its logs.
+#
+# Out of scope: rtc-sctp-source (a Rust workspace with no npm packages), any
+# version bump, and the npm-side trusted-publisher linking (Main does that
+# side; the publish steps fail until then, which is expected, not a defect).
+#
+# Explicit named gaps (not silent coverage):
+#   G1. No native compilation here. @desklink/host ships Rust engine *sources*
+#       (engine/src, Cargo.toml/lock, build.rs) and @desklink/react-native
+#       ships android/ios *sources*; the build-pack matrix below only proves
+#       the TypeScript build and `npm pack --dry-run` contents per OS.
+#   G2. Rust engine per-OS binaries (Linux/Windows/MSVC+static libvpx/macOS
+#       ARM64) are built and tested by the `engine*` jobs in ci.yml, not here.
+#   G3. Android Gradle and iOS Xcode compilation of the react-native sources
+#       are built nowhere in CI; neither workflow proves them.
+#   G4. macOS signing/TCC qualification and all capture/input rig proofs stay
+#       on their dedicated rig lanes.
+#   G5. End-to-end publish cannot pass until Main links the three packages as
+#       npm trusted publishers; until then the publish steps fail on OIDC
+#       authorization, which is the known limitation, not a workflow defect.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Publishes must not overlap: queue main pushes instead of cancelling them.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Gate: the repo's own test suite (root `npm test`, vitest). The workflow
+  # fails here when tests fail; nothing publishes.
+  test:
+    name: test (vitest)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  # Proves what CI can build per OS: the TS build plus the exact file set
+  # `npm pack` would publish for every workspace (host Rust sources and
+  # react-native android/ios sources included). See G1-G4 above for what this
+  # matrix deliberately does not build.
+  build-pack:
+    name: build + pack (${{ matrix.os }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # What would be published, so a manifest change that drops a shipped
+      # file (engine sources, android/ios sources) fails before publish.
+      - run: npm pack --dry-run --workspaces
+
+  # Publishes, in dependency order, every package whose exact version is new
+  # on the registry: @desklink/host, then @desklink/axi (which pins host
+  # 0.5.3), then the independent @desklink/react-native. Already-published
+  # versions are skipped, so re-runs are safe.
+  publish:
+    name: publish new versions
+    needs: [test, build-pack]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - name: Ensure npm 11.5+
+        run: |
+          npm install -g "npm@^11"
+          NPM_V="$(npm --version)"
+          echo "npm $NPM_V"
+          node -e "const m = /^(\d+)\.(\d+)/.exec(process.argv[1]); const major = +m[1], minor = +m[2]; if (major < 11 || (major === 11 && minor < 5)) { console.error('requires npm >= 11.5, have ' + process.argv[1]); process.exit(1); }" "$NPM_V"
+      - run: npm ci
+      # dist/ is gitignored, so publish the build this run just proved.
+      - run: npm run build
+      - name: Publish @desklink/host when the version is new
+        working-directory: packages/desktop-host
+        run: |
+          PKG="$(node -p "require('./package.json').name")"
+          VER="$(node -p "require('./package.json').version")"
+          echo "Registry check: $PKG@$VER"
+          if npm view "$PKG@$VER" version >/dev/null 2>&1; then
+            echo "$PKG@$VER is already on the registry; skipping publish."
+          else
+            echo "Publishing $PKG@$VER ..."
+            npm publish --provenance --access public
+          fi
+      - name: Publish @desklink/axi when the version is new
+        working-directory: packages/axi
+        run: |
+          PKG="$(node -p "require('./package.json').name")"
+          VER="$(node -p "require('./package.json').version")"
+          echo "Registry check: $PKG@$VER"
+          if npm view "$PKG@$VER" version >/dev/null 2>&1; then
+            echo "$PKG@$VER is already on the registry; skipping publish."
+          else
+            echo "Publishing $PKG@$VER ..."
+            npm publish --provenance --access public
+          fi
+      - name: Publish @desklink/react-native when the version is new
+        working-directory: packages/desktop-client
+        run: |
+          PKG="$(node -p "require('./package.json').name")"
+          VER="$(node -p "require('./package.json').version")"
+          echo "Registry check: $PKG@$VER"
+          if npm view "$PKG@$VER" version >/dev/null 2>&1; then
+            echo "$PKG@$VER is already on the registry; skipping publish."
+          else
+            echo "Publishing $PKG@$VER ..."
+            npm publish --provenance --access public
+          fi
