@@ -264,7 +264,10 @@ jobs:
               published) echo "$spec is already on the registry; skipping publish." ;;
               missing)
                 echo "Publishing $spec ..."
-                npm publish "$tarball" --provenance --access public || { echo "::error::npm publish of $spec failed; the other packages were still attempted. Fix the cause and re-run the workflow."; failed=1; } ;;
+                # ./ keeps npm reading the argument as the local file it is:
+                # a bare "dist-desklink/x.tgz" is parsed as the git shorthand
+                # "user/repo" and fails on ssh auth instead of publishing.
+                npm publish "./$tarball" --provenance --access public || { echo "::error::npm publish of $spec failed; the other packages were still attempted. Fix the cause and re-run the workflow."; failed=1; } ;;
               *) failed=1 ;;
             esac
           }
