@@ -440,12 +440,13 @@ Publishing is automatic. Merging a version bump to `main` runs
 `.github/workflows/release.yml`: the test, build, build-pack and per-OS engine
 jobs gate a publish job that releases every package whose exact version is not
 yet on npm, in dependency order — the engine platform packages first, then
-`@desklink/axi` and `@desklink/react-native`, and `@desklink/host` last, only
-after the engine packages it pins and `@desklink/axi` are on the registry — all
-with `--provenance`. A version lockstep check fails the workflow when
-`@desklink/host`, `@desklink/react-native` and `@desklink/axi` disagree, so a
-half-bump never reaches publish. One package's failure never stops the others,
-but the job ends red and every hold or failure names the package and version.
+`@desklink/host` immediately after the engine packages it pins, then
+`@desklink/axi` gated on the host (not the reverse), then
+`@desklink/react-native` — all with `--provenance`. A version lockstep check
+fails the workflow when `@desklink/host`, `@desklink/react-native` and
+`@desklink/axi` disagree, so a half-bump never reaches publish. One package's
+failure never stops the others, but the job ends red and every hold or failure
+names the package and version.
 The workflow uses trusted publishing (OIDC) and no npm token. Re-runs skip
 versions already published.
 
