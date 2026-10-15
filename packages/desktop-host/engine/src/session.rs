@@ -747,7 +747,7 @@ pub enum SessionEvent {
         seq: u64,
         damage: Vec<[usize; 4]>,
     },
-    /// One chunk of the desktop's own audio is waiting to be read, on the same
+    /// One chunk was captured, even if the full queue dropped it, on the same
     /// clock `session.frame.changed` uses.
     Audio {
         seq: u64,
@@ -1037,7 +1037,10 @@ impl Session {
     ) -> std::result::Result<Self, SessionError> {
         #[cfg(not(target_os = "linux"))]
         if request.audio {
-            return Err(SessionError::new("audio-unavailable", "system audio capture requires Linux PipeWire"));
+            return Err(SessionError::new(
+                "audio-unavailable",
+                "system audio capture requires Linux PipeWire",
+            ));
         }
         if request.cursor == crate::protocol::CursorMode::Hidden {
             #[cfg(not(target_os = "linux"))]
@@ -1948,11 +1951,14 @@ impl Session {
             .ok_or_else(|| SessionError::new("operation", no_audio))?;
         let frame_bytes = crate::audio::BYTES_PER_FRAME as usize;
         if max_bytes < frame_bytes {
-            return Err(SessionError::new("malformed", "max_bytes must hold at least one sample frame"));
+            return Err(SessionError::new(
+                "malformed",
+                "max_bytes must hold at least one sample frame",
+            ));
         }
-        let chunk = capture.take().ok_or_else(|| {
-            SessionError::new("audio", "no audio chunk has arrived yet")
-        })?;
+        let chunk = capture
+            .take()
+            .ok_or_else(|| SessionError::new("audio", "no audio chunk has arrived yet"))?;
         let wanted = (max_bytes / frame_bytes * frame_bytes).min(chunk.bytes.len());
         let written = if path.is_empty() { 0 } else { wanted };
         let result = serde_json::json!({
@@ -1974,8 +1980,15 @@ impl Session {
     }
 
     #[cfg(not(target_os = "linux"))]
-    pub fn audio(&self, _path: &str, _max_bytes: usize) -> std::result::Result<serde_json::Value, SessionError> {
-        Err(SessionError::new("operation", "this platform has no system audio capture"))
+    pub fn audio(
+        &self,
+        _path: &str,
+        _max_bytes: usize,
+    ) -> std::result::Result<serde_json::Value, SessionError> {
+        Err(SessionError::new(
+            "operation",
+            "this platform has no system audio capture",
+        ))
     }
 
     pub async fn accept_answer(&self, sdp: String) -> Result<()> {

@@ -31,10 +31,8 @@ apply authenticated input to the same desktop".
   daemon, no autostart, no root.
 - Never: decides identity, installs rules, grants capabilities, arbitrates two
   controllers, remembers a session across a restart.
-- Not yet: carries audio to a receiver. The Linux engine does report whether this
-  machine can capture the desktop's system audio without a prompt
-  (`capture.audio`); what a client should do with that sound is a separate
-  product decision.
+- For the local audio seam and remote playback boundary, see
+  [the audio protocol](PROTOCOL.md#system-audio-over-the-local-protocol).
 
 For prebuilt platform support and macOS installation, see the
 [host installation guide](../README.md#install-and-run).

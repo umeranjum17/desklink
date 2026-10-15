@@ -240,10 +240,11 @@ Result:
  "geometry":{"source":{"width":2560,"height":1440},
              "encoded":{"width":2560,"height":1440},
              "origin":{"x":0,"y":0}},"agentIndicator":false,
- "audio":{"source":"pipewire-monitor","format":"s16le","sample_rate":48000,"channels":2}}
+ "audio":null}
 ```
 
-`audio` is `null` when audio was not requested.
+For the opt-in `audio` result and local read contract, see
+[System audio over the local protocol](#system-audio-over-the-local-protocol).
 
 `source` selects the desktop. `portal` (or absent) asks the compositor for a
 screen cast, which is the only path that carries a Wayland user's consent;
@@ -826,8 +827,15 @@ no frame: both are refused with `error.code = "operation"` (see `session.open`).
 
 ## System audio over the local protocol
 
-Linux `session.open{audio:true}` captures a PipeWire sink monitor as s16le,
-48 kHz stereo PCM on the same engine clock as `session.frame.changed`.
+Linux `session.open{audio:true}` captures the default PipeWire sink's monitor as
+s16le, 48 kHz stereo PCM on the same engine clock as `session.frame.changed`.
+The open result reports
+`audio:{source:"pipewire-monitor",format:"s16le",sample_rate:48000,channels:2}`;
+without the opt-in it reports `audio:null`.
+Audio connects to the engine's ambient PipeWire server, not the video portal's
+consent-bearing fd or the selected X display. A private Xvfb alone does not
+isolate audio: lab callers must use a task-owned PipeWire server, runtime and
+session-manager policy, never the user's live audio server.
 `session.audio` consumes the next 100 ms chunk, writing samples to a caller-owned
 path (parent directory must exist); JSON carries only metadata. Empty `path`
 consumes metadata only (`written:false`, zero `frames`/`bytes`). `max_bytes`
@@ -839,8 +847,10 @@ chunks when full. `seq` advances even across drops. `session.metrics` exposes
 Each captured chunk emits `session.audio.changed` with `sessionId`, `seq`,
 `timestamp_us`, `bytes`, and `gap_ms`. Both method and event are local-only:
 the WebSocket bridge refuses the method and suppresses the event.
-Open refuses unavailable audio with `audio-unavailable` (never downgrades), and
-an encoded source with `operation`. Reading without audio returns `operation`;
+Open refuses unavailable audio with `audio-unavailable` (never downgrades).
+On Linux, an encoded source with audio is refused with `operation`; on macOS
+and Windows any audio request is refused with `audio-unavailable`.
+Reading without audio returns `operation`;
 an empty queue or failed write returns `audio`; a sub-frame limit is `malformed`.
 Audio stops on session close/replacement/EOF. It is not a WebRTC track; SDP and
 remote playback are unchanged.
@@ -957,13 +967,8 @@ anything to show.
 - It does not open ports, register a service, install udev rules, join groups or
   raise capabilities. Kernel input access is a separate, explicit, guided step
   (`desklink-host setup-input` reports what is missing; it does not change it).
-- It does not carry audio to a remote receiver, and video capture stays
-  video-only on the wire. The desktop's own mix reaches only a process on the
-  same machine that already holds the engine's stdio (`session.audio`, a local
-  method like `session.frame`); it is never a WebRTC track, and what a client
-  should do with the desktop's sound is a separate product decision;
-  `capabilities` answers only whether this machine can capture that sound
-  without a prompt.
+- For the local audio boundary, see
+  [System audio over the local protocol](#system-audio-over-the-local-protocol).
 - It does not arbitrate between two controllers. One session, one controller.
 - It does not auto-reconnect with authority it no longer holds: after a lease
   expiry or an engine-side end it requires a fresh `session.open`. A brief
