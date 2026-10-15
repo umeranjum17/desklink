@@ -29,8 +29,12 @@ apply authenticated input to the same desktop".
 - Process shape: per-user, on-demand, spawned by a consumer that already owns
   the session, spoken to over an inherited private channel. No listener, no
   daemon, no autostart, no root.
-- Never: decides identity, installs rules, grants capabilities, carries audio,
-  arbitrates two controllers, remembers a session across a restart.
+- Never: decides identity, installs rules, grants capabilities, arbitrates two
+  controllers, remembers a session across a restart.
+- Not yet: carries audio to a receiver. The Linux engine does report whether this
+  machine can capture the desktop's system audio without a prompt
+  (`capture.audio`); what a client should do with that sound is a separate
+  product decision.
 
 For prebuilt platform support and macOS installation, see the
 [host installation guide](../README.md#install-and-run).

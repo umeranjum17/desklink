@@ -68,8 +68,10 @@ The engine supports Linux desktop sessions, and macOS (preview) desktop sessions
   gets all available view, input and clipboard access, without per-session grants.
 - It does not open a public listener, run as root, install udev rules, join
   groups or raise capabilities.
-- It does not carry audio, arbitrate between two controllers, or remember a
-  session across a restart.
+- It does not carry audio to a receiver yet: on Linux, `capabilities` reports
+  whether this machine can capture the desktop's system audio without a prompt.
+  It does not arbitrate between two controllers, or remember a session across a
+  restart.
 
 ## Install and run
 

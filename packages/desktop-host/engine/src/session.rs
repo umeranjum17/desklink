@@ -869,6 +869,9 @@ pub fn capabilities() -> serde_json::Value {
         .map(|desktop| serde_json::json!([desktop.screen_size().0, desktop.screen_size().1]))
         .unwrap_or(serde_json::Value::Null);
     let clipboard = wayland_clipboard_available();
+    // Asked, not taken: the probe connects to this session's PipeWire, reads the
+    // registry and leaves. No portal, no prompt, no capture.
+    let audio = crate::audio::probe();
     let (input, grant_state, unavailable) = match crate::input::probe() {
         Ok(()) => (serde_json::json!(true), "granted", serde_json::Value::Null),
         Err(unavailable) => (
@@ -896,7 +899,9 @@ pub fn capabilities() -> serde_json::Value {
             "cursor": "embedded",
             "cursor_modes": ["embedded", "hidden"],
             "cursor_positions": {"x11": true, "wayland": "ext-image-copy-capture-v1"},
-            "audio": false,
+            "audio": audio.is_some(),
+            "audio_formats": crate::audio::FORMATS,
+            "audio_source": audio.map(|source| source.name),
         },
         "encode": encode_capabilities(),
         "input": {
@@ -949,6 +954,7 @@ pub fn capabilities() -> serde_json::Value {
             "formats": ["bgra"],
             "cursor": "embedded",
             "cursor_modes": ["embedded"],
+            // ScreenCaptureKit audio is not wired up; macOS is out of scope.
             "audio": false,
             "displays": crate::mac::displays(),
             "grant": if capture_granted { "granted" } else { "missing-screen-recording" },

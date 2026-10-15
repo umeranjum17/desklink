@@ -29,6 +29,11 @@ export interface EngineCapabilities {
         cursor_modes?: Array<'embedded' | 'hidden'>;
         cursor_positions?: { x11: boolean; wayland: 'ext-image-copy-capture-v1' };
         audio: boolean;
+        /** The mechanism a session would capture from (`pipewire-monitor` on
+         * Linux); `null` when nothing is capturable on this machine. */
+        audio_source?: string | null;
+        /** The formats it would arrive in, best first. */
+        audio_formats?: string[];
         displays?: Array<{
             id: number;
             width: number;

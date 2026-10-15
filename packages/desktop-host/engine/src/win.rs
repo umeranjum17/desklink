@@ -15,6 +15,7 @@ pub fn capabilities() -> Value {
             "formats": [],
             "cursor": "unavailable",
             "cursor_modes": [],
+            // No Windows capture path exists to carry audio from; out of scope.
             "audio": false,
             "displays": crate::portal::displays(),
             "grant": "unavailable",
