@@ -101,6 +101,7 @@ run directory. Add a row the day a surface is added; never silently drop one.
 | Phone motion: tap, pinch zoom | `@desklink/react-native` | fixture button edge from the tap, picture width grows under the zoom, both recorded | `phone-motion.webm`, `phone-zoom.png` |
 | iOS live desktop, portrait and landscape | `packages/desktop-client/test/ios-flow.mjs` on the Mac's own simulator | picture fits the agreed fit, decoded frames keep advancing, no diagnostic text on the phone's screen | `step-00-live-desktop.png`, `desklink-receiver-fill-*.png` |
 | iOS phone-only control | same flow, its phone-only control section | desktop-side click, held drag with selection, wheel, typed text, a modifier chord, clipboard both ways, all recorded | `phone-control.mp4`, `step-01-click.png` … `step-07-clipboard-in.png` |
+| **iOS finger-on-glass control, iPad** (`DESKLINK_IOS_GLASS=1 DESKLINK_IOS_IPAD=1` on `fm-iPad (A16)`) | same flow, glass mode: every touch synthesized by the XCTest UI-automation runner (`test/ios-pointer/`), the app launched only with `-desklinkUrl` — no `-desklinkJourney` hook in the run at all | tap, drag, two-finger scroll, typing, a sticky Ctrl chord, clipboard both ways and the pointer mark, each proven **at the desktop**: click under the finger within a desktop pixel, 31 held moves selecting the page's text, 2 wheel events, 8 keydowns for 8 characters, `Control+a`, both confirmation pills, the pasted field. See [iOS phone journeys](features/ios-phone-journeys.md#finger-on-glass-glass-mode) for what it does and does not prove | `glass-ipad/step-0*.png`, `glass-ipad/phone-control.mp4`, `glass-ipad/phone-control.json`, `glass-ipad/pointer-note-*.txt` |
 | iOS pointer mark | same flow, over bare paper | the drawn mark is an arrow, not a rectangle, and its tip is within 2 pt of the desktop's pointer | `step-08-pointer-arrow-4x.png`, `step-08-pointer.json` |
 | iOS keyboard over a field, sideways, fresh launches | same flow, its keyboard section, phone turned landscape, the app shrinking its surface for the keyboard | over five fresh launches a tapped desktop field low on the picture stays wholly above the raised keyboard — never snapped back to the desktop's top-left — light and dark, and takes what is typed | `step-09-keyboard-{1..5}-{closed,open}.png`, `step-09-keyboard-{1..5}.json`, `step-09-keyboard-landscape-{light,dark,typed}.png`, `keyboard-landscape.mp4` |
 | iOS keyboard over a field, upright, one fresh launch | same flow, its portrait keyboard section, phone upright, the app shrinking its surface for the keyboard | the shortened band flips the view's own aspect while the window stays portrait; the picture pans a tapped low field into sight instead of snapping back to the desktop's top-left, and takes what is typed | `step-09-keyboard-portrait-{closed,open,typed}.png`, `step-09-keyboard-portrait.json`, `keyboard-portrait.mp4` |
@@ -138,7 +139,10 @@ false claim; naming it here with the reason is not.
 The iOS rows above are a separate run on the Mac, not part of one directory
 here: `packages/desktop-client/test/ios-flow.mjs` writes
 `~/lab-tmp/dl-pm-iphone/<run>/`, with a capture per step, the phone-only control
-recording and the receipts named above.
+recording and the receipts named above. The finger-on-glass row is the same flow
+with `DESKLINK_IOS_GLASS=1` and `DESKLINK_IOS_IPAD=1` on the Mac's own
+`fm-iPad (A16)` simulator; it writes wherever `DESKLINK_IOS_OUT` points and
+stops after the six control steps, its captures and its one recording.
 
 ## Signaling reattach window
 
