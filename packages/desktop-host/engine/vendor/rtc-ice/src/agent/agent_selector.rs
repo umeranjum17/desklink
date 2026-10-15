@@ -337,6 +337,26 @@ impl ControllingSelector for Agent {
                 );
                 if pending_request.is_use_candidate && selected_pair_is_none {
                     self.set_selected_pair(Some(now), Some(pair_index));
+                } else {
+                    // desklink patch: nomination is decided in `contact_candidates`,
+                    // and that only runs on a `check_interval` tick, so a pair that
+                    // becomes valid just after a tick waits a full tick for its
+                    // USE-CANDIDATE. Ask for the check pass now, when this is the pair
+                    // that tick would nominate. `request_connectivity_check` is the
+                    // deferred-check request (issue #88): it makes `poll_timeout`
+                    // report an already-due deadline, so the driver runs `contact()`
+                    // at once instead of at the next tick. See DESKLINK-PATCH.md.
+                    if self.get_selected_pair().is_none()
+                        && self.nominated_pair.is_none()
+                        && self.get_best_valid_candidate_pair() == Some(pair_index)
+                    {
+                        let p = &self.candidate_pairs[pair_index];
+                        if self.is_nominatable(now, p.local_index, true)
+                            && self.is_nominatable(now, p.remote_index, false)
+                        {
+                            self.request_connectivity_check();
+                        }
+                    }
                 }
             } else {
                 // This shouldn't happen

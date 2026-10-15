@@ -23,6 +23,12 @@ move together to preserve exact-version native engine selection.
   0.21.1, whose timer fix no longer overwrites an elapsed T3 retransmission
   deadline before it is handled; see the pin note in
   `packages/desktop-host/engine/Cargo.toml`.
+- The engine nominates the restarted ICE generation on the check pass that makes
+  a pair usable, instead of waiting for the next 200 ms check cycle. On the
+  routed roam leg that wait was one full cycle (197 ms) between the pair becoming
+  usable and the engine asking the peer to nominate it. See [the vendored rtc-ice
+  patch](packages/desktop-host/engine/vendor/rtc-ice/DESKLINK-PATCH.md) for the
+  exact behavior and how to drop it.
 
 ## 0.5.2
 

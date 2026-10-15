@@ -2930,6 +2930,212 @@ fn test_handle_inbound_request_defers_failing_connectivity_check() -> Result<()>
     Ok(())
 }
 
+// Regression test for the desklink patch that nominates off the check pass
+// (shape 2 in DESKLINK-PATCH.md) instead of the `check_interval` tick.
+//
+// Nomination is decided in `contact_candidates`, which the driver reaches on a
+// `check_interval` tick or when an inbound Binding request arrives while a valid pair
+// already exists. A peer that runs no checks of its own leaves the second path empty, so
+// a pair that becomes valid just after a tick waited a whole tick for its
+// USE-CANDIDATE: measured at 197 ms in the routed roam leg, the entire engine-side cost
+// between the pair becoming valid and the nomination leaving. The pass that nominates has
+// to be the one the validating response asked for.
+//
+// The agent's clock is driven by hand here and never reaches a tick, so the only thing
+// that can produce the nomination is the response itself.
+#[test]
+fn test_nominates_on_the_response_that_validates_the_pair() -> Result<()> {
+    use sansio::Protocol as _;
+
+    let base = Instant::now();
+    let mut a = Agent::new(
+        base,
+        Arc::new(AgentConfig {
+            is_controlling: true,
+            ..Default::default()
+        }),
+        test_crypto_provider(),
+    )?;
+
+    let local = CandidateHostConfig {
+        base_config: CandidateConfig {
+            network: "udp".to_owned(),
+            address: "192.168.0.2".to_owned(),
+            port: 777,
+            component: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+    .new_candidate_host()?;
+    a.add_local_candidate(local)?;
+
+    let remote = CandidateHostConfig {
+        base_config: CandidateConfig {
+            network: "udp".to_owned(),
+            address: "172.17.0.3".to_owned(),
+            port: 999,
+            component: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+    .new_candidate_host()?;
+    let remote_addr = remote.addr();
+    a.add_remote_candidate(remote)?;
+    assert_eq!(a.candidate_pairs.len(), 1, "one pair to check");
+
+    a.start_connectivity_checks(base, true, "remoteUfrag".to_owned(), "remotePwd".to_owned())?;
+
+    // The first pass pings the pair. Nothing has validated it yet, so nothing is
+    // nominated and no USE-CANDIDATE leaves.
+    a.handle_timeout(base)?;
+    let mut check = Message {
+        raw: a
+            .poll_write()
+            .expect("the agent checks the pair")
+            .message
+            .to_vec(),
+        ..Default::default()
+    };
+    check.decode()?;
+    assert_eq!(check.typ, MessageType::new(METHOD_BINDING, CLASS_REQUEST));
+    assert!(
+        !check.contains(ATTR_USE_CANDIDATE),
+        "a check that has not been answered must not nominate"
+    );
+    assert!(a.nominated_pair.is_none());
+
+    // The peer answers that check. Nothing else arrives: no inbound request (the test
+    // delivers no such message) and no tick (the clock moves by a millisecond).
+    let now = base + Duration::from_millis(1);
+    let mut response = Message::new();
+    response.build(&[
+        Box::new(check.clone()),
+        Box::new(BINDING_SUCCESS),
+        Box::new(XorMappedAddress {
+            ip: remote_addr.ip(),
+            port: remote_addr.port(),
+        }),
+        Box::new(MessageIntegrity::new_short_term_integrity_with_provider(
+            "remotePwd".to_owned(),
+            test_crypto_provider().crypto(),
+        )),
+        Box::new(FINGERPRINT),
+    ])?;
+    a.handle_inbound(now, &mut response, 0, remote_addr)?;
+    assert_eq!(
+        a.candidate_pairs[0].state,
+        CandidatePairState::Succeeded,
+        "the response validates the pair"
+    );
+
+    // The pair is valid, so the pass that nominates it is due now. Before the patch the
+    // deadline here was the next tick, a whole `check_interval` away.
+    let deadline = a
+        .poll_timeout()
+        .expect("a validated pair asks for a check pass");
+    assert!(
+        deadline <= now,
+        "the validating response must ask for a pass now, not at the next tick: deadline {deadline:?}, now {now:?}"
+    );
+
+    a.handle_timeout(now)?;
+    assert!(
+        a.nominated_pair.is_some(),
+        "the valid pair must be nominated on the pass the response asked for"
+    );
+    let mut nomination = Message {
+        raw: a
+            .poll_write()
+            .expect("the nomination leaves")
+            .message
+            .to_vec(),
+        ..Default::default()
+    };
+    nomination.decode()?;
+    assert!(
+        nomination.contains(ATTR_USE_CANDIDATE),
+        "the nomination is a Binding request carrying USE-CANDIDATE"
+    );
+
+    a.close()?;
+    Ok(())
+}
+
+// A peer that never answers a check must still retire the pair on the configured budget,
+// and the shape-2 patch must not change that budget: it only ever asks for a pass when a
+// response made a pair valid, so a silent peer never earns one. The agent's clock is driven
+// by hand, so this pins the pass count exactly instead of waiting for it.
+#[test]
+fn test_a_silent_peer_retires_the_pair_on_the_check_budget() -> Result<()> {
+    use sansio::Protocol as _;
+
+    let base = Instant::now();
+    let mut a = Agent::new(
+        base,
+        Arc::new(AgentConfig {
+            is_controlling: true,
+            ..Default::default()
+        }),
+        test_crypto_provider(),
+    )?;
+
+    let local = CandidateHostConfig {
+        base_config: CandidateConfig {
+            network: "udp".to_owned(),
+            address: "192.168.0.2".to_owned(),
+            port: 777,
+            component: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+    .new_candidate_host()?;
+    a.add_local_candidate(local)?;
+
+    let remote = CandidateHostConfig {
+        base_config: CandidateConfig {
+            network: "udp".to_owned(),
+            address: "172.17.0.3".to_owned(),
+            port: 999,
+            component: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+    .new_candidate_host()?;
+    a.add_remote_candidate(remote)?;
+    a.start_connectivity_checks(base, true, "remoteUfrag".to_owned(), "remotePwd".to_owned())?;
+
+    // `ping_all_candidates` retires a pair once `binding_request_count` passes
+    // `max_binding_requests`, so the first pass that retires it is one after the last
+    // request it sends: `max_binding_requests + 2` passes from checking.
+    let last_sending_pass = usize::from(DEFAULT_MAX_BINDING_REQUESTS) + 1;
+    let retiring_pass = last_sending_pass + 1;
+    let mut now = base;
+    for pass in 1..=retiring_pass {
+        now += Duration::from_millis(200);
+        a.handle_timeout(now)?;
+        while a.poll_write().is_some() {}
+        let deadline = a.poll_timeout().expect("the agent stays on its timers");
+        assert!(
+            deadline > now,
+            "pass {pass}: an unanswered peer must not ask for an extra pass (deadline {deadline:?}, now {now:?})"
+        );
+        let failed = a.candidate_pairs[0].state == CandidatePairState::Failed;
+        assert_eq!(
+            failed,
+            pass >= retiring_pass,
+            "pass {pass}: pair must retire on the budget, not before or after"
+        );
+    }
+    assert_eq!(a.connection_state, ConnectionState::Checking);
+
+    a.close()?;
+    Ok(())
+}
+
 // Safari (and Chrome) expose ICE host candidates behind an mDNS "<uuid>.local"
 // hostname by default. A QueryOnly agent (the default) must RESOLVE such a
 // candidate -- i.e. issue an mDNS query, which surfaces as an outbound packet to
