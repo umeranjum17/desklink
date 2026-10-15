@@ -54,6 +54,15 @@ if (Object.values(tools).some((tool) => tool === null)) {
     skip(`no private audio lab: ${Object.entries(tools).filter(([, path]) => path === null).map(([name]) => name).join(', ')} not installed`);
 }
 if (!existsSync(stockConfig)) skip(`no ${stockConfig} to build a private server from`);
+// The lab runs without a session bus (a prompt would need one), and only
+// WirePlumber 0.5's `policy` profile gives the private sink its port config
+// that way. Without it the lab cannot build its fixture, and nothing about the
+// engine is in question.
+const wireplumberHelp = spawnSync(tools.wireplumber, ['--help'], { encoding: 'utf8' });
+if (!`${wireplumberHelp.stdout ?? ''}${wireplumberHelp.stderr ?? ''}`.includes('--profile')) {
+    const version = (spawnSync(tools.wireplumber, ['--version'], { encoding: 'utf8' }).stdout ?? '').trim().split('\n').pop();
+    skip(`the installed wireplumber (${version}) has no --profile option; the lab needs the 0.5 "policy" profile to configure its private sink`);
+}
 
 const lab = mkdtempSync(join(tmpdir(), 'desklink-audio-'));
 const runtime = join(lab, 'run');
