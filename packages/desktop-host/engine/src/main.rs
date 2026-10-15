@@ -576,6 +576,15 @@ fn render_event(notice: session::Notice) -> Option<String> {
             "session.frame.changed",
             serde_json::json!({ "sessionId": session_id, "seq": seq, "damage": damage, "timestamp_us": timestamp_us }),
         ),
+        session::SessionEvent::Audio {
+            seq,
+            timestamp_us,
+            bytes,
+            gap_micros,
+        } => (
+            "session.audio.changed",
+            serde_json::json!({ "sessionId": session_id, "seq": seq, "timestamp_us": timestamp_us, "bytes": bytes, "gap_ms": gap_micros / 1000 }),
+        ),
         session::SessionEvent::Input { input } => (
             "session.input",
             serde_json::json!({ "sessionId": session_id, "input": input }),
@@ -660,6 +669,7 @@ async fn dispatch(
                 loopback_tcp: params.loopback_tcp,
                 agent_indicator: params.agent_indicator,
                 local_frames: params.local_frames,
+                audio: params.audio,
                 ice_servers: params
                     .ice_servers
                     .into_iter()
@@ -686,6 +696,7 @@ async fn dispatch(
                 "geometry": session.geometry(),
                 "cursor": session.cursor_info(),
                 "agentIndicator": session.agent_indicator(),
+                "audio": session.audio_info(),
             });
             *current = Some(session);
             Ok(result)
@@ -787,6 +798,15 @@ async fn dispatch(
             }
             session
                 .frame(params.since, &params.path, params.region)
+                .map_err(|error| ErrorBody::new(error.code, error.message))
+        }
+        "session.audio" => {
+            let session = require_session(current)?;
+            let params: protocol::AudioParams = serde_json::from_value(request.params.clone())
+                .map_err(|error| ErrorBody::new("malformed", error.to_string()))?;
+            check_session(session, &params.session_id, None)?;
+            session
+                .audio(&params.path, params.max_bytes)
                 .map_err(|error| ErrorBody::new(error.code, error.message))
         }
         "session.feed" => {
