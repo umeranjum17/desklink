@@ -1271,12 +1271,13 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     await step('07-clipboard-in', `phone → desktop: pasted ${JSON.stringify(filled)}`);
 
     // 8. the pointer mark: a real arrow, its tip where the desktop's pointer is
-    // A one-finger drag on the whole desktop carries the pointer with no button,
-    // so the mark can be read over bare paper, away from any click dot.
+    // A finger that travels at once (hold: 0, so the app never arms its drag)
+    // carries the pointer with no button, so the mark can be read over bare
+    // paper, away from any click dot.
     since = await clean();
     // A finger travelling over bare paper, so the mark is read over clean
     // background: the press paints its dot 200 desktop pixels away.
-    pointerSteps(udid, [{ action: 'dragTouch', ...aim('dragTouch', { x: 700, y: 460 }), toX: aim('dragTouch', { x: 900, y: 300 }).x, toY: aim('dragTouch', { x: 900, y: 300 }).y }]);
+    pointerSteps(udid, [{ action: 'dragTouch', hold: 0, ...aim('dragTouch', { x: 700, y: 460 }), toX: aim('dragTouch', { x: 900, y: 300 }).x, toY: aim('dragTouch', { x: 900, y: 300 }).y }]);
     const landedAt = { x: 900, y: 300 };
     const travelled = await until('a finger travelling over the picture arrived on the desktop',
         async () => (await page.evaluate('pointer')).slice(since).filter((event) => event.x !== undefined),

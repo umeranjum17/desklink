@@ -24,6 +24,7 @@ final class PointerTests: XCTestCase {
     let id: String?
     let text: String?
     let wait: Double?
+    let hold: Double?
   }
 
   func testPointer() throws {
@@ -48,14 +49,19 @@ final class PointerTests: XCTestCase {
       case "dragTouch":
         // A finger that rests, travels, then lifts: what a phone drags with. A
         // phone takes no pointer events, so this is synthesized touch instead.
+        // The rest is longer than the app's own 500 ms arm delay, so the
+        // desktop's button really goes down and the finger drags; a shorter rest
+        // is a race with that timer and loses it on a busy machine. `hold: 0`
+        // travels at once - the hover a pointer mark is read over.
+        let hold = step.hold ?? 0.8
         let record = XCSynthesizedEventRecord(name: "Touch drag", interfaceOrientation: .portrait)
         let path = XCPointerEventPath(touch: CGPoint(x: step.x, y: step.y), offset: 0)
-        for index in 0...2 { path.move(to: CGPoint(x: step.x, y: step.y), at: 0.15 * Double(index)) }
+        if hold > 0 { for index in 0...2 { path.move(to: CGPoint(x: step.x, y: step.y), at: hold * Double(index) / 2) } }
         for index in 1...20 {
           path.move(to: CGPoint(x: step.x + ((step.toX ?? step.x) - step.x) * Double(index) / 20,
-                                y: step.y + ((step.toY ?? step.y) - step.y) * Double(index) / 20), at: 0.45 + 0.02 * Double(index))
+                                y: step.y + ((step.toY ?? step.y) - step.y) * Double(index) / 20), at: hold + 0.02 * Double(index))
         }
-        path.lift(at: 0.95)
+        path.lift(at: hold + 0.55)
         record.add(path)
         try record.synthesize()
       case "rightClick": point.rightClick()
