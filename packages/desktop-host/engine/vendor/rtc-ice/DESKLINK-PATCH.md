@@ -96,5 +96,6 @@ No public API changed; no signalling or wire change.
 3. Update `packages/desktop-host/engine/Cargo.lock` (`cargo update -p rtc-ice`).
 
 Do this once upstream rtc-ice keeps the previous selected pair across a restart
-on its own (an upstream PR is a follow-up; it needs the captain's word first,
+on its own and nominates a freshly validated pair without waiting for the next
+check tick (an upstream PR is a follow-up; it needs the captain's word first,
 since it would carry his name).
