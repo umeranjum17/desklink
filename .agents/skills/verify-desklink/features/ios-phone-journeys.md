@@ -10,6 +10,9 @@ desktop this machine serves through the bridge:
 - **controlling that desktop from the phone alone** — pointer, click, drag,
   two-finger scroll, typing, sticky modifiers and the clipboard both ways, with
   no input sent to the desktop from this machine;
+- **finger-on-glass control (glass mode)** — the same six steps driven only by
+  the XCTest UI-automation runner, so each input enters at UIKit's hit-testing
+  and React Native's responder system rather than at the view's handlers;
 - **a tapped desktop field stays in sight over the keyboard** — on a fresh
   landscape launch, with the app shrinking its surface the way a consumer's
   keyboard-avoiding screen does, the picture pans so the focused field stays
@@ -43,6 +46,61 @@ env -u DISPLAY -u WAYLAND_DISPLAY \
 `DESKLINK_IOS_DEVICE` runs on one of the Mac's own named simulators and leaves it
 in place; without it the flow creates a `desklink-ios-flow-*` simulator and
 deletes it. `DESKLINK_IOS_IPAD=1` adds the iPad trackpad checks.
+
+### Finger on glass (glass mode)
+
+`DESKLINK_IOS_GLASS=1` proves the same six control steps through the glass: every
+touch in the journey is synthesized by the XCTest UI-automation runner
+(`test/ios-pointer/`), and the app is launched with `-desklinkUrl` only, so the
+run has no `-desklinkJourney` handler-injection path in it at all. Run it on an
+iPad simulator, which is what the captain's iPad question is about:
+
+```sh
+env -u DISPLAY -u WAYLAND_DISPLAY \
+  DESKLINK_IOS_MAC=user@mac DESKLINK_IOS_DIR=fm-desklink-ios DESKLINK_IOS_LANE=dl-ipad-glass-touch \
+  DESKLINK_IOS_DEVICE='fm-iPad (A16)' DESKLINK_IOS_IPAD=1 DESKLINK_IOS_GLASS=1 \
+  DESKLINK_IOS_APP=Desklink.app DESKLINK_IOS_SKIP_BUILD=1 DESKLINK_IOS_KEEP=1 \
+  DESKLINK_IOS_OUT="$HOME/lab-tmp/dl-ipad-glass-touch/glass-ipad" \
+  node packages/desktop-client/test/ios-flow.mjs
+```
+
+It stops after the six control steps and the pointer mark, skipping the trackpad,
+panning, pinch and keyboard-fit sections, so its one recording covers the touch
+journey alone. `DESKLINK_IOS_APP` points at an app the lane built earlier (see
+`test/mac-lane.mjs` for the one-lane-one-directory rule); without
+`DESKLINK_IOS_SKIP_BUILD` the flow builds its own on the Mac.
+
+Who delivers what, and what each step proves at the desktop:
+
+| Step | Delivered by | Desktop sees |
+|---|---|---|
+| tap | `XCUICoordinate.tap()` | `mousedown`+`mouseup`, button 0, within one desktop pixel of where it was aimed |
+| drag | `XCSynthesizedEventRecord` + `XCPointerEventPath` touch path | press, 31 held moves, release, and the page's text selected |
+| two-finger scroll | two touch paths together | `wheel` events (measured, the engine coalesces: 2 events, `deltaY` -240) |
+| typing | `axe type` (HID keyboard) | one `keydown` per character, the desktop's own field holding the text |
+| sticky modifier | `XCUIElement.tap()` on the app's own `desklink-key-Control` | the next key as `Control+a`, then the latch cleared |
+| clipboard out / in | `XCUIElement.tap()` on `desklink-copy` / `desklink-paste` | the phone's own confirmation pill, read by the runner in the same run, and the pasted text in the desktop's field |
+
+The runner's aim is measured, not assumed: `touch-inset-the-phone-only-steps.json`
+records a coordinate tap and a synthesized touch aimed at five desktop positions,
+landing within one pixel at each with one fixed offset. A miss that moved with
+the position would fail the run.
+
+**What glass mode does not prove.** The simulator's glass is a synthesized HID
+stream from the Mac, not a digitizer: this is proof of the delivery path (UIKit
+hit-testing into React Native's responder system and the package's native input
+view) and of the desktop's response, not of a human finger on a physical iPad.
+The physical-iPad XCUITest route stays out of scope: it needs the one-time Touch
+ID "Enable UI Automation" approval the captain's standing no-captain-touch rule
+forbids, and no physical iPad is touched by any of this. Typing and chords are
+HID keystrokes from `axe` (XCTest has no iOS hardware-keyboard API), delivered
+through UIKit's `pressesBegan` into the package's native input view. Two things
+worth knowing when reading the evidence: the confirmation pills live 1.5 s, so
+the runner reads them in-run and writes them to `pointer-note-*.txt` rather than
+letting the flow look after `xcodebuild` returns; and the lane's `DerivedData`
+lives on the Mac's shared disk, which other lanes' pressure can delete - the app
+can be recovered from the simulator's own installed container with
+`xcrun simctl get_app_container <udid> dev.desklink.example app`.
 
 ## Observable proof
 

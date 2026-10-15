@@ -27,6 +27,16 @@
  *    hover moves the desktop's pointer without a button, a click-drag selects
  *    text, a secondary click is a right click and a scroll turns the wheel. The
  *    pointer is driven by XCUITest (test/ios-pointer/), which `axe` cannot do.
+ *  - with DESKLINK_IOS_GLASS=1 the phone-only control journey is proven through
+ *    the glass: every touch in it - the tap, the drag, the two-finger scroll and
+ *    the taps on the app's own modifier, Copy and Paste controls - is a touch the
+ *    XCUITest runner synthesizes at a screen coordinate, so it enters UIKit's
+ *    hit-testing and React Native's responder system, and nothing in the run
+ *    calls a view handler directly. Typing and chords are the simulator's own
+ *    hardware keys (HID), which UIKit delivers to the package's native input
+ *    view. The trackpad, panning, pinch and keyboard-fit sections are skipped in
+ *    this mode, so its one recording and its captures cover the six control
+ *    steps alone.
  *  - every XCUITest step aims at the picture where it is *now*: the app moves it
  *    once the session settles - one status-bar inset - so each section that aims
  *    re-reads the picture and re-measures its instrument's miss at five
@@ -68,6 +78,8 @@
  *                           simulator this run creates and deletes)
  *   DESKLINK_IOS_TREE       path receiving the raw accessibility tree JSON
  *   DESKLINK_IOS_IPAD       1 runs on an iPad simulator and adds the trackpad checks
+ *   DESKLINK_IOS_GLASS      1 proves the phone-only control journey through the
+ *                           glass (see above) and stops after it
  *   DESKLINK_IOS_HOST_ADDR  address the simulator reaches this machine on
  *                           (default: this machine's address as the Mac's ssh
  *                           session sees it)
@@ -115,6 +127,8 @@ const RUNTIME = process.env.DESKLINK_IOS_RUNTIME ?? '';
 /** Run on one of the Mac's own named simulators instead of a throwaway one. */
 const REUSE = process.env.DESKLINK_IOS_DEVICE ?? '';
 const IPAD = process.env.DESKLINK_IOS_IPAD === '1';
+/** Every touch in the phone-only control journey comes from the XCUITest runner. */
+const GLASS = process.env.DESKLINK_IOS_GLASS === '1';
 const POINTER_PROOF = process.env.DESKLINK_IOS_POINTER_PROOF;
 if (POINTER_PROOF) assert(['before', 'after'].includes(POINTER_PROOF));
 const DEVICE = ['desklink-ios-flow', IPAD ? 'ipad' : '', RUNTIME, process.pid, randomBytes(8).toString('hex')].filter(Boolean).join('-');
@@ -191,18 +205,27 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
     CODE_SIGNING_ALLOWED=NO build > "$D/build.log" 2>&1 || { tail -60 "$D/build.log"; exit 1; }`, 40 * 60_000);
 }
 
-/** Run the XCUITest pointer steps (test/ios-pointer/) against the running app. */
-function pointerSteps(udid, steps) {
+/** Run the XCUITest steps (test/ios-pointer/) against the running app. */
+function pointerSteps(udid, steps, notePath = '') {
     const copy = spawnSync('rsync', ['-a', '--delete', `${join(here, 'ios-pointer')}/`, `${MAC}:${LANE.dir}/ios-pointer/`], { encoding: 'utf8', timeout: 60_000 });
     assert.equal(copy.status, 0, `rsync to the Mac failed: ${copy.stderr}`);
-    mac(`cd "$D/ios-pointer"
+    // A step that waited on the app says what it read in `$D/pointer-note.txt`,
+    // because the runner's own result comes back here seconds later than the
+    // words it saw; the file is removed first so a stale one cannot be read.
+    // XCTest hands the runner only the environment it passes through as
+    // `TEST_RUNNER_*`, which arrives in the test process without the prefix.
+    mac(`rm -f "$D/pointer-note.txt"
+cd "$D/ios-pointer"
 # The project is generated with the xcodeproj gem CocoaPods carries, run on CocoaPods' own Ruby.
 POD="$(command -v pod)"
 if head -1 "$POD" | grep -q ruby; then RUBY="$(head -1 "$POD" | sed 's/^#! *//')"
 else eval "$(grep -o '^GEM_HOME="[^"]*"' "$POD")"; export GEM_HOME; RUBY="$(head -1 "$GEM_HOME/bin/pod" | sed 's/^#! *//')"; fi
 $RUBY project.rb
-TEST_RUNNER_DESKLINK_POINTER='${JSON.stringify(steps)}' xcodebuild test -project DesklinkPointer.xcodeproj -scheme PointerTests \
+${notePath === '' ? '' : 'TEST_RUNNER_DESKLINK_POINTER_NOTE="$D/pointer-note.txt" '}TEST_RUNNER_DESKLINK_POINTER='${JSON.stringify(steps)}' xcodebuild test -project DesklinkPointer.xcodeproj -scheme PointerTests \
     -destination "platform=iOS Simulator,id=${udid}" -derivedDataPath "$D/PointerData" > "$D/pointer.log" 2>&1 || { tail -60 "$D/pointer.log"; exit 1; }`, 10 * 60_000);
+    if (notePath === '') return '';
+    spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/pointer-note.txt`, notePath]);
+    return existsSync(notePath) ? readFileSync(notePath, 'utf8') : '';
 }
 
 function simulator() {
@@ -782,7 +805,15 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
         return { origin, scale };
     };
     assert(box.left <= 1, `the picture starts at the screen's left edge, the desktop's left edge with it: ${box.left.toFixed(1)} pt`);
-    assert(box.top >= 20, `the status bar does not cover the picture: it starts ${box.top.toFixed(1)} pt down`);
+    // A tablet keeps no status-bar inset once the session settles: the app hides
+    // the status bar and the picture reaches the screen's top edge (measured at
+    // (0, 0) on the fm-iPad simulator, where a phone keeps its own inset).
+    assert(box.top >= (IPAD ? 0 : 20), `the status bar does not cover the picture: it starts ${box.top.toFixed(1)} pt down`);
+    assert(!IPAD || box.top <= 40, `the picture starts at the screen's top, not pushed down: it starts ${box.top.toFixed(1)} pt down`);
+    // The app moves the picture once the session settles (one status-bar inset,
+    // a tablet's 32 pt), so every step that aims reads it where it is now rather
+    // than where it was in the first screenshot after the launch.
+    await pictureNow('the taps');
     assert(Math.abs(scale * geometry.width - screenWidth) <= 3, `portrait fits the screen's width: ${(scale * geometry.width).toFixed(0)} pt`);
     const slack = Math.ceil(1 / scale) + 1;
     const shown = { left: -origin.x / scale, right: (screenWidth - origin.x) / scale };
@@ -792,7 +823,8 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     for (const target of targets) {
         const at = { x: origin.x + (target.x + 0.5) * scale, y: origin.y + (target.y + 0.5) * scale };
         const before = await page.evaluate('clicks.length');
-        mac(`axe tap -x ${at.x.toFixed(1)} -y ${at.y.toFixed(1)} --udid ${udid}`);
+        if (GLASS) pointerSteps(udid, [{ action: 'tap', x: at.x, y: at.y }]);
+        else mac(`axe tap -x ${at.x.toFixed(1)} -y ${at.y.toFixed(1)} --udid ${udid}`);
         const clicks = await until('a tap reached the desktop as one click',
             async () => (await page.evaluate('clicks')).slice(before), (seen) => seen.length >= 2);
         assert.deepEqual(clicks.map((click) => click.type), ['mousedown', 'mouseup'], `a tap is one click: ${JSON.stringify(clicks)}`);
@@ -922,10 +954,14 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
      */
     const aimFor = async (why) => {
         await pictureNow(why);
-        const instruments = IPAD
-            ? { press: 'a coordinate press', drag: 'a pointer drag' }
-            : { dragTouch: 'a synthesized touch' };
-        const measurement = { section: why, device: IPAD ? 'iPad simulator' : 'iPhone simulator', udid, screen: seen.frame, desktop: geometry, picture: { origin, scale }, instruments: {} };
+        // Glass mode drives fingers with the XCUITest runner: a coordinate tap
+        // and a synthesized touch, the two instruments its whole journey uses.
+        const instruments = GLASS
+            ? { tap: 'a coordinate tap', dragTouch: 'a synthesized touch' }
+            : IPAD
+                ? { press: 'a coordinate press', drag: 'a pointer drag' }
+                : { dragTouch: 'a synthesized touch' };
+        const measurement = { section: why, device: `${IPAD ? 'iPad' : 'iPhone'} simulator${GLASS ? ', glass mode' : ''}`, udid, screen: seen.frame, desktop: geometry, picture: { origin, scale }, instruments: {} };
         // Spread across the picture and clear of its lower edge, which a miss can push out of.
         const probes = [{ x: 150, y: 200 }, { x: 650, y: 200 }, { x: 150, y: 450 }, { x: 650, y: 450 }, { x: 410, y: 320 }];
         for (const [action, what] of Object.entries(instruments)) {
@@ -963,6 +999,8 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     // ---- the trackpad (iPad) ----------------------------------------------------------------
     if (!IPAD) {
         log('trackpad checks skipped: set DESKLINK_IOS_IPAD=1 to run on an iPad simulator');
+    } else if (GLASS) {
+        log('trackpad checks skipped in glass mode: this run drives the glass with fingers, not a trackpad');
     } else {
         await aimFor('the trackpad steps');
         const screenAt = (desktop) => aim('drag', desktop);
@@ -1012,7 +1050,28 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     // Every step below reaches the desktop from the phone's own screen. Nothing in
     // this run sends input to the lab display from here: the page's event log is
     // the only record of the desktop's side of it.
-    const tapDesktop = (spot) => mac(`axe tap -x ${screenPoint(spot).x.toFixed(1)} -y ${screenPoint(spot).y.toFixed(1)} --udid ${udid}`);
+    // Glass mode synthesizes the touch with the XCUITest runner, at the spot
+    // that instrument's measured miss is taken off; otherwise the axe HID
+    // injector does, which aims exactly.
+    const tapDesktop = (spot) => (GLASS
+        ? pointerSteps(udid, [{ action: 'tap', ...aim('tap', spot) }])
+        : mac(`axe tap -x ${screenPoint(spot).x.toFixed(1)} -y ${screenPoint(spot).y.toFixed(1)} --udid ${udid}`));
+    /** The app's own controls: a finger on the control, found by what it says it is. */
+    const tapApp = (...ids) => (GLASS
+        ? pointerSteps(udid, ids.map((id) => ({ action: 'tapButton', id, x: 0, y: 0 })))
+        : mac(ids.map((id) => `axe tap --id ${id} --udid ${udid}`).join('; ')));
+    /**
+     * Tap one of the app's controls and read the confirmation it puts on its own
+     * screen. That pill lives about a second and a half: `axe` comes back as soon
+     * as it has tapped, so the flow can look at the screen right after it, but
+     * `xcodebuild test` is still tearing its runner down seconds later - so in
+     * glass mode the runner that tapped the control reads the pill itself, in the
+     * same run, and hands the words back.
+     */
+    const pillAfter = async (id, prefix, read) => {
+        if (!GLASS) { tapApp(id); return await read(); }
+        return pointerSteps(udid, [{ action: 'tapButton', id, x: 0, y: 0 }, { action: 'waitForText', text: prefix, wait: 15, x: 0, y: 0 }], join(out, `pointer-note-${id}.txt`));
+    };
     const steps = [];
     // Every step starts from a cleared desktop, so its capture carries only
     // what that step did.
@@ -1088,7 +1147,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     const from = { x: Math.round(lineLeft) + 6, y: Math.round((lineTop + lineBottom) / 2) };
     const to = { x: Math.round(lineRight) - 6, y: from.y };
     since = await clean();
-    const dragAction = IPAD ? 'drag' : 'dragTouch';
+    const dragAction = GLASS ? 'dragTouch' : IPAD ? 'drag' : 'dragTouch';
     pointerSteps(udid, [{ action: dragAction, ...aim(dragAction, from), toX: aim(dragAction, to).x, toY: aim(dragAction, to).y }]);
     const dragged = await until('the finger dragging over the line arrived as a drag',
         async () => (await page.evaluate('pointer')).slice(since),
@@ -1138,7 +1197,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
 
     // 5. sticky modifiers: latch, chord, release
     await clean();
-    mac(`axe tap --id desklink-key-Control --udid ${udid}`);
+    tapApp('desklink-key-Control');
     const ctrlValue = (want) => until(`the phone's screen never showed Control as ${want}`,
         () => byId(udid, 'desklink-key-Control'), (seen) => seen.value === want);
     assert.equal((await ctrlValue('latched')).value, 'latched', 'one tap arms Ctrl');
@@ -1152,10 +1211,10 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     assert.equal(await page.evaluate('document.title'), 'Notes',
         'the desktop is still the page the phone was driving, chord and all');
     assert.equal((await ctrlValue('off')).value, 'off', 'the latch clears after the one key it was armed for');
-    mac(`axe tap --id desklink-key-Control --udid ${udid}; axe tap --id desklink-key-Control --udid ${udid}`);
+    tapApp('desklink-key-Control', 'desklink-key-Control');
     assert.equal((await ctrlValue('locked')).value, 'locked', 'a second tap locks Ctrl');
     await step('05-sticky-modifier', 'Ctrl latched → next key sent as Control+A → latch cleared; two taps lock it');
-    mac(`axe tap --id desklink-key-Control --udid ${udid}`);
+    tapApp('desklink-key-Control');
     await ctrlValue('off');
 
     // 6. the desktop's clipboard comes over to the phone
@@ -1170,12 +1229,12 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
         () => page.evaluate('window.copied'), (seen) => seen === 'select this line');
     assert.equal(copied, 'select this line',
         `the page put its selection on the desktop clipboard: ${await page.evaluate('window.copyAttempts ?? 0')} clicks on the button, ${JSON.stringify(clickedOnButton)} at the tap`);
-    mac(`axe tap --id desklink-copy --udid ${udid}`);
     // The phone confirms the transfer with a pill on its own screen; the
     // simulator shares the Mac's pasteboard, so that pill is the phone's proof.
-    const pill = await until('the phone\'s screen confirmed the desktop\'s clipboard',
-        async () => visibleText(udid).find((text) => text.startsWith('Copied to phone')) ?? '',
-        (seen) => seen.includes('select this line'));
+    const pill = await pillAfter('desklink-copy', 'Copied to phone',
+        () => until('the phone\'s screen confirmed the desktop\'s clipboard',
+            async () => visibleText(udid).find((text) => text.startsWith('Copied to phone')) ?? '',
+            (seen) => seen.includes('select this line')));
     assert(pill.includes('select this line'), `the phone's own screen confirms the desktop's clipboard and its text: ${JSON.stringify(pill)}; on screen now: ${JSON.stringify(visibleText(udid))}`);
     await step('06-clipboard-out', `desktop → phone, confirmed on screen: ${pill}`);
 
@@ -1185,7 +1244,6 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     since = await clean();
     tapDesktop(padSpot);
     await sleep(300);
-    mac(`axe tap --id desklink-paste --udid ${udid}`);
     // The confirmation pill lives about a second and a half, so poll for it and
     // for the system's own paste consent in the same breath: the grant is to
     // the app under test, on this task's simulator, and to nothing else.
@@ -1199,9 +1257,10 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
         }
         return texts;
     };
-    const sent = await until('the phone\'s screen confirmed what it sent to the desktop',
-        async () => (await screenAllowingPaste()).find((text) => text.startsWith('Sent to desktop')) ?? '',
-        (seen) => seen.includes('select this line'));
+    const sent = await pillAfter('desklink-paste', 'Sent to desktop',
+        () => until('the phone\'s screen confirmed what it sent to the desktop',
+            async () => (await screenAllowingPaste()).find((text) => text.startsWith('Sent to desktop')) ?? '',
+            (seen) => seen.includes('select this line')));
     assert(sent.includes('select this line'),`the phone's own screen confirms what it sent: ${JSON.stringify(sent)}; on screen now: ${JSON.stringify(visibleText(udid))}`);
     mac(`axe key-combo --modifiers 224 --key 25 --udid ${udid}`);
     const pastes = await until('the desktop pasted the phone\'s clipboard',
@@ -1212,12 +1271,13 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     await step('07-clipboard-in', `phone → desktop: pasted ${JSON.stringify(filled)}`);
 
     // 8. the pointer mark: a real arrow, its tip where the desktop's pointer is
-    // A one-finger drag on the whole desktop carries the pointer with no button,
-    // so the mark can be read over bare paper, away from any click dot.
+    // A finger that travels at once (hold: 0, so the app never arms its drag)
+    // carries the pointer with no button, so the mark can be read over bare
+    // paper, away from any click dot.
     since = await clean();
     // A finger travelling over bare paper, so the mark is read over clean
     // background: the press paints its dot 200 desktop pixels away.
-    pointerSteps(udid, [{ action: 'dragTouch', ...aim('dragTouch', { x: 700, y: 460 }), toX: aim('dragTouch', { x: 900, y: 300 }).x, toY: aim('dragTouch', { x: 900, y: 300 }).y }]);
+    pointerSteps(udid, [{ action: 'dragTouch', hold: 0, ...aim('dragTouch', { x: 700, y: 460 }), toX: aim('dragTouch', { x: 900, y: 300 }).x, toY: aim('dragTouch', { x: 900, y: 300 }).y }]);
     const landedAt = { x: 900, y: 300 };
     const travelled = await until('a finger travelling over the picture arrived on the desktop',
         async () => (await page.evaluate('pointer')).slice(since).filter((event) => event.x !== undefined),
@@ -1278,6 +1338,14 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
         'copy the screen recording back');
     writeFileSync(join(out, 'phone-control.json'), JSON.stringify({ device: seen.frame, udid, steps, recording: 'phone-control.mp4' }, null, 1));
     log(`phone-only control proven over ${steps.length} steps, recorded as phone-control.mp4`);
+    // Glass mode stops here: the six control steps are the proof, and one
+    // recording of them is its motion. The trackpad panning, the pinch and the
+    // keyboard-fit launches stay in this lane's normal run, where a finger is
+    // not the instrument under test.
+    if (GLASS) {
+        console.log(`ok: ${steps.length} control steps driven through the glass by the XCUITest runner on ${IPAD ? 'an iPad' : 'an iPhone'} simulator (${out})`);
+        return;
+    }
 
     // ---- pan and rotation ----------------------------------------------------------------------
     pointerSteps(udid, [{ action: 'landscape', x: 0, y: 0 }]);
