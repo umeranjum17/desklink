@@ -1,0 +1,27 @@
+{
+  "schema": 2,
+  "items": [
+    {
+      "key": "update-1",
+      "type": "evidence",
+      "number": 1,
+      "title": "desklink verification migrated to done-done journeys",
+      "about": "done-done run 20261015T071613Z-dab57596-3f5e47 green: real pointer click reached fixture, marker returned, phone portrait/landscape fit with tap and zoom. Receipt recorded for dab57596.",
+      "link": "dab5759620bdb87efbd76dc4b5b4b47af730ca7f",
+      "media": [
+        {
+          "path": "evidence/1/1.png",
+          "sha256": "cb4c95fa0fbbeda20cd193c7c443d995affaf9b27143e7d08eb827e18ce6598c",
+          "bytes": 24566
+        },
+        {
+          "path": "evidence/1/2.png",
+          "sha256": "76098559ac73667c1e995cb9e068437d76da05bc252589f902d4d1bbca90b0f3",
+          "bytes": 10961
+        }
+      ],
+      "filer": "dl-tool-migration",
+      "filed": "2026-10-15T07:21:42.692Z"
+    }
+  ]
+}

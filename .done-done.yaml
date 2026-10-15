@@ -1,0 +1,20 @@
+# done-done project config. `done-done init` never overwrites this file.
+# The app name finds this repo's evidence and receipts from every checkout.
+app: "desklink"
+journeys:
+  verify:
+    command: env -u DISPLAY -u WAYLAND_DISPLAY node packages/desktop-host/test/prove-live-desktop.mjs $DONE_DONE_EVIDENCE_ROOT/verify && env -u DISPLAY -u WAYLAND_DISPLAY node packages/desktop-host/test/prove-phone-form-factors.mjs $DONE_DONE_EVIDENCE_ROOT/verify
+  live-desktop:
+    command: env -u DISPLAY -u WAYLAND_DISPLAY node packages/desktop-host/test/prove-live-desktop.mjs $DONE_DONE_EVIDENCE_ROOT/live-desktop
+  phone:
+    command: mkdir -p $DONE_DONE_EVIDENCE_ROOT/phone && env -u DISPLAY -u WAYLAND_DISPLAY node packages/desktop-host/test/prove-phone-form-factors.mjs $DONE_DONE_EVIDENCE_ROOT/phone
+  link-drop:
+    command: env -u DISPLAY -u WAYLAND_DISPLAY node packages/desktop-client/test/link-drop-flow.mjs $DONE_DONE_EVIDENCE_ROOT/link-drop
+# Conditional coverage (not default journeys): Mac-only iOS journeys run via
+# packages/desktop-client/test/ios-flow.mjs on the Mac's own simulator, with
+# DESKLINK_IOS_GLASS=1 DESKLINK_IOS_IPAD=1 for finger-on-glass; bridge-retention
+# and carrier/hook reattach matrices run via packages/desktop-client/test/roam-flow.mjs
+# with --product-retention and the adapter flags its header documents.
+
+# This repo's coding agent, over agent in ~/.done-done/config.yaml (model, effort and the other agent settings stay there).
+# agent: opencode

@@ -216,7 +216,7 @@ On Linux, prove refusal and owned teardown with:
 env -u DISPLAY -u WAYLAND_DISPLAY npm run test:lab-safety
 ```
 
-See the [private-lab verification guide](.agents/skills/verify-desklink/SKILL.md),
+See the [done-done journeys](.done-done.yaml),
 [AXI browser lane](packages/axi/README.md#browser-lane-opt-in-loopback-only), and
 [release guide](packages/desktop-host/README.md#building-and-packing-a-release).
 
