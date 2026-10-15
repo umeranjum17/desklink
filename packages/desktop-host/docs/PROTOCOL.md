@@ -852,6 +852,12 @@ an empty queue or failed write returns `audio`; a sub-frame limit is `malformed`
 Audio stops on session close/replacement/EOF. It is not a WebRTC track; SDP and
 remote playback are unchanged.
 
+Repeatable Linux proof: the `system-audio` journey in `.done-done.yaml` runs
+`test/audio-flow.mjs` against a built host/engine (`DESKLINK_ENGINE` overrides
+its path). It requires PipeWire, WirePlumber 0.5 policy, pw-play/pw-dump and Xvfb;
+all capture/playback is digital on ownership-verified private servers. The fresh
+output contains PCM, graph/clock measurements and normal/error teardown evidence.
+
 ```json
 {"id":40,"method":"session.audio","params":{"session_id":"…","path":"/run/user/1000/audio-0007.raw","max_bytes":262144}}
 {"id":40,"result":{"seq":7,"timestamp_us":1234567,"frames":4800,"bytes":19200,"format":"s16le","sample_rate":48000,"channels":2,"gap_ms":0,"written":true}}

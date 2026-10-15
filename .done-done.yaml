@@ -8,6 +8,8 @@ journeys:
     command: env -u DISPLAY -u WAYLAND_DISPLAY node packages/desktop-host/test/prove-live-desktop.mjs $DONE_DONE_EVIDENCE_ROOT/live-desktop
   phone:
     command: mkdir -p $DONE_DONE_EVIDENCE_ROOT/phone && env -u DISPLAY -u WAYLAND_DISPLAY node packages/desktop-host/test/prove-phone-form-factors.mjs $DONE_DONE_EVIDENCE_ROOT/phone
+  system-audio:
+    command: env -u DISPLAY -u WAYLAND_DISPLAY node packages/desktop-host/test/audio-flow.mjs $DONE_DONE_EVIDENCE_ROOT/system-audio
   link-drop:
     command: env -u DISPLAY -u WAYLAND_DISPLAY node packages/desktop-client/test/link-drop-flow.mjs $DONE_DONE_EVIDENCE_ROOT/link-drop
 # Conditional coverage (not default journeys): Mac-only iOS journeys run via
