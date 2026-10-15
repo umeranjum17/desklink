@@ -10,6 +10,9 @@ use stun::textattrs::*;
 
 use crate::attributes::{control::*, priority::*, use_candidate::*};
 use crate::candidate::{candidate_pair::*, *};
+// desklink scout trace (dl-roam-postnom-attr):
+use crate::dl_trace;
+use crate::dl_trace::dl_ice;
 
 trait ControllingSelector {
     fn start(&mut self, now: Instant);
@@ -133,6 +136,20 @@ impl Agent {
         };
 
         if let Some((msg, local, remote)) = result {
+            // desklink scout trace: a USE-CANDIDATE (nomination) request going
+            // out — the first transmission, or a tick-gated retransmission
+            // while the previous one is still unacknowledged.
+            if dl_trace::enabled() {
+                dl_ice!(
+                    "{} NOMINATE txn={:?} local={} remote={} nominated_pair={:?} outstanding={}",
+                    self.get_name(),
+                    msg.transaction_id,
+                    self.local_candidates[local].addr(),
+                    self.remote_candidates[remote].addr(),
+                    self.nominated_pair,
+                    self.pending_binding_requests.len(),
+                );
+            }
             self.send_binding_request(now, &msg, local, remote);
         }
     }
@@ -221,6 +238,27 @@ impl ControllingSelector for Agent {
         }
 
         let nominated_pair_is_some = self.nominated_pair.is_some();
+
+        // desklink scout trace: which nomination branch this contact() pass took.
+        if dl_trace::enabled() {
+            let best = self
+                .get_best_valid_candidate_pair()
+                .map(|i| {
+                    let p = &self.candidate_pairs[i];
+                    format!(
+                        "{}<->{}",
+                        self.local_candidates[p.local_index].addr(),
+                        self.remote_candidates[p.remote_index].addr()
+                    )
+                })
+                .unwrap_or_else(|| "-none-valid-".to_string());
+            dl_ice!(
+                "{} contact_branch selected={:?} nominated={nominated_pair_is_some} best_valid={best} pairs={}",
+                self.get_name(),
+                self.selected_pair,
+                self.candidate_pairs.len(),
+            );
+        }
 
         if self.get_selected_pair().is_some() {
             if self.validate_selected_pair(now) {
@@ -336,6 +374,18 @@ impl ControllingSelector for Agent {
                     rtt.as_millis()
                 );
                 if pending_request.is_use_candidate && selected_pair_is_none {
+                    // desklink scout trace: the browser's answer to a nomination
+                    // request — this is what converts nominated into selected.
+                    if dl_trace::enabled() {
+                        dl_ice!(
+                            "{} NOMINATION_ACK txn={:?} rtt_us={} local={} remote={}",
+                            self.get_name(),
+                            m.transaction_id,
+                            rtt.as_micros(),
+                            self.local_candidates[local_index].addr(),
+                            self.remote_candidates[remote_index].addr(),
+                        );
+                    }
                     self.set_selected_pair(Some(now), Some(pair_index));
                 } else {
                     // desklink patch: nomination is decided in `contact_candidates`,
@@ -386,6 +436,17 @@ impl ControllingSelector for Agent {
 
             let p = &self.candidate_pairs[pair_index];
             let nominated_pair_is_none = self.nominated_pair.is_none();
+
+            // desklink scout trace: an inbound binding request on the
+            // controlling side — the browser's own connectivity check.
+            if dl_trace::enabled() {
+                dl_ice!(
+                    "{} RECV_REQUEST controlling use_candidate={} pair_state={:?} nominated={nominated_pair_is_none}",
+                    self.get_name(),
+                    m.contains(ATTR_USE_CANDIDATE),
+                    p.state,
+                );
+            }
 
             trace!(
                 "controllingSelector: after findPair {}, p.state: {}, {}",

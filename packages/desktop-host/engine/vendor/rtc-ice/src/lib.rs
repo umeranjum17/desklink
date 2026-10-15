@@ -58,6 +58,9 @@
 /// without adding — and version-matching — a direct `rtc-crypto` dependency.
 pub use crypto;
 
+// desklink scout trace: dev-only ICE timeline instrumentation (dl-roam-postnom-attr).
+pub(crate) mod dl_trace;
+
 pub mod agent;
 /// The ICE-specific STUN attributes carried in connectivity checks.
 pub mod attributes;

@@ -3395,6 +3395,11 @@ fn spawn_peer_events(inner: &Arc<Inner>, mut events: tokio_mpsc::UnboundedReceiv
                         first_frame: inner.metrics.lock().map(|m| m.encoded_frames).unwrap_or(0)
                             > 0,
                     });
+                    // desklink scout trace: the session's transport emit, one
+                    // line after the peer event that caused it.
+                    if crate::peer::dl_trace_on() {
+                        crate::peer::dl_eng!("session_transport_emit {}", format!("{state}").to_lowercase());
+                    }
                 }
                 PeerEvent::ControlOpen => {
                     inner.control_open.store(true, Ordering::SeqCst);

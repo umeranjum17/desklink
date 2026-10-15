@@ -47,6 +47,39 @@ function isMedia(payload) {
     return (payload[0] & 0xc0) === 0x80;
 }
 
+/**
+ * Read a STUN header, never alter it.
+ *
+ * Full per-message logging, not first-of-each-kind: a restart's retransmissions
+ * are what a recovery measurement has to see, and a log that keeps only the
+ * first request per direction hides every one of them. STUN and DTLS carry the
+ * handshake and the consent checks; RTP/RTCP carry the picture.
+ */
+function stunInfo(payload) {
+    if (payload.length < 20) return null;
+    if (payload[0] > 0x03) return null;
+    if (payload[4] !== 0x21 || payload[5] !== 0x12 || payload[6] !== 0xa4 || payload[7] !== 0x42) return null;
+    const type = (payload[0] << 8) | payload[1];
+    const txn = payload.subarray(8, 20).toString('hex');
+    let useCandidate = false;
+    let username = '';
+    let off = 20;
+    while (off + 4 <= payload.length) {
+        const at = (payload[off] << 8) | payload[off + 1];
+        const len = (payload[off + 2] << 8) | payload[off + 3];
+        if (off + 4 + len > payload.length) break;
+        if (at === 0x0025) useCandidate = true;
+        if (at === 0x0006) { try { username = payload.subarray(off + 4, off + 4 + len).toString('utf8'); } catch { /* keep */ } }
+        off += 4 + len + ((4 - (len % 4)) % 4);
+    }
+    const kind = type === 0x0001 ? 'request' : type === 0x0101 ? 'success' : type === 0x0111 ? 'error' : type === 0x0011 ? 'indication' : `0x${type.toString(16)}`;
+    return { kind, txn, useCandidate, username };
+}
+
+function isDtls(payload) {
+    return payload.length > 0 && payload[0] >= 0x14 && payload[0] <= 0x19;
+}
+
 /** Loopback and every local IPv4 address, so a candidate can be checked before it is trusted. */
 function localAddresses() {
     const found = new Set(['127.0.0.1']);
@@ -263,9 +296,13 @@ class ShapedLink {
             }
             if (to === null || to === undefined) {
                 this.counters.unroutable += 1;
+                // A STUN or DTLS datagram that had nowhere to go yet, before
+                // the peer's real source was learnt: the bootstrap drop.
+                this.#observe(payload, direction, route, false);
                 return;
             }
             this.counters[direction] += 1;
+            this.#observe(payload, direction, route, true);
             try {
                 socket.send(payload, to.port, to.ip);
                 if (direction === 'toBrowser' && isMedia(payload) && !route.mediaSeen) {
@@ -286,6 +323,53 @@ class ShapedLink {
             return;
         }
         send();
+    }
+
+    /**
+     * The full STUN timeline on the relay's own clock: every request, success,
+     * error and indication in both directions, with its transaction id, its
+     * USE-CANDIDATE flag and its USERNAME (`remote-ufrag:local-ufrag`, so the
+     * ICE generation is readable). When a response answers a transaction this
+     * relay saw as a request, one match line records that request's send time
+     * and the round trip, so a nomination's acknowledgement is nameable per
+     * transmission rather than per direction. Reads only: it forwards nothing
+     * differently and changes no timer, and a failure inside it is swallowed
+     * so a diagnostic can never cost a datagram.
+     */
+    #observe(payload, direction, route, forwarded) {
+        try {
+            this.#observeInner(payload, direction, route, forwarded);
+        } catch {
+            // A diagnostic must never affect forwarding.
+        }
+    }
+
+    #observeInner(payload, direction, route, forwarded) {
+        if (route.obs === undefined) route.obs = { seenDtls: new Set(), pending: new Map() };
+        const stun = stunInfo(payload);
+        if (stun !== null) {
+            this.log(`link gen${route.generation} stun ${direction} ${stun.kind}${stun.useCandidate ? ' useCandidate' : ''} fwd=${forwarded ? 1 : 0} txn=${stun.txn} user=${stun.username || '-'} bytes=${payload.length} at=${Date.now()}`);
+            // A request leaves in one direction and its response comes back in
+            // the other, so both directions share one pending map, keyed by
+            // transaction id.
+            if (stun.kind === 'request') {
+                route.obs.pending.set(stun.txn, { at: Date.now(), dir: direction, useCandidate: stun.useCandidate });
+            } else {
+                const pending = route.obs.pending.get(stun.txn);
+                if (pending !== undefined) {
+                    route.obs.pending.delete(stun.txn);
+                    this.log(`link gen${route.generation} stun-match txn=${stun.txn} req_dir=${pending.dir} resp_dir=${direction} req_uc=${pending.useCandidate ? 1 : 0} resp=${stun.kind} rtt_ms=${Date.now() - pending.at} req_at=${pending.at} resp_at=${Date.now()}`);
+                }
+            }
+            return;
+        }
+        if (isDtls(payload)) {
+            const key = `${direction} dtls`;
+            if (!route.obs.seenDtls.has(key)) {
+                route.obs.seenDtls.add(key);
+                this.log(`link gen${route.generation} dtls ${direction} first fwd=${forwarded ? 1 : 0} b0=0x${payload[0].toString(16)} len=${payload.length} at=${Date.now()}`);
+            }
+        }
     }
 
     /**

@@ -44,6 +44,30 @@
 // place, never created or deleted here. Only this lane's build directory
 // (DESKLINK_IOS_DIR/DESKLINK_IOS_LANE) is removed when done.
 //
+// The cut leg's evidence is four streams, because a recovery number on its own
+// cannot say whose time it was:
+//
+//   engine.log  — this host. The bridge forwards its engine child's diagnostics
+//                 to its own stderr, so with DESKLINK_ICE_TRACE=1 the whole
+//                 stream is the vendored ICE agent's request / nomination /
+//                 state timeline on this host's clock.
+//   wire.log    — this host. The bridge -> engine protocol tap, so
+//                 `session.restart_ice` is timestamped where the engine reads
+//                 it and not where the app typed it.
+//   link.log    — the Mac. `shaped-link.mjs` logs every STUN request, success,
+//                 error and indication in each direction with its transaction
+//                 id, its USE-CANDIDATE flag and its USERNAME, and one
+//                 txn-matched line per response naming the request it answers
+//                 and the round trip. Retransmissions are visible rather than
+//                 collapsed to the first of each kind.
+//   receipt     — every named signalling frame (session id, method, offered
+//                 credentials) with the timestamp it arrived on this host, so
+//                 stage A (path back -> `session.restart_ice`) and stage B
+//                 (that -> `transport=connected`) are read from one array.
+//
+// The relay's own clock is the Mac's, so it differs from this host's by a
+// constant the leg records; only the relay's cadences need that offset.
+//
 // Usage (from the repo root):
 //   DESKLINK_IOS_MAC=umerfaroq@100.97.31.92 DESKLINK_IOS_LANE=dl-pm-8 \
 //     DESKLINK_IOS_OUT=~/evidence/ios-j3 node packages/desktop-client/test/ios-recovery-flow.mjs
@@ -56,7 +80,8 @@
 // `background60`; unset runs the proof legs, drop5 and background60),
 // DESKLINK_IOS_CUT_NEGATIVE (1 restores signalling but leaves the media cut:
 // the cut leg's picture verdict must then fail),
-// DESKLINK_ENGINE, DESKLINK_VERIFY_TARGET (x11_target).
+// DESKLINK_ENGINE, DESKLINK_VERIFY_TARGET (x11_target),
+// DESKLINK_ICE_TRACE (1 records the engine's ICE timeline into engine.log).
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -278,7 +303,14 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
             NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${engineTap}`.trim() }, stdio: ['ignore', 'pipe', 'pipe'] });
     remember(bridge.pid); bridgePid = bridge.pid;
     let engineLog = '';
-    bridge.stderr.on('data', (chunk) => { engineLog = (engineLog + chunk).slice(-8000); });
+    // The bridge forwards the engine child's diagnostics to its own stderr, and
+    // the in-memory tail is only there for a failure message. The whole stream
+    // is the leg's engine-side evidence — the ICE trace, when DESKLINK_ICE_TRACE
+    // is set — so it is kept beside the receipt instead of being dropped.
+    bridge.stderr.on('data', (chunk) => {
+        engineLog = (engineLog + chunk).slice(-8000);
+        try { appendFileSync(join(out, 'engine.log'), chunk); } catch { /* evidence best-effort */ }
+    });
     const bridgePort = await new Promise((ready, fail) => {
         let printed = '';
         const timer = setTimeout(() => fail(new Error(`the bridge never printed its URL: ${printed}${engineLog}`)), 30_000);
@@ -351,7 +383,7 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
         if (message.type === 'report') receipt.macRelay = message.link;
         if (message.type === 'error') relayError = message.message;
         if (message.type === 'ready') ready = message;
-        if (message.type === 'wire') wire.push(message.wire);
+        if (message.type === 'wire') wire.push({ ...message.wire, at: Date.now() });
         const waiter = relayWaiters.find((entry) => entry.type === message.type);
         if (waiter) waiter.resolve(message);
     });

@@ -47,6 +47,33 @@ use webrtc::peer_connection::{
 };
 use webrtc::runtime::default_runtime;
 
+// desklink scout trace (dl-roam-postnom-attr): engine-side restart timeline.
+// Enabled with `DESKLINK_ICE_TRACE=1`; stamps microseconds since the Unix epoch
+// so these lines interleave with the vendored ICE agent's `[ice ...]` lines in
+// one order. Droppable: grep `desklink scout trace`.
+pub(crate) fn dl_trace_on() -> bool {
+    std::env::var("DESKLINK_ICE_TRACE")
+        .map(|v| v != "0" && !v.is_empty())
+        .unwrap_or(false)
+}
+
+pub(crate) fn dl_trace_us() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros())
+        .unwrap_or(0)
+}
+
+macro_rules! dl_eng {
+    ($($arg:tt)*) => {
+        if $crate::peer::dl_trace_on() {
+            eprintln!("[eng {}] {}", $crate::peer::dl_trace_us(), format_args!($($arg)*));
+        }
+    };
+}
+
+pub(crate) use dl_eng;
+
 /// VP9 clock rate, fixed by RFC 9628.
 const VP9_CLOCK_RATE: u32 = 90_000;
 
@@ -420,6 +447,12 @@ impl PeerConnectionEventHandler for Handler {
     }
 
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        // desklink scout trace (dl-roam-postnom-attr): the engine's rtc-level
+        // transport state event, on the same microsecond clock as the vendored
+        // agent's `[ice ...]` lines, so the rtc Connected gate is separable.
+        if dl_trace_on() {
+            dl_eng!("peer_state_change {state:?}");
+        }
         let connected = matches!(state, RTCPeerConnectionState::Connected);
         if connected {
             self.wants_keyframe.store(true, Ordering::SeqCst);
