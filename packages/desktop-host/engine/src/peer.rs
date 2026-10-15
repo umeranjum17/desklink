@@ -1590,6 +1590,15 @@ pub(crate) mod tests {
             .expect("the restart answer is accepted");
     }
 
+    /// How long the restarted generation may take to nominate and reconnect,
+    /// measured from the answered offer: two `check_interval` ticks. The vendored
+    /// agent ticks every 200 ms (`vendor/rtc-ice/src/agent/agent_config.rs`), and
+    /// the routed roam leg measured the engine's own first-valid-pair ->
+    /// USE-CANDIDATE at 197 ms, one tick; the extra tick is headroom for the
+    /// loopback's round trip and for a loaded machine. See the assertion in
+    /// `a_restart_keeps_media_flowing_on_the_selected_pair_until_the_new_one_nominates`.
+    const RECONNECT_BUDGET: Duration = Duration::from_millis(400);
+
     /// A receiver peer that records when each inbound RTP packet arrives and
     /// reports its own ICE candidates, so two peers can really connect.
     struct MediaReceiver {
@@ -1783,6 +1792,37 @@ pub(crate) mod tests {
             .accept_answer(reanswer.sdp)
             .await
             .expect("the restart answer is accepted");
+        let answered_at = Instant::now();
+
+        // The restarted generation has to be nominated off its own check cycle:
+        // nomination is decided in the agent's `contact_candidates` pass, which the
+        // driver reaches on a `check_interval` tick (200 ms) or when an inbound
+        // Binding request arrives while a valid pair already exists. A pair that
+        // becomes valid just after a tick would therefore wait a full tick for its
+        // USE-CANDIDATE, and one tick is the whole engine-side cost measured on the
+        // routed roam leg (first valid pair -> USE-CANDIDATE: 197 ms, i.e. one tick).
+        //
+        // What this asserts, and what it cannot: the engine's "first valid pair"
+        // instant is not observable from here (the peer connection exposes no pair
+        // state), so the bound is measured from the answer, the earliest instant the
+        // engine could nominate, at two ticks. The loopback's client answers checks
+        // and sends its own triggered checks in the same burst, so an inbound request
+        // is nearly always available and the base engine meets this bound too; the
+        // tick itself is graded by the routed roam leg, whose relay log carries both
+        // instants (197 ms, one tick). This guards the property going forward: a
+        // lost pass, a skipped tick or a stalled nomination blows the bound.
+        let reconnected = async {
+            while !engine.is_connected() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            answered_at.elapsed()
+        };
+        let reconnect = tokio::time::timeout(RECONNECT_BUDGET, reconnected)
+            .await
+            .expect("the restarted generation was never nominated");
+        eprintln!(
+            "restart: transport reconnected {reconnect:?} after the answer (budget {RECONNECT_BUDGET:?})"
+        );
 
         // Keep the picture advancing across and after the restart.
         tokio::time::sleep(Duration::from_millis(800)).await;
