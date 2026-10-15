@@ -84,7 +84,6 @@ export interface CursorInfo {
     limitation?: string;
 }
 
-/** Fixed format accepted by a running PipeWire monitor capture. */
 export interface AudioInfo {
     source: 'pipewire-monitor';
     format: 's16le';
@@ -92,7 +91,6 @@ export interface AudioInfo {
     channels: number;
 }
 
-/** One `session.audio` read: what was written to the caller's path. */
 export interface SessionAudio {
     seq: number;
     timestamp_us: number;
@@ -101,7 +99,6 @@ export interface SessionAudio {
     format: string;
     sample_rate: number;
     channels: number;
-    /** Audio the sink produced that this chunk does not follow on from. */
     gap_ms: number;
     written: boolean;
 }
@@ -197,12 +194,9 @@ export interface SessionMetrics {
     input_forwarded: number;
     input_applied: number;
     input_rejected: number;
-    /** Sample frames and PCM bytes captured from the desktop's own audio. */
     audio_frames: number;
     audio_bytes: number;
-    /** PCM dropped because the consumer read slower than the sink produced. */
     audio_dropped_bytes: number;
-    /** Time a chunk's start fell behind the previous chunk's end (under-run). */
     audio_gap_micros: number;
 }
 

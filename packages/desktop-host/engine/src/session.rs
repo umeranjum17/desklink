@@ -93,14 +93,9 @@ pub struct Metrics {
     /// Control messages forwarded back to the consumer that owns the device,
     /// instead of being applied to a desktop this engine holds.
     pub input_forwarded: u64,
-    /// Sample frames and PCM bytes captured from the desktop's own audio,
-    /// whether or not the consumer read them.
     pub audio_frames: u64,
     pub audio_bytes: u64,
-    /// PCM dropped because the consumer read slower than the sink produced.
     pub audio_dropped_bytes: u64,
-    /// Time a chunk's start fell behind the previous chunk's end: an under-run
-    /// or a sink change, which silence alone cannot show.
     pub audio_gap_micros: u64,
 }
 

@@ -243,9 +243,6 @@ Result:
  "audio":null}
 ```
 
-For the opt-in `audio` result and local read contract, see
-[System audio over the local protocol](#system-audio-over-the-local-protocol).
-
 `source` selects the desktop. `portal` (or absent) asks the compositor for a
 screen cast, which is the only path that carries a Wayland user's consent;
 `x11` reads a named X display's root window and applies input through XTest;
