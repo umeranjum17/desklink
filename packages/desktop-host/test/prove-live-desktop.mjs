@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
 import { WebSocket } from 'ws';
-import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../../packages/desktop-host/test/lab-safety.mjs';
+import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from './lab-safety.mjs';
 
 assertNoAmbientDesktop();
 assert(process.platform === 'linux', 'this private-Xvfb proof requires Linux');
