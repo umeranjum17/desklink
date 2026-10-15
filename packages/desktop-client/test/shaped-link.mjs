@@ -47,6 +47,39 @@ function isMedia(payload) {
     return (payload[0] & 0xc0) === 0x80;
 }
 
+/**
+ * Read a STUN header, never alter it.
+ *
+ * Full per-message logging, not first-of-each-kind: a restart's retransmissions
+ * are what a recovery measurement has to see, and a log that keeps only the
+ * first request per direction hides every one of them. STUN and DTLS carry the
+ * handshake and the consent checks; RTP/RTCP carry the picture.
+ */
+function stunInfo(payload) {
+    if (payload.length < 20) return null;
+    if (payload[0] > 0x03) return null;
+    if (payload[4] !== 0x21 || payload[5] !== 0x12 || payload[6] !== 0xa4 || payload[7] !== 0x42) return null;
+    const type = (payload[0] << 8) | payload[1];
+    const txn = payload.subarray(8, 20).toString('hex');
+    let useCandidate = false;
+    let username = '';
+    let off = 20;
+    while (off + 4 <= payload.length) {
+        const at = (payload[off] << 8) | payload[off + 1];
+        const len = (payload[off + 2] << 8) | payload[off + 3];
+        if (off + 4 + len > payload.length) break;
+        if (at === 0x0025) useCandidate = true;
+        if (at === 0x0006) { try { username = payload.subarray(off + 4, off + 4 + len).toString('utf8'); } catch { /* keep */ } }
+        off += 4 + len + ((4 - (len % 4)) % 4);
+    }
+    const kind = type === 0x0001 ? 'request' : type === 0x0101 ? 'success' : type === 0x0111 ? 'error' : type === 0x0011 ? 'indication' : `0x${type.toString(16)}`;
+    return { kind, txn, useCandidate, username };
+}
+
+function isDtls(payload) {
+    return payload.length > 0 && payload[0] >= 0x14 && payload[0] <= 0x19;
+}
+
 /** Loopback and every local IPv4 address, so a candidate can be checked before it is trusted. */
 function localAddresses() {
     const found = new Set(['127.0.0.1']);
@@ -110,7 +143,10 @@ class ShapedLink {
         // so the local-address guard would drop them all. The relay then forwards
         // to the peer source it actually sees, not the candidate it advertised.
         this.remoteBrowser = remoteBrowser; this.remoteEngine = remoteEngine;
-        this.counters = { toEngine: 0, toBrowser: 0, delayed: 0, discarded: 0, unroutable: 0, mediaDiscarded: 0 };
+        // `discarded` is the total; the per-direction pair is what a cut that
+        // stops BOTH native directions must show, since one shared total cannot
+        // tell a one-way loss from a real path cut.
+        this.counters = { toEngine: 0, toBrowser: 0, delayed: 0, discarded: 0, discardedToEngine: 0, discardedToBrowser: 0, unroutable: 0, mediaDiscarded: 0 };
         /** `{}` forwards at once, `{ delayMs }` slows it, `{ discard: true }` drops it. */
         this.shape = {};
         /**
@@ -141,8 +177,26 @@ class ShapedLink {
         this.log(`link ${why}: ${JSON.stringify(this.counters)}; host ${this.host?.ip ?? '-'}:${this.host?.port ?? '-'} browser ${this.browser?.ip ?? '-'}:${this.browser?.port ?? '-'}`);
     }
 
-    /** The counters and learned peers, for a receipt produced on another host. */
-    snapshot() { return { counters: { ...this.counters }, host: this.host, browser: this.browser }; }
+    /**
+     * The counters, learned peers and per-ICE-generation endpoints, for a
+     * receipt produced on another host. `routes` is what names a NEW media
+     * endpoint after a restore: each entry is the advertised browser-facing
+     * (`appPort`) and engine-facing (`enginePort`) port a generation bound, so
+     * a generation-2 endpoint that differs from generation 1 is visible here
+     * rather than inferred from a log line.
+     */
+    snapshot() {
+        const routes = [...this.#routes.values()].map((route) => ({
+            generation: route.generation,
+            appPort: route.toEngine?.address?.().port ?? null,
+            enginePort: route.toBrowser?.address?.().port ?? null,
+            browserAdvertised: route.advertised === true,
+            engineAdvertised: route.engineAdvertised === true,
+            mediaSeen: route.mediaSeen === true,
+        })).sort((a, b) => a.generation - b.generation);
+        return { counters: { ...this.counters }, host: this.host, browser: this.browser,
+            generation: routes.at(-1)?.generation ?? 0, routes };
+    }
 
     /**
      * A new `session.open` from the client.
@@ -216,6 +270,12 @@ class ShapedLink {
         }
     }
 
+    /** Count one discarded datagram in a direction, beside the shared total. */
+    #drop(direction) {
+        this.counters.discarded += 1;
+        this.counters[direction === 'toEngine' ? 'discardedToEngine' : 'discardedToBrowser'] += 1;
+    }
+
     /** Forward one datagram in one direction, out of that direction's socket. */
     #forward(payload, to, socket, direction, route) {
         if (this.discardMedia && isMedia(payload)) {
@@ -223,7 +283,7 @@ class ShapedLink {
             return;
         }
         if (this.shape.discard === true) {
-            this.counters.discarded += 1;
+            this.#drop(direction);
             return;
         }
         const delay = this.shape.delayMs ?? 0;
@@ -231,14 +291,18 @@ class ShapedLink {
             // Re-checked when the delay is up: a shape may have changed, or the
             // run may have torn the link down, in between.
             if (this.shape.discard === true || socket.closed) {
-                this.counters.discarded += 1;
+                this.#drop(direction);
                 return;
             }
             if (to === null || to === undefined) {
                 this.counters.unroutable += 1;
+                // A STUN or DTLS datagram that had nowhere to go yet, before
+                // the peer's real source was learnt: the bootstrap drop.
+                this.#observe(payload, direction, route, false);
                 return;
             }
             this.counters[direction] += 1;
+            this.#observe(payload, direction, route, true);
             try {
                 socket.send(payload, to.port, to.ip);
                 if (direction === 'toBrowser' && isMedia(payload) && !route.mediaSeen) {
@@ -248,7 +312,7 @@ class ShapedLink {
             } catch {
                 // A datagram still inside a delay when the run ended. Nothing is
                 // waiting on it, and a closed relay is not a failure.
-                this.counters.discarded += 1;
+                this.#drop(direction);
             }
         };
         if (delay > 0) {
@@ -259,6 +323,53 @@ class ShapedLink {
             return;
         }
         send();
+    }
+
+    /**
+     * The full STUN timeline on the relay's own clock: every request, success,
+     * error and indication in both directions, with its transaction id, its
+     * USE-CANDIDATE flag and its USERNAME (`remote-ufrag:local-ufrag`, so the
+     * ICE generation is readable). When a response answers a transaction this
+     * relay saw as a request, one match line records that request's send time
+     * and the round trip, so a nomination's acknowledgement is nameable per
+     * transmission rather than per direction. Reads only: it forwards nothing
+     * differently and changes no timer, and a failure inside it is swallowed
+     * so a diagnostic can never cost a datagram.
+     */
+    #observe(payload, direction, route, forwarded) {
+        try {
+            this.#observeInner(payload, direction, route, forwarded);
+        } catch {
+            // A diagnostic must never affect forwarding.
+        }
+    }
+
+    #observeInner(payload, direction, route, forwarded) {
+        if (route.obs === undefined) route.obs = { seenDtls: new Set(), pending: new Map() };
+        const stun = stunInfo(payload);
+        if (stun !== null) {
+            this.log(`link gen${route.generation} stun ${direction} ${stun.kind}${stun.useCandidate ? ' useCandidate' : ''} fwd=${forwarded ? 1 : 0} txn=${stun.txn} user=${stun.username || '-'} bytes=${payload.length} at=${Date.now()}`);
+            // A request leaves in one direction and its response comes back in
+            // the other, so both directions share one pending map, keyed by
+            // transaction id.
+            if (stun.kind === 'request') {
+                route.obs.pending.set(stun.txn, { at: Date.now(), dir: direction, useCandidate: stun.useCandidate });
+            } else {
+                const pending = route.obs.pending.get(stun.txn);
+                if (pending !== undefined) {
+                    route.obs.pending.delete(stun.txn);
+                    this.log(`link gen${route.generation} stun-match txn=${stun.txn} req_dir=${pending.dir} resp_dir=${direction} req_uc=${pending.useCandidate ? 1 : 0} resp=${stun.kind} rtt_ms=${Date.now() - pending.at} req_at=${pending.at} resp_at=${Date.now()}`);
+                }
+            }
+            return;
+        }
+        if (isDtls(payload)) {
+            const key = `${direction} dtls`;
+            if (!route.obs.seenDtls.has(key)) {
+                route.obs.seenDtls.add(key);
+                this.log(`link gen${route.generation} dtls ${direction} first fwd=${forwarded ? 1 : 0} b0=0x${payload[0].toString(16)} len=${payload.length} at=${Date.now()}`);
+            }
+        }
     }
 
     /**
@@ -337,14 +448,21 @@ class ShapedLink {
 /**
  * The protocol channel, with the link rewriting applied to what crosses it.
  *
- * Everything else passes through untouched, in both directions: this is the
- * app's signalling channel, and the flow deliberately does not cut it.
+ * Everything else passes through untouched, in both directions. Most journeys
+ * leave this channel up on purpose; `setCut(true)` on the returned handle is
+ * the owned path cut that stops the signalling channel too, so one process can
+ * retire a tuple, cut both native UDP directions AND signalling, then restore —
+ * never a shared firewall, route or interface change. `onWire(dir, raw)` sees
+ * each frame that crosses (dir is `app>` or `engine>`), for a receipt that names
+ * the session id, the open/close/restart_ice it carried and the offered ICE
+ * credentials.
  */
-function startSignalling(link, bridgePort, token, { relayOnly = false } = {}) {
+function startSignalling(link, bridgePort, token, { relayOnly = false, onWire = () => {} } = {}) {
     const upstream = `ws://127.0.0.1:${bridgePort}/desktop?token=${token}`;
     let generation = 0;
     let offerUfrag;
     let rewrittenOffer;
+    let cut = false;
     // Restart SDP can embed candidates without trickling them again. Rewrite
     // both directions, otherwise a direct candidate bypasses the shaped link.
     const rewriteSdp = async (description, direction) => {
@@ -361,6 +479,9 @@ function startSignalling(link, bridgePort, token, { relayOnly = false } = {}) {
     return new Promise((ready) => {
         const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
         server.on('connection', (client) => {
+            // A dial that lands while the path is cut is refused, exactly as a
+            // radio outage refuses it: the app must re-dial after the restore.
+            if (cut) { client.close(); return; }
             const host = new WebSocket(upstream);
             const send = (socket, message) => socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify(message));
             // The page opens its socket the moment it loads, which can be before
@@ -376,6 +497,7 @@ function startSignalling(link, bridgePort, token, { relayOnly = false } = {}) {
             hostReady.catch(() => undefined);
             host.on('message', async (raw) => {
                 try {
+                    onWire('engine>', raw);
                     const message = JSON.parse(String(raw));
                     if (message.event === 'session.description') {
                         const description = message.params.description;
@@ -401,6 +523,7 @@ function startSignalling(link, bridgePort, token, { relayOnly = false } = {}) {
             client.on('message', async (raw) => {
                 try {
                     await hostReady;
+                    onWire('app>', raw);
                     const message = JSON.parse(String(raw));
                     if (message.method === 'session.open') link.newSession();
                     if (message.method === 'session.description') await rewriteSdp(message.params.description, 'up');
@@ -420,7 +543,16 @@ function startSignalling(link, bridgePort, token, { relayOnly = false } = {}) {
             client.on('close', () => host.close());
             client.on('error', () => host.close());
         });
-        server.on('listening', () => ready({ port: server.address().port, close: () => server.close() }));
+        server.on('listening', () => ready({
+            port: server.address().port,
+            // Cut the signalling channel: refuse every new dial and drop the
+            // open sockets. Restoring lets the next dial through.
+            setCut(value) {
+                cut = value;
+                if (cut) for (const client of server.clients) client.terminate();
+            },
+            close: () => { for (const client of server.clients) client.terminate(); server.close(); },
+        }));
     });
 }
 

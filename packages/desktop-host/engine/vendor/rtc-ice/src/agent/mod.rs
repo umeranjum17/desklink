@@ -38,6 +38,9 @@ use stun::xoraddr::*;
 
 use crate::candidate::candidate_peer_reflexive::CandidatePeerReflexiveConfig;
 use crate::candidate::{candidate_pair::*, *};
+// desklink scout trace (dl-roam-postnom-attr):
+use crate::dl_trace;
+use crate::dl_trace::dl_ice;
 use crate::mdns::{MulticastDnsMode, create_multicast_dns, generate_multicast_dns_name};
 use crate::network_type::NetworkType;
 use crate::rand::*;
@@ -520,6 +523,17 @@ impl Agent {
                     }
                 }
 
+                // desklink scout trace: a remote candidate landed and an
+                // immediate check pass was requested for it.
+                if dl_trace::enabled() {
+                    dl_ice!(
+                        "{} remote_candidate_added {} pairs={} force_check",
+                        self.get_name(),
+                        self.remote_candidates[remote_index].addr(),
+                        self.candidate_pairs.len(),
+                    );
+                }
+
                 self.request_connectivity_check();
             }
         }
@@ -724,6 +738,18 @@ impl Agent {
     /// pair, and restarts the agent's timers. With nothing staged, the current credentials are
     /// kept and only the session is restarted.
     pub fn apply_restart(&mut self, now: Instant, keep_local_candidates: bool) -> Result<()> {
+        // desklink scout trace: restart applied — the new generation begins.
+        if dl_trace::enabled() {
+            dl_ice!(
+                "{} APPLY_RESTART keep_local={keep_local_candidates} role={} state={:?} local_cands={} remote_cands={} pairs={}",
+                self.get_name(),
+                if self.is_controlling { "controlling" } else { "controlled" },
+                self.connection_state,
+                self.local_candidates.len(),
+                self.remote_candidates.len(),
+                self.candidate_pairs.len(),
+            );
+        }
         // desklink patch: remember the pair media is on before the teardown
         // below clears it, so the ICE transport keeps sending and receiving on
         // it until the restarted generation nominates a pair (see
@@ -784,6 +810,20 @@ impl Agent {
     }
 
     fn contact(&mut self, now: Instant) {
+        // desklink scout trace: one line per agent contact() pass, so the tick
+        // cadence (and any forced pass) is measurable.
+        if dl_trace::enabled() {
+            dl_ice!(
+                "{} tick_begin state={:?} sel={:?} nom={:?} pairs={} outstanding={} force={}",
+                self.get_name(),
+                self.connection_state,
+                self.selected_pair,
+                self.nominated_pair,
+                self.candidate_pairs.len(),
+                self.pending_binding_requests.len(),
+                self.force_candidate_contact,
+            );
+        }
         // Consume any pending deferred-check request now that we are running one.
         // Reset before the early returns below so a failed/settled agent does not
         // keep asking `poll_timeout` for an immediate wake-up.
@@ -826,6 +866,19 @@ impl Agent {
         new_state: ConnectionState,
     ) {
         if self.connection_state != new_state {
+            // desklink scout trace: every connection-state transition, with the
+            // selection context that explains it.
+            if dl_trace::enabled() {
+                dl_ice!(
+                    "{} state {:?} -> {:?} sel={:?} nom={:?} pairs={}",
+                    self.get_name(),
+                    self.connection_state,
+                    new_state,
+                    self.selected_pair,
+                    self.nominated_pair,
+                    self.candidate_pairs.len(),
+                );
+            }
             // Connection has gone to failed, release all gathered candidates
             if new_state == ConnectionState::Failed {
                 self.set_selected_pair(now, None);
@@ -860,6 +913,19 @@ impl Agent {
                 self.get_name(),
                 self.candidate_pairs[pair_index]
             );
+
+            // desklink scout trace: nomination landed on a pair — the moment the
+            // agent moves to Connected.
+            if dl_trace::enabled() {
+                let p = &self.candidate_pairs[pair_index];
+                dl_ice!(
+                    "{} SELECTED_PAIR local={} remote={} pairs={}",
+                    self.get_name(),
+                    self.local_candidates[p.local_index].addr(),
+                    self.remote_candidates[p.remote_index].addr(),
+                    self.candidate_pairs.len(),
+                );
+            }
 
             self.candidate_pairs[pair_index].nominated = true;
             self.selected_pair = Some(pair_index);
@@ -1101,6 +1167,20 @@ impl Agent {
             self.remote_candidates[remote_index],
         );
 
+        // desklink scout trace: every outbound connectivity check / nomination,
+        // with the transaction id, so the relay's wire log can be matched to it.
+        if dl_trace::enabled() {
+            dl_ice!(
+                "{} SEND_REQUEST txn={:?} use_candidate={} local={} remote={} outstanding={}",
+                self.get_name(),
+                m.transaction_id,
+                m.contains(ATTR_USE_CANDIDATE),
+                self.local_candidates[local_index].addr(),
+                self.remote_candidates[remote_index].addr(),
+                self.pending_binding_requests.len(),
+            );
+        }
+
         self.invalidate_pending_binding_requests(now);
 
         self.pending_binding_requests.push(BindingRequest {
@@ -1125,6 +1205,17 @@ impl Agent {
         local_index: usize,
         remote_index: usize,
     ) {
+        // desklink scout trace: the answer to an inbound connectivity check, and
+        // whether the request it answered carried the nomination.
+        if dl_trace::enabled() {
+            dl_ice!(
+                "{} SEND_SUCCESS role={} txn={:?} use_candidate={}",
+                self.get_name(),
+                if self.is_controlling { "controlling" } else { "controlled" },
+                m.transaction_id,
+                m.contains(ATTR_USE_CANDIDATE),
+            );
+        }
         let addr = self.remote_candidates[remote_index].addr();
         let (ip, port) = (addr.ip(), addr.port());
         let local_pwd = self.ufrag_pwd.local_credentials.pwd.clone();

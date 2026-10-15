@@ -99,3 +99,13 @@ Do this once upstream rtc-ice keeps the previous selected pair across a restart
 on its own and nominates a freshly validated pair without waiting for the next
 check tick (an upstream PR is a follow-up; it needs the captain's word first,
 since it would carry his name).
+
+## Dev-only measurement instrumentation (not part of the patch)
+
+`src/dl_trace.rs` and its call sites — marked `// desklink scout trace:` — are
+a private-lab instrument, not a shipped behaviour change. They are off unless
+`DESKLINK_ICE_TRACE=1` is set, and when on they only write `[ice <us>]` lines to
+stderr, which the bridge forwards untouched. To drop them: delete
+`src/dl_trace.rs`, remove `pub(crate) mod dl_trace;` from `src/lib.rs`, and
+remove the marked blocks from `src/agent/mod.rs` and
+`src/agent/agent_selector.rs` (grep `desklink scout trace`).
