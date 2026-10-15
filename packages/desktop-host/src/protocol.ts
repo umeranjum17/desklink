@@ -84,6 +84,25 @@ export interface CursorInfo {
     limitation?: string;
 }
 
+export interface AudioInfo {
+    source: 'pipewire-monitor';
+    format: 's16le';
+    sample_rate: number;
+    channels: number;
+}
+
+export interface SessionAudio {
+    seq: number;
+    timestamp_us: number;
+    frames: number;
+    bytes: number;
+    format: string;
+    sample_rate: number;
+    channels: number;
+    gap_ms: number;
+    written: boolean;
+}
+
 export interface OpenSessionRequest {
     /** Cursor-free frames with independent source-coordinate position events. */
     cursor?: 'embedded' | 'hidden';
@@ -108,11 +127,15 @@ export interface OpenSessionRequest {
      * streams, so the engine converts each frame once, for the encoder.
      */
     localFrames?: boolean;
+    /** Local system audio; default false, refuses rather than downgrading. */
+    audio?: boolean;
 }
 
 export interface OpenedSession {
     agentIndicator?: boolean;
     cursor?: CursorInfo;
+    /** Null when this session did not request system audio. */
+    audio?: AudioInfo | null;
     sessionId: string;
     generation: number;
     source: {
@@ -138,6 +161,7 @@ export type EngineEvent =
           };
       }
     | { event: 'session.frame.changed'; params: { sessionId: string; seq: number; damage: number[][]; timestamp_us?: number } }
+    | { event: 'session.audio.changed'; params: { sessionId: string; seq: number; timestamp_us: number; bytes: number; gap_ms: number } }
     | { event: 'session.state'; params: { sessionId: string; capture: string; transport: string; firstFrame: boolean } }
     | { event: 'session.restoreToken'; params: { sessionId: string; token: string } }
     | { event: 'session.capture.stopped'; params: { sessionId: string; reason: string } }
@@ -170,6 +194,10 @@ export interface SessionMetrics {
     input_forwarded: number;
     input_applied: number;
     input_rejected: number;
+    audio_frames: number;
+    audio_bytes: number;
+    audio_dropped_bytes: number;
+    audio_gap_micros: number;
 }
 
 /** An engine refusal or control-pipe failure carrying its error code. */

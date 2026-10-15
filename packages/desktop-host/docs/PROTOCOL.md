@@ -152,9 +152,9 @@ capture would read — and `false` where no audio server, or no such sink, is
 reachable. The probe connects to the session's PipeWire, reads the registry and
 leaves: it never prompts, and it never opens a capture. `audio_source` names the
 mechanism that would be read (`null` on the `false` machine), and
-`audio_formats` is the format it arrives in, best first. The engine does not
-carry audio to a receiver yet, so nothing on the wire changes; macOS and Windows
-report `false` because neither has a capture path that would carry it.
+`audio_formats` is the format it arrives in, best first. `session.open{audio:true}`
+starts local audio capture (see "System audio over the local protocol"); macOS and
+Windows report `false`.
 
 `encode` describes what the engine codes from a captured desktop. VP9 (libvpx,
 software; `hardware` describes it) is always there and is the default. `h264`
@@ -227,7 +227,8 @@ trigger a capture request.
   "ttl_seconds": 3600,                 // session lease; default 3600
   "loopback_tcp": false,               // also offer ICE over TCP on 127.0.0.1; default false
   "agent_indicator": false,            // local input feedback; default false (phone control)
-  "local_frames": true                 // keep frames for session.frame; default true
+  "local_frames": true,                // keep frames for session.frame; default true
+  "audio": false                        // capture system audio for session.audio; default false
 }}
 ```
 
@@ -238,7 +239,8 @@ Result:
  "source":{"kind":"monitor","width":2560,"height":1440,"origin":{"x":0,"y":0}},
  "geometry":{"source":{"width":2560,"height":1440},
              "encoded":{"width":2560,"height":1440},
-             "origin":{"x":0,"y":0}},"agentIndicator":false}
+             "origin":{"x":0,"y":0}},"agentIndicator":false,
+ "audio":null}
 ```
 
 `source` selects the desktop. `portal` (or absent) asks the compositor for a
@@ -820,6 +822,41 @@ no frame: both are refused with `error.code = "operation"` (see `session.open`).
 {"id":20,"result":{"seq":8,"still_ms":210,"width":1280,"height":720,"format":"bgrx","damage":[[32,32,32,32]],"written":true}}
 ```
 
+## System audio over the local protocol
+
+Linux `session.open{audio:true}` captures the default PipeWire sink's monitor as
+s16le, 48 kHz stereo PCM on the same engine clock as `session.frame.changed`.
+The open result reports
+`audio:{source:"pipewire-monitor",format:"s16le",sample_rate:48000,channels:2}`;
+without the opt-in it reports `audio:null`.
+Audio connects to the engine's ambient PipeWire server, not the video portal's
+consent-bearing fd or the selected X display. A private Xvfb alone does not
+isolate audio: lab callers must use a task-owned PipeWire server, runtime and
+session-manager policy, never the user's live audio server.
+`session.audio` consumes the next 100 ms chunk, writing samples to a caller-owned
+path (parent directory must exist); JSON carries only metadata. Empty `path`
+consumes metadata only (`written:false`, zero `frames`/`bytes`). `max_bytes`
+defaults to 1048576 and must be at least 4; it rounds down to whole sample frames.
+Truncation discards the chunk's remainder. The eight-chunk queue drops newest
+chunks when full. `seq` advances even across drops. `session.metrics` exposes
+`audio_frames`, `audio_bytes`, `audio_dropped_bytes`, and `audio_gap_micros`.
+`gap_ms` reports a chunk-start delay beyond the prior chunk's sample span.
+Each captured chunk emits `session.audio.changed` with `sessionId`, `seq`,
+`timestamp_us`, `bytes`, and `gap_ms`. Both method and event are local-only:
+the WebSocket bridge refuses the method and suppresses the event.
+Open refuses unavailable audio with `audio-unavailable` (never downgrades).
+On Linux, an encoded source with audio is refused with `operation`; on macOS
+and Windows any audio request is refused with `audio-unavailable`.
+Reading without audio returns `operation`;
+an empty queue or failed write returns `audio`; a sub-frame limit is `malformed`.
+Audio stops on session close/replacement/EOF. It is not a WebRTC track; SDP and
+remote playback are unchanged.
+
+```json
+{"id":40,"method":"session.audio","params":{"session_id":"…","path":"/run/user/1000/audio-0007.raw","max_bytes":262144}}
+{"id":40,"result":{"seq":7,"timestamp_us":1234567,"frames":4800,"bytes":19200,"format":"s16le","sample_rate":48000,"channels":2,"gap_ms":0,"written":true}}
+```
+
 ## Clipboard over the local protocol
 
 The control channel is the path a controller uses (above). A co-located consumer
@@ -927,11 +964,8 @@ anything to show.
 - It does not open ports, register a service, install udev rules, join groups or
   raise capabilities. Kernel input access is a separate, explicit, guided step
   (`desklink-host setup-input` reports what is missing; it does not change it).
-- It does not carry audio to a receiver, and capture is video-only. A phone
-  watching and driving a desktop needs pixels and input, and what a client
-  should do with the desktop's sound is a separate product decision;
-  `capabilities` answers only whether this machine can capture that sound
-  without a prompt.
+- For the local audio boundary, see
+  [System audio over the local protocol](#system-audio-over-the-local-protocol).
 - It does not arbitrate between two controllers. One session, one controller.
 - It does not auto-reconnect with authority it no longer holds: after a lease
   expiry or an engine-side end it requires a fresh `session.open`. A brief

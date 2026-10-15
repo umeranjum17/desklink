@@ -1,4 +1,4 @@
-//! Can this machine capture the desktop's system audio? Asked, never taken.
+//! System audio probing and opt-in capture of the default PipeWire sink monitor.
 //!
 //! Linux captures through a PipeWire monitor of a sink, so the machine fact is
 //! "a reachable sink exposes monitor ports". `capabilities` may answer that: it

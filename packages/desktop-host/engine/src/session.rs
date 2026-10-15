@@ -93,6 +93,10 @@ pub struct Metrics {
     /// Control messages forwarded back to the consumer that owns the device,
     /// instead of being applied to a desktop this engine holds.
     pub input_forwarded: u64,
+    pub audio_frames: u64,
+    pub audio_bytes: u64,
+    pub audio_dropped_bytes: u64,
+    pub audio_gap_micros: u64,
 }
 
 fn tile_hashes(raw: &[u8], width: usize, height: usize) -> Vec<u64> {
@@ -708,6 +712,8 @@ pub struct OpenRequest {
     /// Keep the latest frame and its tile hashes for `session.frame` and
     /// `session.frame.changed`; off, a frame is converted once, for the encoder.
     pub local_frames: bool,
+    /// Capture the desktop's own system audio for `session.audio`.
+    pub audio: bool,
 }
 
 /// Events a session raises for its consumer.
@@ -735,6 +741,14 @@ pub enum SessionEvent {
         timestamp_us: u64,
         seq: u64,
         damage: Vec<[usize; 4]>,
+    },
+    /// One chunk was captured, even if the full queue dropped it, on the same
+    /// clock `session.frame.changed` uses.
+    Audio {
+        seq: u64,
+        timestamp_us: u64,
+        bytes: u64,
+        gap_micros: u64,
     },
     /// One control-channel message from the client, for a source whose device
     /// the consumer drives. The engine applied nothing locally.
@@ -817,6 +831,9 @@ struct Inner {
     encoded: Mutex<Option<Encoded>>,
     /// `OpenRequest::local_frames`: whether `latest` is kept at all.
     local_frames: bool,
+    /// Dropped on close, stopping the PipeWire stream.
+    #[cfg(target_os = "linux")]
+    audio: Mutex<Option<crate::audio::AudioCapture>>,
     cursor_info: serde_json::Value,
 }
 
@@ -1013,6 +1030,13 @@ impl Session {
         request: OpenRequest,
         events: tokio_mpsc::UnboundedSender<Notice>,
     ) -> std::result::Result<Self, SessionError> {
+        #[cfg(not(target_os = "linux"))]
+        if request.audio {
+            return Err(SessionError::new(
+                "audio-unavailable",
+                "system audio capture requires Linux PipeWire",
+            ));
+        }
         if request.cursor == crate::protocol::CursorMode::Hidden {
             #[cfg(not(target_os = "linux"))]
             return Err(SessionError::new(
@@ -1376,6 +1400,14 @@ impl Session {
             SessionError::new("input", format!("no keyboard layout: {error:#}"))
         })?;
 
+        // Refuse before allocating the peer; never silently downgrade.
+        #[cfg(target_os = "linux")]
+        let audio = if request.audio {
+            Some(start_audio(&id, &events)?)
+        } else {
+            None
+        };
+
         // H.264 is offered beside VP9 only when an encoder for it starts on
         // this machine; the answer then decides which one is coded.
         let codec = if !crate::h264::fits(width, height) {
@@ -1439,6 +1471,8 @@ impl Session {
             },
             capture: Mutex::new(Some(capture)),
             layout: Mutex::new(Some(layout)),
+            #[cfg(target_os = "linux")]
+            audio: Mutex::new(audio),
             last_seq: Mutex::new(0),
             control_open: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -1480,6 +1514,12 @@ impl Session {
         height: usize,
         events: tokio_mpsc::UnboundedSender<Notice>,
     ) -> std::result::Result<Self, SessionError> {
+        if request.audio {
+            return Err(SessionError::new(
+                "operation",
+                "an encoded source carries video the consumer already encoded; there is no local desktop audio to capture",
+            ));
+        }
         if width == 0 || height == 0 || width > 7680 || height > 4320 {
             return Err(SessionError::new(
                 "source",
@@ -1529,6 +1569,8 @@ impl Session {
             point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
             capture: Mutex::new(None),
             layout: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            audio: Mutex::new(None),
             last_seq: Mutex::new(0),
             control_open: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -1856,11 +1898,92 @@ impl Session {
     }
 
     pub fn metrics(&self) -> Metrics {
-        self.inner
+        let mut metrics = self
+            .inner
             .metrics
             .lock()
             .map(|m| m.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        #[cfg(target_os = "linux")]
+        if let Some(audio) = lock(&self.inner.audio).as_ref() {
+            let (frames, bytes, dropped_bytes, gap_micros) = audio.totals();
+            metrics.audio_frames = frames;
+            metrics.audio_bytes = bytes;
+            metrics.audio_dropped_bytes = dropped_bytes;
+            metrics.audio_gap_micros = gap_micros;
+        }
+        metrics
+    }
+
+    pub fn audio_info(&self) -> Option<serde_json::Value> {
+        #[cfg(target_os = "linux")]
+        {
+            lock(&self.inner.audio).as_ref()?; // start() accepted the fixed format.
+            return Some(serde_json::json!({
+                "source": "pipewire-monitor", "format": crate::audio::FORMAT,
+                "sample_rate": crate::audio::SAMPLE_RATE, "channels": crate::audio::CHANNELS,
+            }));
+        }
+        #[cfg(not(target_os = "linux"))]
+        None
+    }
+
+    /// Consume one queued PCM chunk; samples never travel through JSON.
+    #[cfg(target_os = "linux")]
+    pub fn audio(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> std::result::Result<serde_json::Value, SessionError> {
+        let no_audio = if lock(&self.inner.encoded).is_some() {
+            "this session forwards an encoded stream and has no local audio"
+        } else {
+            "this session was opened without audio"
+        };
+        let held = lock(&self.inner.audio);
+        let capture = held
+            .as_ref()
+            .ok_or_else(|| SessionError::new("operation", no_audio))?;
+        let frame_bytes = crate::audio::BYTES_PER_FRAME as usize;
+        if max_bytes < frame_bytes {
+            return Err(SessionError::new(
+                "malformed",
+                "max_bytes must hold at least one sample frame",
+            ));
+        }
+        let chunk = capture
+            .take()
+            .ok_or_else(|| SessionError::new("audio", "no audio chunk has arrived yet"))?;
+        let wanted = (max_bytes / frame_bytes * frame_bytes).min(chunk.bytes.len());
+        let written = if path.is_empty() { 0 } else { wanted };
+        let result = serde_json::json!({
+            "seq": chunk.seq,
+            "timestamp_us": crate::protocol::timestamp_us(chunk.at),
+            "frames": written as u64 / crate::audio::BYTES_PER_FRAME,
+            "bytes": written,
+            "format": crate::audio::FORMAT,
+            "sample_rate": crate::audio::SAMPLE_RATE,
+            "channels": crate::audio::CHANNELS,
+            "gap_ms": chunk.gap_micros / 1000,
+            "written": !path.is_empty(),
+        });
+        if written > 0 {
+            std::fs::write(path, &chunk.bytes[..written])
+                .map_err(|error| SessionError::new("audio", error.to_string()))?;
+        }
+        Ok(result)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn audio(
+        &self,
+        _path: &str,
+        _max_bytes: usize,
+    ) -> std::result::Result<serde_json::Value, SessionError> {
+        Err(SessionError::new(
+            "operation",
+            "this platform has no system audio capture",
+        ))
     }
 
     pub async fn accept_answer(&self, sdp: String) -> Result<()> {
@@ -1993,6 +2116,8 @@ impl Inner {
         // out of scope, so the consumer can truthfully say the desktop stopped.
         let capture = self.capture.lock().ok().and_then(|mut held| held.take());
         drop(capture);
+        #[cfg(target_os = "linux")]
+        drop(self.audio.lock().ok().and_then(|mut held| held.take()));
         self.notify(SessionEvent::State {
             capture: "ended",
             transport: String::from("closed"),
@@ -2449,6 +2574,27 @@ impl Inner {
 /// pipeline and the X11 capture loop derive their cadence from the same rule.
 fn frame_interval(max_fps: u32) -> Duration {
     Duration::from_secs_f64(1.0 / max_fps.max(1) as f64)
+}
+
+#[cfg(target_os = "linux")]
+fn start_audio(
+    id: &str,
+    events: &tokio_mpsc::UnboundedSender<Notice>,
+) -> std::result::Result<crate::audio::AudioCapture, SessionError> {
+    let events = events.clone();
+    let id = id.to_owned();
+    crate::audio::AudioCapture::start(Box::new(move |notice| {
+        let _ = events.send(Notice {
+            session_id: id.clone(),
+            event: SessionEvent::Audio {
+                seq: notice.seq,
+                timestamp_us: crate::protocol::timestamp_us(notice.at),
+                bytes: notice.bytes,
+                gap_micros: notice.gap_micros,
+            },
+        });
+    }))
+    .map_err(|reason| SessionError::new("audio-unavailable", reason))
 }
 
 /// The newest captured frame and when it was captured, handed from the capture
@@ -3423,6 +3569,8 @@ mod tests {
             point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
             capture: Mutex::new(None),
             layout: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            audio: Mutex::new(None),
             last_seq: Mutex::new(0),
             control_open: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -3679,6 +3827,8 @@ mod tests {
             #[cfg(target_os = "linux")]
             point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
             layout: Mutex::new(Some(Layout::from_environment().expect("a keymap"))),
+            #[cfg(target_os = "linux")]
+            audio: Mutex::new(None),
             last_seq: Mutex::new(0),
             control_open: AtomicBool::new(true),
             closed: AtomicBool::new(false),
@@ -4086,6 +4236,7 @@ mod tests {
             loopback_tcp: false,
             agent_indicator: false,
             local_frames: true,
+            audio: false,
         }
     }
 

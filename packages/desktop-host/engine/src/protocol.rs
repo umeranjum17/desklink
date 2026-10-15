@@ -144,6 +144,11 @@ pub struct OpenParams {
     /// the engine then spends nothing per frame on either.
     #[serde(default = "default_local_frames")]
     pub local_frames: bool,
+    /// Capture the desktop's own system audio for `session.audio`. Absent means
+    /// video only; there is never a silent downgrade, so a caller that asks and
+    /// cannot be answered is refused.
+    #[serde(default)]
+    pub audio: bool,
 }
 
 fn default_local_frames() -> bool {
@@ -242,6 +247,23 @@ pub struct SessionRef {
     pub session_id: String,
     #[serde(default)]
     pub generation: Option<u64>,
+}
+
+/// Read the desktop's own audio, the way `FrameParams` reads a frame: bytes go
+/// to the caller's path and JSON carries only metadata.
+#[derive(Debug, Deserialize)]
+pub struct AudioParams {
+    pub session_id: String,
+    #[serde(default)]
+    pub path: String,
+    /// The most bytes to write. Bounded to whole sample frames, so a truncated
+    /// chunk never ends mid-sample.
+    #[serde(default = "default_max_audio_bytes")]
+    pub max_bytes: usize,
+}
+
+fn default_max_audio_bytes() -> usize {
+    1 << 20
 }
 
 #[derive(Debug, Deserialize)]
