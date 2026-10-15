@@ -88,7 +88,7 @@ selected display with ScreenCaptureKit, encodes VP9 (and H.264 through
 VideoToolbox, for a receiver that asks for it), and uses the same WebRTC
 offer, ICE, control-channel, lease, and metrics flow as Linux. Capture currently
 uses one bounded ScreenCaptureKit stream (three-frame queue); the backend may
-supply fewer frames. Audio is not captured.
+supply fewer frames. Audio is not captured on macOS.
 
 `capabilities` is non-prompting and reports active displays (pixel and point
 dimensions, origin and scale), the current keyboard layout, console state, and
@@ -127,7 +127,9 @@ require fresh consent. The macOS engine requires a VP9-enabled build
     "cursor": "embedded",
     "cursor_modes": ["embedded", "hidden"],
     "cursor_positions": {"x11": true, "wayland": "ext-image-copy-capture-v1"},
-    "audio": false
+    "audio": true,
+    "audio_formats": ["s16le"],
+    "audio_source": "pipewire-monitor"
   },
   "encode": {"codecs": ["vp9", "h264"], "hardware": false,
              "h264": {"encoder": "vaapi", "hardware": true}},
@@ -143,6 +145,16 @@ require fresh consent. The macOS engine requires a VP9-enabled build
   "encoded": {"codecs": ["h264"]}
 }
 ```
+
+`capture.audio` (Linux) is a live machine fact, never a build flag: it is `true`
+exactly when a reachable PipeWire sink exposes monitor ports — the node a monitor
+capture would read — and `false` where no audio server, or no such sink, is
+reachable. The probe connects to the session's PipeWire, reads the registry and
+leaves: it never prompts, and it never opens a capture. `audio_source` names the
+mechanism that would be read (`null` on the `false` machine), and
+`audio_formats` is the format it arrives in, best first. The engine does not
+carry audio to a receiver yet, so nothing on the wire changes; macOS and Windows
+report `false` because neither has a capture path that would carry it.
 
 `encode` describes what the engine codes from a captured desktop. VP9 (libvpx,
 software; `hardware` describes it) is always there and is the default. `h264`
@@ -915,8 +927,11 @@ anything to show.
 - It does not open ports, register a service, install udev rules, join groups or
   raise capabilities. Kernel input access is a separate, explicit, guided step
   (`desklink-host setup-input` reports what is missing; it does not change it).
-- It does not carry audio. A phone watching and driving a desktop needs pixels
-  and input; audio is a different product decision.
+- It does not carry audio to a receiver, and capture is video-only. A phone
+  watching and driving a desktop needs pixels and input, and what a client
+  should do with the desktop's sound is a separate product decision;
+  `capabilities` answers only whether this machine can capture that sound
+  without a prompt.
 - It does not arbitrate between two controllers. One session, one controller.
 - It does not auto-reconnect with authority it no longer holds: after a lease
   expiry or an engine-side end it requires a fresh `session.open`. A brief

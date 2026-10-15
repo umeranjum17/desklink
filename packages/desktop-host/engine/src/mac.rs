@@ -184,6 +184,7 @@ fn capabilities() -> Value {
             "formats": ["bgra"],
             "cursor": "embedded",
             "cursor_modes": ["embedded"],
+            // ScreenCaptureKit audio is not wired up; macOS is out of scope.
             "audio": false,
             "displays": displays(),
             "grant": if capture_granted { "granted" } else { "missing-screen-recording" },

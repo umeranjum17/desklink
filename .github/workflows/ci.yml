@@ -118,7 +118,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config libclang-dev \
             libvpx-dev libpipewire-0.3-dev libxkbcommon-dev libwayland-dev libfreetype6-dev libfontconfig1-dev libevdev-dev libxcb1-dev libxcursor-dev libxext-dev xvfb x11-utils xauth tesseract-ocr \
-            dbus at-spi2-core python3-gi gir1.2-gtk-3.0 sway foot grim python3-pil fonts-dejavu-core
+            dbus at-spi2-core python3-gi gir1.2-gtk-3.0 sway foot grim python3-pil fonts-dejavu-core \
+            pipewire wireplumber
       - name: Rust (the version the release build pins)
         run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
       - uses: actions/cache@v4
@@ -149,6 +150,11 @@ jobs:
       - run: node packages/desktop-host/test/encoded-flow.mjs
         env:
           DESKLINK_AXI_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/desklink-host
+      # `capture.audio` against two private PipeWire servers. It prints a skip and
+      # passes where the pipewire/wireplumber daemons are not installed.
+      - run: node packages/desktop-host/test/capabilities-audio.mjs
+        env:
+          DESKLINK_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/desklink-host
       # The client hook's P3a baseline roam (12s same-address outage) on an
       # owned Xvfb, reusing the engine build above. Report-only
       # (continue-on-error): CI runners are small and contended, so its timing

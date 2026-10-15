@@ -7,6 +7,8 @@
 //! over whatever authenticated channel it already has.
 
 #[cfg(target_os = "linux")]
+mod audio;
+#[cfg(target_os = "linux")]
 mod capture;
 #[cfg(target_os = "macos")]
 #[path = "capture_mac.rs"]
