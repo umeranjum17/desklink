@@ -248,9 +248,20 @@ try {
     // Metro serves the example app, so it runs where that app's own `expo`
     // lives: the repository root is not an Expo project and has no SDK to read.
     // Another lane may hold 8081, so Metro takes a port the operating system
-    // says is free and the device's own 8081 is reversed onto it.
+    // says is free and the device's own 8081 is reversed onto it — that is the
+    // real-device path, where the app resolves its bundler as localhost:8081.
+    // An emulator resolves it as the host alias 10.0.2.2:8081 instead, which
+    // adb reverse does not intercept, so there Metro has to hold the host's
+    // own 8081 and the run fails loudly when another process has it.
+    const onEmulator = /^emulator-/.test(serial);
     const metroProbe = createServer();
-    await new Promise(ok => metroProbe.listen(0, '127.0.0.1', ok));
+    const metroBound = new Promise((ok, failed) => {
+        metroProbe.once('error', failed);
+        metroProbe.listen(onEmulator ? 8081 : 0, '127.0.0.1', ok);
+    });
+    await metroBound.catch(error => {
+        throw new Error(`an emulator reaches Metro only on the host's own 8081, which is already held: ${error.message}`);
+    });
     const metroPort = metroProbe.address().port;
     metroProbe.close();
     receipt.metroPort = metroPort;
