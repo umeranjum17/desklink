@@ -68,8 +68,24 @@ const DIAL_RETRY_MS = 250;
 const DIAL_TIMEOUT_MS = 5000;
 /** How long the host holds a session with no carrier (the bridge's `reattachMs`); past it, reopen. */
 const REATTACH_WINDOW_MS = 30_000;
-/** How long a reattached carrier waits for the old ICE pair before asking for a restart. */
-const REATTACH_GRACE_MS = 300;
+/**
+ * How long a reattached carrier waits for the old ICE pair before asking for
+ * a restart — the wait for a brief blip: on an unchanged path the old pair
+ * resumes in ~100 ms and only the carrier was missing, so the wait keeps the
+ * restart unspent while the picture comes back on its own.
+ */
+const REATTACH_GRACE_MS = 200;
+/**
+ * A picture still this long is a real outage, not a blip: the old pair is
+ * not resuming, so the wait that protects a blip would only cost the recovery
+ * its 2 s bar. The line separates the two measured regimes — blips of about
+ * a second heal on the old pair in ~100 ms; by 12 s the pair is gone. The
+ * picture's own last motion is the clock: a re-dialled carrier's age resets
+ * with every refused attempt, so it cannot tell the two apart.
+ */
+const REATTACH_GRACE_BLIP_MAX_MS = 4000;
+/** A real outage's wait: one stats beat — enough to see a picture already moving. */
+const REATTACH_GRACE_SETTLE_MS = 50;
 /**
  * How long the media path may carry nothing at all before a session that says
  * `live` stops saying so. The engine's transport state reaches the client over
@@ -1154,9 +1170,16 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 void establish(authorization);
                 return;
             }
-            // The old pair on an unchanged path resumes in ~100 ms: give it a moment before spending a restart.
+            // A picture that has only just stopped may still be riding its
+            // old ICE pair back: on an unchanged path that pair resumes in
+            // ~100 ms, so a brief blip waits that moment out before a restart
+            // is spent. A picture still past the line is a real outage — the
+            // wait shortens to one stats beat, because waiting out a blip
+            // that never comes would cost the recovery its bar.
             const held = opened.current, before = mediaRef.current;
             cancelRestart();
+            const stillMs = mediaMovingAt.current === null ? Infinity : Date.now() - mediaMovingAt.current;
+            const graceMs = stillMs < REATTACH_GRACE_BLIP_MAX_MS ? REATTACH_GRACE_MS : REATTACH_GRACE_SETTLE_MS;
             restartTimer.current = setTimeout(() => {
                 restartTimer.current = null;
                 void getStats().catch(() => []).then((rows) => {
@@ -1170,7 +1193,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                     restartAttempts.current = restartCycles.current = 0;
                     scheduleRestart(0);
                 });
-            }, REATTACH_GRACE_MS);
+            }, graceMs);
         })();
     }, [adoptCarrier, cancelReconnect, cancelRestart, discardSession, establish, getStats, onTransportState, scheduleRestart, stopDialing, teardown, update]);
 

@@ -16,9 +16,11 @@
 // `restore` retires the app's old browser-facing tuple, lifts the discard and
 // re-opens signalling, so only a fresh ICE generation can find the replacement.
 // `restore negative` restores signalling but LEAVES THE MEDIA CUT — the control
-// whose picture-recovery verdict must fail. `report`/`quit` return a snapshot.
-// Every protocol frame that names a session, a method or ICE credentials is
-// forwarded as a `wire` record, so the run's receipt can name what crossed.
+// whose picture-recovery verdict must fail. `restore resume` lifts the cut on
+// the SAME tuples — the blip where the old ICE pair can come back — and
+// `report`/`quit` return a snapshot. Every protocol frame that names a
+// session, a method or ICE credentials is forwarded as a `wire` record, so the
+// run's receipt can name what crossed.
 import { createInterface } from 'node:readline';
 import { ShapedLink, startSignalling } from './shaped-link.mjs';
 
@@ -83,13 +85,20 @@ async function handle(command) {
         emit({ type: 'cut', at: Date.now(), link: link.snapshot() });
         return;
     }
-    if (command === 'restore' || command === 'restore negative') {
+    if (command === 'restore' || command === 'restore negative' || command === 'restore resume') {
         const negative = command.endsWith('negative');
-        try {
-            await link.rebindBrowserSide();
-        } catch (error) {
-            emit({ type: 'error', message: `rebind: ${error instanceof Error ? error.message : error}` });
-            return;
+        const resume = command.endsWith('resume');
+        // A resume restores the same tuples: the old ICE pair can come back on
+        // them, which is the blip the client's reattach grace protects. The
+        // full restore rebinds instead, so only a fresh generation can find
+        // the replacement.
+        if (!resume) {
+            try {
+                await link.rebindBrowserSide();
+            } catch (error) {
+                emit({ type: 'error', message: `rebind: ${error instanceof Error ? error.message : error}` });
+                return;
+            }
         }
         const at = Date.now();
         // The negative restores the path but keeps cutting MEDIA and nothing
@@ -98,9 +107,9 @@ async function handle(command) {
         // still fail. A full-path discard would only prove a dead transport.
         link.set(negative ? { discardMedia: true } : { discard: false }, negative
             ? 'negative control: signalling restored, media stays cut'
-            : 'owned path back');
+            : resume ? 'path back on the same tuples' : 'owned path back');
         relay.setCut(false);
-        emit({ type: 'restored', at, negative, link: link.snapshot() });
+        emit({ type: 'restored', at, negative, resume, link: link.snapshot() });
         return;
     }
     if (command === 'report' || command === 'quit') emit({ type: 'report', link: link.snapshot() });
