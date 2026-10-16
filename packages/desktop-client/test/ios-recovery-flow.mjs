@@ -352,15 +352,17 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
     // commands resolve the waits below, so a stalled cut names what the relay
     // said rather than hanging.
     const wire = [];
-    // Every relay log line with the host-clock time it arrived, so the wire
-    // truth of a recovery — the first media datagram the relay forwarded for
-    // the new generation — is read on the same clock as `pathAt` without
-    // estimating the Mac's.
+    // Every relay log line, with the host-clock time it arrived for link.log.
+    // Wire truth is read on the relay's own clock instead: its lines reach
+    // this host through the ssh pipe up to a second late, so the first media
+    // datagram, a carrier dial and the path's return (`restored.at`) are all
+    // compared as the relay stamped them (`at=`), with no clock estimate.
     const relayLog = [];
-    const firstMediaAfter = (since, minGeneration = 2) => {
-        for (const { at, line } of relayLog) {
-            const media = /^link generation (\d+) media through /.exec(line);
-            if (media !== null && Number(media[1]) >= minGeneration && at >= since) return at;
+    const relayAt = (pattern, since) => {
+        for (const { line } of relayLog) {
+            const match = pattern.exec(line);
+            const at = Number(/ at=(\d+)$/.exec(line)?.[1]);
+            if (match !== null && at >= since) return { at, match };
         }
         return null;
     };
@@ -693,11 +695,13 @@ test -s "$D/tmp/rec-${name}.mov"`);
                 leg.wire = wire.slice();
             }
             // The bar is wire truth: the first generation-2 media the relay
-            // forwarded, on this host's clock beside `pathAt`. The screenshot
-            // probe lags the wire by over a second, so `recoveryMs` is the
-            // recorded human view of the recovery, not its judgment.
-            const wireMediaAt = firstMediaAfter(pathAt);
-            leg.firstFrameAfterPathBackMs = wireMediaAt === null ? null : wireMediaAt - pathAt;
+            // forwarded after it lifted the cut, both on the relay's clock.
+            // The screenshot probe lags the wire by over a second, so
+            // `recoveryMs` is the recorded human view of the recovery, not its
+            // judgment.
+            const wireMedia = relayAt(/^link generation (\d+) media through /, restored.at);
+            leg.relayPathBackAt = restored.at;
+            leg.firstFrameAfterPathBackMs = wireMedia === null || Number(wireMedia.match[1]) < 2 ? null : wireMedia.at - restored.at;
             assert(leg.firstFrameAfterPathBackMs !== null, 'no generation-2 media reached the relay after the path returned');
             assert(leg.firstFrameAfterPathBackMs <= 2000,
                 `the first generation-2 frame reached the relay ${leg.firstFrameAfterPathBackMs}ms after the path returned (the bar is 2000)`);
@@ -819,6 +823,16 @@ test -s "$D/tmp/rec-${name}.mov"`);
             }
             await waitStatus('connected', 20000);
 
+            // The wait ran: the app re-dialled its carrier after the path came
+            // back, and the old pair's media flowed again — both on the relay's
+            // clock, so the receipt shows whether the media beat the wait out.
+            const reattach = relayAt(/^signalling carrier accepted /, restored.at);
+            const mediaBack = relayAt(/^link media to browser after /, restored.at);
+            leg.reattachAfterPathBackMs = reattach === null ? null : reattach.at - restored.at;
+            leg.mediaBackAfterPathBackMs = mediaBack === null ? null : mediaBack.at - restored.at;
+            assert(leg.reattachAfterPathBackMs !== null, 'the app never re-dialled after the blip, so the reattach wait never ran');
+            assert(leg.mediaBackAfterPathBackMs !== null, 'no media reached the browser side after the blip');
+
             // Same session, one open, no close or revoke — and no restart:
             // the resumed pair carried the recovery on its own.
             const opens = wire.filter((w) => w.dir === 'app>' && w.method === 'session.open').length;
@@ -857,7 +871,7 @@ test -s "$D/tmp/rec-${name}.mov"`);
             receipt.cases[name] = { ...leg, elapsedMs: Date.now() - startedAt };
             saveReceipt();
         }
-        log(`${name}: picture ${leg.recoveryMs}ms, restarts ${leg.wireOps?.restartIce}, generation ${leg.generation}`);
+        log(`${name}: carrier back ${leg.reattachAfterPathBackMs}ms, media back ${leg.mediaBackAfterPathBackMs}ms, picture ${leg.recoveryMs}ms, restarts ${leg.wireOps?.restartIce}, generation ${leg.generation}`);
     };
 
     // DESKLINK_IOS_ONLY names a leg subset for diagnosis; unset runs the proof

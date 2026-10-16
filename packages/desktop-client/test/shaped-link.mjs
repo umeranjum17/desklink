@@ -215,6 +215,9 @@ class ShapedLink {
         this.marks.push({ at: Date.now(), why, shape: { ...shape }, countersBefore: { ...this.counters } });
         this.shape = shape;
         this.discardMedia = shape.discardMedia === true;
+        // The first media to the browser after each shape change is logged,
+        // so a restore names when the picture's datagrams flowed again.
+        this.mediaSinceShape = false;
         this.log(`link → ${JSON.stringify(shape)} (${why})`);
     }
 
@@ -307,7 +310,11 @@ class ShapedLink {
                 socket.send(payload, to.port, to.ip);
                 if (direction === 'toBrowser' && isMedia(payload) && !route.mediaSeen) {
                     route.mediaSeen = true;
-                    this.log(`link generation ${route.generation} media through ${socket.address().address}:${socket.address().port}`);
+                    this.log(`link generation ${route.generation} media through ${socket.address().address}:${socket.address().port} at=${Date.now()}`);
+                }
+                if (direction === 'toBrowser' && isMedia(payload) && this.mediaSinceShape === false) {
+                    this.mediaSinceShape = true;
+                    this.log(`link media to browser after "${this.marks.at(-1).why}" generation ${route.generation} at=${Date.now()}`);
                 }
             } catch {
                 // A datagram still inside a delay when the run ended. Nothing is
@@ -481,6 +488,7 @@ function startSignalling(link, bridgePort, token, { relayOnly = false, onWire = 
         server.on('connection', (client) => {
             // A dial that lands while the path is cut is refused, exactly as a
             // radio outage refuses it: the app must re-dial after the restore.
+            link.log(`signalling carrier ${cut ? 'refused (cut)' : 'accepted'} at=${Date.now()}`);
             if (cut) { client.close(); return; }
             const host = new WebSocket(upstream);
             const send = (socket, message) => socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify(message));
