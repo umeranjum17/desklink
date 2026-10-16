@@ -15,5 +15,8 @@
         "react-native": "0.86.3",
         "react-native-safe-area-context": "~5.7.0",
         "react-native-webrtc": "124.0.8"
+    },
+    "overrides": {
+        "expo-modules-core": "57.0.23"
     }
 }
