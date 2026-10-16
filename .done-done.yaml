@@ -18,7 +18,10 @@ journeys:
 # packages/desktop-client/test/ios-flow.mjs on the Mac's own simulator, with
 # DESKLINK_IOS_GLASS=1 DESKLINK_IOS_IPAD=1 for finger-on-glass; bridge-retention
 # and carrier/hook reattach matrices run via packages/desktop-client/test/roam-flow.mjs
-# with --product-retention and the adapter flags its header documents.
+# with --product-retention and the adapter flags its header documents. The
+# Android journey (live picture, tap, tap-to-desktop-point mapping, cursor) runs
+# via packages/desktop-client/test/android-flow.mjs on an attached emulator or
+# phone (ANDROID_SERIAL, DESKLINK_ANDROID_HOST=10.0.2.2 on an emulator).
 
 # This repo's coding agent, over agent in ~/.done-done/config.yaml (model, effort and the other agent settings stay there).
 # agent: opencode
