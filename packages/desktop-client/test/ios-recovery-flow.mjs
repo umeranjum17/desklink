@@ -86,6 +86,7 @@
 // `background60`; unset runs the proof legs, drop5 and background60),
 // DESKLINK_IOS_CUT_NEGATIVE (1 restores signalling but leaves the media cut:
 // the cut leg's picture verdict must then fail),
+// DESKLINK_IOS_RESUME_OFF_MS (the resume leg's blip length, default 1500),
 // DESKLINK_ENGINE, DESKLINK_VERIFY_TARGET (x11_target),
 // DESKLINK_ICE_TRACE (1 records the engine's ICE timeline into engine.log).
 import assert from 'node:assert/strict';
@@ -709,8 +710,12 @@ test -s "$D/tmp/rec-${name}.mov"`);
             const recovered = shot(join(out, `screen-${name}-recovered.png`));
             leg.letterboxPt = longestDarkRun(recovered, screenPoints());
             assert(leg.letterboxPt < 130, `a ${leg.letterboxPt.toFixed(0)} pt black run splits the recovered picture: letterboxed, not cover`);
+            // Still advancing well after the recovery: the fixture's marker cycles,
+            // so one later shot can land on the frozen frame's own phase —
+            // two fresh changes are the proof, not one sample.
             await sleep(1500);
-            assert(hashShot(shot(join(out, `screen-${name}-recovered-b.png`))) !== frozen, 'the picture stuck on the outage frame after the recovery');
+            shot(join(out, `screen-${name}-recovered-b.png`));
+            await waitAdvancing(frozen, 5000).catch(() => assert.fail('the picture stuck on the outage frame after the recovery'));
             leg.postTap = await tapPicture();
             leg.postKey = await tapKey();
 
@@ -768,7 +773,9 @@ test -s "$D/tmp/rec-${name}.mov"`);
     // out on the old pair — the picture advances again with the same
     // generation and no `session.restart_ice` ever crosses the wire. A
     // restart here means the protection branch was lost.
-    const RESUME_OFF_MS = 1500;
+    // DESKLINK_IOS_RESUME_OFF_MS holds the blip longer, past the client's
+    // 4 s blip line, where its wait shortens to one stats beat.
+    const RESUME_OFF_MS = Number(process.env.DESKLINK_IOS_RESUME_OFF_MS ?? 1500);
     const resumeCase = async () => {
         const name = 'resume';
         const leg = { name };
@@ -862,8 +869,12 @@ test -s "$D/tmp/rec-${name}.mov"`);
             assert.equal(leg.generation, 1, `the blip reached generation ${leg.generation}; the old pair did not carry the recovery`);
             assert(final.routes.find((r) => r.generation === 1)?.mediaSeen === true, 'generation-1 media never traversed the relay');
 
+            // Still advancing well after the blip: the fixture's marker cycles,
+            // so one later shot can land on the frozen frame's own phase —
+            // two fresh changes are the proof, not one sample.
             await sleep(1500);
-            assert(hashShot(shot(join(out, `screen-${name}-recovered-b.png`))) !== frozen, 'the picture stuck on the outage frame after the blip');
+            shot(join(out, `screen-${name}-recovered-b.png`));
+            await waitAdvancing(frozen, 5000).catch(() => assert.fail('the picture stuck on the outage frame after the blip'));
             leg.postTap = await tapPicture();
             stopRecording(name);
             leg.recording = `${name}.mov`;
