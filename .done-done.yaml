@@ -22,6 +22,9 @@ journeys:
 # Window-share pointer refusal runs via packages/desktop-host/test/portal-g2g-flow.mjs
 # --input-proof in its private sway cage, with DESKLINK_PORTAL_XDPW naming an
 # xdg-desktop-portal-wlr that reports a window's size (its header has the recipe).
+# The Android journey (live picture, tap, tap-to-desktop-point mapping, cursor) runs
+# via packages/desktop-client/test/android-flow.mjs on an attached emulator or
+# phone (ANDROID_SERIAL, DESKLINK_ANDROID_HOST=10.0.2.2 on an emulator).
 
 # This repo's coding agent, over agent in ~/.done-done/config.yaml (model, effort and the other agent settings stay there).
 # agent: opencode

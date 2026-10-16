@@ -14,7 +14,14 @@
  *    statistics keep counting decoded frames across the capture window;
  *  - the cursor is real: a swipe across the picture moves the desktop's
  *    pointer, the fixture records where it landed, and the capture after the
- *    swipe shows the pointer there.
+ *    swipe shows the pointer there;
+ *  - the mapping is true: a tap lands on the desktop point the finger covers.
+ *    The portrait picture fits the width, so a tap's x fraction maps to the
+ *    same fraction of the desktop absolutely, and two taps a fixed distance
+ *    apart in y must move the desktop pointer by that distance divided by the
+ *    fit scale. A build whose portrait picture is zoomed past the screen (the
+ *    #118 regression #168 fixed) fails both: its taps land at about a third of
+ *    the expected desktop x and its y steps shrink the same way.
  *
  * The host side runs here, on a private Xvfb (display >= 170, its own cookie),
  * with the repository's own `x11_target` fixture repainting, the bridge on a
@@ -57,7 +64,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { homedir } from 'node:os';
@@ -312,6 +319,43 @@ try {
     const beforeButtons = buttons();
     adb('shell', 'input', 'tap', String(Math.round(1080 * 0.5)), String(Math.round(2400 * 0.25)));
     await sleep(1500);
+    await waitFor(() => buttons() > beforeButtons, 'the tap to reach the desktop', 30000);
+    const button = logs.fixture.split('\n').filter(line => line.includes('"button"')).pop();
+
+    // The mapping: a tap must land on the desktop point the finger covers. The
+    // fixture window fills the captured root at (0,0), so its event coordinates
+    // are desktop pixels one to one. The portrait picture fits the width, so
+    // the tap's x fraction maps absolutely (no inset can shift it), and the y
+    // slope between two taps is the fit's reciprocal regardless of where the
+    // picture is anchored. A zoomed portrait picture (#118's regression) fails
+    // both: its x lands at a fraction of the expected point and its y slope
+    // shrinks by the same zoom.
+    const width = Number(/Physical size: (\d+)x(\d+)/.exec(adb('shell', 'wm', 'size'))?.[1]);
+    assert(width > 0, 'the device to report its screen width');
+    const fit = width / 1280; // the encoded surface is the 1280x720 Xvfb root
+    const buttonUps = () => logs.fixture.split('\n').filter(line => line.includes('"button"') && line.includes('"up"'));
+    const tapsBefore = buttonUps().length;
+    // Inside the picture on every portrait screen: the picture spans the full
+    // width and starts at the top inset, so y 300 and 500 are on the picture
+    // whenever a status bar is no taller than 300 device px.
+    adb('shell', 'input', 'tap', String(Math.round(width * 0.25)), '300');
+    await sleep(1200);
+    adb('shell', 'input', 'tap', String(Math.round(width * 0.75)), '500');
+    await sleep(1200);
+    await waitFor(() => buttonUps().length >= tapsBefore + 2, 'the mapping taps to reach the desktop', 30000);
+    const mappingTaps = buttonUps().slice(tapsBefore).map(line => JSON.parse(line));
+    const atX = want => mappingTaps.find(event => Math.abs(event.x - want) <= 2);
+    const left = atX(Math.round(1280 * 0.25));
+    const right = atX(Math.round(1280 * 0.75));
+    assert(left && right, `the mapping taps to land at desktop x ${Math.round(1280 * 0.25)} and ${Math.round(1280 * 0.75)}: ` +
+        `got ${mappingTaps.map(event => `(${event.x},${event.y})`).join(' ')}`);
+    const slope = (right.y - left.y) / 200;
+    assert(Math.abs(slope - 1 / fit) <= 0.05, `the mapping y slope to be ${1 / fit}, got ${slope}`);
+    // Both taps come from one picture: the anchored top each implies must agree.
+    const topFromLeft = 300 - left.y * fit;
+    const topFromRight = 500 - right.y * fit;
+    assert(Math.abs(topFromLeft - topFromRight) <= 4 && topFromLeft >= -4 && topFromLeft <= 300,
+        `the mapping taps to agree on the picture's top: ${topFromLeft} vs ${topFromRight}`);
 
     // The cursor: a swipe across the picture moves the desktop's pointer, and
     // the fixture records where it landed. Both ends must start inside the
@@ -324,10 +368,6 @@ try {
         String(Math.round(1080 * 0.75)), String(Math.round(2400 * 0.13)), '600');
     await waitFor(() => pointers() > before, 'the fixture pointer to move', 120000);
     const cursor = logs.fixture.split('\n').filter(line => line.includes('"pointer"')).pop();
-    // The tap is read after the swipe, because the fixture's own stdout is
-    // block-buffered: a swipe's flood of events is what flushes the tap line.
-    await waitFor(() => buttons() > beforeButtons, 'the tap to reach the desktop', 30000);
-    const button = logs.fixture.split('\n').filter(line => line.includes('"button"')).pop();
 
     Object.assign(receipt, {
         captures: [first, second, capture('03-tap-received.png'), capture('04-cursor-moved.png')].map(path => path.replace(homedir(), '~')),
@@ -336,6 +376,7 @@ try {
         lastReport: JSON.parse(reports.at(-1)),
         cursor: cursor.trim(),
         tap: button.trim(),
+        mapping: { left, right, slope, fit },
     });
     receipt.outcome = 'PASS';
     console.log(`PASS: the example app opens a live desktop on ${serial}; evidence ${out}`);
@@ -355,6 +396,7 @@ try {
     }
     if (xvfb) { try { await stopOwnedXvfb(xvfb); } catch (error) { receipt.cleanup = String(error); } }
     claim.release();
+    rmSync(scratch, { recursive: true, force: true });
     for (const name of ['bridge', 'fixture', 'metro']) writeFileSync(join(out, `${name}.log`), logs[name]);
     writeFileSync(join(out, 'run.json'), `${JSON.stringify(receipt, null, 2)}\n`);
 }
