@@ -198,7 +198,9 @@ build has, not what this machine can necessarily use.
 
 `input.unavailable_reason` and `input.grant` describe the portal/uinput path:
 without kernel input access a portal session opens and captures, but input
-messages are refused with `input-unavailable`. X display capture uses XTest
+messages are refused with `input-unavailable`. A Hyprland window share's
+pointer moves are the exception: they warp through Hyprland's own IPC instead
+of any device (see Input and clipboard). X display capture uses XTest
 instead and does not require that grant. The engine probes XTest on that named
 display; if it is unavailable, capture and clipboard still open, and input
 messages are refused with `input-unavailable`. X11 clipboard uses CLIPBOARD on the
