@@ -121,6 +121,15 @@ const receipt = {
 };
 const children = [];
 let xvfb, target, bridge, metro, receiver;
+// Every reverse this run creates is undone at the end: adbd keeps a reverse
+// listener until it is removed or the transport goes away, and a device that
+// collects them across runs eventually refuses the next bind with "cannot
+// bind listener: Operation not permitted".
+const reverses = [];
+const reverse = (...args) => {
+    adb('reverse', ...args);
+    reverses.push(args[0]);
+};
 // This machine leaves the device's own Wi-Fi exactly as it found it.
 const wifiOff = process.argv.includes('--wifi-off');
 let wifiWasOn = false;
@@ -191,8 +200,8 @@ try {
         // The signalling socket and the receiver ride `adb reverse`; the media
         // forward is the engine's loopback port, which it picks per session and
         // the app reports as it sees the candidate.
-        adb('reverse', `tcp:${bridgePort}`, `tcp:${bridgePort}`);
-        adb('reverse', `tcp:${receiver.address().port}`, `tcp:${receiver.address().port}`);
+        reverse(`tcp:${bridgePort}`, `tcp:${bridgePort}`);
+        reverse(`tcp:${receiver.address().port}`, `tcp:${receiver.address().port}`);
     }
     const link = `desklink-example://connect?url=${encodeURIComponent(`ws://${phoneHost}:${bridgePort}/desktop?token=${token}`)}`
         + `&report=${encodeURIComponent(`http://${phoneHost}:${receiver.address().port}/report`)}`;
@@ -210,7 +219,7 @@ try {
             receipt.loopback_tcp_ports.push(`${port} (withheld)`);
             return;
         }
-        adb('reverse', `tcp:${port}`, `tcp:${port}`);
+        reverse(`tcp:${port}`, `tcp:${port}`);
         receipt.loopback_tcp_ports.push(port);
     };
 
@@ -218,6 +227,12 @@ try {
         // Every other desklink build takes this lock; the example app's Gradle
         // build is a heavy job like any other.
         const build = spawnSync('flock', ['/tmp/fm-desklink-heavy.lock', 'bash', '-c', [
+            // install-links packs the parent package into node_modules, and npm
+            // re-packs only when the dependency's manifest changes — not when
+            // its source does — so a checkout that edited the package and a
+            // node_modules left by an earlier build would ship the old code.
+            // Drop the packed copy so the install re-packs from this checkout.
+            'rm -rf node_modules/@desklink',
             'npm install --no-audit --no-fund',
             'npx expo prebuild --platform android --no-install',
             'cd android && ./gradlew --no-daemon assembleDebug',
@@ -233,16 +248,27 @@ try {
     // Metro serves the example app, so it runs where that app's own `expo`
     // lives: the repository root is not an Expo project and has no SDK to read.
     // Another lane may hold 8081, so Metro takes a port the operating system
-    // says is free and the device's own 8081 is reversed onto it.
+    // says is free and the device's own 8081 is reversed onto it — that is the
+    // real-device path, where the app resolves its bundler as localhost:8081.
+    // An emulator resolves it as the host alias 10.0.2.2:8081 instead, which
+    // adb reverse does not intercept, so there Metro has to hold the host's
+    // own 8081 and the run fails loudly when another process has it.
+    const onEmulator = /^emulator-/.test(serial);
     const metroProbe = createServer();
-    await new Promise(ok => metroProbe.listen(0, '127.0.0.1', ok));
+    const metroBound = new Promise((ok, failed) => {
+        metroProbe.once('error', failed);
+        metroProbe.listen(onEmulator ? 8081 : 0, '127.0.0.1', ok);
+    });
+    await metroBound.catch(error => {
+        throw new Error(`an emulator reaches Metro only on the host's own 8081, which is already held: ${error.message}`);
+    });
     const metroPort = metroProbe.address().port;
     metroProbe.close();
     receipt.metroPort = metroPort;
     metro = start('metro', 'npx', ['expo', 'start', '--port', String(metroPort)], { ...env, CI: '1' }, example);
     await waitFor(() => /Waiting on http/.test(logs.metro), 'Metro');
     adb('install', '-r', '-g', apk);
-    adb('reverse', 'tcp:8081', `tcp:${metroPort}`);
+    reverse('tcp:8081', `tcp:${metroPort}`);
 
     // The journey. Another desklink app may answer the same `desklink-example`
     // link on this device, so the run names this build's own activity instead
@@ -322,6 +348,7 @@ try {
     for (const [, child] of children) child.kill('SIGTERM');
     await sleep(700);
     for (const [, child] of children) { try { process.kill(child.pid, 0); child.kill('SIGKILL'); } catch { child.exitCode ??= 0; } }
+    for (const spec of reverses.splice(0)) { tryAdb('reverse', '--remove', spec); }
     receiver?.close();
     if (wifiOff && wifiWasOn) {
         try { adb('shell', 'svc', 'wifi', 'enable'); } catch (error) { receipt.wifi_restore = String(error); }
