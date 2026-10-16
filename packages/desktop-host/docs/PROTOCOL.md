@@ -680,6 +680,14 @@ Refusal codes: `session`, `input-replay`, `coordinates`, `text-too-large`,
 pointer twice. Validation and ordering checks all run before any
 physical effect.
 
+A portal share of a single window (`source.kind` `Window` in the open reply)
+refuses pointer `move`, `down` and `up` with `input-unavailable` and a message
+the client can show. The portal reports no desktop origin for a window (xdph
+sends `0,0` for every stream) while the pointer device spans the whole desktop,
+so a tap would land at the same fraction of the desktop instead of on the
+window. Keys, text, wheel, pointer `cancel` and `release_all` are unaffected;
+share the monitor to point and click.
+
 The engine holds its own pressed-key/button state. `close`, `release_all`,
 control-channel loss and process exit all synthesize releases for exactly the
 keys and buttons this session pressed, so a dropped connection cannot leave a

@@ -2243,6 +2243,15 @@ impl Inner {
             self.forward(message);
             return;
         }
+        // A shared window's place on the desktop is unknown (the portal reports
+        // no origin for it), while the pointer device spans the whole desktop:
+        // a tap would land somewhere the person never pointed.
+        if self.source.source_type.as_deref() == Some("Window")
+            && matches!(&message, ControlMessage::Pointer { phase, .. } if !matches!(phase, PointerPhase::Cancel))
+        {
+            self.reject(seq, "input-unavailable", WINDOW_POINTER_REFUSAL);
+            return;
+        }
         if !matches!(
             &message,
             ControlMessage::ClipboardRead { .. } | ControlMessage::ClipboardWrite { .. }
@@ -3457,6 +3466,8 @@ fn available_parallelism() -> usize {
         .map(|n| n.get())
         .unwrap_or(4)
 }
+
+const WINDOW_POINTER_REFUSAL: &str = "a shared window cannot take taps: its place on the desktop is unknown; share the whole screen to point and click";
 
 /// Encoded-surface pixels to the source's own pixels. The client aims at what it
 /// sees; the applier is sized and clamped to the source, so the layout origin

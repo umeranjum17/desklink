@@ -19,6 +19,9 @@ journeys:
 # DESKLINK_IOS_GLASS=1 DESKLINK_IOS_IPAD=1 for finger-on-glass; bridge-retention
 # and carrier/hook reattach matrices run via packages/desktop-client/test/roam-flow.mjs
 # with --product-retention and the adapter flags its header documents.
+# Window-share pointer refusal runs via packages/desktop-host/test/portal-g2g-flow.mjs
+# --input-proof in its private sway cage, with DESKLINK_PORTAL_XDPW naming an
+# xdg-desktop-portal-wlr that reports a window's size (its header has the recipe).
 
 # This repo's coding agent, over agent in ~/.done-done/config.yaml (model, effort and the other agent settings stay there).
 # agent: opencode
