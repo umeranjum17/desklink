@@ -1,28 +1,17 @@
 # Changelog
 
-## 0.5.5
+## 0.5.6
 
-Joint patch release; protocol version remains 3. All five packages move
-together to preserve exact-version native engine selection.
+Joint patch release; protocol version remains 3. All packages move together.
 
 ### Fixed
 
-- A tap on a portrait phone lands on the desktop point under the finger again.
-  Since 0.5.3 the portrait picture opened zoomed to fill the screen's height,
-  so every tap mapped short of the point under the finger and most of the
-  desktop could not be reached; portrait now fits the desktop's width, as
-  documented (#168). The Android journey
-  (`packages/desktop-client/test/android-flow.mjs`) now asserts the mapping.
-- A reattach grace cancels an armed restart before its immediate one (#165),
-  the reattach grace runs at two speeds (#164), and the stall watchdog counts
-  the heartbeat lag from the picture's return (#167).
-- The engine nominates a restarted ICE pair without waiting for the next check
-  tick (#162).
-
-### Added
-
-- Opt-in local system audio capture over a PipeWire sink monitor, reported as
-  a live machine fact (#156, #158, #160).
+- A tap on a portal **window** share no longer lands somewhere the person did
+  not point. The portal gives no desktop origin for a window while the pointer
+  device spans the whole desktop, so pointer moves and clicks on a window share
+  are now refused with `input-unavailable` and a message the client can show
+  (share the monitor to point and click); keys and text still apply. See
+  [PROTOCOL.md](packages/desktop-host/docs/PROTOCOL.md#input-and-clipboard-the-sessions-control-channel).
 
 ## 0.5.3
 

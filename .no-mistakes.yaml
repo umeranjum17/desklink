@@ -19,6 +19,14 @@ test:
       - docs-only (Markdown other than SKILL.md): no package tests
     Name the tests you ran and the tests you skipped, with the reason.
 
+    This step never starts an Android emulator, iOS simulator or
+    physical-device run: no `emulator`, `avdmanager`, `xcrun simctl boot`,
+    `adb` against a device, or the Android/iOS flow scripts that start one.
+    When the change touches Android or iOS code or their flow tests, run the
+    host-side tests that still apply and name the emulator/device journey as
+    skipped with the reason "device proofs run outside the pipeline"; the
+    skip is not a failure.
+
     The one user journey is the done-done `verify` journey in .done-done.yaml
     (live-desktop proof plus phone form factors), not ad-hoc commands. The other
     journeys there (`link-drop` and the rest) are not part of this step; every
