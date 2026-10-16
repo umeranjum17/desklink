@@ -236,7 +236,7 @@ Result:
 
 ```jsonc
 {"sessionId":"<opaque>","generation":1,
- "source":{"kind":"monitor","width":2560,"height":1440,"origin":{"x":0,"y":0}},
+ "source":{"kind":"Monitor","width":2560,"height":1440,"origin":{"x":0,"y":0}},
  "geometry":{"source":{"width":2560,"height":1440},
              "encoded":{"width":2560,"height":1440},
              "origin":{"x":0,"y":0}},"agentIndicator":false,
