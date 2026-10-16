@@ -174,8 +174,7 @@ impl WindowLocator {
         }
         // Bars, notifications and other layer surfaces draw above windows and
         // are absent from the window-only video: a top or overlay one holding
-        // the point takes the press, and a bottom one does under a maximized
-        // window.
+        // the point is what a press there would reach.
         let overlaid = query("j/layers")?
             .as_object()
             .into_iter()
@@ -184,7 +183,7 @@ impl WindowLocator {
             .flatten()
             .any(|(level, surfaces)| {
                 let level = level.parse::<u8>().unwrap_or(0);
-                (level >= 2 || (level == 1 && window["fullscreen"].as_i64() == Some(1)))
+                (level >= 2)
                     && surfaces.as_array().into_iter().flatten().any(|surface| {
                         let (sx, sy) = (surface["x"].as_f64(), surface["y"].as_f64());
                         let (sw, sh) = (surface["w"].as_f64(), surface["h"].as_f64());
