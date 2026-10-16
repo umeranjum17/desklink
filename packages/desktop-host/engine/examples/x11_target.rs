@@ -47,6 +47,11 @@ const MARKER_SIZE: u16 = 32;
 #[cfg(target_os = "linux")]
 const MARKER_STEPS: usize = 3;
 
+// The far-corner cell `--corner <file>` paints: the desktop's bottom-right
+// corner, where a picture that shows only part of the desktop cuts it away.
+#[cfg(target_os = "linux")]
+const CORNER_SIZE: u16 = 96;
+
 #[cfg(target_os = "linux")]
 fn main() -> Result<()> {
     let (connection, screen_number) =
@@ -156,8 +161,19 @@ fn main() -> Result<()> {
     let mut typed = String::new();
     let animate = args.iter().any(|arg| arg == "--animate");
     let moving = std::env::args().any(|arg| arg == "--move");
+    // `--corner <file>`: on each animation tick, paint the far-corner cell in
+    // the colour the file names (`rrggbb`), so a flow can change a fixed spot
+    // in place, when it chooses, and look for exactly that change. The value
+    // `still` instead freezes the blink and the moving marker: the desktop
+    // goes quiet, and only the corner cell itself may change again.
+    let corner = args
+        .iter()
+        .position(|arg| arg == "--corner")
+        .and_then(|i| args.get(i + 1));
+    let mut corner_colour = None;
     let mut position = 0usize;
     let mut bright = false;
+    let mut still = false;
     let mut out = std::io::stdout();
     emit(
         &mut out,
@@ -181,6 +197,7 @@ fn main() -> Result<()> {
             match current {
                 Event::Expose(_) => {
                     paint(&connection, window, graphics, marker)?;
+                    corner_colour = None;
                     connection.flush()?;
                 }
                 Event::MotionNotify(motion) => {
@@ -212,6 +229,7 @@ fn main() -> Result<()> {
                     if release.detail == 1 {
                         marker = Some((release.event_x, release.event_y));
                         paint(&connection, window, graphics, marker)?;
+                        corner_colour = None;
                     }
                     emit(
                         &mut out,
@@ -277,46 +295,72 @@ fn main() -> Result<()> {
             };
         }
         if animate {
-            if moving {
+            let request = corner
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .map(|text| text.trim().to_string());
+            if request.as_deref() == Some("still") {
+                still = true;
+            }
+            let wanted = request.and_then(|text| u32::from_str_radix(&text, 16).ok());
+            if wanted.is_some() && wanted != corner_colour {
+                corner_colour = wanted;
                 connection.change_gc(
                     graphics,
-                    &x11rb::protocol::xproto::ChangeGCAux::new().foreground(0x00d04040),
+                    &x11rb::protocol::xproto::ChangeGCAux::new().foreground(wanted),
                 )?;
                 connection.poly_fill_rectangle(
                     window,
                     graphics,
                     &[Rectangle {
-                        x: MARKER_X + (position * MARKER_SIZE as usize) as i16,
+                        x: (WIDTH - CORNER_SIZE) as i16,
+                        y: (HEIGHT - CORNER_SIZE) as i16,
+                        width: CORNER_SIZE,
+                        height: CORNER_SIZE,
+                    }],
+                )?;
+            }
+            if !still {
+                if moving {
+                    connection.change_gc(
+                        graphics,
+                        &x11rb::protocol::xproto::ChangeGCAux::new().foreground(0x00d04040),
+                    )?;
+                    connection.poly_fill_rectangle(
+                        window,
+                        graphics,
+                        &[Rectangle {
+                            x: MARKER_X + (position * MARKER_SIZE as usize) as i16,
+                            y: MARKER_Y,
+                            width: MARKER_SIZE,
+                            height: MARKER_SIZE,
+                        }],
+                    )?;
+                    position = (position + 1) % MARKER_STEPS;
+                }
+                bright = !bright;
+                connection.change_gc(
+                    graphics,
+                    &x11rb::protocol::xproto::ChangeGCAux::new().foreground(if bright {
+                        0x00ffffff
+                    } else {
+                        0x00000000
+                    }),
+                )?;
+                connection.poly_fill_rectangle(
+                    window,
+                    graphics,
+                    &[Rectangle {
+                        x: if moving {
+                            MARKER_X + (position * MARKER_SIZE as usize) as i16
+                        } else {
+                            MARKER_X + MARKER_SIZE as i16
+                        },
                         y: MARKER_Y,
                         width: MARKER_SIZE,
                         height: MARKER_SIZE,
                     }],
                 )?;
-                position = (position + 1) % MARKER_STEPS;
             }
-            bright = !bright;
-            connection.change_gc(
-                graphics,
-                &x11rb::protocol::xproto::ChangeGCAux::new().foreground(if bright {
-                    0x00ffffff
-                } else {
-                    0x00000000
-                }),
-            )?;
-            connection.poly_fill_rectangle(
-                window,
-                graphics,
-                &[Rectangle {
-                    x: if moving {
-                        MARKER_X + (position * MARKER_SIZE as usize) as i16
-                    } else {
-                        MARKER_X + MARKER_SIZE as i16
-                    },
-                    y: MARKER_Y,
-                    width: MARKER_SIZE,
-                    height: MARKER_SIZE,
-                }],
-            )?;
             connection.flush()?;
             std::thread::sleep(std::time::Duration::from_millis(80));
         }

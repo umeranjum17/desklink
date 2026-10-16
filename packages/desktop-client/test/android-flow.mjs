@@ -12,6 +12,14 @@
  *    "This phone can't show your desktop." Here it must instead present a frame;
  *  - the picture is live, not a first frame: the app's own inbound video
  *    statistics keep counting decoded frames across the capture window;
+ *  - the default picture shows the whole desktop, so every change reaches it:
+ *    the fixture repaints its far (bottom-right) corner in place, twice, and
+ *    each new colour must appear in the app's picture. A picture that opens
+ *    zoomed onto the desktop's top-left corner (0.5.4's portrait default)
+ *    keeps showing an unchanged corner of the desktop while the rest of it
+ *    changes, which reads as a stalled stream. A third change arrives after
+ *    the fixture has been frozen still for twenty seconds, the reported
+ *    stall's own regime: an idle engine missing one lone, same-size change;
  *  - the cursor is real: a swipe across the picture moves the desktop's
  *    pointer, the fixture records where it landed, and the capture after the
  *    swipe shows the pointer there;
@@ -71,6 +79,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { PNG } from 'pngjs';
 import {
     assertNoAmbientDesktop, claimPrivateDisplay, laneArtefactDir, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb,
 } from '../../desktop-host/test/lab-safety.mjs';
@@ -174,7 +183,8 @@ try {
     await verifyOwnedXvfb(xvfb);
     xvfb.kill('SIGCONT');
     const xenv = { ...env, DISPLAY: display, XAUTHORITY: authority };
-    target = start('fixture', fixture, ['--animate', '--move'], xenv);
+    const corner = join(scratch, 'corner');
+    target = start('fixture', fixture, ['--animate', '--move', '--corner', corner], xenv);
     await waitFor(() => logs.fixture.includes('"ready"'), 'the fixture to be ready');
 
     // Another desklink run may hold a fixed port, so the bridge takes one the
@@ -312,6 +322,48 @@ try {
     await waitFor(() => reports.length > 1 && decoded(reports[reports.length - 1]) > decoded(reports[0]),
         'the app to decode further video frames', 60000);
 
+    // Every change, wherever on the desktop: the fixture repaints its far
+    // corner in place, and the app's own picture must show each new colour.
+    // Colours no other part of the fixture or the app draws, so any pixel near
+    // one came from that corner.
+    const shows = (path, rgb) => {
+        const { data } = PNG.sync.read(readFileSync(path));
+        const want = [rgb >> 16, (rgb >> 8) & 0xff, rgb & 0xff];
+        let near = 0;
+        for (let at = 0; at < data.length; at += 4) {
+            if (want.every((value, channel) => Math.abs(data[at + channel] - value) < 48)) near++;
+        }
+        return near;
+    };
+    const corners = [];
+    for (const [name, rgb] of [['magenta', 0xff00ff], ['cyan', 0x00ffff]]) {
+        writeFileSync(corner, rgb.toString(16).padStart(6, '0'));
+        const shot = `05-corner-${name}.png`;
+        let seen = 0;
+        for (const until = Date.now() + 20000; seen < 1000 && Date.now() < until; await sleep(500)) {
+            seen = shows(capture(shot), rgb);
+        }
+        assert(seen >= 1000, `the desktop's far corner turned ${name}, but the app's picture shows ${seen} pixels of it`);
+        corners.push({ colour: name, pixels: seen, capture: join(out, shot).replace(homedir(), '~') });
+    }
+
+    // The reported stall had the opposite shape from the legs above: the
+    // engine had gone idle first (no desktop change for many seconds) and
+    // then missed one lone, same-size in-place change. `still` in the corner
+    // file freezes the fixture's blink and moving marker, the desktop sits
+    // unchanged for a full idle window, and one more corner change must
+    // still reach the picture.
+    writeFileSync(corner, 'still');
+    await sleep(20000);
+    writeFileSync(corner, 'ffd700');
+    let idle = 0;
+    const idleShot = '06-corner-after-idle.png';
+    for (const until = Date.now() + 20000; idle < 1000 && Date.now() < until; await sleep(500)) {
+        idle = shows(capture(idleShot), 0xffd700);
+    }
+    assert(idle >= 1000, `the desktop's far corner changed after a long idle spell, but the app's picture shows ${idle} pixels of it`);
+    corners.push({ colour: 'gold-after-idle', pixels: idle, capture: join(out, idleShot).replace(homedir(), '~') });
+
     // The click: input has to ride the same forward as the picture, so a tap
     // inside the picture must reach the fixture, which records it and repaints
     // a marker there.
@@ -374,6 +426,7 @@ try {
         reports: reports.length,
         firstReport: JSON.parse(reports[0]),
         lastReport: JSON.parse(reports.at(-1)),
+        corners,
         cursor: cursor.trim(),
         tap: button.trim(),
         mapping: { left, right, slope, fit },
