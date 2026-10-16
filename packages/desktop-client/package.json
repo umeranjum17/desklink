@@ -42,6 +42,7 @@
     },
     "scripts": {
         "test:reconnect": "node test/reconnect-flow.mjs",
-        "test:ios": "node test/ios-flow.mjs"
+        "test:ios": "node test/ios-flow.mjs",
+        "test:reattach-race": "node test/reattach-grace-race-flow.mjs"
     }
 }
