@@ -33,10 +33,16 @@
 // down+up landing in the fixture), then it retires the app's UDP tuple, adopts
 // the discard shape on BOTH native directions and cuts signalling, holds a
 // 12 s outage, and restores on generation 2. The same session must survive
-// under one open, no close or revoke, the picture must advance within 2000 ms
-// of the path returning, and after it a key down+up and a pointer down+up must
-// again land in the fixture. `DESKLINK_IOS_CUT_NEGATIVE=1` runs the same cut but
-// restores signalling with the media left cut: the picture verdict must fail.
+// under one open, no close or revoke, the first generation-2 media must reach
+// the relay within 2000 ms of the path returning (the bar is judged on that
+// wire truth; the screenshot probe lags it by over a second, so `recoveryMs`
+// is recorded but not asserted), and after it a key down+up and a pointer
+// down+up must again land in the fixture. `DESKLINK_IOS_CUT_NEGATIVE=1` runs
+// the same cut but restores signalling with the media left cut: the picture
+// verdict must fail. The `resume` leg is the blip control for the client's
+// reattach grace: the same cut held for 1.5 s and restored on the SAME
+// tuples, where the old ICE pair can come back — the picture must advance
+// again with the same generation and zero `session.restart_ice` on the wire.
 // The `live` leg is the opt-in plain baseline; drop5/background60 are unchanged
 // from main.
 //
@@ -346,6 +352,18 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
     // commands resolve the waits below, so a stalled cut names what the relay
     // said rather than hanging.
     const wire = [];
+    // Every relay log line with the host-clock time it arrived, so the wire
+    // truth of a recovery — the first media datagram the relay forwarded for
+    // the new generation — is read on the same clock as `pathAt` without
+    // estimating the Mac's.
+    const relayLog = [];
+    const firstMediaAfter = (since, minGeneration = 2) => {
+        for (const { at, line } of relayLog) {
+            const media = /^link generation (\d+) media through /.exec(line);
+            if (media !== null && Number(media[1]) >= minGeneration && at >= since) return at;
+        }
+        return null;
+    };
     const relayWaiters = [];
     const awaitRelay = (type, ms) => new Promise((resolve, reject) => {
         const entry = { type };
@@ -379,7 +397,10 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
     createInterface({ input: macRelay.stdout }).on('line', (line) => {
         let message;
         try { message = JSON.parse(line); } catch { return; }
-        if (message.type === 'log') appendFileSync(join(out, 'link.log'), `${Date.now()} ${message.line}\n`);
+        if (message.type === 'log') {
+            relayLog.push({ at: Date.now(), line: message.line });
+            appendFileSync(join(out, 'link.log'), `${relayLog.at(-1).at} ${message.line}\n`);
+        }
         if (message.type === 'report') receipt.macRelay = message.link;
         if (message.type === 'error') relayError = message.message;
         if (message.type === 'ready') ready = message;
@@ -671,6 +692,15 @@ test -s "$D/tmp/rec-${name}.mov"`);
                 leg.sessionIdAfter = [...new Set(wire.filter((w) => w.sessionId).map((w) => w.sessionId))].at(-1) ?? null;
                 leg.wire = wire.slice();
             }
+            // The bar is wire truth: the first generation-2 media the relay
+            // forwarded, on this host's clock beside `pathAt`. The screenshot
+            // probe lags the wire by over a second, so `recoveryMs` is the
+            // recorded human view of the recovery, not its judgment.
+            const wireMediaAt = firstMediaAfter(pathAt);
+            leg.firstFrameAfterPathBackMs = wireMediaAt === null ? null : wireMediaAt - pathAt;
+            assert(leg.firstFrameAfterPathBackMs !== null, 'no generation-2 media reached the relay after the path returned');
+            assert(leg.firstFrameAfterPathBackMs <= 2000,
+                `the first generation-2 frame reached the relay ${leg.firstFrameAfterPathBackMs}ms after the path returned (the bar is 2000)`);
             await waitStatus('connected', 20000);
             const recovered = shot(join(out, `screen-${name}-recovered.png`));
             leg.letterboxPt = longestDarkRun(recovered, screenPoints());
@@ -679,7 +709,6 @@ test -s "$D/tmp/rec-${name}.mov"`);
             assert(hashShot(shot(join(out, `screen-${name}-recovered-b.png`))) !== frozen, 'the picture stuck on the outage frame after the recovery');
             leg.postTap = await tapPicture();
             leg.postKey = await tapKey();
-            assert(leg.recoveryMs <= 2000, `the picture took ${leg.recoveryMs}ms to advance again (J3 allows 2000)`);
 
             // A final snapshot names the generation and the endpoints the
             // recovery actually used.
@@ -726,16 +755,120 @@ test -s "$D/tmp/rec-${name}.mov"`);
             receipt.cases[name] = { ...leg, elapsedMs: Date.now() - startedAt };
             saveReceipt();
         }
-        log(`${name}: recovery ${leg.recoveryMs}ms, generation ${leg.generation}; counters ${JSON.stringify(leg.finalCounters)}`);
+        log(`${name}: wire first frame ${leg.firstFrameAfterPathBackMs}ms, picture ${leg.recoveryMs}ms, generation ${leg.generation}; counters ${JSON.stringify(leg.finalCounters)}`);
+    };
+
+    // The blip the reattach grace protects, as a control: the SAME cut as
+    // `cut`, held for a blip's length and restored on the SAME tuples, so the
+    // old ICE pair can resume when the path returns. The client must ride it
+    // out on the old pair — the picture advances again with the same
+    // generation and no `session.restart_ice` ever crosses the wire. A
+    // restart here means the protection branch was lost.
+    const RESUME_OFF_MS = 1500;
+    const resumeCase = async () => {
+        const name = 'resume';
+        const leg = { name };
+        const startedAt = Date.now();
+        startRecording(name);
+        try {
+            const baseline = [];
+            for (let i = 0; i < 6; i++) { baseline.push(hashShot(shot(join(out, `screen-${name}-live-${i}.png`)))); await sleep(1200); }
+            leg.pictureDistinctBefore = new Set(baseline).size;
+            assert(leg.pictureDistinctBefore >= 3, `the settled picture did not keep advancing before the blip: ${leg.pictureDistinctBefore} of ${baseline.length}`);
+            leg.preTap = await tapPicture();
+            const idsBefore = [...new Set(wire.filter((w) => w.sessionId).map((w) => w.sessionId))];
+            assert(idsBefore.length === 1, `before the blip the wire named ${idsBefore.length} session id(s)`);
+            leg.sessionIdBefore = idsBefore[0];
+
+            assert(macRelay && macRelay.exitCode === null, 'the Mac relay is not running to cut');
+            const waitCut = awaitRelay('cut', 10000);
+            const tCut = Date.now();
+            macRelay.stdin.write('cut\n');
+            const cut = await waitCut;
+            leg.cutAt = tCut;
+            leg.cutCounters = { ...cut.link.counters };
+            await sleep(Math.max(0, RESUME_OFF_MS - (Date.now() - tCut)));
+            // Both directions must actually have been dropped during the blip.
+            const waitPath = awaitRelay('report', 10000);
+            macRelay.stdin.write('report\n');
+            const atPath = await waitPath;
+            assert(atPath.link.counters.discardedToEngine > leg.cutCounters.discardedToEngine,
+                `the blip discarded no toEngine datagrams (${leg.cutCounters.discardedToEngine} → ${atPath.link.counters.discardedToEngine})`);
+            assert(atPath.link.counters.discardedToBrowser > leg.cutCounters.discardedToBrowser,
+                `the blip discarded no toBrowser datagrams (${leg.cutCounters.discardedToBrowser} → ${atPath.link.counters.discardedToBrowser})`);
+
+            // Restore on the same tuples: only the carrier was missing, so
+            // the old pair can come back exactly as the grace's comment says.
+            const frozen = hashShot(shot(join(out, `screen-${name}-frozen.png`)));
+            const waitRestored = awaitRelay('restored', 15000);
+            const pathAt = Date.now();
+            macRelay.stdin.write('restore resume\n');
+            const restored = await waitRestored;
+            leg.pathAt = pathAt;
+            leg.restoredAt = Date.now();
+            assert(restored.resume === true, 'the relay did not restore on the same tuples');
+            leg.restoreCounters = { ...restored.link.counters };
+
+            let firstMove = null;
+            try { firstMove = await waitAdvancing(frozen, 30000); }
+            finally {
+                const advancedAt = firstMove ?? Date.now();
+                leg.recoveryMs = advancedAt - pathAt;
+                leg.sessionIdAfter = [...new Set(wire.filter((w) => w.sessionId).map((w) => w.sessionId))].at(-1) ?? null;
+                leg.wire = wire.slice();
+            }
+            await waitStatus('connected', 20000);
+
+            // Same session, one open, no close or revoke — and no restart:
+            // the resumed pair carried the recovery on its own.
+            const opens = wire.filter((w) => w.dir === 'app>' && w.method === 'session.open').length;
+            const restartIce = wire.filter((w) => w.dir === 'app>' && w.method === 'session.restart_ice');
+            const closes = wire.filter((w) => w.dir === 'app>' && w.method === 'session.close');
+            const revoked = wire.filter((w) => w.event === 'session.revoked');
+            const offers = wire.filter((w) => w.dir === 'engine>' && w.event === 'session.description' && w.descriptionType === 'offer' && w.ufrag);
+            const ufrags = [...new Set(offers.map((w) => w.ufrag))];
+            leg.wireOps = { opens, restartIce: restartIce.length, closes: closes.length, revoked: revoked.length };
+            leg.iceUfrags = ufrags;
+            assert.equal(opens, 1, `the blip journey opened ${opens} sessions; it must stay on the one open`);
+            assert.equal(closes.length, 0, 'a session.close crossed during the blip');
+            assert.equal(revoked.length, 0, 'a session.revoked crossed during the blip');
+            assert(leg.sessionIdBefore !== null && leg.sessionIdAfter === leg.sessionIdBefore,
+                `the session changed over the blip (${leg.sessionIdBefore} → ${leg.sessionIdAfter})`);
+            assert.equal(restartIce.length, 0,
+                `the old pair resumed but the client still spent ${restartIce.length} session.restart_ice`);
+            assert.equal(ufrags.length, 1,
+                `the blip renegotiated ICE credentials anyway: ${JSON.stringify(ufrags)}`);
+
+            const waitFinal = awaitRelay('report', 10000);
+            macRelay.stdin.write('report\n');
+            const final = (await waitFinal).link;
+            leg.finalCounters = { ...final.counters };
+            leg.generation = final.generation;
+            leg.routes = final.routes;
+            assert.equal(leg.generation, 1, `the blip reached generation ${leg.generation}; the old pair did not carry the recovery`);
+            assert(final.routes.find((r) => r.generation === 1)?.mediaSeen === true, 'generation-1 media never traversed the relay');
+
+            await sleep(1500);
+            assert(hashShot(shot(join(out, `screen-${name}-recovered-b.png`))) !== frozen, 'the picture stuck on the outage frame after the blip');
+            leg.postTap = await tapPicture();
+            stopRecording(name);
+            leg.recording = `${name}.mov`;
+        } finally {
+            receipt.cases[name] = { ...leg, elapsedMs: Date.now() - startedAt };
+            saveReceipt();
+        }
+        log(`${name}: picture ${leg.recoveryMs}ms, restarts ${leg.wireOps?.restartIce}, generation ${leg.generation}`);
     };
 
     // DESKLINK_IOS_ONLY names a leg subset for diagnosis; unset runs the proof
-    // legs (drop5 and background60). The `live` and `cut` legs are opt-in.
+    // legs (drop5 and background60). The `live`, `cut` and `resume` legs are
+    // opt-in.
     const only = (process.env.DESKLINK_IOS_ONLY ?? '').split(',').map((name) => name.trim()).filter(Boolean);
     receipt.only = only.length === 0 ? 'drop5,background60' : only;
-    const runLeg = (name) => only.length === 0 ? !['live', 'cut'].includes(name) : only.includes(name);
+    const runLeg = (name) => only.length === 0 ? !['live', 'cut', 'resume'].includes(name) : only.includes(name);
     if (runLeg('live')) await liveCase();
     if (runLeg('cut')) await cutCase(process.env.DESKLINK_IOS_CUT_NEGATIVE === '1');
+    if (runLeg('resume')) await resumeCase();
     if (runLeg('drop5')) await runCase('drop5', 5000,
         async () => { process.kill(bridgePid, 'SIGSTOP'); process.kill(enginePid, 'SIGSTOP'); },
         async () => { unstop(); });
