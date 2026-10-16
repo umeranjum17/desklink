@@ -173,6 +173,7 @@ fn main() -> Result<()> {
     let mut corner_colour = None;
     let mut position = 0usize;
     let mut bright = false;
+    let mut still = false;
     let mut out = std::io::stdout();
     emit(
         &mut out,
@@ -297,7 +298,9 @@ fn main() -> Result<()> {
             let request = corner
                 .and_then(|path| std::fs::read_to_string(path).ok())
                 .map(|text| text.trim().to_string());
-            let still = request.as_deref() == Some("still");
+            if request.as_deref() == Some("still") {
+                still = true;
+            }
             let wanted = request.and_then(|text| u32::from_str_radix(&text, 16).ok());
             if wanted.is_some() && wanted != corner_colour {
                 corner_colour = wanted;
