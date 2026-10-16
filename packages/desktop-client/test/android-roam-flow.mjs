@@ -360,7 +360,7 @@ try {
             run.ufrags = [...new Set(offers.map(w => w.ufrag))];
             run.ufragBefore = wire.slice(0, runStart).filter(w => w.event === 'session.description' && w.descriptionType === 'offer' && w.ufrag).at(-1)?.ufrag ?? null;
             run.newUfrag = run.ufrags.some(u => u !== run.ufragBefore);
-            run.fingerprints = [...new Set(wire.filter(w => w.fingerprint).map(w => w.fingerprint))].length;
+            run.fingerprints = [...new Set(wire.filter(w => w.dir === 'engine>' && w.event === 'session.description' && w.descriptionType === 'offer' && w.fingerprint).map(w => w.fingerprint))].length;
             run.sessionIdAfter = sessionIds().at(-1) ?? null;
             run.sameSession = run.sessionIdBefore !== null && run.sessionIdAfter === run.sessionIdBefore
                 && run.wireOps.opens === 0 && run.wireOps.closes === 0 && run.wireOps.revoked === 0 && run.fingerprints === 1;
