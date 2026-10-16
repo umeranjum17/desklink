@@ -8,9 +8,20 @@
 # or overrides it.
 test:
   instructions: |
-    Live validation runs the done-done journeys in .done-done.yaml, not ad-hoc
-    commands. The `verify` journey (live-desktop proof plus phone form factors)
-    is the gate; `link-drop` covers the userspace-shaped recovery flow; every
+    Run only the tests for the parts this change touches, plus one user
+    journey. CI already runs the full suite on every PR: never run it twice.
+
+    Changed-part tests, chosen from the diff against the base branch:
+      - packages/<name>/ changed: `npm run build`, then `npx vitest run packages/<name>`
+        for each changed package (a root package.json, package-lock.json,
+        tsconfig.base.json or vitest.config.ts change counts as every package)
+      - packages/desktop-host/engine/ changed: `npm run test:engine`
+      - docs-only (Markdown other than SKILL.md): no package tests
+    Name the tests you ran and the tests you skipped, with the reason.
+
+    The one user journey is the done-done `verify` journey in .done-done.yaml
+    (live-desktop proof plus phone form factors), not ad-hoc commands. The other
+    journeys there (`link-drop` and the rest) are not part of this step; every
     pass claim must name the journey it actually exercised.
 
     Proof is the journey driving the real user journey, with ambient

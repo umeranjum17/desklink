@@ -21,6 +21,10 @@ jobs:
   # touch. Always runs, so this context reports on every PR. `packages` covers
   # every JS/TS workspace input; `native` covers the desktop-host engine and its
   # release seams. A workflow edit is in both, so CI changes still exercise CI.
+  # Markdown is docs in either set (`every`: a file must match both lines),
+  # except SKILL.md, which the axi validation checks. The skipped jobs still
+  # report, so they can be required checks; never put paths-ignore on this
+  # workflow, or a required check never reports and the PR waits forever.
   changes:
     runs-on: ubuntu-24.04
     outputs:
@@ -31,19 +35,14 @@ jobs:
       - uses: dorny/paths-filter@v3
         id: filter
         with:
+          predicate-quantifier: every
           filters: |
             packages:
-              - '.github/**'
-              - 'package.json'
-              - 'package-lock.json'
-              - 'tsconfig.base.json'
-              - 'vitest.config.ts'
-              - 'packages/**'
+              - '{.github/**,package.json,package-lock.json,tsconfig.base.json,vitest.config.ts,packages/**}'
+              - '!**/!(SKILL).md'
             native:
-              - '.github/**'
-              - 'package.json'
-              - 'package-lock.json'
-              - 'packages/desktop-host/**'
+              - '{.github/**,package.json,package-lock.json,packages/desktop-host/**}'
+              - '!**/!(SKILL).md'
 
   # Runs when any JS/TS workspace input changed. Skipped on a docs-only or
   # native-only change.
