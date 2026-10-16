@@ -1,4 +1,5 @@
 <h1 align="center">@desklink/axi</h1>
+<!-- docs-only CI dry run; this branch is deleted after the run -->
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@desklink/axi"><img alt="npm" src="https://img.shields.io/npm/v/@desklink/axi?style=flat" /></a>
