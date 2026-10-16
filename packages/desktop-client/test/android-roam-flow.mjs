@@ -26,6 +26,10 @@
 // Usage (from the repo root, with DISPLAY and WAYLAND_DISPLAY unset):
 //   ANDROID_SERIAL=… DESKLINK_ANDROID_OUT=<fresh dir> DESKLINK_ROAM_APP_ADDRESS=192.168.1.144 \
 //     DESKLINK_ENGINE=… DESKLINK_VERIFY_TARGET=… node packages/desktop-client/test/android-roam-flow.mjs
+// Operator precondition, set on the phone before the run: the screen must stay
+// awake for the whole run — a long screen-off timeout or the developer "stay
+// awake" option. This flow changes no device setting, and a phone that sleeps
+// mid-run stops the run rather than being kept awake by it.
 // Env: DESKLINK_ROAM_RUNS (default 3), DESKLINK_ROAM_CUT_OFF_MS (default 12000),
 // DESKLINK_ROAM_INSTALL (1 installs the built APK first, without -g),
 // DESKLINK_ROAM_END_SCREEN_OFF (1 presses power at the end if the screen is on),
