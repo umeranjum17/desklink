@@ -25,6 +25,11 @@ journeys:
 # The Android journey (live picture, tap, tap-to-desktop-point mapping, cursor) runs
 # via packages/desktop-client/test/android-flow.mjs on an attached emulator or
 # phone (ANDROID_SERIAL, DESKLINK_ANDROID_HOST=10.0.2.2 on an emulator).
+# The Android roam cut (12 s owned path cut in an in-process relay, same-session
+# recovery judged on the relay clock against the 2 s bar, tap after each run) runs
+# via packages/desktop-client/test/android-roam-flow.mjs on an attached emulator or
+# phone (ANDROID_SERIAL, DESKLINK_ANDROID_OUT, DESKLINK_ROAM_APP_ADDRESS = this
+# host's LAN IPv4; its header has the recipe).
 
 # This repo's coding agent, over agent in ~/.done-done/config.yaml (model, effort and the other agent settings stay there).
 # agent: opencode

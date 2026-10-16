@@ -136,8 +136,9 @@ class ShapedLink {
     /** Candidates are taken one at a time, in arrival order. */
     #queue = Promise.resolve();
 
-    constructor(log, { appAddress = '127.0.0.1', engineAddress = '127.0.0.1', remoteBrowser = false, remoteEngine = false } = {}) {
+    constructor(log, { appAddress = '127.0.0.1', engineAddress = '127.0.0.1', remoteBrowser = false, remoteEngine = false, seedBrowser = null } = {}) {
         this.log = log;
+        this.seedBrowser = seedBrowser;
         this.appAddress = appAddress; this.engineAddress = engineAddress;
         // When a peer is remote, its candidates are not this host's own addresses,
         // so the local-address guard would drop them all. The relay then forwards
@@ -428,6 +429,14 @@ class ShapedLink {
             return null;
         }
         const route = await this.#ready(generation);
+        // A peer behind this host's stateful firewall is heard only on a flow
+        // this relay opened first, so its own candidate (when `seedBrowser`
+        // accepts it) is where the engine's checks go until its first packet
+        // names its real source: ordinary ICE hole punching, no firewall change.
+        if (route.browser === null && this.seedBrowser?.(candidate.ip)) {
+            route.browser = { ip: candidate.ip, port: candidate.port };
+            this.log(`link generation ${generation} browser seeded at ${candidate.ip}:${candidate.port}`);
+        }
         if (route.advertised) return null;
         route.advertised = true;
         const toBrowser = route.toBrowser.address().port;
