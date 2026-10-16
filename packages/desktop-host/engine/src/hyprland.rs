@@ -205,7 +205,10 @@ impl WindowLocator {
                             && surfaces.as_array().into_iter().flatten().any(|surface| {
                                 let (sx, sy) = (surface["x"].as_f64(), surface["y"].as_f64());
                                 let (sw, sh) = (surface["w"].as_f64(), surface["h"].as_f64());
-                                matches!(
+                                !matches!(
+                                    surface["namespace"].as_str(),
+                                    Some("desklink-agent" | "desklink-point")
+                                ) && matches!(
                                     (sx, sy, sw, sh),
                                     (Some(sx), Some(sy), Some(sw), Some(sh))
                                         if (mx + sx..mx + sx + sw).contains(&px)
