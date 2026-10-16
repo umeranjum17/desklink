@@ -2411,7 +2411,11 @@ impl Inner {
         let (x, y) = to_source_pixels(x, y, (width, height), &self.source);
         #[cfg(target_os = "linux")]
         if let Some(window) = lock(&self.window).as_ref() {
-            let place = || window.place(x, y).map_err(|message| ("input-unavailable", message));
+            let place = || {
+                window
+                    .place(x, y)
+                    .map_err(|message| ("input-unavailable", message))
+            };
             return match phase {
                 PointerPhase::Move => place(),
                 PointerPhase::Down | PointerPhase::Up => {
@@ -2419,7 +2423,10 @@ impl Inner {
                     self.with_input(|_| Ok(()))?;
                     place()?;
                     self.with_input(|target| {
-                        target.button(Button::from_number(button), matches!(phase, PointerPhase::Down))
+                        target.button(
+                            Button::from_number(button),
+                            matches!(phase, PointerPhase::Down),
+                        )
                     })
                 }
                 PointerPhase::Cancel => self.with_input(InputTarget::release_all),
@@ -3452,7 +3459,10 @@ fn spawn_peer_events(inner: &Arc<Inner>, mut events: tokio_mpsc::UnboundedReceiv
                     // desklink scout trace: the session's transport emit, one
                     // line after the peer event that caused it.
                     if crate::peer::dl_trace_on() {
-                        crate::peer::dl_eng!("session_transport_emit {}", format!("{state}").to_lowercase());
+                        crate::peer::dl_eng!(
+                            "session_transport_emit {}",
+                            format!("{state}").to_lowercase()
+                        );
                     }
                 }
                 PeerEvent::ControlOpen => {
