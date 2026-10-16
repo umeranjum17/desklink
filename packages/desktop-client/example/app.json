@@ -12,6 +12,6 @@
             "bundleIdentifier": "dev.desklink.example",
             "supportsTablet": true
         },
-        "plugins": ["@config-plugins/react-native-webrtc", "@desklink/react-native", "./withLocalBridge", "./withBuiltInKotlin"]
+        "plugins": ["@config-plugins/react-native-webrtc", "@desklink/react-native", "./withLocalBridge"]
     }
 }
