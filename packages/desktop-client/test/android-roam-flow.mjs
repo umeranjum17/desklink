@@ -64,6 +64,8 @@ assert(Object.values(networkInterfaces()).flat().some(entry => entry?.address ==
     `DESKLINK_ROAM_APP_ADDRESS ${appAddress} is not an address of this host`);
 const RUNS = Number(process.env.DESKLINK_ROAM_RUNS ?? 3);
 const CUT_OFF_MS = Number(process.env.DESKLINK_ROAM_CUT_OFF_MS ?? 12000);
+assert(Number.isInteger(RUNS) && RUNS >= 1, 'set DESKLINK_ROAM_RUNS to a whole number of runs, at least 1');
+assert(Number.isFinite(CUT_OFF_MS) && CUT_OFF_MS > 0, 'set DESKLINK_ROAM_CUT_OFF_MS to a positive number of milliseconds');
 const engine = resolve(process.env.DESKLINK_ENGINE ?? join(repo, 'packages/desktop-host/engine/target/debug/desklink-host'));
 const fixtureBin = resolve(process.env.DESKLINK_VERIFY_TARGET ?? join(repo, 'packages/desktop-host/engine/target/debug/examples/x11_target'));
 const example = join(repo, 'packages/desktop-client/example');
