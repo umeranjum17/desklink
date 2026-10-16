@@ -272,7 +272,9 @@ animating in and out, with light and dark keylines so it reads on any content.
 On Wayland it uses a click-through layer-shell surface with an edge glow, drawn
 at the highest announced output integer scale, capped at 4; its bounded area is
 masked before capture/diff (pixels behind the effect can remain briefly stale).
-On bare X11 it is an override-redirect, click-through window that follows the
+On a located Hyprland window share the cue gets no pointer or click feedback —
+the engine places the pointer itself, so a stream fraction is not the window's
+desktop point (see Input and clipboard); keys still show. On bare X11 it is an override-redirect, click-through window that follows the
 pointer, so it stays
 visible over windows that set their own cursor and never replaces the cursor.
 Its size follows `Xft.dpi` from 96–384 DPI, defaulting to 1x otherwise;
