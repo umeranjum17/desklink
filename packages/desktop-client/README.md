@@ -290,7 +290,10 @@ view.
   fires. While the loop runs, a session that has shown a picture never reports
   `failed` or a transport failure; one that never showed a picture reports the
   first-frame transport failure after 20 s and the loop stops. A new carrier
-  picks up the same session after a 300 ms grace for the old ICE pair: if the
+  picks up the same session after a short grace for the old ICE pair, sized by
+  how long the picture has been still: stills under 4 s wait out the blip
+  (200 ms), stills past it take one stats beat (50 ms) and ask for the restart
+  at once. If the
   picture advanced during it, there is no restart (and a `reconnecting`
   session returns to `live`); otherwise the session moves to `reconnecting`
   and asks for an ICE restart. Failures caused
