@@ -257,11 +257,18 @@ try {
     // Another lane may hold 8081, so Metro takes a port the operating system
     // says is free and the device's own 8081 is reversed onto it — that is the
     // real-device path, where the app resolves its bundler as localhost:8081.
-    // An emulator would resolve it as the host alias 10.0.2.2:8081 instead,
-    // which adb reverse does not intercept, so the debug build's own bundler
-    // setting points it at localhost:8081 the same way.
+    // An emulator resolves it as the host alias 10.0.2.2:8081 instead, which
+    // adb reverse does not intercept, so there Metro has to hold the host's
+    // own 8081 and the run fails loudly when another process has it.
+    const onEmulator = /^emulator-/.test(serial);
     const metroProbe = createServer();
-    await new Promise((ok, failed) => { metroProbe.once('error', failed); metroProbe.listen(0, '127.0.0.1', ok); });
+    const metroBound = new Promise((ok, failed) => {
+        metroProbe.once('error', failed);
+        metroProbe.listen(onEmulator ? 8081 : 0, '127.0.0.1', ok);
+    });
+    await metroBound.catch(error => {
+        throw new Error(`an emulator reaches Metro only on the host's own 8081, which is already held: ${error.message}`);
+    });
     const metroPort = metroProbe.address().port;
     metroProbe.close();
     receipt.metroPort = metroPort;
@@ -269,7 +276,6 @@ try {
     await waitFor(() => /Waiting on http/.test(logs.metro), 'Metro');
     adb('install', '-r', '-g', apk);
     reverse('tcp:8081', `tcp:${metroPort}`);
-    adb('shell', `run-as dev.desklink.example sh -c 'mkdir -p shared_prefs && echo "<map><string name=\\"debug_http_host\\">localhost:8081</string></map>" > shared_prefs/dev.desklink.example_preferences.xml'`);
 
     // The journey. Another desklink app may answer the same `desklink-example`
     // link on this device, so the run names this build's own activity instead
