@@ -13,7 +13,10 @@
  *  - `packages/desktop-client/src/native.web.ts` decodes the stream in a real
  *    browser (frames counted by `requestVideoFrameCallback`, and the rendered
  *    picture is sampled to prove it is not a black rectangle), and turns a
- *    browser mouse click into the client's own `pointer` control messages.
+ *    browser mouse click into the client's own `pointer` control messages;
+ *  - on a phone-sized touch screen, a real two-finger pinch zooms the picture
+ *    to the client's cap (text 11 px at fit reads at 14 px or more), and a tap
+ *    on the zoomed picture lands on the stream pixel under the finger.
  *
  * Usage:
  *
@@ -52,6 +55,9 @@ const repo = resolve(here, '../../..');
 const fixture = join(here, 'fixtures/encoded-486x1080.h264');
 /** The stream's own size, and what the consumer declares in `session.open`. */
 const SIZE = { width: 486, height: 1080 };
+/** A phone's viewport in CSS pixels, and the client's zoom cap (`MAX_SCALE` in native.web.ts). */
+const PHONE = { width: 402, height: 874 };
+const MAX_SCALE = 2.5;
 /** How long the whole flow may take before it is a failure, not a hang. */
 const DEADLINE_MS = 90_000;
 
@@ -649,6 +655,52 @@ async function main() {
         );
         assert.deepEqual(engine.openPermissions, ['view'], 'the real click came from a legacy view-only open');
         console.log(`legacy permissions=[view] session.input → pointer ${pressed.phase} at (${pressed.x}, ${pressed.y}), up at (${released.x}, ${released.y})`);
+
+        // Reading on a phone: two real fingers pinch the fitted picture up to
+        // the zoom cap, and a tap on the zoomed picture still lands on the
+        // stream pixel under the finger.
+        await chrome.send('Emulation.setDeviceMetricsOverride', { width: PHONE.width, height: PHONE.height, deviceScaleFactor: 3, mobile: false });
+        await chrome.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+        const fitScale = Math.min(PHONE.width / SIZE.width, PHONE.height / SIZE.height);
+        await chrome.until(`Math.abs(window.__flow.pictureRect().width - ${SIZE.width * fitScale}) < 1`, 5000, 'the picture to fit the phone');
+        const touch = (type, points) => chrome.send('Input.dispatchTouchEvent', {
+            type, touchPoints: points.map(([x, y], id) => ({ x, y, id, radiusX: 4, radiusY: 4, force: 1 })),
+        });
+        const centre = { x: PHONE.width / 2, y: PHONE.height / 2 };
+        await touch('touchStart', [[centre.x - 20, centre.y], [centre.x + 20, centre.y]]);
+        for (let step = 1; step <= 20; step += 1) {
+            const half = 20 + step * 8;
+            await touch('touchMove', [[centre.x - half, centre.y], [centre.x + half, centre.y]]);
+            await sleep(16);
+        }
+        await touch('touchEnd', []);
+        const zoomed = await chrome.evaluate('window.__flow.pictureRect()');
+        const zoomedScale = zoomed.width / SIZE.width;
+        assert.ok(
+            Math.abs(zoomedScale - MAX_SCALE) < 0.01,
+            `a pinch reaches the zoom cap: ${fitScale.toFixed(3)} -> ${zoomedScale.toFixed(3)} CSS px per stream px`,
+        );
+        // Text a desktop shows at 11 CSS px at fit (J5's phone reading) is at
+        // least 14 px once pinched.
+        assert.ok(11 * zoomedScale / fitScale >= 14, `pinched text is readable: ${(11 * zoomedScale / fitScale).toFixed(1)} px`);
+        const tapAt = { x: Math.round(PHONE.width * 0.3), y: Math.round(PHONE.height * 0.6) };
+        const expected = {
+            x: Math.floor((tapAt.x - zoomed.x) / zoomedScale),
+            y: Math.floor((tapAt.y - zoomed.y) / zoomedScale),
+        };
+        const before = engine.eventsNamed('session.input').length;
+        await sleep(400);
+        await touch('touchStart', [[tapAt.x, tapAt.y]]);
+        await touch('touchEnd', []);
+        await sleep(400);
+        const tapped = engine.eventsNamed('session.input').slice(before).map((message) => message.params.input)
+            .find((input) => input.kind === 'pointer' && input.phase === 'down');
+        assert.ok(tapped !== undefined, 'a tap on the zoomed picture reaches the engine');
+        assert.deepEqual({ x: tapped.x, y: tapped.y }, expected, 'a tap on the zoomed picture lands under the finger');
+        console.log(
+            `pinch → ${fitScale.toFixed(3)} to ${zoomedScale.toFixed(3)} CSS px per stream px (11 px text → ${(11 * zoomedScale / fitScale).toFixed(1)} px),`
+                + ` tap at (${tapAt.x}, ${tapAt.y}) → stream (${tapped.x}, ${tapped.y})`,
+        );
 
         feeding = false;
         await feeder;
