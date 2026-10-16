@@ -42,8 +42,22 @@
  *   node packages/desktop-host/test/portal-g2g-flow.mjs [--size 1920x1080]
  *     [--fps 60] [--scenario typing,scroll,still] [--seconds 15] [--gate]
  *     [--freeze-after 2]
+ *   node packages/desktop-host/test/portal-g2g-flow.mjs --input-proof
  *   node packages/desktop-host/test/portal-g2g-flow.mjs --cursor-proof
  *     [--background light|dark] [--scale 2]
+ *
+ * `--input-proof` shares one window, then the output, through
+ * xdg-desktop-portal-wlr and taps each over the control channel: the window's
+ * tap is refused with a typed reason (its desktop origin is unknown), the
+ * monitor's takes its usual path. `/dev/uinput` is masked in every cage, so no
+ * input reaches any desktop. xdph cannot share a window on sway, and stock
+ * xdpw 0.8.4 sends no `size` for a window stream (which the engine needs), so
+ * `DESKLINK_PORTAL_XDPW` names an xdpw 0.8.4 built with a window size added the
+ * way xdph reports it: in `xdpw_impl_screencast_start`'s stream properties, an
+ * `else if (cast->current_constraints.width > 0)` branch after the output one
+ * appending `"size", "(ii)", current_constraints.width, .height`; then
+ * `meson setup build -Dman-pages=disabled -Dsd-bus-provider=libsystemd`.
+ * `wlr.portal` is read from `../share/xdg-desktop-portal/portals/` beside it.
  *
  * `--cursor-proof` opens a hidden-cursor session, moves the cage's pointer
  * through sway, and checks every session.cursor sample against where the
@@ -65,6 +79,8 @@
  *   DESKLINK_PORTAL_STAMP   stamp client (default: examples/wl_stamp_target
  *                           next to the engine binary)
  *   DESKLINK_PORTAL_SWAY    headless compositor binary (default: sway on PATH)
+ *   DESKLINK_PORTAL_SWAYMSG swaymsg for the input proof's chooser (default: on PATH)
+ *   DESKLINK_PORTAL_XDPW    xdg-desktop-portal-wlr for --input-proof (see above)
  *   DESKLINK_PORTAL_RENDER_NODE  render node name, e.g. renderD129 (default:
  *                           the first one not bound to the nvidia driver, whose
  *                           24-bit readback the portal's shm path refuses)
@@ -75,8 +91,8 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import {
-    chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync,
-    realpathSync, rmSync, statSync, writeFileSync,
+    chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync,
+    openSync, realpathSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { availableParallelism, loadavg, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -164,8 +180,10 @@ async function cage(dir) {
         return wayland !== null;
     });
     const client = { ...env, WAYLAND_DISPLAY: wayland };
-    if (config.cursorProof) {
+    if (config.cursorProof || config.xdpw) {
         client.SWAYSOCK = join(runtime, readdirSync(runtime).find(n => n.startsWith('sway-ipc.') && n.endsWith('.sock')));
+    }
+    if (config.cursorProof) {
         setInterval(() => {
             const command = join(dir, 'pointer-command');
             if (!existsSync(command)) return;
@@ -185,8 +203,15 @@ async function cage(dir) {
         sleep(20_000).then(() => null),
     ]);
     if (stampReady?.ready !== true) fail('the stamp client never mapped');
-    start('xdph', config.xdph, [], client);
-    await until('the portal backend', () => busNames().some((n) => n.name === 'org.freedesktop.impl.portal.desktop.hyprland'));
+    if (config.xdpw) {
+        // The input proof shares a single window, which xdg-desktop-portal-wlr
+        // offers on sway; xdph's window sharing needs Hyprland itself.
+        start('xdpw', config.xdpw, [], client);
+        await until('the portal backend', () => busNames().some((n) => n.name === 'org.freedesktop.impl.portal.desktop.wlr'));
+    } else {
+        start('xdph', config.xdph, [], client);
+        await until('the portal backend', () => busNames().some((n) => n.name === 'org.freedesktop.impl.portal.desktop.hyprland'));
+    }
     start('portal', config.portal, []);
     await until('the portal', () => busNames().some((n) => n.name === 'org.freedesktop.portal.Desktop'));
 
@@ -208,6 +233,15 @@ async function cage(dir) {
         }
     });
     if (ambientVisible.length > 0) fail(`ambient sockets are reachable in the cage: ${ambientVisible.map((a) => a.path).join(', ')}`);
+    // uinput devices are host-wide: one made in here would reach the live desktop.
+    let uinput = 'absent';
+    try {
+        closeSync(openSync('/dev/uinput', 'w'));
+        uinput = 'writable';
+    } catch {
+        if (existsSync('/dev/uinput')) uinput = 'masked';
+    }
+    if (uinput === 'writable') fail('/dev/uinput is writable in the cage');
     const dri = readdirSync('/dev/dri');
     if (dri.some((name) => name.startsWith('card'))) fail(`a KMS node is visible: ${dri.join(', ')}`);
     const isolation = {
@@ -217,6 +251,7 @@ async function cage(dir) {
         runtime_dir: runtimeEntries,
         ambient_sockets_visible: 0,
         dri,
+        uinput,
         pid_namespace_init: process.pid === 1,
         wayland_display: wayland,
     };
@@ -243,7 +278,8 @@ async function main() {
     const maxFps = Number(option('fps', '60'));
     const seconds = Number(option('seconds', '15'));
     const freezeAfter = Number(option('freeze-after', '2'));
-    const scenarios = (process.argv.includes('--cursor-proof') ? 'still' : option('scenario', 'typing,scroll')).split(',');
+    const inputProof = process.argv.includes('--input-proof');
+    const scenarios = (process.argv.includes('--cursor-proof') || inputProof ? 'still' : option('scenario', 'typing,scroll')).split(',');
     const gate = process.argv.includes('--gate');
     assert(width > 0 && height > 0 && maxFps > 0 && seconds > 0, 'bad --size, --fps or --seconds');
     assert(Number.isInteger(freezeAfter) && freezeAfter > 0, 'bad --freeze-after');
@@ -274,6 +310,10 @@ async function main() {
         ['pipewire', which('pipewire')], ['wireplumber', which('wireplumber')], ['sway', sway],
         ['xdg-desktop-portal', portal], ['xdg-desktop-portal-hyprland', xdph], ['chrome', chrome],
     ].filter(([, found]) => !found).map(([name]) => name);
+    const xdpw = inputProof ? firstFile([process.env.DESKLINK_PORTAL_XDPW, ...PORTAL_DIRS.map((d) => `${d}/xdg-desktop-portal-wlr`)]) : null;
+    const wlrPortal = xdpw && firstFile([join(dirname(xdpw), '../share/xdg-desktop-portal/portals/wlr.portal'), '/usr/share/xdg-desktop-portal/portals/wlr.portal']);
+    if (inputProof && !wlrPortal) missing.push('xdg-desktop-portal-wlr (set DESKLINK_PORTAL_XDPW)');
+    if (inputProof && !(process.env.DESKLINK_PORTAL_SWAYMSG || which('swaymsg'))) missing.push('swaymsg');
     if (missing.length > 0) skip(`missing ${missing.join(', ')}`);
     if (spawnSync('unshare', ['--user', '--map-root-user', '--mount', '--pid', '--fork', 'true']).status !== 0) {
         skip('unprivileged user namespaces are not available');
@@ -299,7 +339,7 @@ async function main() {
     for (const scenario of scenarios) {
         const before = loadavg()[0];
         const result = await measure({
-            engine, stamp, sway, portal, xdph, portalFile, chrome, renderNode, width, height, maxFps, seconds, scenario, freezeAfter,
+            engine, stamp, sway, portal, xdph, portalFile, xdpw, wlrPortal, inputProof, chrome, renderNode, width, height, maxFps, seconds, scenario, freezeAfter,
             embeddedControl: process.argv.includes('--embedded-control'),
             cursorProof: process.argv.includes('--cursor-proof'), background: option('background', 'light'), scale: Number(option('scale', '1')), swaymsg: process.env.DESKLINK_PORTAL_SWAYMSG || which('swaymsg'),
         });
@@ -312,7 +352,7 @@ async function main() {
             console.error(`FAIL ${scenario}: load ${result.load.before}/${result.load.after} is over ${limit}`);
             failed = true;
         }
-        if (process.argv.includes('--cursor-proof')) continue;
+        if (process.argv.includes('--cursor-proof') || inputProof) continue;
         const measured = result.g2g_ms.n > 0 && Number.isFinite(result.g2g_ms.p50);
         if (gate && scenario === 'typing' && !(measured && result.presented_fps >= 50 && result.g2g_ms.p50 <= 50)) {
             console.error(`FAIL typing: ${result.presented_fps} fps presented, p50 ${result.g2g_ms.p50} ms over ${result.g2g_ms.n} decoded stamps`);
@@ -336,7 +376,9 @@ async function measure(run) {
         const setup = [
             'set -e',
             'ulimit -c 0',
-            `touch "${dir}/render"`,
+            `touch "${dir}/render" "${dir}/no-uinput"`,
+            `chmod 000 "${dir}/no-uinput"`,
+            `[ ! -e /dev/uinput ] || mount --bind "${dir}/no-uinput" /dev/uinput`,
             `mount --bind "/dev/dri/${run.renderNode}" "${dir}/render"`,
             'mount -t tmpfs -o mode=755 tmpfs /dev/dri',
             `touch "/dev/dri/${run.renderNode}"`,
@@ -384,6 +426,7 @@ async function measure(run) {
         const engine = new Engine(child, lines);
         await engine.request('hello', { protocol: 3 });
         if (run.cursorProof) return {...await cursorProof(engine, dir, run), isolation:first.isolation};
+        if (run.inputProof) return { ...await inputProof(engine, dir, run), isolation: first.isolation };
 
         const browser = await startChrome(run.chrome);
         cleanup.unshift(() => browser.close());
@@ -458,7 +501,7 @@ async function measure(run) {
 }
 
 function writeCage(dir, run) {
-    for (const leaf of ['home/.config/hypr', 'home/.config/xdg-desktop-portal', 'portals', 'services']) {
+    for (const leaf of ['home/.config/hypr', 'home/.config/xdg-desktop-portal-wlr', 'home/.config/xdg-desktop-portal', 'portals', 'services']) {
         mkdirSync(join(dir, leaf), { recursive: true });
     }
     const ambient = [process.env.DBUS_SESSION_BUS_ADDRESS?.match(/unix:path=([^,;]+)/)?.[1]];
@@ -467,7 +510,7 @@ function writeCage(dir, run) {
     }
     writeFileSync(join(dir, 'cage.json'), JSON.stringify({
         scenario: run.scenario, engine: realpathSync(run.engine), stamp: realpathSync(run.stamp), sway: run.sway,
-        portal: run.portal, xdph: run.xdph, cursorProof: run.cursorProof, background: run.background, swaymsg: run.swaymsg,
+        portal: run.portal, xdph: run.xdph, xdpw: run.inputProof ? run.xdpw : null, cursorProof: run.cursorProof, background: run.background, swaymsg: run.swaymsg,
         ambient: ambient.filter((path) => path && existsSync(path)).map((path) => {
             const { dev, ino } = statSync(path);
             return { path, dev, ino };
@@ -495,8 +538,22 @@ function writeCage(dir, run) {
     writeFileSync(picker, '#!/bin/sh\necho "[SELECTION]/screen:HEADLESS-1"\n');
     chmodSync(picker, 0o755);
     writeFileSync(join(dir, 'home/.config/hypr/xdph.conf'), `screencopy {\n  custom_picker_binary = ${picker}\n  max_fps = 60\n}\n`);
-    writeFileSync(join(dir, 'home/.config/xdg-desktop-portal/portals.conf'), '[preferred]\ndefault=hyprland\n');
-    copyFileSync(run.portalFile, join(dir, 'portals/hyprland.portal'));
+    // xdpw's consent step: the harness names the share kind. A simple chooser's
+    // answer is matched against every window whatever types were asked for, as
+    // xdph's picker offers windows to an engine that asked for monitors.
+    const chooser = join(dir, 'chooser.sh');
+    writeFileSync(chooser, [
+        '#!/bin/sh',
+        `if [ "$(cat '${join(dir, 'share')}')" = Monitor ]; then echo "Monitor: HEADLESS-1"; exit; fi`,
+        `id=$('${run.swaymsg}' -s "$SWAYSOCK" -t get_tree | grep -o '"foreign_toplevel_identifier": "[^"]*"' | head -1 | cut -d'"' -f4)`,
+        'echo "Window: $id"',
+        '',
+    ].join('\n'));
+    chmodSync(chooser, 0o755);
+    writeFileSync(join(dir, 'home/.config/xdg-desktop-portal-wlr/config'), `[screencast]\nchooser_type=simple\nchooser_cmd=${chooser}\nmax_fps=30\n`);
+    writeFileSync(join(dir, 'home/.config/xdg-desktop-portal/portals.conf'), `[preferred]\ndefault=${run.inputProof ? 'wlr' : 'hyprland'}\n`);
+    if (run.inputProof) copyFileSync(run.wlrPortal, join(dir, 'portals/wlr.portal'));
+    else copyFileSync(run.portalFile, join(dir, 'portals/hyprland.portal'));
 }
 
 function tailLogs(dir) {
@@ -557,6 +614,12 @@ const PAGE = `(() => {
     const context = canvas.getContext('2d', { willReadFrequently: true });
     const state = { frames: 0, measuring: false, sourceWidth: 0, times: [], g2g: [], undecoded: 0 };
     let pending = [];
+    let channel = null;
+    const replies = [];
+    pc.ondatachannel = (event) => {
+        channel = event.channel;
+        channel.onmessage = (message) => replies.push(JSON.parse(message.data));
+    };
     pc.ontrack = (event) => { video.srcObject = new MediaStream([event.track]); video.play().catch(() => {}); };
     const onFrame = (now, meta) => {
         state.frames++;
@@ -585,6 +648,16 @@ const PAGE = `(() => {
     };
     window.__g2g = {
         get frames() { return state.frames; },
+        get channelOpen() { return channel?.readyState === 'open'; },
+        async control(message) {
+            channel.send(JSON.stringify(message));
+            for (let i = 0; i < 100; i++) {
+                const reply = replies.find((r) => r.seq === message.seq && (r.kind === 'ack' || r.kind === 'rejected'));
+                if (reply) return reply;
+                await new Promise((done) => setTimeout(done, 50));
+            }
+            return null;
+        },
         async answer(sdp) {
             await pc.setRemoteDescription({ type: 'offer', sdp });
             for (const candidate of pending.splice(0)) await pc.addIceCandidate(candidate).catch(() => {});
@@ -798,4 +871,53 @@ async function cursorProof(engine, dir, run) {
     }
     await engine.request('session.close',{session_id:hidden.sessionId});
     return {source:'portal',cursor:hidden.cursor,cursor_events:cursorEvents().length,samples,hidden_pixels:'unchanged on pointer motion'};
+}
+
+// A tap on a shared window must never land somewhere the person did not point:
+// the portal reports no origin for a window and the pointer device spans the
+// whole desktop, so the engine refuses it. The monitor share keeps its path.
+async function inputProof(engine, dir, run) {
+    const browser = await startChrome(run.chrome);
+    try {
+        let sessionId = null;
+        let generation = 1;
+        engine.on((event) => {
+            if (event.event === 'session.description' && event.params.description.type === 'offer') {
+                browser.evaluate(`window.__g2g.answer(${JSON.stringify(event.params.description.sdp)})`)
+                    .then((sdp) => engine.request('session.description', { session_id: sessionId, generation, description: { type: 'answer', sdp } }))
+                    .catch((error) => console.error(`answer failed: ${error.message}`));
+            } else if (event.event === 'session.candidate') {
+                browser.evaluate(`window.__g2g.candidate(${JSON.stringify({
+                    candidate: event.params.candidate, sdpMid: event.params.sdpMid, sdpMLineIndex: event.params.sdpMLineIndex,
+                })})`).catch(() => {});
+            }
+        });
+        const shares = {};
+        for (const share of ['Window', 'Monitor']) {
+            writeFileSync(join(dir, 'share'), share);
+            await browser.evaluate(PAGE);
+            const opened = await engine.request('session.open', { source: { kind: 'portal' }, max_width: run.width, max_height: run.height }, 60_000);
+            sessionId = opened.sessionId;
+            generation = opened.generation;
+            await browser.until('window.__g2g.channelOpen', 30_000, `the ${share} share's control channel`);
+            const { width, height } = opened.geometry.encoded;
+            const tap = await browser.evaluate(`window.__g2g.control(${JSON.stringify({ kind: 'pointer', phase: 'down', x: width >> 1, y: height >> 1, button: 1, seq: 1 })})`);
+            const typed = await browser.evaluate(`window.__g2g.control(${JSON.stringify({ kind: 'text', text: 'a', seq: 2 })})`);
+            await engine.request('session.close', { session_id: sessionId });
+            shares[share] = { kind: opened.source.kind, origin: opened.source.origin, tap, typed };
+        }
+        const { Window: window, Monitor: monitor } = shares;
+        assert.equal(window.kind, 'Window', 'the lab did not share a single window');
+        assert.equal(window.tap?.kind, 'rejected', `a window-share tap was applied: ${JSON.stringify(window.tap)}`);
+        assert.equal(window.tap.code, 'input-unavailable');
+        assert.match(window.tap.message, /shared window cannot take taps/);
+        // Only pointing is refused; the cage has no input device, so typing
+        // meets the ordinary refusal, as it does on the monitor share.
+        assert.equal(window.typed?.message, 'no input backend', JSON.stringify(window.typed));
+        assert.equal(monitor.kind, 'Monitor');
+        assert.equal(monitor.tap?.message, 'no input backend', `the monitor share's tap changed path: ${JSON.stringify(monitor.tap)}`);
+        return { source: 'portal', shares };
+    } finally {
+        await browser.close();
+    }
 }

@@ -236,7 +236,7 @@ Result:
 
 ```jsonc
 {"sessionId":"<opaque>","generation":1,
- "source":{"kind":"monitor","width":2560,"height":1440,"origin":{"x":0,"y":0}},
+ "source":{"kind":"Monitor","width":2560,"height":1440,"origin":{"x":0,"y":0}},
  "geometry":{"source":{"width":2560,"height":1440},
              "encoded":{"width":2560,"height":1440},
              "origin":{"x":0,"y":0}},"agentIndicator":false,
@@ -679,6 +679,14 @@ Refusal codes: `session`, `input-replay`, `coordinates`, `text-too-large`,
 `input-replay` and **no side effect**, so a replayed message cannot move the
 pointer twice. Validation and ordering checks all run before any
 physical effect.
+
+A portal share of a single window (`source.kind` `Window` in the open reply)
+refuses pointer `move`, `down` and `up` with `input-unavailable` and a message
+the client can show. The portal reports no desktop origin for a window (xdph
+sends `0,0` for every stream) while the pointer device spans the whole desktop,
+so a tap would land at the same fraction of the desktop instead of on the
+window. Keys, text, wheel, pointer `cancel` and `release_all` are unaffected;
+share the monitor to point and click.
 
 The engine holds its own pressed-key/button state. `close`, `release_all`,
 control-channel loss and process exit all synthesize releases for exactly the

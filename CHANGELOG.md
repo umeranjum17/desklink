@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.6
+
+Joint patch release; protocol version remains 3. All packages move together.
+
+### Fixed
+
+- A tap on a portal **window** share no longer lands somewhere the person did
+  not point. The portal gives no desktop origin for a window while the pointer
+  device spans the whole desktop, so pointer moves and clicks on a window share
+  are now refused with `input-unavailable` and a message the client can show
+  (share the monitor to point and click); keys and text still apply. See
+  [PROTOCOL.md](packages/desktop-host/docs/PROTOCOL.md#input-and-clipboard-the-sessions-control-channel).
+
 ## 0.5.3
 
 Joint patch release preparation; protocol version remains 3. All five packages
