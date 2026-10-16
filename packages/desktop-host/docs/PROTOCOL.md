@@ -696,8 +696,8 @@ in `j/clients` with that title and the stream's size. Each `move`, `down` and
 through the input device as before. A tap is still refused with
 `input-unavailable` when the window cannot be told apart (no announcement,
 no such window, or several that look alike), when it has closed or sits on a
-hidden workspace, or when another window covers the tapped point. Other
-compositors keep the refusal above.
+hidden workspace, or when another window covers the tapped point or the
+window hangs off screen. Other compositors keep the refusal above.
 
 The engine holds its own pressed-key/button state. `close`, `release_all`,
 control-channel loss and process exit all synthesize releases for exactly the

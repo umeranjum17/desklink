@@ -117,11 +117,37 @@ impl WindowLocator {
             left + x as f64 * width / source_w as f64,
             top + y as f64 * height / source_h as f64,
         );
-        // Hyprland draws tiled windows, then floating ones, then fullscreen,
-        // then those let over fullscreen, each in its list order: a later one
-        // that holds the point is what a press there would reach.
+        // Hyprland clamps the cursor to the screen edge, so a point off every
+        // monitor would press something else or nothing.
+        let on_screen = monitors.as_array().into_iter().flatten().any(|monitor| {
+            let scale = monitor["scale"].as_f64().filter(|scale| *scale > 0.0);
+            monitor["disabled"].as_bool() != Some(true)
+                && matches!(
+                    (
+                        monitor["x"].as_f64(),
+                        monitor["y"].as_f64(),
+                        monitor["width"].as_f64(),
+                        monitor["height"].as_f64(),
+                        scale
+                    ),
+                    (Some(mx), Some(my), Some(mw), Some(mh), Some(scale))
+                        if (mx..mx + mw / scale).contains(&px)
+                            && (my..my + mh / scale).contains(&py)
+                )
+        });
+        if !on_screen {
+            return Err(String::from(
+                "a shared window cannot take taps where it hangs off screen",
+            ));
+        }
+        // Hyprland draws tiled windows, then floating ones, then fullscreen
+        // ones, and pinned ones above all; j/clients lists them in the
+        // compositor's own stacking order, so a later layer-mate holding the
+        // point is what a press there would reach. A floating window let over
+        // fullscreen draws above it, but j/clients cannot tell that one from
+        // any floating window, so either pairing over the point is a refusal.
         let layer = |w: &Value| {
-            if w["allowedOverFullscreen"].as_bool() == Some(true) {
+            if w["pinned"].as_bool() == Some(true) {
                 3
             } else if w["fullscreen"].as_i64().is_some_and(|mode| mode > 0) {
                 2
@@ -130,12 +156,14 @@ impl WindowLocator {
             }
         };
         let covered = clients.iter().enumerate().any(|(i, other)| {
-            i != index
-                && shown(other)
-                && (layer(other), i) > (layer(window), index)
+            shown(other)
                 && bounds(other).is_some_and(|(l, t, w, h)| {
                     (l..l + w).contains(&px) && (t..t + h).contains(&py)
                 })
+                && match (layer(other), layer(window), i > index) {
+                    (1, 2, _) | (2, 1, _) => true,
+                    (above, own, later) => above > own || (above == own && later),
+                }
         });
         if covered {
             return Err(String::from(

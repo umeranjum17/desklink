@@ -8,9 +8,9 @@ Joint patch release; protocol version remains 3. All packages move together.
 
 - A tap on a portal **window** share on Hyprland now lands on the window, at
   the point the person sees under their finger, even after the window moves.
-  A window that cannot be told apart, is hidden, or is covered at that point
-  is still refused with `input-unavailable`; other compositors keep the 0.5.6
-  refusal. See [PROTOCOL.md](packages/desktop-host/docs/PROTOCOL.md#input-and-clipboard-the-sessions-control-channel).
+  A window that cannot be told apart, is hidden, hangs off screen, or is
+  covered at that point is still refused with `input-unavailable`; other
+  compositors keep the 0.5.6 refusal. See [PROTOCOL.md](packages/desktop-host/docs/PROTOCOL.md#input-and-clipboard-the-sessions-control-channel).
 - A later portal share in the same engine no longer attaches to an earlier
   share's stale PipeWire node.
 
