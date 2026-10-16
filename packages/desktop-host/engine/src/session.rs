@@ -2271,6 +2271,11 @@ impl Inner {
         let located = lock(&self.window).is_some();
         #[cfg(not(target_os = "linux"))]
         let located = false;
+        let feedback = if located {
+            feedback.filter(|(kind, ..)| *kind == 'T')
+        } else {
+            feedback
+        };
         if self.source.source_type.as_deref() == Some("Window")
             && !located
             && matches!(&message, ControlMessage::Pointer { phase, .. } if !matches!(phase, PointerPhase::Cancel))

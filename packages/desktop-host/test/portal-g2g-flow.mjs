@@ -1025,7 +1025,12 @@ function answerOffers(engine, browser) {
     });
     return async (share, run) => {
         await browser.evaluate(PAGE);
-        const opened = await engine.request('session.open', { source: { kind: 'portal' }, max_width: run.width, max_height: run.height }, 60_000);
+        const opened = await engine.request('session.open', {
+            source: { kind: 'portal' },
+            max_width: run.width,
+            max_height: run.height,
+            ...(run.hyprland ? { agent_indicator: true } : {}),
+        }, 60_000);
         current = opened;
         await browser.until('window.__g2g.channelOpen', 30_000, `the ${share} share's control channel`);
         return opened;

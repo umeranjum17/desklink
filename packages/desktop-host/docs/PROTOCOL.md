@@ -692,7 +692,14 @@ share the monitor to point and click.
 
 On Hyprland the engine places the pointer itself. Hyprland announces each
 window share by title on its event socket, and the engine takes the one window
-in `j/clients` with that title and the stream's size. Each `move`, `down` and
+in `j/clients` with that title and the stream's size. That match runs once, at
+the first tap, and the announcement says nothing else about which share it is:
+if the shared window's title changes before that first tap and another window
+of the stream's size now carries the announced title, taps land on the other
+window; and when two window shares are announced at once (another session, or
+any other consumer of the portal), the engine cannot tell which announcement
+is this share's, so every tap refuses with `input-unavailable` for the
+session's lifetime. Each `move`, `down` and
 `up` warps the pointer to the window's current position plus the local point
 (so a window moved after the share started still maps); buttons and keys go
 through the input device as before. A tap is still refused with
