@@ -688,6 +688,17 @@ so a tap would land at the same fraction of the desktop instead of on the
 window. Keys, text, wheel, pointer `cancel` and `release_all` are unaffected;
 share the monitor to point and click.
 
+On Hyprland the engine places the pointer itself. Hyprland announces each
+window share by title on its event socket, and the engine takes the one window
+in `j/clients` with that title and the stream's size. Each `move`, `down` and
+`up` warps the pointer to the window's current position plus the local point
+(so a window moved after the share started still maps); buttons and keys go
+through the input device as before. A tap is still refused with
+`input-unavailable` when the window cannot be told apart (no announcement,
+no such window, or several that look alike), when it has closed or sits on a
+hidden workspace, or when another window covers the tapped point. Other
+compositors keep the refusal above.
+
 The engine holds its own pressed-key/button state. `close`, `release_all`,
 control-channel loss and process exit all synthesize releases for exactly the
 keys and buttons this session pressed, so a dropped connection cannot leave a

@@ -30,6 +30,8 @@ journeys:
 # via packages/desktop-client/test/android-roam-flow.mjs on an attached emulator or
 # phone (ANDROID_SERIAL, DESKLINK_ANDROID_OUT, DESKLINK_ROAM_APP_ADDRESS = this
 # host's LAN IPv4; its header has the recipe).
+# Hyprland window-share taps run via the same flow with --hyprland-input-proof
+# (DESKLINK_PORTAL_AQUAMARINE names the patched aquamarine its header describes).
 
 # This repo's coding agent, over agent in ~/.done-done/config.yaml (model, effort and the other agent settings stay there).
 # agent: opencode
