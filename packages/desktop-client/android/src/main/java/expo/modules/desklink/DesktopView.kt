@@ -474,8 +474,9 @@ class DesktopView(context: Context, appContext: AppContext) : ExpoView(context, 
   private fun fillScale(): Float {
     // Portrait fits the width unless the app opted into cover; landscape
     // covers. Either way the fill never goes below the fit or above the zoom cap.
-    val wide = if (width <= height && !cover) safeWidth() else width.toFloat()
-    val fill = max(wide / surfaceWidth, (height - insetTop) / surfaceHeight)
+    val covers = width > height || cover
+    val fill = if (!covers) safeWidth() / surfaceWidth
+      else max(width.toFloat() / surfaceWidth, (height - insetTop) / surfaceHeight)
     return max(fitScale(), min(fill, MAX_SCALE))
   }
 
