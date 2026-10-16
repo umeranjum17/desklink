@@ -277,8 +277,9 @@ view.
   network is still down. Renegotiation transients from a restart the session
   asked for itself are expected, not a new outage: they neither flip the
   status nor trigger another restart for a short grace window. A picture
-  that keeps moving holds off the heartbeat watchdog for up to ~20 s, since
-  the control channel lags the video after an outage.
+  that keeps moving holds off the heartbeat watchdog for up to ~20 s from
+  the later of the last heartbeat and the picture's return, since the
+  control channel lags the video after an outage.
 - **Roaming keeps the session.** The signalling carrier is not the session:
   when it closes, or a restart request on it gets no reply within 1.5 s, the
   session drops that carrier for good (calling its optional `close()`) and

@@ -15,6 +15,16 @@
 // exactly as the README defines it, and the disconnect is delivered through its
 // `state` event, which is how the engine reports it.
 //
+// Then, on a fresh page with the engine's 500 ms heartbeat on, a path outage
+// long enough that the heartbeat lags the restored picture, as the engine's
+// SCTP retransmission backoff makes it after ~15 s: nothing crosses the link,
+// restarts are spent on the carrier until it dies, and the path comes back
+// through a reattach and an ICE restart, with the heartbeat 15 s behind the
+// picture of a still desktop (the engine's one keepalive frame a second).
+// That recovery must hold: no restart, close or reopen for the next 18 s. A
+// second outage after it must still be seen and recovered on the same
+// session.
+//
 //   node packages/desktop-client/test/reattach-grace-race-flow.mjs [evidence-dir]
 //
 // DESKLINK_CHROME overrides the browser (default /usr/bin/chromium).
@@ -50,7 +60,7 @@ import { useDesktopSession } from '__SRC__/useDesktopSession';
 import { attachSurface, nativeDesklink } from '__SRC__/native.web';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const probe = window.__probe = { status: 'boot', frames: 0, restarts: [] };
+const probe = window.__probe = { status: 'boot', frames: 0, restarts: [], log: [], opens: [], closes: [], pings: 0 };
 window.addEventListener('unhandledrejection', (e) => { probe.error = String(e.reason); });
 
 // The grace's stats read is parked while this is true, so a disconnect can be
@@ -71,24 +81,49 @@ window.__releaseStats = () => {
 const canvas = document.createElement('canvas');
 canvas.width = 320; canvas.height = 180;
 const ctx = canvas.getContext('2d');
-let drawing = true; let tick = 0;
-const draw = () => {
-    if (!drawing) return;
+let drawing = true; let tick = 0; let still = null;
+const frame = () => {
     tick += 1;
     ctx.fillStyle = 'hsl(' + ((tick * 7) % 360) + ' 80% 50%)';
     ctx.fillRect(0, 0, 320, 180);
+};
+const draw = () => {
+    if (!drawing) return;
+    frame();
     requestAnimationFrame(draw);
 };
 requestAnimationFrame(draw);
+// 'still' is a still desktop: the engine re-sends one unchanged frame a
+// second, which the client's 500 ms stats read sees 1-1.5 s apart; one frame
+// every 1.25 s gives it those gaps.
+const paint = (on) => {
+    clearInterval(still);
+    if (on === 'still') { on = false; frame(); still = setInterval(frame, 1250); }
+    if (on && !drawing) requestAnimationFrame(draw);
+    drawing = on;
+};
 const stream = canvas.captureStream(20);
 const engine = new RTCPeerConnection({ iceServers: [] });
 engine.addTrack(stream.getVideoTracks()[0], stream);
-engine.createDataChannel('control');
+
+// The engine's side of the link. While up is false nothing crosses it: no
+// dial, no heartbeat, and (with the picture stopped) no frames. pinging is the
+// engine's 500 ms heartbeat; reoffer answers a restart with an ICE-restart
+// offer. Both stay off for the race phases, which only count restarts.
+const link = window.__link = { up: true, pinging: false, reoffer: false };
+const control = engine.createDataChannel('control');
+setInterval(() => {
+    if (!link.pinging || control.readyState !== 'open') return;
+    control.send('{"kind":"ping"}');
+    probe.pings += 1;
+}, 500);
+// Run once the engine has applied the client's next answer.
+let onAnswer = null;
 
 const carriers = [];
 const current = () => carriers[carriers.length - 1];
-async function sendOffer() {
-    const offer = await engine.createOffer();
+async function sendOffer(options) {
+    const offer = await engine.createOffer(options);
     await engine.setLocalDescription(offer);
     current().emit({ kind: 'description', description: { type: 'offer', sdp: offer.sdp } });
 }
@@ -104,6 +139,7 @@ function newCarrier() {
         generation: 0,
         async request(method, params) {
             if (method === 'session.open') {
+                probe.opens.push(Date.now());
                 carrier.generation += 1;
                 setTimeout(() => { void sendOffer(); }, 0);
                 return { sessionId: 'sess-race', generation: carrier.generation,
@@ -112,13 +148,19 @@ function newCarrier() {
             }
             if (method === 'session.description') {
                 if (params.description.type === 'answer') await engine.setRemoteDescription({ type: 'answer', sdp: params.description.sdp });
+                const answered = onAnswer; onAnswer = null; answered?.();
                 return {};
             }
             if (method === 'session.candidate') {
                 await engine.addIceCandidate({ candidate: params.candidate, sdpMid: params.sdpMid ?? undefined, sdpMLineIndex: params.sdpMLineIndex ?? undefined }).catch(() => {});
                 return {};
             }
-            if (method === 'session.restart_ice') { carrier.restartAt = Date.now(); probe.restarts.push(carrier.restartAt); return {}; }
+            if (method === 'session.restart_ice') {
+                carrier.restartAt = Date.now(); probe.restarts.push(carrier.restartAt);
+                if (link.reoffer && link.up) setTimeout(() => { void sendOffer({ iceRestart: true }); }, 0);
+                return {};
+            }
+            if (method === 'session.close') probe.closes.push(Date.now());
             return {};
         },
         subscribe(handler) { handlers.add(handler); return () => handlers.delete(handler); },
@@ -133,11 +175,12 @@ let session = null;
 function Harness() {
     session = useDesktopSession({
         authorize: async () => {
+            if (!link.up) throw Object.assign(new Error('the desktop is unreachable'), { code: 'transport' });
             const carrier = newCarrier();
             if (window.__onAuthorize) { const resolveReattach = window.__onAuthorize; window.__onAuthorize = null; setTimeout(resolveReattach, 0); }
             return { signaling: carrier, session: { maxWidth: 320, maxHeight: 180, maxFps: 30 } };
         },
-        onStateChange: (s) => { probe.status = s.status; },
+        onStateChange: (s) => { if (s.status !== probe.status) probe.log.push([Date.now(), s.status]); probe.status = s.status; },
         onError: (f) => { probe.error = f.code; },
     });
     window.__session = session;
@@ -201,6 +244,39 @@ window.__phaseRace = async () => {
     record.restarts = probe.restarts.length - before;
     return record;
 };
+
+// A path outage: nothing crosses the link, and the carrier dies carrierMs in
+// (restarts reach it only while it lives). Back on the path, the engine
+// answers a restart with an ICE-restart offer; the picture returns with that
+// generation (a still desktop if still) and the heartbeat lagMs after it.
+window.__phaseOutage = async ({ downMs, carrierMs, lagMs, watchMs, still }) => {
+    const r = { nativeId: session.nativeId, cutAt: Date.now() };
+    const since = (t0, times) => times.filter((t) => t > t0).length;
+    const firstAfter = (t0, live) => probe.log.find(([t, s]) => t > t0 && (s === 'live') === live)?.[0] ?? null;
+    link.up = false; link.pinging = false; paint(false);
+    await sleep(carrierMs);
+    current().emit({ kind: 'carrier-closed' });
+    await sleep(downMs - carrierMs);
+    r.detectedAt = firstAfter(r.cutAt, false);
+    r.restartsDown = since(r.cutAt, probe.restarts);
+    onAnswer = () => { r.restoredAt = Date.now(); paint(still ? 'still' : true); setTimeout(() => { link.pinging = true; }, lagMs); };
+    r.pathAt = Date.now();
+    link.up = true;
+    for (let waited = 0; probe.status !== 'live' && waited < 10000; waited += 20) await sleep(20);
+    r.recoveredAt = firstAfter(r.pathAt, true);
+    if (r.recoveredAt === null) return r;
+    const frames = probe.frames, pings = probe.pings;
+    await sleep(watchMs);
+    r.watchedMs = Date.now() - r.recoveredAt;
+    r.restartsAfter = since(r.recoveredAt, probe.restarts);
+    r.closes = since(r.cutAt, probe.closes);
+    r.opens = since(r.cutAt, probe.opens);
+    r.statusesAfter = probe.log.filter(([t]) => t > r.recoveredAt);
+    r.framesAfter = probe.frames - frames;
+    r.pingsAfter = probe.pings - pings;
+    r.nativeIdAfter = session.nativeId;
+    return r;
+};
 `;
 
 const viteConfig = `const SRC = ${JSON.stringify(SRC)};
@@ -257,7 +333,33 @@ async function main() {
         assert(afterRelease <= 300, `restart came ${afterRelease} ms after the wait released (want <=300): ${JSON.stringify(race)}`);
         assert(afterEvent < 1000, `restart came ${afterEvent} ms after the disconnect (want <<2000): ${JSON.stringify(race)}`);
 
-        const result = { status: 'pass', chrome, protection, race, afterRelease, afterEvent };
+        // The outage legs run on a fresh page, with the engine's heartbeat and re-offers on.
+        await page.reload();
+        await page.waitForFunction(() => window.__probe != null && typeof window.__phaseOutage === 'function');
+        await wait(async () => { const p = await page.evaluate(() => window.__probe); return p.status === 'live' && p.frames > 3; }, 30000, 'live picture after the reload');
+        await page.evaluate(() => Object.assign(window.__link, { pinging: true, reoffer: true }));
+        await new Promise((r) => setTimeout(r, 3000)); // heartbeats land and arm the stall watchdog
+        const held = (name, leg) => {
+            const why = `${name}: ${JSON.stringify(leg)}`;
+            assert(leg.detectedAt !== null, `the outage never took the session off live: ${why}`);
+            assert(leg.recoveredAt !== null, `no recovery to live after the path came back: ${why}`);
+            assert(leg.recoveredAt - leg.pathAt <= 2000, `live came ${leg.recoveredAt - leg.pathAt} ms after the path (want <=2000): ${why}`);
+            assert.equal(leg.restartsAfter, 0, `a restart fired after the recovery: ${why}`);
+            assert.equal(leg.closes, 0, `the session was closed: ${why}`);
+            assert.equal(leg.opens, 0, `a new session was opened: ${why}`);
+            assert.deepEqual(leg.statusesAfter, [], `the status left live after the recovery: ${why}`);
+            assert.equal(leg.nativeIdAfter, leg.nativeId, `the native session changed: ${why}`);
+            assert(leg.framesAfter > 0, `the picture did not advance after the recovery: ${why}`);
+            assert(leg.pingsAfter > 0, `the heartbeat never came back: ${why}`);
+        };
+        const outage = await page.evaluate((leg) => window.__phaseOutage(leg), { downMs: 15000, carrierMs: 7000, lagMs: 15000, watchMs: 18000, still: true });
+        held('outage', outage);
+        assert(outage.restartsDown >= 1, `no restart was spent during the outage: ${JSON.stringify(outage)}`);
+        assert(outage.watchedMs >= 10000, `watched ${outage.watchedMs} ms after the recovery (want >=10000)`);
+        const second = await page.evaluate((leg) => window.__phaseOutage(leg), { downMs: 6000, carrierMs: 0, lagMs: 1000, watchMs: 4000 });
+        held('second outage', second);
+
+        const result = { status: 'pass', chrome, protection, race, afterRelease, afterEvent, outage, second };
         writeFileSync(join(scratch, 'race-result.json'), JSON.stringify(result, null, 2) + '\n');
         console.log('RACE-RESULT ' + JSON.stringify(result));
     } finally {

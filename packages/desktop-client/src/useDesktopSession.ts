@@ -56,7 +56,12 @@ const STALL_AFTER_MS = 1200;
  * trigger another restart while the window lasts.
  */
 const RESTART_GRACE_MS = 2500;
-/** How long a moving picture outlasts silent heartbeats: after an outage the data channel lags the video. */
+/**
+ * How long a moving picture outlasts silent heartbeats, from the later of the
+ * last heartbeat and the picture's return from a freeze: after an outage the
+ * data channel lags the video, as SCTP's retransmissions back off (to 15 s,
+ * then 31 s, after the first loss).
+ */
 const QUIET_PICTURE_MS = 20_000;
 /** How long a restart offer may go unanswered before the next attempt. */
 const RESTART_REPLY_MS = 5000;
@@ -388,6 +393,8 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const mediaMovingAt = useRef<number | null>(null);
     /** Whether the picture of an open session has stopped advancing. */
     const frozen = useRef(false);
+    /** When a frozen picture last moved again, or 0 while it has not. */
+    const pictureBackAt = useRef(0);
     /** Renegotiation transients are not a new outage before this time. */
     const restartGraceUntil = useRef(0);
     /** ICE-restart attempts spent on the current drop. */
@@ -739,6 +746,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 mediaMovingAt.current = Date.now();
                 if (!frozen.current) return;
                 frozen.current = false;
+                pictureBackAt.current = Date.now();
                 // The picture advances again, so the transport can be believed
                 // for this session: live returns without waiting for it to say so.
                 if (statusRef.current === 'reconnecting' || (statusRef.current === 'failed' && heldIceFailureAt.current !== null)) onTransportState('connected', false);
@@ -779,7 +787,14 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             stallTimer.current = setTimeout(() => checkStallRef.current(), restartGraceUntil.current - Date.now());
             return;
         }
-        if (pictureMoving(STALL_AFTER_MS) && !frozen.current && quietMs < QUIET_PICTURE_MS) {
+        // The outage's own silence is not the data channel lagging the
+        // picture: that lag starts when the picture comes back. Until the
+        // heartbeat catches up, the picture is held to the freeze bar: a
+        // still desktop's keepalive frames, a second apart, read up to
+        // 1.5 s apart through the stats poll.
+        const lagging = pictureBackAt.current > lastPingAt.current;
+        const lagMs = Date.now() - Math.max(lastPingAt.current, pictureBackAt.current);
+        if (pictureMoving(lagging ? FROZEN_AFTER_MS : STALL_AFTER_MS) && !frozen.current && lagMs < QUIET_PICTURE_MS) {
             stallTimer.current = setTimeout(() => checkStallRef.current(), STALL_AFTER_MS);
             return;
         }
@@ -901,6 +916,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         mediaRef.current = null;
         mediaMovingAt.current = null;
         frozen.current = false;
+        pictureBackAt.current = 0;
         opened.current = null;
         dropCarrier(false);
         setNativeId(null);
