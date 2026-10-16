@@ -163,7 +163,9 @@ fn main() -> Result<()> {
     let moving = std::env::args().any(|arg| arg == "--move");
     // `--corner <file>`: on each animation tick, paint the far-corner cell in
     // the colour the file names (`rrggbb`), so a flow can change a fixed spot
-    // in place, when it chooses, and look for exactly that change.
+    // in place, when it chooses, and look for exactly that change. The value
+    // `still` instead freezes the blink and the moving marker: the desktop
+    // goes quiet, and only the corner cell itself may change again.
     let corner = args
         .iter()
         .position(|arg| arg == "--corner")
@@ -292,9 +294,11 @@ fn main() -> Result<()> {
             };
         }
         if animate {
-            let wanted = corner
+            let request = corner
                 .and_then(|path| std::fs::read_to_string(path).ok())
-                .and_then(|text| u32::from_str_radix(text.trim(), 16).ok());
+                .map(|text| text.trim().to_string());
+            let still = request.as_deref() == Some("still");
+            let wanted = request.and_then(|text| u32::from_str_radix(&text, 16).ok());
             if wanted.is_some() && wanted != corner_colour {
                 corner_colour = wanted;
                 connection.change_gc(
@@ -312,46 +316,48 @@ fn main() -> Result<()> {
                     }],
                 )?;
             }
-            if moving {
+            if !still {
+                if moving {
+                    connection.change_gc(
+                        graphics,
+                        &x11rb::protocol::xproto::ChangeGCAux::new().foreground(0x00d04040),
+                    )?;
+                    connection.poly_fill_rectangle(
+                        window,
+                        graphics,
+                        &[Rectangle {
+                            x: MARKER_X + (position * MARKER_SIZE as usize) as i16,
+                            y: MARKER_Y,
+                            width: MARKER_SIZE,
+                            height: MARKER_SIZE,
+                        }],
+                    )?;
+                    position = (position + 1) % MARKER_STEPS;
+                }
+                bright = !bright;
                 connection.change_gc(
                     graphics,
-                    &x11rb::protocol::xproto::ChangeGCAux::new().foreground(0x00d04040),
+                    &x11rb::protocol::xproto::ChangeGCAux::new().foreground(if bright {
+                        0x00ffffff
+                    } else {
+                        0x00000000
+                    }),
                 )?;
                 connection.poly_fill_rectangle(
                     window,
                     graphics,
                     &[Rectangle {
-                        x: MARKER_X + (position * MARKER_SIZE as usize) as i16,
+                        x: if moving {
+                            MARKER_X + (position * MARKER_SIZE as usize) as i16
+                        } else {
+                            MARKER_X + MARKER_SIZE as i16
+                        },
                         y: MARKER_Y,
                         width: MARKER_SIZE,
                         height: MARKER_SIZE,
                     }],
                 )?;
-                position = (position + 1) % MARKER_STEPS;
             }
-            bright = !bright;
-            connection.change_gc(
-                graphics,
-                &x11rb::protocol::xproto::ChangeGCAux::new().foreground(if bright {
-                    0x00ffffff
-                } else {
-                    0x00000000
-                }),
-            )?;
-            connection.poly_fill_rectangle(
-                window,
-                graphics,
-                &[Rectangle {
-                    x: if moving {
-                        MARKER_X + (position * MARKER_SIZE as usize) as i16
-                    } else {
-                        MARKER_X + MARKER_SIZE as i16
-                    },
-                    y: MARKER_Y,
-                    width: MARKER_SIZE,
-                    height: MARKER_SIZE,
-                }],
-            )?;
             connection.flush()?;
             std::thread::sleep(std::time::Duration::from_millis(80));
         }
