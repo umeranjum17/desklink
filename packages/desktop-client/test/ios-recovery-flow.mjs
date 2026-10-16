@@ -87,6 +87,7 @@
 // DESKLINK_IOS_CUT_NEGATIVE (1 restores signalling but leaves the media cut:
 // the cut leg's picture verdict must then fail),
 // DESKLINK_IOS_RESUME_OFF_MS (the resume leg's blip length, default 1500),
+// DESKLINK_IOS_CUT_OFF_MS (the cut leg's outage length, default 12000),
 // DESKLINK_ENGINE, DESKLINK_VERIFY_TARGET (x11_target),
 // DESKLINK_ICE_TRACE (1 records the engine's ICE timeline into engine.log).
 import assert from 'node:assert/strict';
@@ -626,7 +627,9 @@ test -s "$D/tmp/rec-${name}.mov"`);
     // resumed old pair is impossible and the proof requires a new generation.
     // `negative` restores signalling but leaves the media cut, so the same
     // picture verdict must fail.
-    const CUT_OFF_MS = 12000;
+    // DESKLINK_IOS_CUT_OFF_MS overrides the outage length (default 12000);
+    // the matrix leg sets 15000 for the extreme.
+    const CUT_OFF_MS = Number(process.env.DESKLINK_IOS_CUT_OFF_MS ?? 12000);
     const cutCase = async (negative) => {
         const name = 'cut';
         const leg = { name, negative };
