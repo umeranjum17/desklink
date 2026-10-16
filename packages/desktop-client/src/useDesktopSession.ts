@@ -1191,6 +1191,11 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                     }
                     if (statusRef.current !== 'reconnecting') update({ status: 'reconnecting' });
                     restartAttempts.current = restartCycles.current = 0;
+                    // A transport `disconnected` that landed while the stats read
+                    // above was in flight armed `scheduleRestart(RESTART_AFTER_MS)`;
+                    // without clearing it first the request here would return early
+                    // on the armed timer and the restart would slip by up to 2 s.
+                    cancelRestart();
                     scheduleRestart(0);
                 });
             }, graceMs);
