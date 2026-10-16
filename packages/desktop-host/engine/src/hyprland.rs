@@ -174,24 +174,44 @@ impl WindowLocator {
         }
         // Bars, notifications and other layer surfaces draw above windows and
         // are absent from the window-only video: a top or overlay one holding
-        // the point is what a press there would reach.
+        // the point is what a press there would reach. Their boxes come local
+        // to their monitor, which j/monitors places.
+        let anchored = |name: &str| -> Option<(f64, f64)> {
+            for monitor in monitors.as_array().into_iter().flatten() {
+                if monitor["name"].as_str() == Some(name) {
+                    return Some((monitor["x"].as_f64()?, monitor["y"].as_f64()?));
+                }
+            }
+            None
+        };
         let overlaid = query("j/layers")?
             .as_object()
             .into_iter()
             .flatten()
-            .filter_map(|(_, monitor)| monitor["levels"].as_object())
-            .flatten()
-            .any(|(level, surfaces)| {
-                let level = level.parse::<u8>().unwrap_or(0);
-                (level >= 2)
-                    && surfaces.as_array().into_iter().flatten().any(|surface| {
-                        let (sx, sy) = (surface["x"].as_f64(), surface["y"].as_f64());
-                        let (sw, sh) = (surface["w"].as_f64(), surface["h"].as_f64());
-                        matches!(
-                            (sx, sy, sw, sh),
-                            (Some(sx), Some(sy), Some(sw), Some(sh))
-                                if (sx..sx + sw).contains(&px) && (sy..sy + sh).contains(&py)
-                        )
+            .map(|(name, monitor)| Some((anchored(name)?, monitor)))
+            .collect::<Option<Vec<((f64, f64), &Value)>>>()
+            .ok_or(String::from(
+                "a shared window cannot take taps: a screen's layers are unknown",
+            ))?
+            .into_iter()
+            .any(|((mx, my), monitor)| {
+                monitor["levels"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .any(|(level, surfaces)| {
+                        let level = level.parse::<u8>().unwrap_or(0);
+                        (level >= 2)
+                            && surfaces.as_array().into_iter().flatten().any(|surface| {
+                                let (sx, sy) = (surface["x"].as_f64(), surface["y"].as_f64());
+                                let (sw, sh) = (surface["w"].as_f64(), surface["h"].as_f64());
+                                matches!(
+                                    (sx, sy, sw, sh),
+                                    (Some(sx), Some(sy), Some(sw), Some(sh))
+                                        if (mx + sx..mx + sx + sw).contains(&px)
+                                            && (my + sy..my + sy + sh).contains(&py)
+                                )
+                            })
                     })
             });
         if overlaid {
