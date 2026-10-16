@@ -35,7 +35,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { homedir } from 'node:os';
+import { homedir, networkInterfaces } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -56,6 +56,8 @@ const serial = process.env.ANDROID_SERIAL ?? '';
 assert(serial !== '', 'set ANDROID_SERIAL');
 const appAddress = process.env.DESKLINK_ROAM_APP_ADDRESS ?? '';
 assert(/^\d+\.\d+\.\d+\.\d+$/.test(appAddress), 'set DESKLINK_ROAM_APP_ADDRESS to this host\'s LAN IPv4');
+assert(Object.values(networkInterfaces()).flat().some(entry => entry?.address === appAddress),
+    `DESKLINK_ROAM_APP_ADDRESS ${appAddress} is not an address of this host`);
 const RUNS = Number(process.env.DESKLINK_ROAM_RUNS ?? 3);
 const CUT_OFF_MS = Number(process.env.DESKLINK_ROAM_CUT_OFF_MS ?? 12000);
 const engine = resolve(process.env.DESKLINK_ENGINE ?? join(repo, 'packages/desktop-host/engine/target/debug/desklink-host'));
@@ -125,14 +127,6 @@ const waitFor = async (ready, what, ms = 60000) => {
     while (Date.now() < until) { if (ready()) return; await sleep(100); }
     throw new Error(`timed out waiting for ${what}`);
 };
-const freePort = async () => {
-    const probe = createServer();
-    await new Promise(ok => probe.listen(0, '127.0.0.1', ok));
-    const { port } = probe.address();
-    probe.close();
-    return port;
-};
-
 const reverses = [];
 const reverse = (spec, to = spec) => { adb('reverse', spec, to); reverses.push(spec); };
 let xvfb = null; let claim = null; let receiver = null; let link = null; let relay = null;
@@ -221,8 +215,19 @@ try {
 
     // Metro serves the debug build's JavaScript to the device's own 8081.
     // An emulator resolves its bundler as the host's own 10.0.2.2:8081, which
-    // adb reverse does not intercept; a phone resolves localhost:8081.
-    const metroPort = serial.startsWith('emulator-') ? 8081 : await freePort();
+    // adb reverse does not intercept, so there Metro has to hold the host's
+    // own 8081 and the run fails loudly when another process has it; a phone
+    // resolves localhost:8081, reversed onto a free port.
+    const metroProbe = createServer();
+    const metroBound = new Promise((ok, failed) => {
+        metroProbe.once('error', failed);
+        metroProbe.listen(serial.startsWith('emulator-') ? 8081 : 0, '127.0.0.1', ok);
+    });
+    await metroBound.catch(error => {
+        throw new Error(`an emulator reaches Metro only on the host's own 8081, which is already held: ${error.message}`);
+    });
+    const metroPort = metroProbe.address().port;
+    metroProbe.close();
     start('metro', 'npx', ['expo', 'start', '--port', String(metroPort)], { ...env, CI: '1' }, example);
     await waitFor(() => /Waiting on http/.test(logs.metro), 'Metro', 120000);
     if (process.env.DESKLINK_ROAM_INSTALL === '1') adb('install', '-r', apk);
@@ -235,7 +240,8 @@ try {
         + `&report=${encodeURIComponent(`http://127.0.0.1:${receiver.address().port}/report`)}`;
     adb('shell', 'am', 'force-stop', BUNDLE);
     await sleep(800);
-    adb('shell', 'am', 'start', '-n', `${BUNDLE}/.MainActivity`, '-a', 'android.intent.action.VIEW', '-d', `"${link_}"`);
+    await waitFor(() => adbRun('shell', 'am', 'start', '-n', `${BUNDLE}/.MainActivity`, '-a', 'android.intent.action.VIEW', '-d', `"${link_}"`).status === 0,
+        'the app to answer its connection link', 120000);
     const launchedAt = Date.now();
     await waitFor(() => reports.some(r => r.presentedAt > 0), 'the first presented frame', 240000);
     receipt.firstLiveMs = Date.now() - launchedAt;
