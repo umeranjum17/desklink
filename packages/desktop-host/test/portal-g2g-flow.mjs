@@ -317,7 +317,7 @@ async function cage(dir) {
     process.stdout.write(`${JSON.stringify({ cage: 'ready', isolation })}\n`);
 
     // The cursor proof's engine asks this cage's compositor for cursor positions.
-    const engine = spawn(config.engine, ['serve'], { stdio: 'inherit', env: { ...(config.cursorProof ? client : hyprland ? hyprEnv : env), RUST_LOG: 'warn' } });
+    const engine = spawn(config.engine, ['serve'], { stdio: 'inherit', env: { ...(config.cursorProof || config.hyprland ? client : env), RUST_LOG: 'warn' } });
     const finish = () => {
         for (const child of children) child.kill('SIGKILL');
         process.exit(0);
@@ -1079,6 +1079,7 @@ async function hyprlandInputProof(engine, dir, run) {
         const share = async (name) => {
             writeFileSync(join(dir, 'share'), name);
             const opened = await openShare(name, run);
+            assert.equal(opened.agentIndicator, true, `the ${name} share's agent indicator did not start`);
             await browser.until('window.__g2g.frames > 0', 30_000, `a first frame of ${name}`);
             // Hyprland announces a share when it copies a frame.
             await sleep(300);
