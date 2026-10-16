@@ -2418,16 +2418,15 @@ impl Inner {
             };
             return match phase {
                 PointerPhase::Move => place(),
-                PointerPhase::Down | PointerPhase::Up => {
+                PointerPhase::Down => {
                     // Refused before the pointer moves: nothing could press.
                     self.with_input(|_| Ok(()))?;
                     place()?;
-                    self.with_input(|target| {
-                        target.button(
-                            Button::from_number(button),
-                            matches!(phase, PointerPhase::Down),
-                        )
-                    })
+                    self.with_input(|target| target.button(Button::from_number(button), true))
+                }
+                PointerPhase::Up => {
+                    self.with_input(|target| target.button(Button::from_number(button), false))?;
+                    place()
                 }
                 PointerPhase::Cancel => self.with_input(InputTarget::release_all),
             };
