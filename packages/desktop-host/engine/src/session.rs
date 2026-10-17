@@ -2907,6 +2907,12 @@ fn auto_bitrate(width: usize, height: usize) -> u32 {
 const QUEUE_HIGH: Duration = Duration::from_millis(25);
 /// Below this the path has room again and the target may creep back up.
 const QUEUE_LOW: Duration = Duration::from_millis(10);
+/// The same thresholds for a TCP path. TCP never drops, so its queue is read
+/// as delay alone, and a relay's bridge adds 20-30 ms of delivery jitter that is
+/// not queueing: at 25/10 ms that jitter backs the target off to its floor
+/// with the link idle. Only a queue that stands over 100 ms is a backlog here.
+const QUEUE_HIGH_TCP: Duration = Duration::from_millis(100);
+const QUEUE_LOW_TCP: Duration = Duration::from_millis(60);
 /// How often queueing delay may back the target off: long enough for the last
 /// back-off to reach the far end and show in its feedback, short enough that a
 /// queue is drained in a few steps rather than a few seconds.
@@ -2928,6 +2934,8 @@ struct RateControl {
     last_change: Option<Instant>,
     /// The last queueing delay reported, while the path reports one.
     queue: Option<Duration>,
+    queue_high: Duration,
+    queue_low: Duration,
 }
 
 impl RateControl {
@@ -2946,7 +2954,19 @@ impl RateControl {
             target: ceiling,
             last_change: None,
             queue: None,
+            queue_high: QUEUE_HIGH,
+            queue_low: QUEUE_LOW,
         }
+    }
+
+    /// Read queueing delay against the thresholds for the transport the selected
+    /// pair runs over.
+    fn set_tcp(&mut self, tcp: bool) {
+        (self.queue_high, self.queue_low) = if tcp {
+            (QUEUE_HIGH_TCP, QUEUE_LOW_TCP)
+        } else {
+            (QUEUE_HIGH, QUEUE_LOW)
+        };
     }
 
     /// The new target when these loss reports (RFC 3550 fractions, /256) or
@@ -2959,7 +2979,7 @@ impl RateControl {
         let since = self.last_change.map(|at| now.duration_since(at));
         let waited = |gap: Duration| since.is_none_or(|since| since >= gap);
         let floor = (self.ceiling / 8).max(500);
-        let next = if let Some(path) = path.filter(|path| path.queue_delay > QUEUE_HIGH) {
+        let next = if let Some(path) = path.filter(|path| path.queue_delay > self.queue_high) {
             if !waited(DELAY_BACKOFF_EVERY) {
                 return None;
             }
@@ -2971,7 +2991,7 @@ impl RateControl {
                 return None;
             }
             let loss = worst as f64 / 256.0;
-            let roomy = self.queue.is_none_or(|queue| queue < QUEUE_LOW);
+            let roomy = self.queue.is_none_or(|queue| queue < self.queue_low);
             if loss > 0.10 {
                 ((self.target as f64 * 0.7) as u32).max(floor)
             } else if loss < 0.02 && roomy {
@@ -3220,6 +3240,9 @@ fn spawn_pipeline(
                 }
                 let reports = peer.take_loss_reports();
                 let path = peer.take_path_report();
+                if path.is_some() {
+                    rate.set_tcp(handle.block_on(peer.selected_pair_is_tcp()));
+                }
                 if let Some(kbps) = rate.update(&reports, path, Instant::now()) {
                     let applied = inner.encoder.lock().map(|mut encoder| {
                         encoder
@@ -3864,7 +3887,7 @@ mod tests {
         )
         .await
         .expect("a peer connection builds without a network");
-        test_inner_with(events, peer, 64, 64)
+        test_inner_with(events, Arc::new(peer), 64, 64)
     }
 
     #[cfg(target_os = "linux")]
@@ -3999,7 +4022,7 @@ mod tests {
 
     fn test_inner_with(
         events: tokio_mpsc::UnboundedSender<Notice>,
-        peer: VideoPeer,
+        peer: Arc<VideoPeer>,
         width: usize,
         height: usize,
     ) -> (Arc<Inner>, Arc<Mutex<Vec<(i16, bool)>>>) {
@@ -4027,7 +4050,7 @@ mod tests {
             latest: Arc::new(Mutex::new(None)),
             capture_error: Arc::new(Mutex::new(None)),
             frame_changes: tokio::sync::watch::channel(0).1,
-            peer: Mutex::new(Some(Arc::new(peer))),
+            peer: Mutex::new(Some(peer)),
             encoder: Mutex::new(Some(VideoEncoder::Vp9(
                 Encoder::new(width, height, 1000, 30, 1).expect("an encoder"),
             ))),
@@ -4629,7 +4652,7 @@ mod tests {
         let codec = crate::peer::tests::h264_receiver_codec();
         let (peer, _) = crate::peer::tests::answered(vec![codec.clone()]).await;
         let (events, mut received) = tokio_mpsc::unbounded_channel();
-        let (inner, _) = test_inner_with(events, peer, 64, 64);
+        let (inner, _) = test_inner_with(events, Arc::new(peer), 64, 64);
         let session = Session { inner };
         let mut offers = Vec::new();
         for _ in 0..3 {
@@ -4801,6 +4824,72 @@ mod tests {
         assert_eq!((later.codec, later.encoder), ("vp9", "libvpx"));
     }
 
+    /// The rate target after 3 s of delivery jitter on a connected pair: a queue
+    /// that alternates between 5 and 30 ms with nothing lost, and 800 kbps
+    /// delivered. The pipeline runs for real; only the path reports are fed.
+    async fn target_under_bridge_jitter(tcp: bool) -> u32 {
+        let peers = crate::peer::tests::connected(
+            if tcp {
+                Vec::new()
+            } else {
+                vec![std::net::SocketAddr::from(([0, 0, 0, 0], 0))]
+            },
+            if tcp {
+                vec![std::net::SocketAddr::from(([127, 0, 0, 1], 0))]
+            } else {
+                Vec::new()
+            },
+            tcp,
+        )
+        .await;
+        let engine = Arc::clone(&peers.engine);
+        assert_eq!(
+            engine.selected_pair_is_tcp().await,
+            tcp,
+            "the selected pair must run over {}",
+            if tcp { "TCP" } else { "UDP" }
+        );
+        let (events, _events_rx) = tokio_mpsc::unbounded_channel();
+        let (inner, _recorded) = test_inner_with(events, Arc::clone(&engine), 64, 64);
+        let (_frame_tx, frame_rx) = latest_frame();
+        spawn_pipeline(
+            &inner,
+            Arc::clone(&engine),
+            frame_rx,
+            Arc::new(AtomicBool::new(true)),
+            30,
+            1000,
+        );
+        for step in 0..300 {
+            let queue_delay = Duration::from_millis(if step % 2 == 0 { 5 } else { 30 });
+            engine.report_path(PathReport {
+                queue_delay,
+                delivered_kbps: 800,
+            });
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let target = inner.metrics.lock().unwrap().target_kbps;
+        drop(peers);
+        target
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tcp_path_with_bridge_jitter_holds_its_rate_ceiling() {
+        assert_eq!(
+            target_under_bridge_jitter(true).await,
+            1000,
+            "a 5-30 ms jitter that is not a queue must not back a TCP path off"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_udp_path_with_the_same_jitter_still_backs_off() {
+        assert!(
+            target_under_bridge_jitter(false).await < 1000,
+            "a UDP path reads the same 30 ms as a standing queue and must back off"
+        );
+    }
+
     #[tokio::test]
     async fn a_receiver_that_asks_for_h264_is_sent_h264_from_the_first_frame() {
         let Some(info) = tokio::task::spawn_blocking(crate::h264::probe)
@@ -4813,7 +4902,7 @@ mod tests {
         let (peer, _answer) =
             crate::peer::tests::answered(vec![crate::peer::tests::h264_receiver_codec()]).await;
         let (events, _events_rx) = tokio_mpsc::unbounded_channel();
-        let (inner, _recorded) = test_inner_with(events, peer, 320, 240);
+        let (inner, _recorded) = test_inner_with(events, Arc::new(peer), 320, 240);
         // The answer is real, so ICE runs and, with no candidates, never
         // connects; each state it reports would take back `assume_connected`.
         let pinned = current_peer(&inner).expect("the test's peer");

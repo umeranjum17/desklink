@@ -23,7 +23,7 @@ use rtc::peer_connection::configuration::media_engine::{
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::event::RTCPeerConnectionIceEvent;
 use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::transport::{RTCIceCandidateInit, RTCIceServer};
+use rtc::peer_connection::transport::{RTCIceCandidateInit, RTCIceProtocol, RTCIceServer};
 use rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtc::rtcp::receiver_report::ReceiverReport;
@@ -1133,6 +1133,21 @@ impl VideoPeer {
         self.connected.load(Ordering::SeqCst)
     }
 
+    /// Whether ICE selected a TCP candidate pair (the relay's ICE-TCP path).
+    /// False until a pair is selected.
+    pub async fn selected_pair_is_tcp(&self) -> bool {
+        let Some(sender) = self.peer.get_senders().await.into_iter().next() else {
+            return false;
+        };
+        let Ok(Some(dtls)) = sender.transport().await else {
+            return false;
+        };
+        matches!(
+            dtls.ice_transport().get_selected_candidate_pair().await,
+            Ok(Some(pair)) if pair.local().protocol == RTCIceProtocol::Tcp
+        )
+    }
+
     /// Stand in for a connected transport, for a pipeline under test.
     #[cfg(test)]
     pub fn assume_connected(&self) {
@@ -1173,6 +1188,12 @@ impl VideoPeer {
     /// also when the receiver sends no transport-wide feedback.
     pub fn take_path_report(&self) -> Option<PathReport> {
         lock(&self.path).take()
+    }
+
+    /// Stand in for transport-wide feedback that reports a path, for a pipeline under test.
+    #[cfg(test)]
+    pub fn report_path(&self, report: PathReport) {
+        *lock(&self.path) = Some(report);
     }
 
     /// Take the pending "the far end needs a reference frame" request, if any.
@@ -1700,6 +1721,7 @@ pub(crate) mod tests {
     async fn media_receiver(
         receiver: Arc<MediaReceiver>,
         udp: Vec<std::net::SocketAddr>,
+        tcp: Vec<std::net::SocketAddr>,
     ) -> Arc<dyn PeerConnection> {
         let mut media_engine = MediaEngine::default();
         media_engine
@@ -1713,6 +1735,7 @@ pub(crate) mod tests {
             .with_runtime(default_runtime().expect("a runtime"))
             .with_handler(receiver)
             .with_udp_addrs(udp)
+            .with_tcp_addrs(tcp)
             .build()
             .await
             .expect("a receiving peer");
@@ -1722,17 +1745,27 @@ pub(crate) mod tests {
     /// An engine and a client receiving on `client_udp`, offered, answered and
     /// connected over ICE, with the client's RTP arrival times and the
     /// candidates the engine offered.
-    struct Connected {
-        engine: Arc<VideoPeer>,
+    pub(crate) struct Connected {
+        pub(crate) engine: Arc<VideoPeer>,
         offer: String,
-        client: Arc<dyn PeerConnection>,
+        pub(crate) client: Arc<dyn PeerConnection>,
         arrivals: Arc<Mutex<Vec<Instant>>>,
         offered: Arc<Mutex<Vec<String>>>,
     }
 
-    async fn connected(client_udp: Vec<std::net::SocketAddr>) -> Connected {
+    /// `client_tcp` and `loopback_tcp` give a pair that runs over ICE-TCP: a
+    /// client with no UDP candidates can only reach the engine over TCP.
+    pub(crate) async fn connected(
+        client_udp: Vec<std::net::SocketAddr>,
+        client_tcp: Vec<std::net::SocketAddr>,
+        loopback_tcp: bool,
+    ) -> Connected {
         let (events, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (engine, offer) = VideoPeer::offer(transport(), events, VideoCodec::Vp9)
+        let options = TransportOptions {
+            loopback_tcp,
+            ..transport()
+        };
+        let (engine, offer) = VideoPeer::offer(options, events, VideoCodec::Vp9)
             .await
             .expect("an offering peer");
         let engine = Arc::new(engine);
@@ -1746,7 +1779,7 @@ pub(crate) mod tests {
             arrivals: Arc::clone(&arrivals),
             connected: Arc::clone(&connected),
         });
-        let client = media_receiver(Arc::clone(&receiver), client_udp).await;
+        let client = media_receiver(Arc::clone(&receiver), client_udp, client_tcp).await;
 
         client
             .set_remote_description(RTCSessionDescription::offer(offer.clone()).expect("an offer"))
@@ -1827,7 +1860,12 @@ pub(crate) mod tests {
             client,
             arrivals,
             offered,
-        } = connected(vec![std::net::SocketAddr::from(([0, 0, 0, 0], 0))]).await;
+        } = connected(
+            vec![std::net::SocketAddr::from(([0, 0, 0, 0], 0))],
+            Vec::new(),
+            false,
+        )
+        .await;
         eprintln!("restart: the engine offered {:?}", offered.lock().unwrap());
 
         // Any bytes the VP9 packetizer turns into one access unit.
@@ -1971,10 +2009,14 @@ pub(crate) mod tests {
             arrivals,
             offered,
             ..
-        } = connected(vec![std::net::SocketAddr::from((
-            std::net::Ipv6Addr::LOCALHOST,
-            0,
-        ))])
+        } = connected(
+            vec![std::net::SocketAddr::from((
+                std::net::Ipv6Addr::LOCALHOST,
+                0,
+            ))],
+            Vec::new(),
+            false,
+        )
         .await;
         let offered = offered.lock().unwrap().clone();
         eprintln!("ipv6: the engine offered {offered:?}");
