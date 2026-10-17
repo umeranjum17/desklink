@@ -135,6 +135,8 @@ export function statusText({ status, presented, failure }: SessionSnapshot): str
             switch (failure?.code) {
                 case 'transport':
                     return 'Can’t reach your desktop.';
+                case 'never-connected':
+                    return 'Can’t reach your desktop from this network.';
                 case 'permission':
                     return 'This phone isn’t allowed to show your desktop.';
                 case 'consent':

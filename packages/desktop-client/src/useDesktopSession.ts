@@ -222,6 +222,13 @@ const UNREACHABLE_DESKTOP =
 export const FIRST_FRAME_AFTER_MS = 20_000;
 const NO_PICTURE =
     'The desktop never sent a picture. On a path that only reaches the desktop through a tunnel or a USB forward, open the session with loopbackTcp: true.';
+/**
+ * A first open whose media path never formed: no candidate pair ever answered.
+ * Reopening asks the same network the same question, and every reopen makes the
+ * host restart its capture, so this ends the session once instead.
+ */
+const NEVER_CONNECTED =
+    'No network path to the desktop ever formed. Other networks need a relay route supplied by the app; a tunnel or USB forward needs loopbackTcp: true.';
 
 /**
  * The engine's and host's own refusal tokens, mapped to this package's failure
@@ -407,6 +414,10 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const restartCycles = useRef(0);
     /** The last ICE state the peer or the engine reported. */
     const iceConnected = useRef(false);
+    /** Whether the held native session's path ever reached `connected`. */
+    const pathFormed = useRef(false);
+    /** Whether any session since the last teardown showed a picture: reopens are for those only. */
+    const everPresented = useRef(false);
     /**
      * When the peer's own ICE last failed while the session was held, or null
      * when the current failure is not an ICE one. Kept across the hold so the
@@ -465,10 +476,17 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
      * `ice` marks a failure of the peer's own media path (its ICE `failed`
      * state, or a `failure` event whose reason is `ice`). While the session is
      * held and has not been revoked, that is not the end of the session: the
-     * reopen effect keeps it for `HOLD_AFTER_FAILED_MS` first. */
+     * reopen effect keeps it for `HOLD_AFTER_FAILED_MS` first.
+     *
+     * A first open whose path never formed is neither: there is nothing to
+     * hold and nothing a reopen would change, so it ends as `never-connected`. */
     const transportFailed = useCallback((message: string = UNREACHABLE_DESKTOP, ice = false): boolean => {
         if (dialing.current !== null) return false;
         if (ice && statusRef.current === 'failed') return false;
+        if (!everPresented.current && !pathFormed.current && nativeRef.current != null) {
+            refuse(NEVER_CONNECTED, 'never-connected');
+            return true;
+        }
         refuse(message, 'transport', ice);
         return true;
     }, [refuse]);
@@ -671,6 +689,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const onTransportState = useCallback((state: string, trackIce = true, skipGrace = false) => {
         // Synthetic stall reports say nothing about ICE itself.
         if (trackIce) iceConnected.current = state === 'connected' || state === 'completed';
+        if (trackIce && iceConnected.current) pathFormed.current = true;
         if (heldIceFailureAt.current !== null && statusRef.current === 'failed'
             && (state === 'connected' || state === 'completed')) {
             heldIceFailureAt.current = null;
@@ -907,6 +926,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         pendingCandidates.current = [];
         pendingCursorEvents.current = [];
         heldIceFailureAt.current = null;
+        pathFormed.current = false;
         restartGraceUntil.current = 0;
         restartCycles.current = 0;
         // A new session has its own media path: the last one's counts and its
@@ -949,6 +969,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         cancelFirstFrame();
         stopDialing();
         restoreToken.current = null;
+        everPresented.current = false;
         const openedRef = opened.current;
         const owner = signaling.current;
         discardSession();
@@ -1288,6 +1309,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                         // One mark per session: a producer that re-marks (a repaint
                         // after renegotiation) must not read a stale picture as live.
                         if (presentedRef.current) return;
+                        everPresented.current = true;
                         attempts.current = 0;
                         restartAttempts.current = 0;
                         restartCycles.current = 0;
@@ -1449,17 +1471,25 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             heldIceFailureAt.current = null;
             return;
         }
-        if (snapshot.failure?.code !== 'transport') return;
-        const reopen = () => {
-            // The failed session is dead on the engine side. Drop its handle and
-            // close the remote session whether or not another attempt is left: a
-            // failure the user can retry by hand must not sit behind a stale
-            // native handle that makes `connect()` a no-op.
+        // The failed session is dead on the engine side. Drop its handle and
+        // close the remote session whether or not another attempt is left: a
+        // failure the user can retry by hand must not sit behind a stale
+        // native handle that makes `connect()` a no-op.
+        const drop = () => {
             const owner = signaling.current;
             const openedRef = opened.current;
             cancelRestart();
             discardSession();
             void endRemote(openedRef, owner);
+        };
+        // A path that never formed is closed once and not reopened.
+        if (snapshot.failure?.code === 'never-connected') {
+            drop();
+            return;
+        }
+        if (snapshot.failure?.code !== 'transport') return;
+        const reopen = () => {
+            drop();
             // With the carrier dead, the dial loop opens on the first one that comes up.
             if (dialing.current !== null) {
                 update({ status: 'reconnecting' });

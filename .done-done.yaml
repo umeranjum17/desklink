@@ -18,7 +18,10 @@ journeys:
 # packages/desktop-client/test/ios-flow.mjs on the Mac's own simulator, with
 # DESKLINK_IOS_GLASS=1 DESKLINK_IOS_IPAD=1 for finger-on-glass; bridge-retention
 # and carrier/hook reattach matrices run via packages/desktop-client/test/roam-flow.mjs
-# with --product-retention and the adapter flags its header documents.
+# with --product-retention and the adapter flags its header documents; a first
+# open on a path that never forms (UDP discarded before connect) runs there via
+# --scenario never-connected --adapter hook: one `never-connected` failure, one
+# open and one close in 60 s.
 # Window-share pointer refusal runs via packages/desktop-host/test/portal-g2g-flow.mjs
 # --input-proof in its private sway cage, with DESKLINK_PORTAL_XDPW naming an
 # xdg-desktop-portal-wlr that reports a window's size (its header has the recipe).
