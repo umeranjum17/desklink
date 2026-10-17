@@ -103,6 +103,7 @@ import { fileURLToPath } from 'node:url';
 import { PNG } from 'pngjs';
 import { macLane, CLEAN_SCRIPT } from './mac-lane.mjs';
 import { pictureBox } from './picture-box.mjs';
+import { spawnAsync } from './clip-capture.mjs';
 import { WebSocket, WebSocketServer } from 'ws';
 
 import { assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
@@ -161,14 +162,22 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" LANG=en_US.UTF-8 LC_ALL=en_
 export TMPDIR="$D/tmp/" npm_config_cache="$R/.npm" CP_HOME_DIR="$R/.cocoapods" EXPO_NO_TELEMETRY=1 CI=1
 ${process.env.DESKLINK_IOS_XCODE ? `export DEVELOPER_DIR=${JSON.stringify(process.env.DESKLINK_IOS_XCODE)}` : ''}
 `;
-function mac(script, timeout = 120_000) {
-    const run = spawnSync('ssh', ['-o', 'BatchMode=yes', MAC, 'bash -s'], {
-        input: PRELUDE + script, encoding: 'utf8', timeout, maxBuffer: 64 << 20,
-    });
+function macResult(run, script) {
     if (run.status !== 0) {
         throw new Error(`on the Mac: ${script.trim().split('\n')[0]} → ${run.status ?? run.signal}\n${(run.stdout + run.stderr).slice(-3000)}`);
     }
     return run.stdout;
+}
+function mac(script, timeout = 120_000) {
+    return macResult(spawnSync('ssh', ['-o', 'BatchMode=yes', MAC, 'bash -s'], {
+        input: PRELUDE + script, encoding: 'utf8', timeout, maxBuffer: 64 << 20,
+    }), script);
+}
+/** `mac` for the steps that run while the relay carries media: the ssh call is awaited. */
+async function macAsync(script, timeout = 120_000) {
+    return macResult(await spawnAsync('ssh', ['-o', 'BatchMode=yes', MAC, 'bash -s'], {
+        input: PRELUDE + script, encoding: 'utf8', timeout, maxBuffer: 64 << 20,
+    }), script);
 }
 
 function buildApp(udid) {
@@ -206,15 +215,15 @@ xcodebuild -workspace "$WS" -scheme "$(basename "$WS" .xcworkspace)" -configurat
 }
 
 /** Run the XCUITest steps (test/ios-pointer/) against the running app. */
-function pointerSteps(udid, steps, notePath = '') {
-    const copy = spawnSync('rsync', ['-a', '--delete', `${join(here, 'ios-pointer')}/`, `${MAC}:${LANE.dir}/ios-pointer/`], { encoding: 'utf8', timeout: 60_000 });
+async function pointerSteps(udid, steps, notePath = '') {
+    const copy = await spawnAsync('rsync', ['-a', '--delete', `${join(here, 'ios-pointer')}/`, `${MAC}:${LANE.dir}/ios-pointer/`], { encoding: 'utf8', timeout: 60_000 });
     assert.equal(copy.status, 0, `rsync to the Mac failed: ${copy.stderr}`);
     // A step that waited on the app says what it read in `$D/pointer-note.txt`,
     // because the runner's own result comes back here seconds later than the
     // words it saw; the file is removed first so a stale one cannot be read.
     // XCTest hands the runner only the environment it passes through as
     // `TEST_RUNNER_*`, which arrives in the test process without the prefix.
-    mac(`rm -f "$D/pointer-note.txt"
+    await macAsync(`rm -f "$D/pointer-note.txt"
 cd "$D/ios-pointer"
 # The project is generated with the xcodeproj gem CocoaPods carries, run on CocoaPods' own Ruby.
 POD="$(command -v pod)"
@@ -224,7 +233,7 @@ $RUBY project.rb
 ${notePath === '' ? '' : 'TEST_RUNNER_DESKLINK_POINTER_NOTE="$D/pointer-note.txt" '}TEST_RUNNER_DESKLINK_POINTER='${JSON.stringify(steps)}' xcodebuild test -project DesklinkPointer.xcodeproj -scheme PointerTests \
     -destination "platform=iOS Simulator,id=${udid}" -derivedDataPath "$D/PointerData" > "$D/pointer.log" 2>&1 || { tail -60 "$D/pointer.log"; exit 1; }`, 10 * 60_000);
     if (notePath === '') return '';
-    spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/pointer-note.txt`, notePath]);
+    await spawnAsync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/pointer-note.txt`, notePath]);
     return existsSync(notePath) ? readFileSync(notePath, 'utf8') : '';
 }
 
@@ -249,7 +258,7 @@ function simulator() {
  * Every string the simulator's own screen shows, with the node it came from:
  * no metrics, no URLs, no tokens, and no word counted twice for one node.
  */
-function visibleNodes(udid) {
+async function visibleNodes(udid) {
     const entries = [];
     let seen = 0;
     const walk = (node) => {
@@ -283,7 +292,7 @@ function visibleNodes(udid) {
             texts: [...said, ...mine.map((entry) => entry.text)],
         };
     };
-    const tree = describeTree(udid);
+    const tree = await describeTree(udid);
     for (const root of tree) entries.push(...walk(root).entries);
     // React Native hands the accessibility tree a wrapper and its inner text
     // node at the same frame in the same process: one word on the phone's
@@ -297,13 +306,13 @@ function visibleNodes(udid) {
     return [...byFrame.values()];
 }
 
-const visibleText = (udid) => visibleNodes(udid).map((entry) => entry.text);
+const visibleText = async (udid) => (await visibleNodes(udid)).map((entry) => entry.text);
 
-function describeTree(udid) {
+async function describeTree(udid) {
     let last = null;
     for (let attempt = 0; attempt < 3; attempt++) {
         try {
-            const tree = JSON.parse(mac(`axe describe-ui --udid ${udid}`));
+            const tree = JSON.parse(await macAsync(`axe describe-ui --udid ${udid}`));
             if (process.env.DESKLINK_IOS_TREE) writeFileSync(process.env.DESKLINK_IOS_TREE, JSON.stringify(tree, null, 1));
             return tree;
         } catch (error) { last = error; }
@@ -317,8 +326,8 @@ function kidsOf(node) {
 }
 
 /** The hidden accessibility status the app exposes as `testID="desklink-status"`, and the screen's size in points. */
-function screen(udid) {
-    const tree = describeTree(udid);
+async function screen(udid) {
+    const tree = await describeTree(udid);
     let status = null;
     const walk = (node) => {
         if (node.AXUniqueId === 'desklink-status') status = node.AXLabel ?? node.AXValue ?? '';
@@ -329,8 +338,8 @@ function screen(udid) {
 }
 
 /** The accessibility value the simulator's own screen carries for one identifier. */
-function byId(udid, id) {
-    const tree = describeTree(udid);
+async function byId(udid, id) {
+    const tree = await describeTree(udid);
     let found = null;
     const walk = (node) => {
         if (node.AXUniqueId === id) found = { label: node.AXLabel ?? null, value: node.AXValue ?? null };
@@ -553,29 +562,29 @@ let recorderPid = null;
  * really running — a run that recorded nothing used to copy the previous run's
  * mp4 forward as its own proof — and removes that stale file first.
  */
-function startRecording() {
-    mac(`rm -f "$D/tmp/phone-control.mp4"`);
-    recorderPid = mac(`nohup xcrun simctl io ${udid} recordVideo --codec=h264 "$D/tmp/phone-control.mp4" > "$D/tmp/record.log" 2>&1 < /dev/null & echo $!`).trim();
-    mac('sleep 3');
-    if (mac(`kill -0 ${recorderPid} 2>/dev/null && echo running || true`).trim() !== 'running') {
-        assert.fail(`the screen recorder did not start: ${mac('cat "$D/tmp/record.log" 2>/dev/null || true')}`);
+async function startRecording() {
+    await macAsync(`rm -f "$D/tmp/phone-control.mp4"`);
+    recorderPid = (await macAsync(`nohup xcrun simctl io ${udid} recordVideo --codec=h264 "$D/tmp/phone-control.mp4" > "$D/tmp/record.log" 2>&1 < /dev/null & echo $!`)).trim();
+    await macAsync('sleep 3');
+    if ((await macAsync(`kill -0 ${recorderPid} 2>/dev/null && echo running || true`)).trim() !== 'running') {
+        assert.fail(`the screen recorder did not start: ${await macAsync('cat "$D/tmp/record.log" 2>/dev/null || true')}`);
     }
 }
 
 /** SIGINT, not SIGTERM: simctl finalises the mp4 on SIGINT and drops it otherwise. */
-function stopRecording() {
+async function stopRecording() {
     if (recorderPid === null) return;
-    mac(`kill -INT ${recorderPid} 2>/dev/null || true; sleep 2`);
+    await macAsync(`kill -INT ${recorderPid} 2>/dev/null || true; sleep 2`);
     recorderPid = null;
 }
 
 async function cleanup() {
     try {
-        stopRecording();
+        await stopRecording();
     } catch (error) { log('recording cleanup:', error.message); }
     if (udid !== null && temporarySimulator) {
         try {
-            mac(`xcrun simctl terminate ${udid} ${BUNDLE} || true; xcrun simctl shutdown ${udid} || true; xcrun simctl delete ${udid}`);
+            await macAsync(`xcrun simctl terminate ${udid} ${BUNDLE} || true; xcrun simctl shutdown ${udid} || true; xcrun simctl delete ${udid}`);
             udid = null;
         } catch (error) { log('simulator cleanup:', error.message); }
     }
@@ -718,7 +727,7 @@ async function main() {
     log(`relay on ${hostAddr}:${relay.address().port}`);
 
     // ---- launch on the simulator ---------------------------------------------------
-    mac(`mkdir -p "$D/tmp"
+    await macAsync(`mkdir -p "$D/tmp"
 xcrun simctl boot ${udid} 2>/dev/null || true; xcrun simctl bootstatus ${udid} -b > /dev/null
 xcrun simctl install ${udid} "${app}"
 xcrun simctl terminate ${udid} ${BUNDLE} 2>/dev/null || true
@@ -730,15 +739,15 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     while (seen.status !== 'Connected') {
         assert(Date.now() < deadline, `the simulator never showed the desktop: status ${seen.status}\n${engineLog}`);
         await sleep(1000);
-        try { seen = screen(udid); } catch (error) { seen = { status: `unreadable (${error.message.split('\n')[0]})` }; }
+        try { seen = (await screen(udid)); } catch (error) { seen = { status: `unreadable (${error.message.split('\n')[0]})` }; }
     }
     log(`simulator status: ${seen.status}`);
     // A reused simulator may have been left turned by an interrupted earlier
     // run; this journey starts and ends portrait. Re-read the frame after it,
     // because the rest of the journey measures from it.
-    pointerSteps(udid, [{ action: 'portrait', x: 0, y: 0 }]);
+    await pointerSteps(udid, [{ action: 'portrait', x: 0, y: 0 }]);
     await sleep(1500);
-    seen = screen(udid);
+    seen = (await screen(udid));
     log(`screen after turning portrait: ${seen.frame.width}x${seen.frame.height}`);
 
     // ---- descriptions ---------------------------------------------------------------
@@ -766,9 +775,9 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
         return [png.data[i], png.data[i + 1], png.data[i + 2]];
     };
     const pixel = (png, point) => rgb(png, point).reduce((sum, value) => sum + value);
-    const capture = (path) => {
-        mac(`xcrun simctl io ${udid} screenshot "$D/tmp/ios-flow.png" > /dev/null`);
-        assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/tmp/ios-flow.png`, path]).status, 0, 'copy the screenshot back');
+    const capture = async (path) => {
+        await macAsync(`xcrun simctl io ${udid} screenshot "$D/tmp/ios-flow.png" > /dev/null`);
+        assert.equal((await spawnAsync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/tmp/ios-flow.png`, path])).status, 0, 'copy the screenshot back');
         return PNG.sync.read(readFileSync(path));
     };
     /** Share of the screen inside fully black rows or columns: the letterbox. */
@@ -782,7 +791,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     let box = { top: 0, left: 0, bottom: 0 };
     for (let attempt = 0; attempt < 20 && box.bottom - box.top < screenWidth * geometry.height / geometry.width - 2; attempt++) {
         if (attempt > 0) await sleep(500);
-        box = pictureBox(capture(join(out, 'desklink-receiver-fill-portrait.png')), screenWidth);
+        box = pictureBox(await capture(join(out, 'desklink-receiver-fill-portrait.png')), screenWidth);
     }
     let scale = (box.bottom - box.top) / geometry.height;
     let origin = { x: box.left, y: box.top };
@@ -794,7 +803,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
      */
     const pictureNow = async (why) => {
         const was = { origin, scale };
-        const fresh = pictureBox(capture(join(out, 'picture-now.png')), screenWidth);
+        const fresh = pictureBox(await capture(join(out, 'picture-now.png')), screenWidth);
         if (fresh.bottom - fresh.top < screenWidth * geometry.height / geometry.width - 2) return was;
         box = fresh;
         scale = (box.bottom - box.top) / geometry.height;
@@ -823,8 +832,8 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     for (const target of targets) {
         const at = { x: origin.x + (target.x + 0.5) * scale, y: origin.y + (target.y + 0.5) * scale };
         const before = await page.evaluate('clicks.length');
-        if (GLASS) pointerSteps(udid, [{ action: 'tap', x: at.x, y: at.y }]);
-        else mac(`axe tap -x ${at.x.toFixed(1)} -y ${at.y.toFixed(1)} --udid ${udid}`);
+        if (GLASS) await pointerSteps(udid, [{ action: 'tap', x: at.x, y: at.y }]);
+        else await macAsync(`axe tap -x ${at.x.toFixed(1)} -y ${at.y.toFixed(1)} --udid ${udid}`);
         const clicks = await until('a tap reached the desktop as one click',
             async () => (await page.evaluate('clicks')).slice(before), (seen) => seen.length >= 2);
         assert.deepEqual(clicks.map((click) => click.type), ['mousedown', 'mouseup'], `a tap is one click: ${JSON.stringify(clicks)}`);
@@ -854,7 +863,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     let follows = false;
     for (let attempt = 0; attempt < 10 && !follows; attempt++) {
         await sleep(500);
-        png = capture(shot);
+        png = (await capture(shot));
         follows = litShare(png) > 0.5 && targets.every((target) => pixel(png, {
             x: origin.x + (target.x - 10) * scale, y: origin.y + (target.y - 10) * scale,
         }) < 200);
@@ -871,7 +880,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
         const previous = (await page.evaluate('clicks')).filter((click) => click.type === 'mousedown').at(-1);
         const tip = { x: origin.x + (previous.x + 0.5) * scale, y: origin.y + (previous.y + 0.5) * scale };
         const count = await page.evaluate('clicks.length');
-        mac(`axe tap -x ${tip.x.toFixed(1)} -y ${tip.y.toFixed(1)} --udid ${udid}`);
+        await macAsync(`axe tap -x ${tip.x.toFixed(1)} -y ${tip.y.toFixed(1)} --udid ${udid}`);
         const received = await until('a tap at the pointer tip reached the desktop as one click',
             async () => (await page.evaluate('clicks')).slice(count), (seen) => seen.length >= 2);
         assert.deepEqual(received.map((click) => click.type), ['mousedown', 'mouseup']);
@@ -881,7 +890,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
         writeFileSync(join(out, 'host-click.log'), lines.join('\n') + '\n');
         for (const line of lines) log(line);
         await sleep(500);
-        const frame = capture(join(out, 'desklink-ios-pointer-frame.png'));
+        const frame = await capture(join(out, 'desklink-ios-pointer-frame.png'));
         const density = frame.width / screenWidth;
         const mark = received[0];
         const x = Math.round((origin.x + (mark.x + 0.5) * scale - 10) * density);
@@ -905,7 +914,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     const before = rgb(png, caret);
     const moved = (after) => before.some((value, i) => Math.abs(value - after[i]) > 8);
     const after = await until('the picture keeps changing with the desktop',
-        async () => rgb(capture(join(out, 'simulator-later.png')), caret), moved);
+        async () => rgb(await capture(join(out, 'simulator-later.png')), caret), moved);
     assert(moved(after),
         `the picture keeps changing with the desktop: caret rgb(${before}), then rgb(${after})`);
     log(`the picture follows the desktop: both clicks shown, caret rgb(${before}) → rgb(${after})`);
@@ -914,7 +923,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     // HID usages pressed on the simulator's keyboard reach the app as a hardware
     // keyboard's would: Up, Esc, Tab, Command+C, then typed text.
     const keysBefore = await page.evaluate('keys.length');
-    for (const press of ['key 82', 'key 41', 'key 43', 'key-combo --modifiers 227 --key 6', 'type desk']) mac(`axe ${press} --udid ${udid}`);
+    for (const press of ['key 82', 'key 41', 'key 43', 'key-combo --modifiers 227 --key 6', 'type desk']) await macAsync(`axe ${press} --udid ${udid}`);
     const keys = await until('the hardware keys reached the desktop',
         async () => (await page.evaluate('keys')).slice(keysBefore), (seen) => seen.some((key) => key.type === 'keyup' && key.key === 'k'));
     const downs = keys.filter((key) => key.type === 'keydown');
@@ -975,7 +984,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
                     const at = screenPoint(probe);
                     // Press on the point and let go a few points away: a finger that never
                     // moves is a pan, not a click, and would measure nothing.
-                    pointerSteps(udid, [{ action, x: at.x, y: at.y, toX: at.x + 6, toY: at.y + 6 }]);
+                    await pointerSteps(udid, [{ action, x: at.x, y: at.y, toX: at.x + 6, toY: at.y + 6 }]);
                     for (let i = 0; i < 30 && down === undefined; i++) {
                         await sleep(100);
                         // A finger tap arrives as a click, a pointer press as a pointer event.
@@ -1018,7 +1027,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
         ];
         const pointerBefore = await page.evaluate('pointer.length');
         log('driving the trackpad with XCUITest');
-        pointerSteps(udid, steps);
+        await pointerSteps(udid, steps);
         const seen = await until('the trackpad press, drag and scroll reached the desktop',
             async () => (await page.evaluate('pointer')).slice(pointerBefore),
             (all) => all.some((event) => event.type === 'mouseup' && event.button === 0));
@@ -1053,13 +1062,13 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     // Glass mode synthesizes the touch with the XCUITest runner, at the spot
     // that instrument's measured miss is taken off; otherwise the axe HID
     // injector does, which aims exactly.
-    const tapDesktop = (spot) => (GLASS
-        ? pointerSteps(udid, [{ action: 'tap', ...aim('tap', spot) }])
-        : mac(`axe tap -x ${screenPoint(spot).x.toFixed(1)} -y ${screenPoint(spot).y.toFixed(1)} --udid ${udid}`));
+    const tapDesktop = async (spot) => (GLASS
+        ? (await pointerSteps(udid, [{ action: 'tap', ...aim('tap', spot) }]))
+        : (await macAsync(`axe tap -x ${screenPoint(spot).x.toFixed(1)} -y ${screenPoint(spot).y.toFixed(1)} --udid ${udid}`)));
     /** The app's own controls: a finger on the control, found by what it says it is. */
-    const tapApp = (...ids) => (GLASS
-        ? pointerSteps(udid, ids.map((id) => ({ action: 'tapButton', id, x: 0, y: 0 })))
-        : mac(ids.map((id) => `axe tap --id ${id} --udid ${udid}`).join('; ')));
+    const tapApp = async (...ids) => (GLASS
+        ? (await pointerSteps(udid, ids.map((id) => ({ action: 'tapButton', id, x: 0, y: 0 }))))
+        : (await macAsync(ids.map((id) => `axe tap --id ${id} --udid ${udid}`).join('; '))));
     /**
      * Tap one of the app's controls and read the confirmation it puts on its own
      * screen. That pill lives about a second and a half: `axe` comes back as soon
@@ -1069,21 +1078,21 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
      * same run, and hands the words back.
      */
     const pillAfter = async (id, prefix, read) => {
-        if (!GLASS) { tapApp(id); return await read(); }
-        return pointerSteps(udid, [{ action: 'tapButton', id, x: 0, y: 0 }, { action: 'waitForText', text: prefix, wait: 15, x: 0, y: 0 }], join(out, `pointer-note-${id}.txt`));
+        if (!GLASS) { await tapApp(id); return await read(); }
+        return await pointerSteps(udid, [{ action: 'tapButton', id, x: 0, y: 0 }, { action: 'waitForText', text: prefix, wait: 15, x: 0, y: 0 }], join(out, `pointer-note-${id}.txt`));
     };
     const steps = [];
     // Every step starts from a cleared desktop, so its capture carries only
     // what that step did.
     const step = async (name, note) => {
         const shot = join(out, `step-${name}.png`);
-        capture(shot);
+        await capture(shot);
         steps.push({ step: name, capture: shot.split('/').pop(), result: note });
         log(`step ${name}: ${note} (${shot})`);
     };
     // What the phone's screen says, with nothing diagnostic on it and no word
     // said twice by one node.
-    const onScreen = visibleNodes(udid);
+    const onScreen = await visibleNodes(udid);
     const diagnostics = onScreen.filter((entry) => /wss?:\/\/|[Tt]oken|key=|bearer|0x[0-9a-f]{6}|\bfps\b|\bms\b.*\bpixels?\b/i.test(entry.text));
     assert.deepEqual(diagnostics, [], `the phone screen shows no addresses, tokens or metrics: ${JSON.stringify(diagnostics)}`);
     const repeated = onScreen.map((entry) => entry.text).filter((text, index, all) => all.indexOf(text) !== index);
@@ -1129,12 +1138,12 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     await step('00-live-desktop', `live desktop at the documented portrait fit: ${(geometry.width * scale).toFixed(0)}x${pictureHeightPt.toFixed(0)} pt band at the top of a ${screenWidth}x${screenHeight} pt screen (${(100 * pictureHeightPt / screenHeight).toFixed(0)}% of its height; the rest is letterbox and the app's own chrome), no diagnostic text on the phone`);
 
     // The whole phone-only journey as one screen recording on the Mac.
-    startRecording();
+    await startRecording();
 
     // 1. pointer and click
     const press = { x: 700, y: 460 };
     let since = await clean();
-    tapDesktop(press);
+    await tapDesktop(press);
     const clicked = await until('a tap on the phone is one click on the desktop',
         async () => (await page.evaluate('clicks')).slice(since), (seen) => seen.length >= 2);
     assert.deepEqual(clicked.map((click) => click.type), ['mousedown', 'mouseup'], `a tap on the phone is one click on the desktop: ${JSON.stringify(clicked)}`);
@@ -1148,7 +1157,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     const to = { x: Math.round(lineRight) - 6, y: from.y };
     since = await clean();
     const dragAction = GLASS ? 'dragTouch' : IPAD ? 'drag' : 'dragTouch';
-    pointerSteps(udid, [{ action: dragAction, ...aim(dragAction, from), toX: aim(dragAction, to).x, toY: aim(dragAction, to).y }]);
+    await pointerSteps(udid, [{ action: dragAction, ...aim(dragAction, from), toX: aim(dragAction, to).x, toY: aim(dragAction, to).y }]);
     const dragged = await until('the finger dragging over the line arrived as a drag',
         async () => (await page.evaluate('pointer')).slice(since),
         (seen) => seen.some((event) => event.type === 'mouseup' && event.button === 0));
@@ -1164,7 +1173,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
 
     // 3. two fingers scroll the desktop; a one finger would pan the picture
     since = await clean();
-    pointerSteps(udid, [{ action: 'scrollTwo', ...aim('dragTouch', { x: 700, y: 300 }), dy: 220 }]);
+    await pointerSteps(udid, [{ action: 'scrollTwo', ...aim('dragTouch', { x: 700, y: 300 }), dy: 220 }]);
     // The wheel arrives as a burst the finger is still making, so it is read
     // until the whole gesture has turned the wheel, not until the first event.
     const wheelDelta = (seen) => seen.filter((event) => event.type === 'wheel').reduce((sum, event) => sum + event.dy, 0);
@@ -1177,12 +1186,12 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
 
     // 4. typing on the phone reaches the desktop's own field, once per character
     const padSpot = { x: 150, y: 640 };
-    tapDesktop(padSpot);
+    await tapDesktop(padSpot);
     await sleep(300);
     const padBefore = await page.evaluate('document.getElementById("pad").value');
     const mirrorBefore = await page.evaluate('document.getElementById("typed").textContent');
     since = await clean();
-    mac(`axe type 'desklink' --udid ${udid}`);
+    await macAsync(`axe type 'desklink' --udid ${udid}`);
     const typed = await until('what the phone typed reached the desktop\'s field',
         () => page.evaluate('document.getElementById("pad").value'), (seen) => seen !== padBefore);
     assert(typed === 'desklink', `what the phone typed is in the desktop's field, once: ${JSON.stringify(typed)}`);
@@ -1197,12 +1206,12 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
 
     // 5. sticky modifiers: latch, chord, release
     await clean();
-    tapApp('desklink-key-Control');
+    await tapApp('desklink-key-Control');
     const ctrlValue = (want) => until(`the phone's screen never showed Control as ${want}`,
-        () => byId(udid, 'desklink-key-Control'), (seen) => seen.value === want);
+        async () => await byId(udid, 'desklink-key-Control'), (seen) => seen.value === want);
     assert.equal((await ctrlValue('latched')).value, 'latched', 'one tap arms Ctrl');
     since = await page.evaluate('keys.length');
-    mac(`axe key 4 --udid ${udid}`);
+    await macAsync(`axe key 4 --udid ${udid}`);
     const chorded = await until('Ctrl then A reached the desktop',
         async () => (await page.evaluate('keys')).slice(since), (seen) => seen.some((key) => key.type === 'keyup' && key.key === 'a'));
     const chordDown = chorded.find((key) => key.type === 'keydown' && key.key === 'a');
@@ -1211,10 +1220,10 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     assert.equal(await page.evaluate('document.title'), 'Notes',
         'the desktop is still the page the phone was driving, chord and all');
     assert.equal((await ctrlValue('off')).value, 'off', 'the latch clears after the one key it was armed for');
-    tapApp('desklink-key-Control', 'desklink-key-Control');
+    await tapApp('desklink-key-Control', 'desklink-key-Control');
     assert.equal((await ctrlValue('locked')).value, 'locked', 'a second tap locks Ctrl');
     await step('05-sticky-modifier', 'Ctrl latched → next key sent as Control+A → latch cleared; two taps lock it');
-    tapApp('desklink-key-Control');
+    await tapApp('desklink-key-Control');
     await ctrlValue('off');
 
     // 6. the desktop's clipboard comes over to the phone
@@ -1222,7 +1231,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     // button is now rather than where it was authored.
     const buttonSpot = await page.evaluate('(() => { const box = document.getElementById("copy-out").getBoundingClientRect(); return { x: box.left + box.width / 2, y: box.top + box.height / 2 }; })()');
     since = await clean();
-    tapDesktop(buttonSpot);
+    await tapDesktop(buttonSpot);
     const clickedOnButton = await until('the tap on the copy button reached the desktop',
         async () => (await page.evaluate('clicks')).slice(since), (seen) => seen.length >= 2);
     const copied = await until('the page put its selection on the desktop clipboard',
@@ -1233,25 +1242,25 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     // simulator shares the Mac's pasteboard, so that pill is the phone's proof.
     const pill = await pillAfter('desklink-copy', 'Copied to phone',
         () => until('the phone\'s screen confirmed the desktop\'s clipboard',
-            async () => visibleText(udid).find((text) => text.startsWith('Copied to phone')) ?? '',
+            async () => (await visibleText(udid)).find((text) => text.startsWith('Copied to phone')) ?? '',
             (seen) => seen.includes('select this line')));
-    assert(pill.includes('select this line'), `the phone's own screen confirms the desktop's clipboard and its text: ${JSON.stringify(pill)}; on screen now: ${JSON.stringify(visibleText(udid))}`);
+    assert(pill.includes('select this line'), `the phone's own screen confirms the desktop's clipboard and its text: ${JSON.stringify(pill)}; on screen now: ${JSON.stringify(await visibleText(udid))}`);
     await step('06-clipboard-out', `desktop → phone, confirmed on screen: ${pill}`);
 
     // 7. and the phone's clipboard goes the other way, pasted into the focused field
     // The phone's clipboard holds what step 06 brought over, so this needs no
     // host pasteboard write and no operating system's paste consent prompt.
     since = await clean();
-    tapDesktop(padSpot);
+    await tapDesktop(padSpot);
     await sleep(300);
     // The confirmation pill lives about a second and a half, so poll for it and
     // for the system's own paste consent in the same breath: the grant is to
     // the app under test, on this task's simulator, and to nothing else.
     let allowed = false;
     const screenAllowingPaste = async () => {
-        const texts = visibleText(udid);
+        const texts = await visibleText(udid);
         if (!allowed && texts.includes('Allow Paste')) {
-            mac(`axe tap --label "Allow Paste" --udid ${udid}`);
+            await macAsync(`axe tap --label "Allow Paste" --udid ${udid}`);
             allowed = true;
             log('allowed the app under test its own paste prompt on this simulator');
         }
@@ -1261,8 +1270,8 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
         () => until('the phone\'s screen confirmed what it sent to the desktop',
             async () => (await screenAllowingPaste()).find((text) => text.startsWith('Sent to desktop')) ?? '',
             (seen) => seen.includes('select this line')));
-    assert(sent.includes('select this line'),`the phone's own screen confirms what it sent: ${JSON.stringify(sent)}; on screen now: ${JSON.stringify(visibleText(udid))}`);
-    mac(`axe key-combo --modifiers 224 --key 25 --udid ${udid}`);
+    assert(sent.includes('select this line'),`the phone's own screen confirms what it sent: ${JSON.stringify(sent)}; on screen now: ${JSON.stringify(await visibleText(udid))}`);
+    await macAsync(`axe key-combo --modifiers 224 --key 25 --udid ${udid}`);
     const pastes = await until('the desktop pasted the phone\'s clipboard',
         () => page.evaluate('window.pastes'), (seen) => seen.length > 0);
     assert.equal(pastes.at(-1)?.text, 'select this line', `the desktop pasted the phone's clipboard: ${JSON.stringify(pastes)}`);
@@ -1277,7 +1286,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     since = await clean();
     // A finger travelling over bare paper, so the mark is read over clean
     // background: the press paints its dot 200 desktop pixels away.
-    pointerSteps(udid, [{ action: 'dragTouch', hold: 0, ...aim('dragTouch', { x: 700, y: 460 }), toX: aim('dragTouch', { x: 900, y: 300 }).x, toY: aim('dragTouch', { x: 900, y: 300 }).y }]);
+    await pointerSteps(udid, [{ action: 'dragTouch', hold: 0, ...aim('dragTouch', { x: 700, y: 460 }), toX: aim('dragTouch', { x: 900, y: 300 }).x, toY: aim('dragTouch', { x: 900, y: 300 }).y }]);
     const landedAt = { x: 900, y: 300 };
     const travelled = await until('a finger travelling over the picture arrived on the desktop',
         async () => (await page.evaluate('pointer')).slice(since).filter((event) => event.x !== undefined),
@@ -1286,7 +1295,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     const landed = travelled.at(-1);
     assert(within(landed, landedAt), `the pointer ends where the finger did: ${JSON.stringify(landed)}`);
     const tip = screenPoint({ x: landed.x, y: landed.y });
-    const frame = capture(join(out, 'step-08-pointer-frame.png'));
+    const frame = await capture(join(out, 'step-08-pointer-frame.png'));
     const density = frame.width / screenWidth;
     const half = Math.round(24 * density);
     const crop = new PNG({ width: half * 8, height: half * 8 });
@@ -1333,8 +1342,8 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     }, null, 1));
     await step('08-pointer-arrow', `arrow over bare paper: ${widthsPt[0].toFixed(1)} pt at the tip, ${widest.toFixed(1)} pt at its widest, tip ${(tipPt.x - tip.x).toFixed(1)}/${(tipPt.y - tip.y).toFixed(1)} pt from the desktop pointer`);
 
-    stopRecording();
-    assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/tmp/phone-control.mp4`, join(out, 'phone-control.mp4')]).status, 0,
+    await stopRecording();
+    assert.equal((await spawnAsync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/tmp/phone-control.mp4`, join(out, 'phone-control.mp4')])).status, 0,
         'copy the screen recording back');
     writeFileSync(join(out, 'phone-control.json'), JSON.stringify({ device: seen.frame, udid, steps, recording: 'phone-control.mp4' }, null, 1));
     log(`phone-only control proven over ${steps.length} steps, recorded as phone-control.mp4`);
@@ -1348,12 +1357,12 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     }
 
     // ---- pan and rotation ----------------------------------------------------------------------
-    pointerSteps(udid, [{ action: 'landscape', x: 0, y: 0 }]);
+    await pointerSteps(udid, [{ action: 'landscape', x: 0, y: 0 }]);
     await sleep(1500);
     // simctl saves the display's native portrait pixels; turned to landscapeLeft, the
     // picture's top-left lands at the screenshot's top-right. Turn it upright.
-    const landscapeShot = (name) => {
-        const sideways = capture(join(out, 'simulator-landscape-native.png'));
+    const landscapeShot = async (name) => {
+        const sideways = await capture(join(out, 'simulator-landscape-native.png'));
         const landscape = new PNG({ width: sideways.height, height: sideways.width });
         for (let y = 0; y < sideways.height; y++) {
             for (let x = 0; x < sideways.width; x++) sideways.data.copy(landscape.data, ((sideways.width - 1 - x) * landscape.width + y) * 4, (y * sideways.width + x) * 4, (y * sideways.width + x) * 4 + 4);
@@ -1362,33 +1371,33 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
         return landscape;
     };
     /** A full-screen landscape capture: the picture fills it, with no black letterbox. */
-    const landscapeCapture = (name) => {
-        const landscape = landscapeShot(name);
+    const landscapeCapture = async (name) => {
+        const landscape = await landscapeShot(name);
         const bars = barShare(landscape);
         assert(bars < 0.15, `black bars take under 15% of the landscape screen (${name}): ${(100 * bars).toFixed(1)}%`);
         return landscape;
     };
-    const landscape = landscapeCapture('desklink-receiver-fill-landscape.png');
+    const landscape = await landscapeCapture('desklink-receiver-fill-landscape.png');
     const across = pictureBox(landscape, screenHeight);
     log(`landscape: ${(100 * barShare(landscape)).toFixed(1)}% black bars, picture from (${across.left.toFixed(1)}, ${across.top.toFixed(1)}) pt`);
     for (const dx of [-1, 1]) for (const dy of [-1, 1]) {
-        mac(`axe swipe --start-x ${(screenHeight * (dx < 0 ? 0.85 : 0.15)).toFixed(0)} --start-y ${(screenWidth * (dy < 0 ? 0.85 : 0.15)).toFixed(0)} --end-x ${(screenHeight * (dx < 0 ? 0.15 : 0.85)).toFixed(0)} --end-y ${(screenWidth * (dy < 0 ? 0.15 : 0.85)).toFixed(0)} --duration 0.6 --udid ${udid}`);
+        await macAsync(`axe swipe --start-x ${(screenHeight * (dx < 0 ? 0.85 : 0.15)).toFixed(0)} --start-y ${(screenWidth * (dy < 0 ? 0.85 : 0.15)).toFixed(0)} --end-x ${(screenHeight * (dx < 0 ? 0.15 : 0.85)).toFixed(0)} --end-y ${(screenWidth * (dy < 0 ? 0.15 : 0.85)).toFixed(0)} --duration 0.6 --udid ${udid}`);
         await sleep(1000);
-        landscapeCapture(`desklink-receiver-fill-landscape-panned-${dx}-${dy}.png`);
+        await landscapeCapture(`desklink-receiver-fill-landscape-panned-${dx}-${dy}.png`);
     }
-    pointerSteps(udid, [{ action: 'portrait', x: 0, y: 0 }]);
+    await pointerSteps(udid, [{ action: 'portrait', x: 0, y: 0 }]);
     await sleep(1500);
-    const back = pictureBox(capture(join(out, 'desklink-receiver-fill-portrait-rotated-back.png')), screenWidth);
+    const back = pictureBox(await capture(join(out, 'desklink-receiver-fill-portrait-rotated-back.png')), screenWidth);
     assert(Math.abs(back.top - box.top) <= 1 && back.left <= 1, `turned back, the picture starts at the top-left again: (${back.left.toFixed(1)}, ${back.top.toFixed(1)}) pt, first (${box.left.toFixed(1)}, ${box.top.toFixed(1)})`);
     log('rotated back: the picture starts at the top-left again');
     const clicksBefore = await page.evaluate('clicks.length');
-    pointerSteps(udid, [{
+    await pointerSteps(udid, [{
         action: 'pinch', x: screenWidth * 0.25 - correction('dragTouch').x,
         y: back.top + (back.bottom - back.top) * 0.5 - correction('dragTouch').y,
         span: screenWidth * 0.24, scale: 2,
     }]);
     await sleep(1000);
-    const zoomedShot = capture(join(out, 'simulator-zoomed.png'));
+    const zoomedShot = await capture(join(out, 'simulator-zoomed.png'));
     const zoomedBox = pictureBox(zoomedShot, screenWidth);
     const zoomedScale = (zoomedBox.bottom - zoomedBox.top) / geometry.height;
     assert(zoomedScale > scale * 1.5, `the pinch visibly zooms to cropped content: ${zoomedScale / scale}x`);
@@ -1408,9 +1417,9 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     const dotFirst = dotAt(zoomedShot);
     assert(dotFirst !== null, 'the marker is visible on the zoomed desktop before panning');
     const panY = zoomedBox.top + (zoomedBox.bottom - zoomedBox.top) * 0.5;
-    mac(`axe swipe --start-x ${(screenWidth * 0.4).toFixed(1)} --start-y ${panY.toFixed(1)} --end-x ${(screenWidth * 0.55).toFixed(1)} --end-y ${panY.toFixed(1)} --duration 0.6 --udid ${udid}`);
+    await macAsync(`axe swipe --start-x ${(screenWidth * 0.4).toFixed(1)} --start-y ${panY.toFixed(1)} --end-x ${(screenWidth * 0.55).toFixed(1)} --end-y ${panY.toFixed(1)} --duration 0.6 --udid ${udid}`);
     await sleep(1000);
-    const pannedShot = capture(join(out, 'simulator-pan-candidate.png'));
+    const pannedShot = await capture(join(out, 'simulator-pan-candidate.png'));
     const dotPanned = dotAt(pannedShot);
     assert(dotPanned !== null && dotPanned - dotFirst > 40, `the pan visibly moves the marker right: ${dotFirst} → ${dotPanned} pt`);
     assert.equal(await page.evaluate('clicks.length'), clicksBefore, 'zooming and one-finger panning click nothing');
@@ -1428,23 +1437,23 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     // The software keyboard is drawn by the Simulator app, not by a headless
     // `simctl` boot; bring it up (if it is not already) so the captures and
     // the app's own keyboard events are real. Leave a running Simulator alone.
-    mac(`pgrep -x Simulator > /dev/null || (open -a Simulator --args -CurrentDeviceUDID ${udid} > /dev/null 2>&1; sleep 5)`);
+    await macAsync(`pgrep -x Simulator > /dev/null || (open -a Simulator --args -CurrentDeviceUDID ${udid} > /dev/null 2>&1; sleep 5)`);
     const LAUNCHES = 5;
-    const launchFresh = () => mac(`xcrun simctl terminate ${udid} ${BUNDLE} 2>/dev/null || true
+    const launchFresh = async () => await macAsync(`xcrun simctl terminate ${udid} ${BUNDLE} 2>/dev/null || true
 xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboardFit 1`);
-    launchFresh();
-    await until('the relaunched app shows the desktop again', async () => screen(udid).status, (status) => status === 'Connected', 90_000);
-    const appearance = mac(`xcrun simctl ui ${udid} appearance`).trim();
-    startRecording();
-    pointerSteps(udid, [{ action: 'landscape', x: 0, y: 0 }]);
+    await launchFresh();
+    await until('the relaunched app shows the desktop again', async () => (await screen(udid)).status, (status) => status === 'Connected', 90_000);
+    const appearance = (await macAsync(`xcrun simctl ui ${udid} appearance`)).trim();
+    await startRecording();
+    await pointerSteps(udid, [{ action: 'landscape', x: 0, y: 0 }]);
     await sleep(1500);
     const wide = { width: screenHeight, height: screenWidth };
-    const sideways = landscapeCapture('step-09-keyboard-landscape-before.png');
+    const sideways = await landscapeCapture('step-09-keyboard-landscape-before.png');
     const fillBox = pictureBox(sideways, wide.width);
     const fillScale = Math.max(wide.width / geometry.width, wide.height / geometry.height);
     // The field sits just above the app's own controls, where a finger can
     // reach it, and below where the keyboard's top will be.
-    const deckTop = Math.min(...visibleNodes(udid).filter((entry) => entry.id?.startsWith('desklink-'))
+    const deckTop = Math.min(...(await visibleNodes(udid)).filter((entry) => entry.id?.startsWith('desklink-'))
         .map((entry) => Number(/\{\{-?[\d.]+,\s*(-?[\d.]+)\}/.exec(entry.frame ?? '')?.[1] ?? Infinity)));
     assert(Number.isFinite(deckTop), 'the app\'s controls have a place on the screen');
     const field = { left: 420, width: 360, height: 44 };
@@ -1462,8 +1471,8 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
      * screen; null while it is down. The keyboard reports its keys in the
      * upright screen's points, where the turned screen's top edge is its right.
      */
-    const keyboardKeys = () => {
-        const keys = visibleNodes(udid).filter((entry) => /^(q|w|e|r|t|y|u|i|o|p)$/.test(entry.text) && entry.id === null)
+    const keyboardKeys = async () => {
+        const keys = (await visibleNodes(udid)).filter((entry) => /^(q|w|e|r|t|y|u|i|o|p)$/.test(entry.text) && entry.id === null)
             .map((entry) => /\{\{(-?[\d.]+),\s*-?[\d.]+\},\s*\{([\d.]+),/.exec(entry.frame ?? ''))
             .filter(Boolean).map(([, x, width]) => wide.height - (Number(x) + Number(width)));
         return keys.length > 0 ? Math.min(...keys) : null;
@@ -1497,7 +1506,7 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
         const aiming = [];
         for (const aimed of [{ x: 360, y: 150 }, { x: 560, y: 150 }, { x: 360, y: 260 }]) {
             await page.evaluate('window.reset()');
-            mac(`axe tap -x ${aimed.x} -y ${aimed.y} --udid ${udid}`);
+            await macAsync(`axe tap -x ${aimed.x} -y ${aimed.y} --udid ${udid}`);
             const click = await until(`the aiming tap at (${aimed.x}, ${aimed.y}) reached the desktop`, () => page.evaluate('clicks.at(-1)'), (seen) => seen?.type === 'mouseup');
             aiming.push({ aimed, at: { x: box.left + (click.x + 0.5) * scale, y: box.top + (click.y + 0.5) * scale } });
         }
@@ -1512,12 +1521,12 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     };
     for (let launch = 1; launch <= LAUNCHES; launch++) {
         if (launch > 1) {
-            launchFresh();
-            await until(`fresh launch ${launch} shows the desktop again`, async () => screen(udid).status, (status) => status === 'Connected', 90_000);
-            pointerSteps(udid, [{ action: 'landscape', x: 0, y: 0 }]);
+            await launchFresh();
+            await until(`fresh launch ${launch} shows the desktop again`, async () => (await screen(udid)).status, (status) => status === 'Connected', 90_000);
+            await pointerSteps(udid, [{ action: 'landscape', x: 0, y: 0 }]);
             await sleep(1500);
         }
-        const before = landscapeCapture(`step-09-keyboard-${launch}-before.png`);
+        const before = await landscapeCapture(`step-09-keyboard-${launch}-before.png`);
         const box = pictureBox(before, wide.width);
         const scale = Math.max(wide.width / geometry.width, wide.height / geometry.height);
         const fieldAt = { x: box.left + fieldCenter.x * scale, y: box.top + fieldCenter.y * scale };
@@ -1525,11 +1534,11 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
         const aim = sidewaysAim(fieldAt);
         log(`fresh launch ${launch}: the field at (${fieldAt.x.toFixed(1)}, ${fieldAt.y.toFixed(1)}) pt is aimed at (${aim.x.toFixed(1)}, ${aim.y.toFixed(1)})`);
         await page.evaluate('window.reset()');
-        mac(`axe tap -x ${aim.x.toFixed(1)} -y ${aim.y.toFixed(1)} --udid ${udid}`);
+        await macAsync(`axe tap -x ${aim.x.toFixed(1)} -y ${aim.y.toFixed(1)} --udid ${udid}`);
         await until(`fresh launch ${launch} focused the sign-in field at desktop (${fieldCenter.x}, ${fieldCenter.y})`,
             () => page.evaluate('({ focused: document.activeElement && document.activeElement.id, click: clicks.at(-1) })'), (seen) => seen.focused === 'email');
         // With the keyboard down the field is on the screen where the tap left it.
-        const closed = landscapeShot(`step-09-keyboard-${launch}-closed.png`);
+        const closed = await landscapeShot(`step-09-keyboard-${launch}-closed.png`);
         const closedRows = dotRows(closed);
         assert(closedRows.length > 0, `fresh launch ${launch}: the tapped field is on the screen before the keyboard opens`);
         const closedBottom = Math.max(...closedRows);
@@ -1537,12 +1546,12 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
         // consumer's keyboard-avoiding screen makes room. The picture must pan
         // so the field stays in the part that is left, not snap back to the
         // desktop's top-left corner and hide it.
-        pointerSteps(udid, [{ action: 'tapButton', id: 'desklink-keyboard', x: 0, y: 0 }]);
+        await pointerSteps(udid, [{ action: 'tapButton', id: 'desklink-keyboard', x: 0, y: 0 }]);
         await sleep(1500);
-        await until(`the on-screen keyboard came up on fresh launch ${launch}`, async () => keyboardKeys(), (top) => top !== null);
+        await until(`the on-screen keyboard came up on fresh launch ${launch}`, async () => await keyboardKeys(), (top) => top !== null);
         await sleep(400);
-        writeFileSync(join(out, `step-09-keyboard-tree-${launch}.json`), JSON.stringify(describeTree(udid), null, 1));
-        const open = landscapeShot(`step-09-keyboard-${launch}-open.png`);
+        writeFileSync(join(out, `step-09-keyboard-tree-${launch}.json`), JSON.stringify(await describeTree(udid), null, 1));
+        const open = await landscapeShot(`step-09-keyboard-${launch}-open.png`);
         const rows = dotRows(open);
         assert(rows.length > 0, `fresh launch ${launch}: with the surface shortened for the keyboard the picture panned the tapped field into sight; its dot is nowhere in step-09-keyboard-${launch}-open.png, where it was at ${closedBottom.toFixed(0)} pt before`);
         const openBottom = Math.max(...rows);
@@ -1552,10 +1561,10 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     }
     const themed = {};
     for (const theme of ['light', 'dark']) {
-        mac(`xcrun simctl ui ${udid} appearance ${theme}`);
+        await macAsync(`xcrun simctl ui ${udid} appearance ${theme}`);
         await sleep(1500);
         const name = `step-09-keyboard-landscape-${theme}.png`;
-        const shot = landscapeShot(name);
+        const shot = await landscapeShot(name);
         themed[theme] = shot;
         assert(dotRows(shot).length > 0, `the tapped field is on the screen with the keyboard up (${theme}): its dot is nowhere in ${name}`);
         log(`step 09-keyboard-${theme}: sideways, keyboard up (${theme}): the tapped field stays in sight (${name})`);
@@ -1564,16 +1573,16 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     // light), so the keyboard over it stays light whatever the phone is set to.
     const changed = themed.light.data.filter((value, i) => value !== themed.dark.data[i]).length / themed.light.data.length;
     log(`the phone set to dark changes ${(changed * 100).toFixed(1)}% of the screen: the example app keeps its own light keyboard`);
-    mac(`axe type 'umer' --udid ${udid}`);
+    await macAsync(`axe type 'umer' --udid ${udid}`);
     const signedIn = await until('what the phone typed reached the sign-in field',
         () => page.evaluate('document.getElementById("email").value'), (value) => value === 'umer');
     assert.equal(signedIn, 'umer', 'what the phone typed is in the field');
     await sleep(800);
-    landscapeShot('step-09-keyboard-landscape-typed.png');
-    stopRecording();
-    mac(`xcrun simctl ui ${udid} appearance ${appearance === 'dark' ? 'dark' : 'light'}`);
-    pointerSteps(udid, [{ action: 'portrait', x: 0, y: 0 }]);
-    assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/tmp/phone-control.mp4`, join(out, 'keyboard-landscape.mp4')]).status, 0,
+    await landscapeShot('step-09-keyboard-landscape-typed.png');
+    await stopRecording();
+    await macAsync(`xcrun simctl ui ${udid} appearance ${appearance === 'dark' ? 'dark' : 'light'}`);
+    await pointerSteps(udid, [{ action: 'portrait', x: 0, y: 0 }]);
+    assert.equal((await spawnAsync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/tmp/phone-control.mp4`, join(out, 'keyboard-landscape.mp4')])).status, 0,
         'copy the keyboard recording back');
     log(`sideways with the keyboard up, the tapped field stays in sight and takes what is typed (${LAUNCHES}/${LAUNCHES} fresh launches)`);
 
@@ -1585,12 +1594,12 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
     // a rotation and snap back to the desktop's top-left corner (hiding the
     // field under the keyboard). The true-rotation reset above stays: only a
     // window orientation change resets the picture.
-    startRecording();
-    launchFresh();
-    await until('the relaunched app shows the desktop again', async () => screen(udid).status, (status) => status === 'Connected', 90_000);
-    pointerSteps(udid, [{ action: 'portrait', x: 0, y: 0 }]);
+    await startRecording();
+    await launchFresh();
+    await until('the relaunched app shows the desktop again', async () => (await screen(udid)).status, (status) => status === 'Connected', 90_000);
+    await pointerSteps(udid, [{ action: 'portrait', x: 0, y: 0 }]);
     await sleep(1500);
-    seen = screen(udid);
+    seen = (await screen(udid));
     await pictureNow('the portrait keyboard step');
     const portraitScale = scale;
     const portraitOrigin = { ...origin };
@@ -1626,39 +1635,39 @@ xcrun simctl launch ${udid} ${BUNDLE} -desklinkUrl '${relayUrl}' -desklinkKeyboa
         }
         return rows;
     };
-    const portraitKeyboardTop = () => {
-        const keys = visibleNodes(udid).filter((entry) => /^(q|w|e|r|t|y|u|i|o|p)$/.test(entry.text) && entry.id === null)
+    const portraitKeyboardTop = async () => {
+        const keys = (await visibleNodes(udid)).filter((entry) => /^(q|w|e|r|t|y|u|i|o|p)$/.test(entry.text) && entry.id === null)
             .map((entry) => Number(/\{\{-?[\d.]+,\s*(-?[\d.]+)\}/.exec(entry.frame ?? '')?.[1] ?? NaN))
             .filter((y) => Number.isFinite(y));
         return keys.length > 0 ? Math.min(...keys) : null;
     };
     await page.evaluate('window.reset()');
-    mac(`axe tap -x ${(portraitOrigin.x + portraitFieldCenterDesktop.x * portraitScale).toFixed(1)} -y ${(portraitOrigin.y + portraitFieldCenterDesktop.y * portraitScale).toFixed(1)} --udid ${udid}`);
+    await macAsync(`axe tap -x ${(portraitOrigin.x + portraitFieldCenterDesktop.x * portraitScale).toFixed(1)} -y ${(portraitOrigin.y + portraitFieldCenterDesktop.y * portraitScale).toFixed(1)} --udid ${udid}`);
     await until('the portrait tap focused the low field',
         () => page.evaluate('({ focused: document.activeElement && document.activeElement.id, click: clicks.at(-1) })'), (seen) => seen.focused === 'email');
-    const portraitClosed = capture('step-09-keyboard-portrait-closed.png');
+    const portraitClosed = await capture('step-09-keyboard-portrait-closed.png');
     const portraitClosedRows = portraitDotRows(portraitClosed);
     assert(portraitClosedRows.length > 0, 'portrait: the tapped low field is on the screen before the keyboard opens');
     const portraitClosedBottom = Math.max(...portraitClosedRows);
-    pointerSteps(udid, [{ action: 'tapButton', id: 'desklink-keyboard', x: 0, y: 0 }]);
+    await pointerSteps(udid, [{ action: 'tapButton', id: 'desklink-keyboard', x: 0, y: 0 }]);
     await sleep(1500);
-    await until('the on-screen keyboard came up in portrait', async () => portraitKeyboardTop(), (top) => top !== null);
+    await until('the on-screen keyboard came up in portrait', async () => await portraitKeyboardTop(), (top) => top !== null);
     await sleep(400);
-    writeFileSync(join(out, 'step-09-keyboard-portrait-tree.json'), JSON.stringify(describeTree(udid), null, 1));
-    const portraitOpen = capture('step-09-keyboard-portrait-open.png');
+    writeFileSync(join(out, 'step-09-keyboard-portrait-tree.json'), JSON.stringify(await describeTree(udid), null, 1));
+    const portraitOpen = await capture('step-09-keyboard-portrait-open.png');
     const portraitRows = portraitDotRows(portraitOpen);
     assert(portraitRows.length > 0, `portrait: with the surface shortened for the keyboard the picture panned the tapped field into sight; its dot is nowhere in step-09-keyboard-portrait-open.png, where it was at ${portraitClosedBottom.toFixed(0)} pt before`);
     const portraitOpenBottom = Math.max(...portraitRows);
     assert(portraitOpenBottom < portraitClosedBottom - 20, `portrait: the picture panned the field up when the surface shortened for the keyboard: it moved from ${portraitClosedBottom.toFixed(0)} pt to ${portraitOpenBottom.toFixed(0)} pt`);
     writeFileSync(join(out, 'step-09-keyboard-portrait.json'), JSON.stringify({ closedBottom: portraitClosedBottom, openBottom: portraitOpenBottom }, null, 1));
-    mac(`axe type 'umer' --udid ${udid}`);
+    await macAsync(`axe type 'umer' --udid ${udid}`);
     const portraitTyped = await until('what the phone typed reached the portrait field',
         () => page.evaluate('document.getElementById("email").value'), (value) => value === 'umer');
     assert.equal(portraitTyped, 'umer', 'portrait: what the phone typed is in the field');
     await sleep(800);
-    capture('step-09-keyboard-portrait-typed.png');
-    stopRecording();
-    assert.equal(spawnSync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/tmp/phone-control.mp4`, join(out, 'keyboard-portrait.mp4')]).status, 0,
+    await capture('step-09-keyboard-portrait-typed.png');
+    await stopRecording();
+    assert.equal((await spawnAsync('scp', ['-q', '-o', 'BatchMode=yes', `${MAC}:${LANE.dir}/tmp/phone-control.mp4`, join(out, 'keyboard-portrait.mp4')])).status, 0,
         'copy the portrait keyboard recording back');
     log(`portrait with the keyboard up, the tapped low field stays in sight and takes what is typed (field moved from ${portraitClosedBottom.toFixed(0)} to ${portraitOpenBottom.toFixed(0)} pt)`);
     console.log(`ok: the iOS receiver shows the live desktop, answers ${codec} with NACK, its taps click the host and its hardware input drives it${IPAD ? ', trackpad included' : ''} (${out})`);

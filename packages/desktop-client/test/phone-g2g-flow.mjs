@@ -85,6 +85,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import {
     assertNoAmbientDesktop, claimPrivateDisplay, laneArtefactDir, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb,
 } from '../../desktop-host/test/lab-safety.mjs';
+import { spawnAsync } from './clip-capture.mjs';
 
 assertNoAmbientDesktop();
 assert(process.platform === 'linux', 'this private-Xvfb proof requires Linux');
@@ -171,18 +172,20 @@ const attached = spawnSync('adb', ['devices'], { encoding: 'utf8' }).stdout.spli
     .map(line => line.trim().split(/\s+/)).filter(([, state]) => state === 'device').map(([name]) => name);
 assert(attached.includes(serial), `adb does not report ${serial} as attached: ${attached.join(', ') || 'none'}`);
 assert(/^emulator/.test(serial) === false, 'J4 is a physical phone, not an emulator');
-const adb = (...args) => {
-    const done = adbTry(...args);
+// Every adb call is awaited: the relay and the receiver share this process's
+// event loop, and a blocking adb call stalls them while the phone is busy.
+const adb = async (...args) => {
+    const done = await adbTry(...args);
     assert.equal(done.status, 0, `adb ${args.join(' ')} failed: ${done.stderr}`);
     return done.stdout;
 };
-const adbTry = (...args) => spawnSync('adb', ['-s', serial, ...args],
+const adbTry = (...args) => spawnAsync('adb', ['-s', serial, ...args],
     { encoding: 'utf8', timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
-const adbBin = (...args) => spawnSync('adb', ['-s', serial, ...args], { encoding: 'buffer', timeout: 600000, maxBuffer: 256 * 1024 * 1024 });
+const adbBin = (...args) => spawnAsync('adb', ['-s', serial, ...args], { encoding: 'buffer', timeout: 600000, maxBuffer: 256 * 1024 * 1024 });
 /** Measurement grabs fail fast: a wedged capture must never eat the device lock. */
-const adbBinQuick = (...args) => spawnSync('adb', ['-s', serial, ...args], { encoding: 'buffer', timeout: 25000, maxBuffer: 256 * 1024 * 1024 });
-const adbQuick = (...args) => {
-    const done = spawnSync('adb', ['-s', serial, ...args], { encoding: 'utf8', timeout: 25000, maxBuffer: 64 * 1024 * 1024 });
+const adbBinQuick = (...args) => spawnAsync('adb', ['-s', serial, ...args], { encoding: 'buffer', timeout: 25000, maxBuffer: 256 * 1024 * 1024 });
+const adbQuick = async (...args) => {
+    const done = await spawnAsync('adb', ['-s', serial, ...args], { encoding: 'utf8', timeout: 25000, maxBuffer: 64 * 1024 * 1024 });
     assert.equal(done.status, 0, `adb ${args.join(' ')} failed: ${done.stderr}`);
     return done.stdout;
 };
@@ -207,7 +210,7 @@ const start = (name, cmd, args, childEnv, cwd = repo) => {
 };
 const waitFor = async (ready, what, ms = 120000) => {
     const until = Date.now() + ms;
-    while (Date.now() < until) { if (ready()) return; await sleep(200); }
+    while (Date.now() < until) { if (await ready()) return; await sleep(200); }
     throw new Error(`timed out waiting for ${what}`);
 };
 
@@ -256,10 +259,10 @@ const clockOffsets = async (samples = 21) => {
  * span of one capture. The grab happens inside that window; the midpoint is
  * the estimate and half the span is the uncertainty every sample carries.
  */
-const captureCost = () => {
+const captureCost = async () => {
     const script = 'for i in 1 2 3 4 5 6 7; do a=$(date +%s%3N); screencap /dev/null; b=$(date +%s%3N);'
         + ' echo $((b-a)); done; for i in 1 2 3 4 5 6 7; do a=$(date +%s%3N); true; b=$(date +%s%3N); echo $((b-a)); done';
-    const lines = adb('shell', script).split('\n').map(line => Number(line.trim())).filter(Number.isFinite);
+    const lines = (await adb('shell', script)).split('\n').map(line => Number(line.trim())).filter(Number.isFinite);
     assert(lines.length >= 10, 'the device could not time its own captures');
     const windows = lines.slice(0, lines.length / 2);
     const execs = lines.slice(lines.length / 2);
@@ -279,17 +282,17 @@ const captureCost = () => {
  * after, repeat. Timestamps come from the phone, so no adb round trip enters
  * the latency arithmetic.
  */
-const captureLoop = (count, directory) => {
+const captureLoop = async (count, directory) => {
     const stampPath = `${directory}/stamps.txt`;
-    const shell = script => {
-        const done = spawnSync('adb', ['-s', serial, 'shell', script], { encoding: 'utf8', timeout: 300_000, maxBuffer: 16 * 1024 * 1024 });
+    const shell = async script => {
+        const done = await spawnAsync('adb', ['-s', serial, 'shell', script], { encoding: 'utf8', timeout: 300_000, maxBuffer: 16 * 1024 * 1024 });
         assert.equal(done.status, 0, `adb shell failed: ${done.stderr}`);
         return done.stdout ?? '';
     };
-    shell(`rm -f ${directory}/cap_*.raw ${stampPath}`);
-    shell(`i=1; while [ $i -le ${count} ]; do a=$(date +%s%3N); screencap ${directory}/cap_$i.raw;`
+    await shell(`rm -f ${directory}/cap_*.raw ${stampPath}`);
+    await shell(`i=1; while [ $i -le ${count} ]; do a=$(date +%s%3N); screencap ${directory}/cap_$i.raw;`
         + ` b=$(date +%s%3N); echo "$i $a $b" >> ${stampPath}; i=$((i+1)); done; echo done`);
-    return shell(`cat ${stampPath}`).split('\n').map(line => line.trim().split(/\s+/))
+    return (await shell(`cat ${stampPath}`)).split('\n').map(line => line.trim().split(/\s+/))
         .filter(row => row.length === 3).map(([i, a, b]) => ({ index: Number(i), before: Number(a), after: Number(b) }));
 };
 
@@ -425,10 +428,10 @@ const driveInput = async (scenario, seconds) => {
     const until = Date.now() + seconds * 1000;
     while (Date.now() < until) {
         if (scenario === 'scroll') {
-            adb('shell', 'input', 'swipe', '540', '1800', '540', '900', '250');
+            await adb('shell', 'input', 'swipe', '540', '1800', '540', '900', '250');
         } else {
-            adb('shell', 'input', 'text', 'desklink');
-            adb('shell', 'input', 'keyevent', '67');
+            await adb('shell', 'input', 'text', 'desklink');
+            await adb('shell', 'input', 'keyevent', '67');
         }
         await sleep(scenario === 'scroll' ? 350 : 120);
     }
@@ -519,8 +522,8 @@ const publishedVersions = dir => Object.fromEntries(Object.entries(JSON.parse(re
 /** One raw frame off the phone, with the picture band and a hash of it: the
  * picture sits wherever the app puts it, so a fixed middle strip would hash
  * only the black around it and stay frozen while the desktop answers. */
-const phoneFrame = (quick = false) => {
-    const grab = quick ? adbBinQuick('exec-out', 'screencap') : adbBin('exec-out', 'screencap');
+const phoneFrame = async (quick = false) => {
+    const grab = quick ? (await adbBinQuick('exec-out', 'screencap')) : (await adbBin('exec-out', 'screencap'));
     assert.equal(grab.status, 0, `screencap failed: ${grab.stderr}`);
     const { pixels, width, height } = capturePixels(grab.stdout);
     assert(width > 0 && pixels.length > 0, 'the phone returned no screen');
@@ -542,10 +545,10 @@ const phoneFrame = (quick = false) => {
  * label is matched loosely: the platform renders a React Native Button's text
  * in capitals.
  */
-const uiBound = (label, quick = false) => {
+const uiBound = async (label, quick = false) => {
     const dump = quick
-        ? (spawnSync('adb', ['-s', serial, 'shell', 'uiautomator dump /data/local/tmp/dl-ui.xml >/dev/null 2>&1; cat /data/local/tmp/dl-ui.xml'], { encoding: 'utf8', timeout: 25000 }).stdout ?? '')
-        : (adbTry('shell', 'uiautomator dump /data/local/tmp/dl-ui.xml >/dev/null 2>&1; cat /data/local/tmp/dl-ui.xml').stdout ?? '');
+        ? ((await spawnAsync('adb', ['-s', serial, 'shell', 'uiautomator dump /data/local/tmp/dl-ui.xml >/dev/null 2>&1; cat /data/local/tmp/dl-ui.xml'], { encoding: 'utf8', timeout: 25000 })).stdout ?? '')
+        : ((await adbTry('shell', 'uiautomator dump /data/local/tmp/dl-ui.xml >/dev/null 2>&1; cat /data/local/tmp/dl-ui.xml')).stdout ?? '');
     const want = label.toLowerCase();
     for (const [node] of dump.matchAll(/<node[^>]*>/g)) {
         const text = /text="([^"]*)"/.exec(node)?.[1] ?? '';
@@ -563,8 +566,8 @@ const uiBound = (label, quick = false) => {
  * app to the launcher would otherwise read the phone's own wallpaper as the
  * desktop picture and tap the test phone's home screen.
  */
-const ourAppInFront = id => (adbTry('shell', 'dumpsys activity activities | grep -m1 topResumedActivity').stdout ?? '').includes(id);
-const bringOurAppToFront = id => adb('shell', 'am', 'start', '-n', `${id}/.MainActivity`);
+const ourAppInFront = async id => ((await adbTry('shell', 'dumpsys activity activities | grep -m1 topResumedActivity')).stdout ?? '').includes(id);
+const bringOurAppToFront = async id => await adb('shell', 'am', 'start', '-n', `${id}/.MainActivity`);
 
 /** Wait until the phone's own screen carries the desktop picture. */
 const waitForLive = async (applicationId, ms = 120000) => {
@@ -572,8 +575,8 @@ const waitForLive = async (applicationId, ms = 120000) => {
     let last = null;
     let relaunches = 0;
     while (Date.now() - from < ms) {
-        if (!ourAppInFront(applicationId)) { relaunches += 1; bringOurAppToFront(applicationId); await sleep(2000); continue; }
-        last = phoneFrame();
+        if (!(await ourAppInFront(applicationId))) { relaunches += 1; await bringOurAppToFront(applicationId); await sleep(2000); continue; }
+        last = (await phoneFrame());
         if (last.band !== null && last.band.bottom - last.band.top > 200) {
             return { first_picture_ms: Date.now() - from, picture_band: last.band, app_relaunches: relaunches };
         }
@@ -648,12 +651,12 @@ const latencyJourney = async () => {
     if (transport === 'usb' || relayRate !== null) {
         // The device reaches this host at the bridge's own port; with a relay in
         // front, that port is the relay, so the shape actually applies.
-        adb('reverse', `tcp:${bridgePort}`, `tcp:${relayPort ?? bridgePort}`);
-        adb('reverse', `tcp:${receiver.address().port}`, `tcp:${receiver.address().port}`);
+        await adb('reverse', `tcp:${bridgePort}`, `tcp:${relayPort ?? bridgePort}`);
+        await adb('reverse', `tcp:${receiver.address().port}`, `tcp:${receiver.address().port}`);
     } else {
         // Preflight: if the phone cannot open this port the run would spend
         // minutes waiting for a session that can never start.
-        const reach = adbTry('shell', `nc -w 3 ${host} ${bridgePort} < /dev/null; echo $?`).stdout.trim().split('\n').at(-1);
+        const reach = (await adbTry('shell', `nc -w 3 ${host} ${bridgePort} < /dev/null; echo $?`)).stdout.trim().split('\n').at(-1);
         if (reach !== '0') {
             throw new Error(`the phone cannot reach ${host}:${bridgePort} over Wi-Fi (nc said ${reach}); `
                 + 'this host drops inbound TCP except sshd (see /etc/nftables.conf), '
@@ -666,7 +669,7 @@ const latencyJourney = async () => {
 
     // The app: this checkout's example, on the phone.
     if (process.env.DESKLINK_ANDROID_SKIP_BUILD !== '1') {
-        const build = spawnSync('flock', ['/tmp/fm-desklink-heavy.lock', 'bash', '-c', [
+        const build = await spawnAsync('flock', ['/tmp/fm-desklink-heavy.lock', 'bash', '-c', [
             'npm install --no-audit --no-fund',
             'npx expo prebuild --platform android --no-install',
             'cd android && ./gradlew --no-daemon assembleDebug',
@@ -694,35 +697,35 @@ const latencyJourney = async () => {
     // A 168 MB debug APK costs minutes to install (streamed installs wedge on
     // this device), so the phone remembers which build it already has.
     const marker = '/data/local/tmp/dl-phone-g2g.apk';
-    if ((adbTry('shell', `cat ${marker} 2>/dev/null`).stdout ?? '').trim() !== receipt.apkSha256) {
-        const installed = spawnSync('adb', ['-s', serial, 'install', '-r', '-g', '-t', '--no-streaming', apk], { encoding: 'utf8', timeout: 900000 });
+    if (((await adbTry('shell', `cat ${marker} 2>/dev/null`)).stdout ?? '').trim() !== receipt.apkSha256) {
+        const installed = await spawnAsync('adb', ['-s', serial, 'install', '-r', '-g', '-t', '--no-streaming', apk], { encoding: 'utf8', timeout: 900000 });
         assert.equal(installed.status, 0, `adb install failed: ${installed.stderr ?? installed.stdout ?? installed.signal}`);
-        adb('shell', `echo -n ${receipt.apkSha256} > ${marker}`);
+        await adb('shell', `echo -n ${receipt.apkSha256} > ${marker}`);
     } else {
         receipt.apk_install = 'already installed, same sha256';
     }
     mark('apk-installed');
     // A debug build always asks Metro on its own port 8081; the reverse maps
     // that device port onto whichever free port this run's Metro took.
-    adb('reverse', 'tcp:8081', `tcp:${metroPort}`);
+    await adb('reverse', 'tcp:8081', `tcp:${metroPort}`);
 
     receipt.device = {
-        model: adb('shell', 'getprop', 'ro.product.model').trim(),
-        release: adb('shell', 'getprop', 'ro.build.version.release').trim(),
-        sdk: adb('shell', 'getprop', 'ro.build.version.sdk').trim(),
-        resolution: adb('shell', 'wm', 'size').trim().split(':').pop().trim(),
-        wifi: /SSID: "([^"]+)"/.exec(adb('shell', 'dumpsys', 'wifi'))?.[1] ?? 'unknown',
-        refresh_hz: /renderFrameRate=([\d.]+)/.exec(adb('shell', 'dumpsys', 'display'))?.[1] ?? null,
+        model: (await adb('shell', 'getprop', 'ro.product.model')).trim(),
+        release: (await adb('shell', 'getprop', 'ro.build.version.release')).trim(),
+        sdk: (await adb('shell', 'getprop', 'ro.build.version.sdk')).trim(),
+        resolution: (await adb('shell', 'wm', 'size')).trim().split(':').pop().trim(),
+        wifi: /SSID: "([^"]+)"/.exec(await adb('shell', 'dumpsys', 'wifi'))?.[1] ?? 'unknown',
+        refresh_hz: /renderFrameRate=([\d.]+)/.exec(await adb('shell', 'dumpsys', 'display'))?.[1] ?? null,
         host_to_phone_ping_ms: null,
     };
 
     // The phone's own view of the Wi-Fi link, for the method record.
-    receipt.phone_to_host_ping_ms = (() => {
-        const text = adb('shell', 'ping', '-c', '10', '-i', '0.2', '-W', '2', host);
+    receipt.phone_to_host_ping_ms = await (async () => {
+        const text = await adb('shell', 'ping', '-c', '10', '-i', '0.2', '-W', '2', host);
         return round(Number(/=\s*[\d.]+\/([\d.]+)/.exec(text)?.[1] ?? NaN) || null);
     })();
 
-    receipt.costs = captureCost();
+    receipt.costs = (await captureCost());
     mark('costs-measured');
     receipt.clock_before = await clockOffsets();
     mark('clock-measured');
@@ -736,9 +739,9 @@ const latencyJourney = async () => {
 
     // A warm start would keep the previous run's link, which points at a
     // bridge that no longer exists, so the app starts cold every run.
-    adb('shell', 'am', 'force-stop', 'dev.desklink.example');
+    await adb('shell', 'am', 'force-stop', 'dev.desklink.example');
     await sleep(1000);
-    adb('shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', `"${link}"`);
+    await adb('shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', `"${link}"`);
     await waitFor(connected, "the app's own report with a presented frame", 180000);
     await sleep(4000);
     mark('session-live');
@@ -751,7 +754,7 @@ const latencyJourney = async () => {
     // Scenario legs: frame rate first (the harness is idle, so it is the
     // phone's own number), then latency (the capture loop is running).
     const directory = '/data/local/tmp/dl-phone-g2g';
-    adb('shell', `mkdir -p ${directory}`);
+    await adb('shell', `mkdir -p ${directory}`);
     receipt.legs = {};
     for (const scenario of scenarios) {
         if (mode !== scenario) {
@@ -778,27 +781,27 @@ const latencyJourney = async () => {
         // Typing leaves the soft keyboard up, which shrinks and crops the
         // picture until the stamp strip is only partly on screen. Dismiss it
         // before measuring: a cropped strip cannot carry all 24 bits.
-        adb('shell', 'input', 'keyevent', '111');
+        await adb('shell', 'input', 'keyevent', '111');
         await sleep(2000);
         const expected = Math.min(160, Math.round(latencySeconds * 1000 / receipt.costs.capture_window_median_ms));
         // The phone's clock drifts against this host's, and a stale offset
         // would show up as latency, so this leg measures its own offset before
         // and after its captures and uses the mean.
         leg.clock_before = await clockOffsets();
-        const stamps = captureLoop(expected, directory);
+        const stamps = await captureLoop(expected, directory);
         leg.clock_after = await clockOffsets();
         leg.clock_offset_ms = round((leg.clock_before.offset_median_ms + leg.clock_after.offset_median_ms) / 2);
         leg.clock_drift_ms = round(leg.clock_after.offset_median_ms - leg.clock_before.offset_median_ms);
         mark(`${scenario}-captured`);
         // One frame in memory at a time: a raw capture is 10 MB and a leg has
         // up to 160 of them.
-        const pull = index => adbBin('exec-out', 'cat', `${directory}/cap_${index}.raw`).stdout;
-        leg.latency = decodeLatency(stamps, pull, leg, { ...receipt, offset_ms: leg.clock_offset_ms });
+        const pull = async index => (await adbBin('exec-out', 'cat', `${directory}/cap_${index}.raw`)).stdout;
+        leg.latency = (await decodeLatency(stamps, pull, leg, { ...receipt, offset_ms: leg.clock_offset_ms }));
         mark(`${scenario}-decoded`);
-        if (!keepCaptures) adb('shell', `rm -f ${directory}/cap_*.raw ${directory}/stamps.txt`);
+        if (!keepCaptures) await adb('shell', `rm -f ${directory}/cap_*.raw ${directory}/stamps.txt`);
         leg.load_after_latency = load();
-        leg.battery = adb('shell', 'dumpsys', 'battery').split('\n').filter(line => /level|temperature|status/.test(line)).map(line => line.trim());
-        writeFileSync(join(out, `screen-${scenario}.png`), adbBin('exec-out', 'screencap', '-p').stdout);
+        leg.battery = (await adb('shell', 'dumpsys', 'battery')).split('\n').filter(line => /level|temperature|status/.test(line)).map(line => line.trim());
+        writeFileSync(join(out, `screen-${scenario}.png`), (await adbBin('exec-out', 'screencap', '-p')).stdout);
         receipt.legs[scenario] = leg;
         saveReceipt();
     }
@@ -827,8 +830,8 @@ const latencyJourney = async () => {
  * says so wherever it names a path.
  */
 const quickstartJourney = async () => {
-    receipt.sourceHead = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
-    receipt.published_host_version = spawnSync('npm', ['view', '@desklink/host', 'version'], { encoding: 'utf8' }).stdout.trim() || null;
+    receipt.sourceHead = (await spawnAsync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' })).stdout.trim();
+    receipt.published_host_version = (await spawnAsync('npm', ['view', '@desklink/host', 'version'], { encoding: 'utf8' })).stdout.trim() || null;
     receipt.transport_detail = 'adb reverse tunnel over the USB cable, both legs (signalling, app JavaScript and, as the wire log shows, WebRTC media); '
         + 'not the local network: this host drops inbound TCP except sshd, and the phone is on the same subnet';
     const token = await hostLab();
@@ -844,11 +847,11 @@ const quickstartJourney = async () => {
     // carries it: install the forward before that chunk goes on, because a TCP
     // connect refused while the forward is still being set up is a candidate
     // ICE does not come back to.
-    const forwardLoopbackCandidates = text => {
+    const forwardLoopbackCandidates = async text => {
         seenText = `${seenText}${text}`.slice(-8192);
         for (const [, port] of seenText.matchAll(/candidate:\d+ 1 tcp \d+ 127\.0\.0\.1 (\d+) typ host tcptype passive/g)) {
             if (forwardedLoopback.includes(port)) continue;
-            if (adbTry('reverse', `tcp:${port}`, `tcp:${port}`).status === 0) forwardedLoopback.push(port);
+            if ((await adbTry('reverse', `tcp:${port}`, `tcp:${port}`)).status === 0) forwardedLoopback.push(port);
         }
     };
     let wirePort;
@@ -859,13 +862,17 @@ const quickstartJourney = async () => {
     wireRelay = createNetServer(client => {
         const upstream = connect({ host: '127.0.0.1', port: bridgePort });
         const pump = (from, to, side) => {
+            // Chunks reach `to` in arrival order, each after the forward its candidate needs.
+            let queued = Promise.resolve();
             from.on('data', chunk => {
-                const text = chunk.toString();
-                if (side === 'host->phone') forwardLoopbackCandidates(text);
-                wire.push(`[${new Date().toISOString()}] ${side} ${text.slice(0, 8000).split(token).join('<bridge-token>')}\n`);
-                to.write(chunk);
+                queued = queued.then(async () => {
+                    const text = chunk.toString();
+                    if (side === 'host->phone') await forwardLoopbackCandidates(text);
+                    wire.push(`[${new Date().toISOString()}] ${side} ${text.slice(0, 8000).split(token).join('<bridge-token>')}\n`);
+                    to.write(chunk);
+                });
             });
-            from.on('end', () => to.end());
+            from.on('end', () => queued.then(() => to.end()));
             from.on('error', () => to.destroy());
             to.on('error', () => from.destroy());
         };
@@ -900,7 +907,7 @@ const quickstartJourney = async () => {
     const packageSource = process.env.DESKLINK_QUICKSTART_PACKAGE ?? 'published';
     if (!existsSync(join(quickstart, 'package.json'))) {
         mkdirSync(quickstart, { recursive: true });
-        const scaffold = spawnSync('npx', ['-y', 'create-expo-app@latest', quickstart, '--template', 'blank-typescript'],
+        const scaffold = await spawnAsync('npx', ['-y', 'create-expo-app@latest', quickstart, '--template', 'blank-typescript'],
             { encoding: 'utf8', timeout: 600000 });
         assert.equal(scaffold.status, 0, `could not scaffold ${quickstart}: ${(scaffold.stderr ?? scaffold.stdout ?? '').slice(-400)}`);
     }
@@ -908,13 +915,13 @@ const quickstartJourney = async () => {
     // npm publishes, installed by path rather than linked from this checkout.
     let packageInstall = null;
     if (packageSource === 'tarball') {
-        const packed = spawnSync('npm', ['pack', '--pack-destination', scratch, join(repo, 'packages/desktop-client')], { encoding: 'utf8', timeout: 600000 });
+        const packed = await spawnAsync('npm', ['pack', '--pack-destination', scratch, join(repo, 'packages/desktop-client')], { encoding: 'utf8', timeout: 600000 });
         assert.equal(packed.status, 0, `could not pack the client: ${(packed.stderr ?? packed.stdout ?? '').slice(-400)}`);
         packageInstall = join(scratch, packed.stdout.trim().split('\n').pop().trim());
         receipt.app_tarball = { path: packageInstall, sha256: hash(packageInstall) };
     }
     if (packageSource !== 'repo' && !existsSync(join(quickstart, 'node_modules', '@desklink', 'react-native', 'package.json'))) {
-        const installedPackages = spawnSync('npx', ['expo', 'install', '@desklink/react-native', 'react-native-webrtc',
+        const installedPackages = await spawnAsync('npx', ['expo', 'install', '@desklink/react-native', 'react-native-webrtc',
             '@config-plugins/react-native-webrtc@15', '@byokit/signaling@0.1.0'],
             { cwd: quickstart, env, encoding: 'utf8', timeout: 600000 });
         assert.equal(installedPackages.status, 0, `could not install the published packages: ${(installedPackages.stderr ?? installedPackages.stdout ?? '').slice(-400)}`);
@@ -934,7 +941,7 @@ const quickstartJourney = async () => {
         : 'android/build.gradle from PR #95 (expo-module-gradle-plugin), applied because the installed release still lacks it';
     const patchGradle = `node -e "require('node:fs').copyFileSync('${join(repo, 'packages/desktop-client/android/build.gradle')}', 'node_modules/@desklink/react-native/android/build.gradle')"`;
     if (process.env.DESKLINK_ANDROID_SKIP_BUILD !== '1') {
-        const build = spawnSync('flock', ['/tmp/fm-desklink-heavy.lock', 'bash', '-c', [
+        const build = await spawnAsync('flock', ['/tmp/fm-desklink-heavy.lock', 'bash', '-c', [
             // `--install-links` copies the package instead of symlinking it, so
             // Metro resolves the app's own `expo` from inside the project.
             ...(packageSource === 'repo' ? [`npm install --no-audit --no-fund --install-links file:${join(repo, 'packages/desktop-client')}`] : []),
@@ -959,7 +966,7 @@ const quickstartJourney = async () => {
     mark('apk-ready');
     // No `-g`: nothing is pre-granted on the test phone, so the journey
     // proves only what a new user actually taps.
-    const installed = spawnSync('adb', ['-s', serial, 'install', '-r', '-t', '--no-streaming', quickApk], { encoding: 'utf8', timeout: 900000 });
+    const installed = await spawnAsync('adb', ['-s', serial, 'install', '-r', '-t', '--no-streaming', quickApk], { encoding: 'utf8', timeout: 900000 });
     assert.equal(installed.status, 0, `adb install failed: ${installed.stderr ?? installed.stdout ?? installed.signal}`);
     mark('apk-installed');
     const metroProbe = createServer();
@@ -974,8 +981,8 @@ const quickstartJourney = async () => {
     }
     // The debug build loads its JavaScript from Metro on 8081, and the media
     // bridge answers on its own port: both legs of the journey are this tunnel.
-    adb('reverse', 'tcp:8081', `tcp:${metroPort}`);
-    adb('reverse', `tcp:${wirePort}`, `tcp:${wirePort}`);
+    await adb('reverse', 'tcp:8081', `tcp:${metroPort}`);
+    await adb('reverse', `tcp:${wirePort}`, `tcp:${wirePort}`);
     receipt.metroPort = metroPort;
     mark('metro-ready');
 
@@ -992,7 +999,7 @@ const quickstartJourney = async () => {
     const frames = [];
     const capture = (async () => {
         for (let index = 0; recording && index < RECORD_FRAMES; index++) {
-            const frame = adbBin('exec-out', 'screencap', '-p').stdout;
+            const frame = (await adbBin('exec-out', 'screencap', '-p')).stdout;
             if (!frame.length) break;
             const path = join(recordDir, `f_${index}.png`);
             writeFileSync(path, frame);
@@ -1006,25 +1013,25 @@ const quickstartJourney = async () => {
     };
 
     receipt.device = {
-        model: adb('shell', 'getprop', 'ro.product.model').trim(),
-        release: adb('shell', 'getprop', 'ro.build.version.release').trim(),
-        sdk: adb('shell', 'getprop', 'ro.build.version.sdk').trim(),
-        resolution: adb('shell', 'wm', 'size').trim().split(':').pop().trim(),
+        model: (await adb('shell', 'getprop', 'ro.product.model')).trim(),
+        release: (await adb('shell', 'getprop', 'ro.build.version.release')).trim(),
+        sdk: (await adb('shell', 'getprop', 'ro.build.version.sdk')).trim(),
+        resolution: (await adb('shell', 'wm', 'size')).trim().split(':').pop().trim(),
     };
     // A cold start, so the app cannot keep a link to a bridge that is gone.
-    adb('shell', 'am', 'force-stop', applicationId);
+    await adb('shell', 'am', 'force-stop', applicationId);
     await sleep(1000);
-    adb('shell', 'am', 'start', '-n', `${applicationId}/.MainActivity`);
+    await adb('shell', 'am', 'start', '-n', `${applicationId}/.MainActivity`);
     await sleep(8000); // Metro serves the first bundle request here
-    await waitFor(() => uiBound('Connect') !== null, 'the quickstart Connect button', 120000);
+    await waitFor(async () => (await uiBound('Connect')) !== null, 'the quickstart Connect button', 120000);
     mark('app-open');
 
     // Tap Connect the way a user does: the control's own bounds, not a guess.
-    const connectButton = uiBound('Connect');
-    writeFileSync(join(out, 'app-idle.png'), adbBin('exec-out', 'screencap', '-p').stdout);
-    adb('shell', 'input', 'tap', String(Math.round(connectButton.centerX)), String(Math.round(connectButton.centerY)));
+    const connectButton = await uiBound('Connect');
+    writeFileSync(join(out, 'app-idle.png'), (await adbBin('exec-out', 'screencap', '-p')).stdout);
+    await adb('shell', 'input', 'tap', String(Math.round(connectButton.centerX)), String(Math.round(connectButton.centerY)));
     const connected = await waitForLive(applicationId);
-    writeFileSync(join(out, 'first-connect.png'), adbBin('exec-out', 'screencap', '-p').stdout);
+    writeFileSync(join(out, 'first-connect.png'), (await adbBin('exec-out', 'screencap', '-p')).stdout);
     receipt.first_connect = { ...connected, connect_button: connectButton };
     mark('session-live');
 
@@ -1032,25 +1039,25 @@ const quickstartJourney = async () => {
     // the run tries the middle of the picture and, if the view crops the
     // desktop differently than expected, moves across it until the desktop
     // answers. How many taps it took is published either way.
-    if (!ourAppInFront(applicationId)) bringOurAppToFront(applicationId);
-    const before = phoneFrame();
-    writeFileSync(join(out, 'tap-before.png'), adbBin('exec-out', 'screencap', '-p').stdout);
+    if (!(await ourAppInFront(applicationId))) await bringOurAppToFront(applicationId);
+    const before = await phoneFrame();
+    writeFileSync(join(out, 'tap-before.png'), (await adbBin('exec-out', 'screencap', '-p')).stdout);
     receipt.tap = { attempts: [] };
     assert(before.band !== null, 'the phone lost the desktop picture before the tap');
     for (const [at, position] of [[0.5, 0.5], [0.35, 0.5], [0.65, 0.5], [0.5, 0.38], [0.5, 0.62]].entries()) {
         const x = Math.round(before.width * position[1]);
         const y = Math.round(before.band.top + (before.band.bottom - before.band.top) * position[0]);
         const taps = fixtureTaps;
-        if (!ourAppInFront(applicationId)) bringOurAppToFront(applicationId);
-        adb('shell', 'input', 'tap', String(x), String(y));
+        if (!(await ourAppInFront(applicationId))) await bringOurAppToFront(applicationId);
+        await adb('shell', 'input', 'tap', String(x), String(y));
         await sleep(2500);
         receipt.tap.attempts.push({ phone_x: x, phone_y: y, desktop_ticks: fixtureTaps - taps });
         if (fixtureTaps > taps) break;
     }
     await stopRecording();
     receipt.tap.desktop_clicks = fixtureTaps;
-    const after = phoneFrame();
-    writeFileSync(join(out, 'tap-after.png'), adbBin('exec-out', 'screencap', '-p').stdout);
+    const after = await phoneFrame();
+    writeFileSync(join(out, 'tap-after.png'), (await adbBin('exec-out', 'screencap', '-p')).stdout);
     assert(fixtureTaps > 0, 'no tap on the picture reached the desktop');
     // The desktop changed on the phone's own screen, not only in the host's count.
     assert(after.hash !== before.hash, 'the phone screen did not change after the tap that the host counted');
@@ -1062,12 +1069,12 @@ const quickstartJourney = async () => {
     const seconds = (Date.now() - recordFrom) / 1000;
     const fps = Math.max(1, Math.round(frames.length / Math.max(1, seconds) * 100) / 100);
     receipt.recording = { frames: frames.length, seconds: round(seconds), fps, note: 'frame sequence over adb exec-out screencap, not screenrecord: this phone lets no other process write a readable capture' };
-    const encoded = spawnSync('ffmpeg', ['-y', '-framerate', String(fps), '-i', join(recordDir, 'f_%d.png'),
+    const encoded = await spawnAsync('ffmpeg', ['-y', '-framerate', String(fps), '-i', join(recordDir, 'f_%d.png'),
         '-vf', 'scale=540:-2', '-pix_fmt', 'yuv420p', '-c:v', 'libx264', '-crf', '30', join(out, 'connect-and-tap.mp4')],
     { encoding: 'utf8', timeout: 600000 });
     assert.equal(encoded.status, 0, `ffmpeg could not encode the recording: ${encoded.stderr?.slice(-400)}`);
     // The frames are bulky scratch; the encoded recording is the proof.
-    spawnSync('rm', ['-rf', recordDir]);
+    await spawnAsync('rm', ['-rf', recordDir]);
     mark('recorded');
 
     receipt.load_after = load();
@@ -1080,10 +1087,10 @@ const quickstartJourney = async () => {
     fixtureBrowser.kill('SIGTERM');
     } finally {
         try { await stopRecording(); } catch { /* already finished */ }
-        if (wirePort !== undefined) adbTry('reverse', '--remove', `tcp:${wirePort}`);
-        adbTry('reverse', '--remove', 'tcp:8081');
+        if (wirePort !== undefined) await adbTry('reverse', '--remove', `tcp:${wirePort}`);
+        await adbTry('reverse', '--remove', 'tcp:8081');
         receipt.loopback_tcp_ports = forwardedLoopback.slice();
-        for (const port of forwardedLoopback) adbTry('reverse', '--remove', `tcp:${port}`);
+        for (const port of forwardedLoopback) await adbTry('reverse', '--remove', `tcp:${port}`);
         try { wireRelay?.close(); } catch { /* already closed */ }
         try { fixture?.close(); } catch { /* already closed */ }
     }
@@ -1175,12 +1182,12 @@ const recoveryJourney = async () => {
     // Signalling and reports ride the USB reverse; the media stays on Wi-Fi.
     const sigRev = await freePort();
     const repRev = await freePort();
-    adb('reverse', `tcp:${sigRev}`, `tcp:${bridgePort}`);
-    adb('reverse', `tcp:${repRev}`, `tcp:${receiver.address().port}`);
+    await adb('reverse', `tcp:${sigRev}`, `tcp:${bridgePort}`);
+    await adb('reverse', `tcp:${repRev}`, `tcp:${receiver.address().port}`);
     const reverses = [`tcp:${sigRev}`, `tcp:${repRev}`, 'tcp:8081'];
 
     if (process.env.DESKLINK_ANDROID_SKIP_BUILD !== '1') {
-        const build = spawnSync('flock', ['/tmp/fm-desklink-heavy.lock', 'bash', '-c', [
+        const build = await spawnAsync('flock', ['/tmp/fm-desklink-heavy.lock', 'bash', '-c', [
             'npm install --no-audit --no-fund',
             'npx expo prebuild --platform android --no-install',
             'cd android && ./gradlew --no-daemon assembleDebug',
@@ -1191,10 +1198,10 @@ const recoveryJourney = async () => {
     assert(existsSync(apk), `no APK at ${apk}: build the example app first`);
     receipt.apkSha256 = hash(apk);
     const marker = '/data/local/tmp/dl-phone-recovery.apk';
-    if ((adbTry('shell', `cat ${marker} 2>/dev/null`).stdout ?? '').trim() !== receipt.apkSha256) {
-        const installed = spawnSync('adb', ['-s', serial, 'install', '-r', '-t', '--no-streaming', apk], { encoding: 'utf8', timeout: 900000 });
+    if (((await adbTry('shell', `cat ${marker} 2>/dev/null`)).stdout ?? '').trim() !== receipt.apkSha256) {
+        const installed = await spawnAsync('adb', ['-s', serial, 'install', '-r', '-t', '--no-streaming', apk], { encoding: 'utf8', timeout: 900000 });
         assert.equal(installed.status, 0, `adb install failed: ${installed.stderr ?? installed.stdout ?? installed.signal}`);
-        adb('shell', `echo -n ${receipt.apkSha256} > ${marker}`);
+        await adb('shell', `echo -n ${receipt.apkSha256} > ${marker}`);
     } else {
         receipt.apk_install = 'already installed, same sha256';
     }
@@ -1209,16 +1216,16 @@ const recoveryJourney = async () => {
     } catch (error) {
         throw new Error(`${error}; metro said: ${logs.metro.slice(-400)}`);
     }
-    adb('reverse', 'tcp:8081', `tcp:${metroPort}`);
+    await adb('reverse', 'tcp:8081', `tcp:${metroPort}`);
     mark('metro-ready');
     receipt.device = {
-        model: adb('shell', 'getprop', 'ro.product.model').trim(),
-        release: adb('shell', 'getprop', 'ro.build.version.release').trim(),
-        sdk: adb('shell', 'getprop', 'ro.build.version.sdk').trim(),
-        resolution: adb('shell', 'wm', 'size').trim().split(':').pop().trim(),
-        wifi: /SSID: "([^"]+)"/.exec(adb('shell', 'dumpsys', 'wifi'))?.[1] ?? 'unknown',
+        model: (await adb('shell', 'getprop', 'ro.product.model')).trim(),
+        release: (await adb('shell', 'getprop', 'ro.build.version.release')).trim(),
+        sdk: (await adb('shell', 'getprop', 'ro.build.version.sdk')).trim(),
+        resolution: (await adb('shell', 'wm', 'size')).trim().split(':').pop().trim(),
+        wifi: /SSID: "([^"]+)"/.exec(await adb('shell', 'dumpsys', 'wifi'))?.[1] ?? 'unknown',
     };
-    receipt.costs = captureCost();
+    receipt.costs = (await captureCost());
 
     const link = `desklink-example://connect?url=${encodeURIComponent(`ws://127.0.0.1:${sigRev}/desktop?token=${token}`)}`
         + `&report=${encodeURIComponent(`http://127.0.0.1:${repRev}/report`)}&cover=1`;
@@ -1228,38 +1235,38 @@ const recoveryJourney = async () => {
     receipt.link = link.replace(token, '<bridge-token>');
     const applicationId = 'dev.desklink.example';
     try {
-    adb('shell', 'am', 'force-stop', applicationId);
+    await adb('shell', 'am', 'force-stop', applicationId);
     await sleep(1000);
-    adb('shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', `"${link}"`);
+    await adb('shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', `"${link}"`);
     await waitFor(connected, "the app's own report with a presented frame", 180000);
     mark('session-live');
     // The fixture must be visibly animating on the phone, or every later
     // "advancing again" check is meaningless.
     const hashes = [];
-    for (let i = 0; i < 5; i += 1) { hashes.push(phoneFrame().hash); await sleep(400); }
+    for (let i = 0; i < 5; i += 1) { hashes.push((await phoneFrame()).hash); await sleep(400); }
     assert(new Set(hashes).size > 1, `the phone picture never changes: ${hashes.join(',')}`);
-    writeFileSync(join(out, 'screen-live.png'), adbBin('exec-out', 'screencap', '-p').stdout);
-    assert(uiBound('connected') !== null, 'the app does not read Connected while live');
+    writeFileSync(join(out, 'screen-live.png'), (await adbBin('exec-out', 'screencap', '-p')).stdout);
+    assert((await uiBound('connected')) !== null, 'the app does not read Connected while live');
 
-    const wifiIp = () => {
-        const m = /inet ([0-9.]+)/.exec(adbTry('shell', 'ip -o addr show wlan0').stdout ?? '');
+    const wifiIp = async () => {
+        const m = /inet ([0-9.]+)/.exec((await adbTry('shell', 'ip -o addr show wlan0')).stdout ?? '');
         return m?.[1] ?? null;
     };
     const waitWifiIp = async (ms) => {
         const until = Date.now() + ms;
         for (;;) {
-            const ip = wifiIp();
+            const ip = await wifiIp();
             if (ip !== null) return ip;
             if (Date.now() >= until) throw new Error('Wi-Fi never rejoined');
             await sleep(1000);
         }
     };
-    const statusIs = (word) => uiBound(word, true) !== null;
+    const statusIs = async (word) => (await uiBound(word, true)) !== null;
     const waitStatus = async (caseName, word, ms, phase) => {
         console.log(`[${caseName}] waiting for ${word} (${phase})`);
         const until = Date.now() + ms;
         for (;;) {
-            if (statusIs(word)) { console.log(`[${caseName}] ${word} shown (${phase})`); return Date.now(); }
+            if (await statusIs(word)) { console.log(`[${caseName}] ${word} shown (${phase})`); return Date.now(); }
             if (Date.now() >= until) throw new Error(`the app never read ${word} (${phase})`);
             await sleep(500);
         }
@@ -1271,7 +1278,7 @@ const recoveryJourney = async () => {
         let movedAt = null;
         let last = frozen;
         for (;;) {
-            const hash = phoneFrame(true).hash;
+            const hash = (await phoneFrame(true)).hash;
             if (hash !== last) {
                 if (movedAt !== null) { console.log(`[${caseName}] picture advancing`); return movedAt; }
                 movedAt = Date.now();
@@ -1283,10 +1290,10 @@ const recoveryJourney = async () => {
     };
     const tapPicture = async (caseName, why) => {
         console.log(`[${caseName}] tap (${why})`);
-        const frame = phoneFrame(true);
+        const frame = await phoneFrame(true);
         assert(frame.band !== null, 'the phone lost the desktop picture before the tap');
         const before = fixtureLines().length;
-        adbQuick('shell', 'input', 'tap', String(Math.round(frame.width / 2)), String(Math.round((frame.band.top + frame.band.bottom) / 2)));
+        await adbQuick('shell', 'input', 'tap', String(Math.round(frame.width / 2)), String(Math.round((frame.band.top + frame.band.bottom) / 2)));
         const until = Date.now() + 8000;
         for (;;) {
             const fresh = fixtureLines().slice(before);
@@ -1297,14 +1304,14 @@ const recoveryJourney = async () => {
             await sleep(250);
         }
     };
-    const encodeCase = (name, frames, startedAt) => {
+    const encodeCase = async (name, frames, startedAt) => {
         const seconds = (Date.now() - startedAt) / 1000;
         const fps = Math.max(1, Math.round(frames.length / Math.max(1, seconds) * 100) / 100);
-        const encoded = spawnSync('ffmpeg', ['-y', '-framerate', String(fps), '-i', join(out, `${name}-f_%d.png`),
+        const encoded = await spawnAsync('ffmpeg', ['-y', '-framerate', String(fps), '-i', join(out, `${name}-f_%d.png`),
             '-vf', 'scale=540:-2', '-pix_fmt', 'yuv420p', '-c:v', 'libx264', '-crf', '30', join(out, `${name}.mp4`)],
             { encoding: 'utf8', timeout: 600000 });
         assert.equal(encoded.status, 0, `ffmpeg could not encode ${name}: ${encoded.stderr?.slice(-300)}`);
-        for (const path of frames) spawnSync('rm', ['-f', path]);
+        for (const path of frames) await spawnAsync('rm', ['-f', path]);
         return { recording: `${name}.mp4`, frames: frames.length, seconds: round(seconds), fps };
     };
     receipt.cases = {};
@@ -1317,7 +1324,7 @@ const recoveryJourney = async () => {
         let recording = true;
         const capture = (async () => {
             for (let index = 0; recording; index += 1) {
-                const frame = adbBin('exec-out', 'screencap', '-p').stdout;
+                const frame = (await adbBin('exec-out', 'screencap', '-p')).stdout;
                 if (!frame.length) break;
                 const path = join(out, `${name}-f_${index}.png`);
                 writeFileSync(path, frame);
@@ -1328,7 +1335,7 @@ const recoveryJourney = async () => {
         const leg = { name };
         try {
             console.log(`[${name}] pre-tap`);
-            if (!ourAppInFront(applicationId)) bringOurAppToFront(applicationId);
+            if (!(await ourAppInFront(applicationId))) await bringOurAppToFront(applicationId);
             leg.preTap = await tapPicture(name, 'pre-outage');
             const tDrop0 = Date.now();
             console.log(`[${name}] outage starts`);
@@ -1337,23 +1344,23 @@ const recoveryJourney = async () => {
             console.log(`[${name}] outage triggered after ${outageAt - tDrop0}ms`);
             if (observable) {
                 leg.reconnectingAt = await waitStatus(name, 'econnecting', 15000, 'outage') - outageAt;
-                writeFileSync(join(out, `screen-${name}-reconnecting.png`), adbBin('exec-out', 'screencap', '-p').stdout);
-                assert(statusIs('econnecting'), 'the Reconnecting state left before the outage ended');
+                writeFileSync(join(out, `screen-${name}-reconnecting.png`), (await adbBin('exec-out', 'screencap', '-p')).stdout);
+                assert(await statusIs('econnecting'), 'the Reconnecting state left before the outage ended');
             }
             await sleep(Math.max(0, outageMs - (Date.now() - tDrop0)));
             console.log(`[${name}] restoring`);
             await restore();
             leg.outageMs = Date.now() - tDrop0;
             console.log(`[${name}] restored after ${leg.outageMs}ms outage`);
-            const frozen = phoneFrame(true).hash;
+            const frozen = (await phoneFrame(true)).hash;
             const t0 = Date.now();
             const firstMove = await waitAdvancing(name, frozen, 30000);
             leg.recoveryMs = firstMove - t0;
             leg.statusAt = await (async () => { const t = Date.now(); await waitStatus(name, 'connected', 20000, 'recovery'); return Date.now() - t; })();
-            writeFileSync(join(out, `screen-${name}-recovered.png`), adbBin('exec-out', 'screencap', '-p').stdout);
+            writeFileSync(join(out, `screen-${name}-recovered.png`), (await adbBin('exec-out', 'screencap', '-p')).stdout);
             // Still advancing a moment later: the picture is live, not one frame.
             await sleep(1200);
-            const later = [phoneFrame(true).hash, phoneFrame(true).hash];
+            const later = [(await phoneFrame(true)).hash, (await phoneFrame(true)).hash];
             assert(later[0] !== frozen && later[1] !== frozen, 'the picture stuck on the outage frame after the recovery');
             leg.postTap = await tapPicture(name, 'post-recovery');
             assert(leg.recoveryMs <= 2000, `the picture took ${leg.recoveryMs}ms to advance again (J3 allows 2000)`);
@@ -1361,37 +1368,37 @@ const recoveryJourney = async () => {
             recording = false;
             try { await capture; } catch { /* a failed grab must not mask the case result */ }
         }
-        Object.assign(leg, encodeCase(name, frames, startedAt));
+        Object.assign(leg, await encodeCase(name, frames, startedAt));
         receipt.cases[name] = leg;
         saveReceipt();
         mark(name);
     };
 
-    const ipBefore = wifiIp();
+    const ipBefore = await wifiIp();
     assert(ipBefore !== null, 'the phone is not on Wi-Fi');
     receipt.wifiBefore = ipBefore;
     // A 5 s drop: both managers off, radios silent, then back.
     await runCase('drop5', 5000,
-        async () => { adb('shell', 'svc wifi disable'); },
-        async () => { adb('shell', 'svc wifi enable'); await waitWifiIp(30000); });
+        async () => { await adb('shell', 'svc wifi disable'); },
+        async () => { await adb('shell', 'svc wifi enable'); await waitWifiIp(30000); });
     // A roam: the interface down long enough to lose the address, then a fresh join.
-    const roamWas = wifiIp();
+    const roamWas = await wifiIp();
     await runCase('roam', 10000,
-        async () => { adb('shell', 'svc wifi disable'); await waitFor(() => wifiIp() === null, 'the address to drop', 15000); },
-        async () => { adb('shell', 'svc wifi enable'); await waitWifiIp(30000); });
-    receipt.wifiAfterRoam = { before: roamWas, after: wifiIp() };
+        async () => { await adb('shell', 'svc wifi disable'); await waitFor(async () => (await wifiIp()) === null, 'the address to drop', 15000); },
+        async () => { await adb('shell', 'svc wifi enable'); await waitWifiIp(30000); });
+    receipt.wifiAfterRoam = { before: roamWas, after: await wifiIp() };
     // A 60 s backgrounding: home, a full minute, back to our own activity.
     await runCase('background60', 60000,
-        async () => { adb('shell', 'input', 'keyevent', 'KEYCODE_HOME'); await sleep(1500); assert(!ourAppInFront(applicationId), 'our app stayed in front after HOME'); },
-        async () => { bringOurAppToFront(applicationId); }, false);
+        async () => { await adb('shell', 'input', 'keyevent', 'KEYCODE_HOME'); await sleep(1500); assert(!(await ourAppInFront(applicationId)), 'our app stayed in front after HOME'); },
+        async () => { await bringOurAppToFront(applicationId); }, false);
 
     receipt.outcome = 'PASS';
     console.log(`PASS: ${serial} recovered drop, roam and background on real Wi-Fi; evidence ${out}`);
     } finally {
-        adbTry('shell', 'svc wifi enable');
+        await adbTry('shell', 'svc wifi enable');
         try { await waitWifiIp(30000); } catch { /* the case error owns the failure */ }
-        for (const reverse of reverses) adbTry('reverse', '--remove', reverse);
-        adbTry('reverse', '--remove', 'tcp:8081');
+        for (const reverse of reverses) await adbTry('reverse', '--remove', reverse);
+        await adbTry('reverse', '--remove', 'tcp:8081');
     }
 };
 try {
@@ -1404,9 +1411,9 @@ try {
     await sleep(700);
     for (const [, child] of children) { try { process.kill(child.pid, 0); child.kill('SIGKILL'); } catch { child.exitCode ??= 0; } }
     receiver?.close();
-    writeFileSync(join(out, 'screen-final.png'), adbBin('exec-out', 'screencap', '-p').stdout);
-    adb('shell', 'input', 'keyevent', '3');
-    if (!keepCaptures) adb('shell', 'rm', '-rf', '/data/local/tmp/dl-phone-g2g', '/data/local/tmp/dl-quickstart');
+    writeFileSync(join(out, 'screen-final.png'), (await adbBin('exec-out', 'screencap', '-p')).stdout);
+    await adb('shell', 'input', 'keyevent', '3');
+    if (!keepCaptures) await adb('shell', 'rm', '-rf', '/data/local/tmp/dl-phone-g2g', '/data/local/tmp/dl-quickstart');
     if (xvfb) { try { await stopOwnedXvfb(xvfb); } catch (error) { receipt.cleanup = String(error); } }
     claim.release();
     for (const name of Object.keys(logs)) writeFileSync(join(out, `${name}.log`), logs[name]);
@@ -1428,15 +1435,18 @@ process.exit(receipt.outcome === 'PASS' ? 0 : 1);
  * configuration only wins if it reads the strip in most frames, its stamps
  * advance, and they land on latencies a phone could plausibly show.
  */
-function pickStripConfig(sample, pull) {
+async function pickStripConfig(sample, pull) {
     const configs = [];
     for (let pitch = 8; pitch <= 80; pitch += 0.5) {
         for (const x0 of [0, 1, 2, 3, 4]) configs.push({ pitch, x0 });
     }
     // Every configuration reads the same sample frames, so they are pulled once
     // (a raw capture is 10 MB; the sample is deliberately short).
-    const frames = sample.map(frame => ({ before: frame.before, ...capturePixels(pull(frame.index)) }))
-        .filter(capture => capture.pixels.length >= 1080 * 2376 * 4);
+    const frames = [];
+    for (const frame of sample) {
+        const capture = { before: frame.before, ...capturePixels(await pull(frame.index)) };
+        if (capture.pixels.length >= 1080 * 2376 * 4) frames.push(capture);
+    }
     const scored = [];
     for (const config of configs) {
         const stamps = frames.map(capture => frameStamp(capture.pixels, capture.width, capture.height, config).stamp);
@@ -1490,11 +1500,11 @@ function pickStripConfig(sample, pull) {
  *  - `relative` drops the clock entirely: it is how much each frame lags the
  *    fastest frame in the same run, which no clock error can move.
  */
-function decodeLatency(stamps, pull, leg, receipt_) {
+async function decodeLatency(stamps, pull, leg, receipt_) {
     const grab = receipt_.costs.grab_estimate_ms;
     const exec = receipt_.costs.exec_median_ms;
     const offset = receipt_.offset_ms;
-    const chosen = pickStripConfig(stamps.filter((_, at) => at % 3 === 0), pull);
+    const chosen = await pickStripConfig(stamps.filter((_, at) => at % 3 === 0), pull);
     if (chosen === null) {
         return {
             decoded: false,
@@ -1505,7 +1515,7 @@ function decodeLatency(stamps, pull, leg, receipt_) {
     const reads = [];
     let band = null;
     for (const frame of stamps) {
-        const { pixels, width, height } = capturePixels(pull(frame.index));
+        const { pixels, width, height } = capturePixels(await pull(frame.index));
         if (pixels.length < 1080 * 2376 * 4) continue;
         const read = frameStamp(pixels, width, height, chosen.config);
         band ??= read.band ?? null;
