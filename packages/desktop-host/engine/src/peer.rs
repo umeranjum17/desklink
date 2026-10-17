@@ -267,6 +267,33 @@ pub struct TransportOptions {
     pub pace_bps: f64,
 }
 
+/// The UDP sockets ICE gathers host candidates from: an ephemeral port on every
+/// IPv4 interface and, when this computer has an IPv6 address a peer could
+/// reach, on every IPv6 one too. Mobile carriers commonly hand a phone a global
+/// IPv6 address, and a stateful firewall passes the simultaneous checks, so
+/// IPv6 can be the only direct path a phone off home Wi-Fi has. The library
+/// expands a wildcard into the interfaces' own addresses, skipping loopback and
+/// link-local; with none left it binds the wildcard itself and offers `::`,
+/// which no peer can use, so `[::]` is asked for only when there is one.
+fn udp_addrs() -> Vec<std::net::SocketAddr> {
+    let has_ipv6 = rtc::shared::ifaces::ifaces()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|interface| interface.addr)
+        .any(|addr| match addr.ip() {
+            std::net::IpAddr::V6(ip) => {
+                // fe80::/10; `Ipv6Addr::is_unicast_link_local` is still unstable.
+                !ip.is_loopback() && !ip.is_unspecified() && ip.segments()[0] & 0xffc0 != 0xfe80
+            }
+            std::net::IpAddr::V4(_) => false,
+        });
+    let mut addrs = vec![std::net::SocketAddr::from(([0, 0, 0, 0], 0))];
+    if has_ipv6 {
+        addrs.push(std::net::SocketAddr::from(([0u16; 8], 0)));
+    }
+    addrs
+}
+
 /// What the pacer lets go back to back: a few dozen packets. A 4K key frame is
 /// hundreds of packets, and released at once it overflows the receiver's
 /// socket buffer, which loses the frame and draws another key frame request —
@@ -899,7 +926,7 @@ impl VideoPeer {
             // An ephemeral port on every interface: ICE needs a socket to gather
             // candidates from, and the peer needs no fixed port because the
             // consumer's authenticated channel carries the candidates.
-            .with_udp_addrs(vec![std::net::SocketAddr::from(([0, 0, 0, 0], 0))])
+            .with_udp_addrs(udp_addrs())
             .with_tcp_addrs(if options.loopback_tcp {
                 vec![std::net::SocketAddr::from(([127, 0, 0, 1], 0))]
             } else {
@@ -1258,7 +1285,7 @@ pub(crate) mod tests {
             .with_interceptor_registry(registry)
             .with_runtime(default_runtime().expect("a runtime"))
             .with_handler(Arc::new(NoopHandler))
-            .with_udp_addrs(vec![std::net::SocketAddr::from(([0, 0, 0, 0], 0))])
+            .with_udp_addrs(udp_addrs())
             .build()
             .await
             .expect("an answering peer");
@@ -1667,7 +1694,10 @@ pub(crate) mod tests {
         }
     }
 
-    async fn media_receiver(receiver: Arc<MediaReceiver>) -> Arc<dyn PeerConnection> {
+    async fn media_receiver(
+        receiver: Arc<MediaReceiver>,
+        udp: Vec<std::net::SocketAddr>,
+    ) -> Arc<dyn PeerConnection> {
         let mut media_engine = MediaEngine::default();
         media_engine
             .register_codec(vp9_codec(), RtpCodecKind::Video)
@@ -1679,18 +1709,25 @@ pub(crate) mod tests {
             .with_interceptor_registry(registry)
             .with_runtime(default_runtime().expect("a runtime"))
             .with_handler(receiver)
-            .with_udp_addrs(vec![std::net::SocketAddr::from(([0, 0, 0, 0], 0))])
+            .with_udp_addrs(udp)
             .build()
             .await
             .expect("a receiving peer");
         Arc::new(peer)
     }
 
-    /// A restart offer/answer round must not interrupt media already flowing on
-    /// the selected pair: the picture keeps advancing (no gap over 200 ms) while
-    /// the old pair stays reachable, and the ICE generation still turns over.
-    #[tokio::test]
-    async fn a_restart_keeps_media_flowing_on_the_selected_pair_until_the_new_one_nominates() {
+    /// An engine and a client receiving on `client_udp`, offered, answered and
+    /// connected over ICE, with the client's RTP arrival times and the
+    /// candidates the engine offered.
+    struct Connected {
+        engine: Arc<VideoPeer>,
+        offer: String,
+        client: Arc<dyn PeerConnection>,
+        arrivals: Arc<Mutex<Vec<Instant>>>,
+        offered: Arc<Mutex<Vec<String>>>,
+    }
+
+    async fn connected(client_udp: Vec<std::net::SocketAddr>) -> Connected {
         let (events, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (engine, offer) = VideoPeer::offer(transport(), events, VideoCodec::Vp9)
             .await
@@ -1706,7 +1743,7 @@ pub(crate) mod tests {
             arrivals: Arc::clone(&arrivals),
             connected: Arc::clone(&connected),
         });
-        let client = media_receiver(Arc::clone(&receiver)).await;
+        let client = media_receiver(Arc::clone(&receiver), client_udp).await;
 
         client
             .set_remote_description(RTCSessionDescription::offer(offer.clone()).expect("an offer"))
@@ -1724,6 +1761,8 @@ pub(crate) mod tests {
 
         // The engine's candidates reach the client.
         let client_for_engine_candidates = Arc::clone(&client);
+        let offered: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let offered_by_engine = Arc::clone(&offered);
         tokio::spawn(async move {
             while let Some(event) = events_rx.recv().await {
                 if let PeerEvent::Candidate {
@@ -1732,6 +1771,7 @@ pub(crate) mod tests {
                     sdp_m_line_index,
                 } = event
                 {
+                    offered_by_engine.lock().unwrap().push(candidate.clone());
                     let _ = client_for_engine_candidates
                         .add_ice_candidate(RTCIceCandidateInit {
                             candidate,
@@ -1757,9 +1797,35 @@ pub(crate) mod tests {
         // Wait for the ICE path to come up on both ends.
         let deadline = Instant::now() + Duration::from_secs(5);
         while !(engine.is_connected() && connected.load(Ordering::SeqCst)) {
-            assert!(Instant::now() < deadline, "the peers never connected");
+            assert!(
+                Instant::now() < deadline,
+                "the peers never connected; the engine offered {:?}",
+                offered.lock().unwrap()
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        Connected {
+            engine,
+            offer,
+            client,
+            arrivals,
+            offered,
+        }
+    }
+
+    /// A restart offer/answer round must not interrupt media already flowing on
+    /// the selected pair: the picture keeps advancing (no gap over 200 ms) while
+    /// the old pair stays reachable, and the ICE generation still turns over.
+    #[tokio::test]
+    async fn a_restart_keeps_media_flowing_on_the_selected_pair_until_the_new_one_nominates() {
+        let Connected {
+            engine,
+            offer,
+            client,
+            arrivals,
+            offered,
+        } = connected(vec![std::net::SocketAddr::from(([0, 0, 0, 0], 0))]).await;
+        eprintln!("restart: the engine offered {:?}", offered.lock().unwrap());
 
         // Any bytes the VP9 packetizer turns into one access unit.
         let frame: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
@@ -1880,6 +1946,61 @@ pub(crate) mod tests {
             worst < Duration::from_millis(200),
             "media stalled for {worst:?} through the restart: {:?}",
             stamps
+        );
+
+        engine.close().await;
+        let _ = client.close().await;
+    }
+
+    /// A phone whose only direct way here is IPv6, such as one on a carrier that
+    /// hands it a global IPv6 address, still gets the picture: the engine offers
+    /// its IPv6 addresses, never a loopback or link-local one, and a client that
+    /// can only send from `::1` connects and receives media.
+    #[tokio::test]
+    async fn a_client_with_only_an_ipv6_route_gets_the_picture() {
+        if !udp_addrs().iter().any(std::net::SocketAddr::is_ipv6) {
+            eprintln!("ipv6: skipped, this computer has no IPv6 address a peer could reach");
+            return;
+        }
+        let Connected {
+            engine,
+            client,
+            arrivals,
+            offered,
+            ..
+        } = connected(vec![std::net::SocketAddr::from((
+            std::net::Ipv6Addr::LOCALHOST,
+            0,
+        ))])
+        .await;
+        let offered = offered.lock().unwrap().clone();
+        eprintln!("ipv6: the engine offered {offered:?}");
+        let ipv6: Vec<std::net::Ipv6Addr> = offered
+            .iter()
+            .filter_map(|candidate| candidate.split(' ').nth(4)?.parse().ok())
+            .collect();
+        assert!(!ipv6.is_empty(), "no IPv6 candidate was offered");
+        assert!(
+            !ipv6
+                .iter()
+                .any(|ip| ip.is_loopback() || ip.segments()[0] & 0xffc0 == 0xfe80),
+            "a loopback or link-local address reached the client: {ipv6:?}"
+        );
+
+        let frame: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
+        for _ in 0..50 {
+            engine
+                .send_frame(&frame, true, Instant::now())
+                .await
+                .expect("a frame is sent");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let received = arrivals.lock().unwrap().len();
+        eprintln!("ipv6: {received} of 50 frames arrived at a client on ::1");
+        assert!(
+            received >= 25,
+            "the picture did not arrive over IPv6: {received} packets"
         );
 
         engine.close().await;

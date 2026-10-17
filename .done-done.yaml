@@ -30,6 +30,11 @@ journeys:
 # via packages/desktop-client/test/android-roam-flow.mjs on an attached emulator or
 # phone (ANDROID_SERIAL, DESKLINK_ANDROID_OUT, DESKLINK_ROAM_APP_ADDRESS = this
 # host's LAN IPv4; its header has the recipe).
+# The engine's IPv6 path (IPv6 host candidates, picture to a client that can only
+# send from ::1) runs via `cargo test --bin desklink-host peer::tests::` in
+# packages/desktop-host/engine; it skips with a printed reason on a host with no
+# IPv6 address, so run it in a private `unshare -rn` netns with a ULA on a dummy link
+# and a 224.0.0.0/4 route on it (the mDNS socket needs one).
 # Hyprland window-share taps run via packages/desktop-host/test/portal-g2g-flow.mjs
 # --hyprland-input-proof, with DESKLINK_PORTAL_AQUAMARINE naming the patched
 # aquamarine its header describes.
