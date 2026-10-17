@@ -392,7 +392,7 @@ try {
     const droppedNonRelayOut = () => Number(lastReport().droppedNonRelayOut ?? 0);
     await waitFor(() => droppedNonRelayOut() > 0, 'the app to withhold non-relay locals', 60000);
     // A clip of the live picture: the device's own screenrecord, or a screencap timelapse when it is unavailable.
-    const clip = captureClip({
+    const clip = await captureClip({
         serial, seconds: 10, devicePath: '/sdcard/link-tcp-clip.mp4',
         outPath: join(out, 'clip-relayed-desktop.mp4'), scratch,
     });
