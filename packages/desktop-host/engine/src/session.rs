@@ -1267,9 +1267,16 @@ impl Session {
                 let source_h = source.height.max(1) as usize;
                 let (width, height) =
                     fit(source_w, source_h, request.max_width, request.max_height);
+                // A Hyprland window share's cues go to the desktop point each
+                // press lands on, and its picture holds no layer surface to mask.
+                #[cfg(target_os = "linux")]
+                let desktop =
+                    share_watch.is_some() && source.source_type.as_deref() == Some("Window");
                 #[cfg(target_os = "linux")]
                 if request.agent_indicator {
-                    indicator = crate::indicator::Indicator::start_wayland(source_w, source_h).ok();
+                    indicator =
+                        crate::indicator::Indicator::start_wayland(source_w, source_h, desktop)
+                            .ok();
                 }
                 #[cfg(target_os = "macos")]
                 if request.agent_indicator {
@@ -1312,6 +1319,7 @@ impl Session {
                     sink,
                     indicator
                         .as_ref()
+                        .filter(|_| !desktop)
                         .map(crate::indicator::Indicator::position),
                     Box::new({
                         let status = capture_status.clone();
@@ -1754,6 +1762,22 @@ impl Session {
                 "timeout must be 1..120000 ms; label must be at most 96 printable ASCII bytes",
             ));
         }
+        // A located window's point shows where a press there would land, on
+        // the output holding it; the next may land on another output, so each
+        // gets its own helper.
+        #[cfg(target_os = "linux")]
+        let landed = match lock(&self.inner.window).as_ref() {
+            Some(window) => {
+                let (px, py) = window
+                    .locate(x, y)
+                    .map_err(|message| SessionError::new("indicator-unavailable", message))?;
+                if let Some(helper) = overlay.take() {
+                    helper.stop();
+                }
+                Some((px.floor() as i64, py.floor() as i64))
+            }
+            None => None,
+        };
         #[cfg(not(target_os = "windows"))]
         if overlay.is_none() {
             #[cfg(target_os = "linux")]
@@ -1762,7 +1786,10 @@ impl Session {
                 PointDesktop::Wayland => crate::indicator::Indicator::start_point_wayland(
                     source.width,
                     source.height,
-                    source.position,
+                    landed
+                        .map(|(x, y)| (x as i32, y as i32))
+                        .or(source.position),
+                    landed.is_some(),
                 ),
                 PointDesktop::Unavailable(_) => unreachable!("validated point target"),
             };
@@ -1784,6 +1811,8 @@ impl Session {
                 }
             })?);
         }
+        #[cfg(target_os = "linux")]
+        let (x, y) = landed.unwrap_or((x, y));
         #[cfg(not(target_os = "windows"))]
         return overlay
             .as_mut()
@@ -2239,7 +2268,7 @@ impl Inner {
             }
             *last = seq;
         }
-        let feedback = match &message {
+        let mut feedback = match &message {
             ControlMessage::Pointer { phase, x, y, .. } if lock(&self.encoded).is_none() => {
                 let (x, y) = to_source_pixels(*x, *y, self.encoded_size(), &self.source);
                 Some((
@@ -2271,11 +2300,6 @@ impl Inner {
         let located = lock(&self.window).is_some();
         #[cfg(not(target_os = "linux"))]
         let located = false;
-        let feedback = if located {
-            feedback.filter(|(kind, ..)| *kind == 'T')
-        } else {
-            feedback
-        };
         if self.source.source_type.as_deref() == Some("Window")
             && !located
             && matches!(&message, ControlMessage::Pointer { phase, .. } if !matches!(phase, PointerPhase::Cancel))
@@ -2301,7 +2325,14 @@ impl Inner {
                 y,
                 button,
                 ..
-            } => self.pointer(phase, x, y, button, seq),
+            } => self.pointer(phase, x, y, button, seq).map(|landed| {
+                // A located window's cue goes where the press landed, or nowhere.
+                if located {
+                    feedback = feedback
+                        .zip(landed)
+                        .map(|((kind, ..), (x, y))| (kind, x, y));
+                }
+            }),
             ControlMessage::Wheel { dx, dy, .. } => self.wheel(dx, dy, seq),
             ControlMessage::Key {
                 name,
@@ -2402,7 +2433,7 @@ impl Inner {
         y: i64,
         button: i64,
         _seq: u64,
-    ) -> std::result::Result<(), (&'static str, String)> {
+    ) -> std::result::Result<Option<(i64, i64)>, (&'static str, String)> {
         let (width, height) = self.encoded_size();
         if !(0..width as i64).contains(&x) || !(0..height as i64).contains(&y) {
             return Err((
@@ -2421,19 +2452,21 @@ impl Inner {
                     .place(x, y)
                     .map_err(|message| ("input-unavailable", message))
             };
+            // The desktop point the pointer landed on, where its cue belongs.
             return match phase {
-                PointerPhase::Move => place(),
+                PointerPhase::Move => place().map(Some),
                 PointerPhase::Down => {
                     // Refused before the pointer moves: nothing could press.
                     self.with_input(|_| Ok(()))?;
-                    place()?;
-                    self.with_input(|target| target.button(Button::from_number(button), true))
+                    let point = place()?;
+                    self.with_input(|target| target.button(Button::from_number(button), true))?;
+                    Ok(Some(point))
                 }
                 PointerPhase::Up => {
                     self.with_input(|target| target.button(Button::from_number(button), false))?;
-                    place()
+                    place().map(Some)
                 }
-                PointerPhase::Cancel => self.with_input(InputTarget::release_all),
+                PointerPhase::Cancel => self.with_input(InputTarget::release_all).map(|()| None),
             };
         }
         self.with_input(|target| match phase {
@@ -2448,6 +2481,7 @@ impl Inner {
             }
             PointerPhase::Cancel => target.release_all(),
         })
+        .map(|()| None)
     }
 
     fn wheel(

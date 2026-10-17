@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- On a Hyprland **window** share, the agent indicator's click cue and
+  `session.point`'s ring now show on the desktop point the tap lands on,
+  instead of being hidden (cue) or drawn as if the window filled the screen
+  (point). A tap landing on an output other than the cue's draws no cue. See
+  [PROTOCOL.md](packages/desktop-host/docs/PROTOCOL.md#input-and-clipboard-the-sessions-control-channel).
+
 ## 0.5.7
 
 Joint patch release; protocol version remains 3. All packages move together.

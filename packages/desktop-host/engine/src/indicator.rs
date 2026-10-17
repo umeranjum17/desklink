@@ -157,11 +157,14 @@ impl Indicator {
         )
     }
 
+    /// `desktop`: points are compositor layout coordinates, drawn on the
+    /// output that holds `position`.
     #[cfg(target_os = "linux")]
     pub fn start_point_wayland(
         width: i32,
         height: i32,
         position: Option<(i32, i32)>,
+        desktop: bool,
     ) -> Result<Self> {
         let (x, y) = position.unwrap_or_default();
         Self::spawn(
@@ -173,6 +176,7 @@ impl Indicator {
                     i32::from(position.is_some()).to_string(),
                     x.to_string(),
                     y.to_string(),
+                    i32::from(desktop).to_string(),
                 ]),
             1.0,
             1.0,
@@ -217,14 +221,17 @@ impl Indicator {
         }
     }
 
+    /// `desktop`: cues are compositor layout coordinates, drawn only where
+    /// they fall on the output the overlay opened on.
     #[cfg(target_os = "linux")]
-    pub fn start_wayland(width: usize, height: usize) -> Result<Self> {
+    pub fn start_wayland(width: usize, height: usize, desktop: bool) -> Result<Self> {
         let executable = std::env::current_exe()?;
         Self::spawn(
             Command::new(executable)
                 .arg("agent-overlay-wayland")
                 .arg(width.to_string())
-                .arg(height.to_string()),
+                .arg(height.to_string())
+                .args(desktop.then_some("desktop")),
             1.0,
             1.0,
         )
