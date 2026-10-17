@@ -22,6 +22,7 @@ import {
     ClipboardConfirmation,
     DesktopView,
     ModifierKeys,
+    isLoopbackTcpCandidate,
     useDesktopSession,
     type SessionEvent,
     type SessionSnapshot,
@@ -34,7 +35,7 @@ const DECK_TALL = 560;
 /** The shortest edge that makes a screen a tablet's rather than a phone's. */
 const TABLET_MIN = 500;
 
-function connectionLink(link: string | null): { url: string; report: string | null; cover: boolean; keyboardFit: boolean; tcpRelay: string | null; dropUdp: boolean; key: string } | null {
+function connectionLink(link: string | null): { url: string; report: string | null; cover: boolean; keyboardFit: boolean; tcpRelay: string | null; relayOnly: boolean; key: string } | null {
     if (!link) return null;
     try {
         const parsed = new URL(link);
@@ -42,9 +43,9 @@ function connectionLink(link: string | null): { url: string; report: string | nu
         // A demo journey opts the picture into covering the view (`cover=1`)
         // instead of fitting the portrait width; anywhere else it is off.
         // `tcpRelay` carries the desktop over the app's own relay link instead
-        // of a forward (a lab WebSocket byte relay); `dropUdp=1` discards UDP
-        // candidates so the session can only use that relay.
-        return url ? { url, report: parsed.searchParams.get('report'), cover: parsed.searchParams.get('cover') === '1', keyboardFit: false, tcpRelay: parsed.searchParams.get('tcpRelay'), dropUdp: parsed.searchParams.get('dropUdp') === '1', key: link } : null;
+        // of a forward (a lab WebSocket byte relay); `relayOnly=1` keeps only the
+        // relayed TCP candidate, simulating a phone with no other route.
+        return url ? { url, report: parsed.searchParams.get('report'), cover: parsed.searchParams.get('cover') === '1', keyboardFit: false, tcpRelay: parsed.searchParams.get('tcpRelay'), relayOnly: parsed.searchParams.get('relayOnly') === '1', key: link } : null;
     } catch { return null; }
 }
 
@@ -192,29 +193,26 @@ function base64ToBytes(text: string): Uint8Array {
 }
 
 /**
- * A lab counterfactual for a relay-only phone: drop every UDP candidate and
- * strip UDP lines from SDP offers, so ICE can only use the relayed TCP route.
- * Never on in the app itself; the journey link asks for it.
+ * A lab counterfactual for a relay-only phone: keep only the relayed TCP
+ * candidate (the engine's loopback offer, rewritten to the kit's listener by
+ * the session) and strip anything else from SDP offers, so ICE can only use
+ * the relayed route. Never on in the app itself; the journey link asks for it.
  */
-export function dropUdpCandidates(event: SessionEvent): SessionEvent | null {
+export function keepRelayCandidateOnly(event: SessionEvent): SessionEvent | null {
     if (event.kind === 'candidate') {
-        return isUdpCandidate(event.candidate.candidate) ? null : event;
+        return isLoopbackTcpCandidate(event.candidate.candidate) ? event : null;
     }
     if (event.kind === 'description') {
         const sdp = event.description.sdp
             .split(/\r?\n/)
-            .filter((line) => !isUdpCandidate(line.replace(/^a=/, '')))
+            .filter((line) => {
+                const body = line.startsWith('a=candidate:') ? line.slice(2) : line;
+                return !body.startsWith('candidate:') || isLoopbackTcpCandidate(body);
+            })
             .join('\r\n');
         return { ...event, description: { ...event.description, sdp } };
     }
     return event;
-}
-
-/** Whether this candidate line offers UDP. Anything else is kept. */
-function isUdpCandidate(candidate: string): boolean {
-    const fields = candidate.trim().split(/\s+/);
-    if (fields.length < 3 || !fields[0]?.startsWith('candidate:')) return false;
-    return fields[2]?.toLowerCase() === 'udp';
 }
 
 /**
@@ -274,7 +272,7 @@ export default function App() {
         // the reference app keeps the whole screen.
         const keyboardFitSetting: unknown = Platform.OS === 'ios' ? Settings.get('desklinkKeyboardFit') : null;
         return typeof url === 'string'
-            ? { url, report: null as string | null, cover: coverSetting === '1' || coverSetting === 'true' || coverSetting === 1, keyboardFit: keyboardFitSetting === '1' || keyboardFitSetting === 'true' || keyboardFitSetting === 1, tcpRelay: null as string | null, dropUdp: false, key: url }
+            ? { url, report: null as string | null, cover: coverSetting === '1' || coverSetting === 'true' || coverSetting === 1, keyboardFit: keyboardFitSetting === '1' || keyboardFitSetting === 'true' || keyboardFitSetting === 1, tcpRelay: null as string | null, relayOnly: false, key: url }
             : null;
     });
     React.useEffect(() => {
@@ -287,12 +285,12 @@ export default function App() {
     if (!connection) return <View style={[styles.root, styles.idle]}><StatusBar hidden /><Text style={styles.messageText}>Open a desktop connection link to connect.</Text></View>;
     return (
         <SafeAreaProvider>
-            <ConnectedDesktop key={connection.key} url={connection.url} report={connection.report} cover={connection.cover} keyboardFit={connection.keyboardFit} tcpRelay={connection.tcpRelay} dropUdp={connection.dropUdp} />
+            <ConnectedDesktop key={connection.key} url={connection.url} report={connection.report} cover={connection.cover} keyboardFit={connection.keyboardFit} tcpRelay={connection.tcpRelay} relayOnly={connection.relayOnly} />
         </SafeAreaProvider>
     );
 }
 
-function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, dropUdp }: { url: string; report: string | null; cover: boolean; keyboardFit: boolean; tcpRelay: string | null; dropUdp: boolean }) {
+function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, relayOnly }: { url: string; report: string | null; cover: boolean; keyboardFit: boolean; tcpRelay: string | null; relayOnly: boolean }) {
     const startedAt = React.useRef(Date.now());
     const root = React.useRef<View>(null);
     const presentedAt = React.useRef<number | null>(null);
@@ -305,7 +303,7 @@ function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, dropUdp }
     // session keeps its forward-based loopback route.
     const relay = React.useMemo(() => (tcpRelay ? wsTcpTransport(tcpRelay) : null), [tcpRelay]);
     // Lab evidence that the relay leg filtered UDP: every dropped candidate.
-    const droppedUdp = React.useRef(0);
+    const droppedNonRelay = React.useRef(0);
     const desktop = useDesktopSession({
         authorize: async () => {
             // A fresh authorization needs an open carrier; the bridge may retain
@@ -333,9 +331,22 @@ function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, dropUdp }
                     void fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), loopbackTcpPort: port }) })
                         .catch(() => undefined);
                 }
-            }, dropUdp ? (event) => {
-                const kept = dropUdpCandidates(event);
-                if (kept === null) droppedUdp.current += 1;
+            }, relayOnly ? (event) => {
+                // Lab inventory: every candidate line the engine offers, kept or
+                // dropped, so the run can prove the relay-only path. Lab only.
+                if (report !== null) {
+                    const offered = event.kind === 'candidate'
+                        ? [event.candidate.candidate]
+                        : event.kind === 'description'
+                            ? event.description.sdp.split(/\r?\n/).filter(line => line.startsWith('a=candidate'))
+                            : [];
+                    for (const line of offered) {
+                        void fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), offered: line }) })
+                            .catch(() => undefined);
+                    }
+                }
+                const kept = keepRelayCandidateOnly(event);
+                if (kept === null) droppedNonRelay.current += 1;
                 return kept;
             } : undefined);
             await signaling.current.open;
@@ -411,7 +422,7 @@ function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, dropUdp }
             try {
                 const stats = await desktop.getStats();
                 const tcp = await desktop.getTcpTransportStats().catch(() => null);
-                if (!stopped) await fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), startedAt: startedAt.current, presentedAt: presentedAt.current, stats, tcp, droppedUdp: droppedUdp.current }) });
+                if (!stopped) await fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), startedAt: startedAt.current, presentedAt: presentedAt.current, stats, tcp, droppedNonRelay: droppedNonRelay.current }) });
             } catch { /* Evidence collection never interrupts a desktop session. */ }
         };
         void sample();
