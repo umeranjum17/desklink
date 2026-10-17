@@ -51,10 +51,10 @@ export interface NativeDesklinkModule {
     /** Video reception and codec statistics, excluding network addresses and credentials. */
     getStats?(id: string): Promise<string>;
     /**
-     * Relay-only route (Android): listen on the phone's 127.0.0.1 for the
+     * Relay-only route (native): listen on the phone's 127.0.0.1 for the
      * native peer's ICE-TCP dial, returning the listener's port, or 0/null
      * when the listener cannot start. Absent where the build cannot carry it
-     * (web, and iOS until its slice lands).
+     * (web: a browser cannot dial a JS socket).
      */
     startTcpBridge?(id: string): number | null;
     /** Bytes toward the engine on one relayed connection, base64, batched by the caller. */

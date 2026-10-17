@@ -180,9 +180,15 @@ batched crossings for the session. (The lab emulator itself decoded at about 6
 fps on its software VP9 path while the bridge idled; the bridge was never the
 bottleneck.) Without the option, behaviour is unchanged.
 
-Android only: a build whose native module cannot carry it refuses the session
-rather than opening one with no path. The web binding never carries it — a
-browser cannot dial a JS socket — and iOS follows in the next slice.
+On iOS the same contract holds through the `DesklinkTcp` native module: with
+`tcpTransport` set the session opens with the loopback route and the picture
+rides the consumer stream; without it, iOS behaviour is unchanged. A
+simulator session over the relay showed a live H.264 picture (518 decoded
+frames at the 12.5 fps the fixture produced, bytes both ways over one bridged
+connection in about 14 batched crossings a second), and the engine's ICE
+trace nominated the bridged loopback TCP pair. A build whose native module
+cannot carry it refuses the session rather than opening one with no path.
+The web binding never carries it — a browser cannot dial a JS socket.
 
 ### What the package guarantees
 

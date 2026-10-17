@@ -4,6 +4,6 @@
     "modules": ["expo.modules.desklink.DesklinkModule"]
   },
   "ios": {
-    "modules": ["DesklinkInputModule"]
+    "modules": ["DesklinkInputModule", "DesklinkTcpModule"]
   }
 }
