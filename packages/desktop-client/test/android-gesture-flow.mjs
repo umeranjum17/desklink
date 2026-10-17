@@ -3,7 +3,7 @@
  * The three gestures, end to end: drag-select, a fling and a two-finger scroll,
  * from an Android device to a real desktop this machine serves.
  *
- * Why this exists: the phone proof (lab-tmp/dl-j2-android-proof) proved click
+ * Why this exists: an earlier phone proof (under lab-tmp) proved click
  * and long press, and could not express drag or two fingers at all — that
  * device delivers no MOVE event to any application, from any injector. This
  * flow runs the same journey on hardware that can, and judges every gesture by

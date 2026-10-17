@@ -335,7 +335,7 @@ async function main() {
     }
     const engine = engineBinary();
     const fixture = fixtureBinary();
-    const evidence = resolve(process.argv[2] ?? join(process.env.HOME ?? tmpdir(), 'lab-tmp', 'dl-pm-8-recovery', `run-${Date.now()}`));
+    const evidence = resolve(process.argv[2] ?? join(process.env.HOME ?? tmpdir(), 'lab-tmp', 'link-drop-recovery', `run-${Date.now()}`));
     mkdirSync(evidence, { recursive: true });
     const scratch = mkdtempSync(join(tmpdir(), 'dl-link-drop-'));
     const receipt = {

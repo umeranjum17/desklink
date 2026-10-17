@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Dex the multi-pointer touch injector so `uiautomator runtest` can drive real
 # MotionEvents on a device. Sources: the uiautomator injector first written for
-# the phone proof (fm/dl-j2-android-proof), unchanged except for the
+# the phone proof, unchanged except for the
 # hold-before-move a drag needs; the stub classes stand in for the framework's
 # own package-private ones, which is why the injector runs as
 # com.android.uiautomator.core.Touch and takes the real one at runtime.

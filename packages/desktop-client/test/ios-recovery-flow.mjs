@@ -4,7 +4,7 @@
 // and a 60 s backgrounding) are the proof legs this file already carried; the
 // `cut` leg is the owned path cut (retire the app's tuple, discard both native
 // UDP directions and signalling, restore on generation 2 against a 12 s
-// outage) that the dl-roam-mac-cut slice adds, with a `cut` negative control
+// outage) that this slice adds, with a `cut` negative control
 // that restores signalling but leaves the media cut.
 //
 // The path: the app reaches a userspace-shaped relay running ON THE MAC
@@ -75,7 +75,7 @@
 // constant the leg records; only the relay's cadences need that offset.
 //
 // Usage (from the repo root):
-//   DESKLINK_IOS_MAC=umerfaroq@100.97.31.92 DESKLINK_IOS_LANE=dl-pm-8 \
+//   DESKLINK_IOS_MAC=you@your-mac.local DESKLINK_IOS_LANE=ios-proof-1 \
 //     DESKLINK_IOS_OUT=~/evidence/ios-j3 node packages/desktop-client/test/ios-recovery-flow.mjs
 //
 // Environment: DESKLINK_IOS_MAC (required), DESKLINK_IOS_LANE (required),
