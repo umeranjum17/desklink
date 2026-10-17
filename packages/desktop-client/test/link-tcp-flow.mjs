@@ -107,6 +107,8 @@ let xvfb, target, bridge, metro, receiver, relayServer;
 let enginePort = 0;
 const relayBytes = { wsToTcp: 0, tcpToWs: 0, streams: 0 };
 const reports = [];
+// Corner-file handshake evidence, for the same reason.
+let cornerDebug = null;
 const reverses = [];
 const reverse = (...args) => {
     adb('reverse', ...args);
@@ -142,13 +144,18 @@ try {
     const corner = join(scratch, 'corner');
     target = start('fixture', fixture, ['--animate', '--move', '--corner', corner], xenv);
     await waitFor(() => logs.fixture.includes('"ready"'), 'the fixture to be ready');
+    // The far corner is painted before the app launches, so the session's
+    // opening keyframe already carries it: asserting a repaint mid-session
+    // would race the emulator's slow software decoder, whose dropped frames
+    // can lose a one-shot change forever.
+    writeFileSync(corner, 'ff00ff');
 
     const probe = createServer();
-    await new Promise(ok => probe.listen(0, '0.0.0.0', ok));
+    await new Promise(ok => probe.listen(0, '127.0.0.1', ok));
     const bridgePort = probe.address().port;
     probe.close();
     bridge = start('bridge', process.execPath,
-        ['packages/desktop-host/bin/desklink-host.mjs', 'bridge', '--source', 'x11', '--display', display, '--listen', `0.0.0.0:${bridgePort}`],
+        ['packages/desktop-host/bin/desklink-host.mjs', 'bridge', '--source', 'x11', '--display', display, '--listen', `127.0.0.1:${bridgePort}`],
         // The engine's own ICE nomination trace (stderr): the selected pair's
         // local/remote addresses prove which path the media took.
         { ...xenv, DESKLINK_ICE_TRACE: '1' });
@@ -163,7 +170,7 @@ try {
     const relayLog = join(out, 'relay.log');
     const relayNote = (line) => writeFileSync(relayLog, `${Date.now()} ${line}\n`, { flag: 'a' });
     relayNote('relay up');
-    relayServer = new WebSocketServer({ host: '0.0.0.0', port: 0 });
+    relayServer = new WebSocketServer({ host: '127.0.0.1', port: 0 });
     await new Promise(ok => relayServer.on('listening', ok));
     const relayPort = relayServer.address().port;
     receipt.relayPort = relayPort;
@@ -229,7 +236,7 @@ try {
             response.end();
         });
     });
-    await new Promise(ok => receiver.listen(0, '0.0.0.0', ok));
+    await new Promise(ok => receiver.listen(0, '127.0.0.1', ok));
 
     if (process.env.DESKLINK_ANDROID_SKIP_BUILD !== '1') {
         const build = spawnSync('flock', ['/tmp/fm-desklink-heavy.lock', 'bash', '-c', [
@@ -259,6 +266,10 @@ try {
     metro = start('metro', 'npx', ['expo', 'start', '--port', '8081'], { ...env, CI: '1' }, example);
     await waitFor(() => /Waiting on http/.test(logs.metro), 'Metro');
     adb('install', '-r', '-g', apk);
+    // Route surgery below needs privilege; the emulator's userdebug build
+    // grants it. Restarting adbd drops nothing this run needs yet.
+    adb('root');
+    adb('wait-for-device');
     // Every socket the app opens rides `adb reverse` (TCP only): signaling,
     // reports, the relay, and the bundle.
     reverse('tcp:8081', 'tcp:8081');
@@ -278,30 +289,42 @@ try {
     await waitFor(() => tryAdb('shell', 'am', 'start', '-n', 'dev.desklink.example/.MainActivity',
         '-a', 'android.intent.action.VIEW', '-d', `"${link}"`),
     'the app to answer its connection link', 120000);
-    // The dev client loads its bundle over the network, so the guest uplink
-    // stays up for the launch and goes away the moment the app's JS boots —
-    // Metro finishing the bundle is not delivery (the app shows 99% while it
-    // still downloads). Everything after (signaling, reports, relay) rides
-    // `adb reverse`.
+    // The dev client loads its bundle over the network, and the kit fetches
+    // its native module on first use, so the guest route stays up for the
+    // launch and goes away on the app's authorize mark — after both fetches
+    // resolved. The app then waits out the kill before opening the session,
+    // so the race is closed on both ends. Everything after rides `adb
+    // reverse`. Route surgery (not `svc`): the per-interface tables are
+    // flushed while the interfaces keep their addresses, so ICE still gathers
+    // but no UDP packet can leave — and no gatherer hangs on interfaces
+    // vanishing mid-enumeration. Loopback and the reverses are all that is
+    // left.
     await waitFor(() => /Android Bundled/.test(logs.metro), 'Metro to serve the bundle', 180000);
-    await waitFor(() => {
-        const boot = spawnSync('adb', ['-s', serial, 'shell', 'logcat', '-d'], { encoding: 'utf8', timeout: 30000 }).stdout;
-        return /Running ".+"|^.*ReactNativeJS.*:/m.test(boot);
-    }, "the app's JS to boot", 180000);
-    // The relay-only network: the guest's uplink goes off, so the emulator
-    // cannot reach the host's UDP at all — no candidate filtering could fake
-    // this. Loopback and the reverses above are all that is left.
-    adb('shell', 'svc', 'wifi', 'disable');
-    adb('shell', 'svc', 'data', 'disable');
-    await sleep(3000);
-    const guestRoutes = adb('shell', 'ip', 'route');
-    writeFileSync(join(out, 'guest-routes.txt'), guestRoutes);
-    assert(!/10\.0\.2\.0\/24/.test(guestRoutes), 'the guest uplink is down: no route to the host');
+    await waitFor(() => reports.some(text => {
+        try { return JSON.parse(text).authorizing === true; } catch { return false; }
+    }), 'the app to authorize', 180000);
+    adb('shell', 'ip', 'route', 'flush', 'table', 'eth0');
+    adb('shell', 'ip', 'route', 'flush', 'table', 'wlan0');
+    adb('shell', 'ip', '-6', 'route', 'flush', 'table', 'eth0');
+    adb('shell', 'ip', '-6', 'route', 'flush', 'table', 'wlan0');
+    await sleep(1000);
+    const guestRoutes = spawnSync('adb', ['-s', serial, 'shell', 'ip', 'route', 'get', '10.0.2.2'], { encoding: 'utf8', timeout: 30000 });
+    const guestAddrs = adb('shell', 'ip', 'addr', 'show', 'eth0');
+    writeFileSync(join(out, 'guest-routes.txt'), `get 10.0.2.2:\n${guestRoutes.stdout}${guestRoutes.stderr}\neth0:\n${guestAddrs}\n`);
+    assert(guestRoutes.status !== 0 || /unreachable/i.test(guestRoutes.stdout), 'the guest has no route to the host');
+    assert(/inet 10\.0\.2\.15\/24/.test(guestAddrs), 'the guest keeps its address so ICE still gathers');
+    const guestRoutes6 = spawnSync('adb', ['-s', serial, 'shell', 'ip', '-6', 'route', 'get', 'fd7a:115c:a1e0::4137:a101'], { encoding: 'utf8', timeout: 30000 });
+    writeFileSync(join(out, 'guest-routes.txt'), `get 10.0.2.2:\n${guestRoutes.stdout}${guestRoutes.stderr}\neth0:\n${guestAddrs}\nget fd7a:115c:a1e0::4137:a101:\n${guestRoutes6.stdout}${guestRoutes6.stderr}\n`, { flag: 'a' });
+    assert(guestRoutes6.status !== 0 || /unreachable/i.test(guestRoutes6.stdout), 'the guest has no IPv6 route off-host either');
     const pingHost = spawnSync('adb', ['-s', serial, 'shell', 'ping', '-c1', '-W3', '10.0.2.2'], { encoding: 'utf8', timeout: 30000 });
     assert(!/1 received|1 packets received/.test(pingHost.stdout), 'the host is unreachable from the guest');
     const pingLoopback = spawnSync('adb', ['-s', serial, 'shell', 'ping', '-c1', '-W3', '127.0.0.1'], { encoding: 'utf8', timeout: 30000 });
     assert(/1 received|1 packets received/.test(pingLoopback.stdout), 'the guest loopback is up');
     await waitFor(() => reports.length > 0, "the app's own report", 180000);
+    {
+        const first = JSON.parse(reports[0]);
+        assert(!first.terminal, `the app ended before opening: ${JSON.stringify(first.failure)}`);
+    }
     await waitFor(() => enginePort > 0, "the engine's loopback ICE port", 120000);
     receipt.loopback_tcp_port = enginePort;
     await waitFor(() => {
@@ -341,6 +364,8 @@ try {
     assert(firstTcp.bytesFromEngine > 0, 'bytes crossed the bridge from the engine');
     const droppedNonRelay = () => Number(lastReport().droppedNonRelay ?? 0);
     await waitFor(() => droppedNonRelay() > 0, 'the app to discard non-relay candidates', 60000);
+    const droppedNonRelayOut = () => Number(lastReport().droppedNonRelayOut ?? 0);
+    await waitFor(() => droppedNonRelayOut() > 0, 'the app to withhold non-relay locals', 60000);
     // A clip of the live picture, recorded on the device.
     const clipDevice = '/sdcard/link-tcp-clip.mp4';
     adb('shell', 'rm', '-f', clipDevice);
@@ -352,8 +377,21 @@ try {
     await sleep(6000);
     const second = capture('02-relayed-desktop-later.png');
 
+    // Input rode the same path: a tap inside the picture reaches the fixture,
+    // proved by the engine log (instant, no video lag involved), before any
+    // pixel assertions below.
+    const buttons = () => logs.fixture.split('\n').filter(line => line.includes('"button"')).length;
+    const beforeButtons = buttons();
+    adb('shell', 'input', 'tap', String(Math.round(1080 * 0.5)), String(Math.round(2400 * 0.25)));
+    await sleep(1500);
+    await waitFor(() => buttons() > beforeButtons, 'the tap to reach the desktop', 30000);
+    const button = logs.fixture.split('\n').filter(line => line.includes('"button"')).pop();
+
     // Every change, wherever on the desktop: the fixture repaints its far
-    // corner in place, and the app's picture must show each new colour.
+    // corner in place, and the app's own picture must show each new colour.
+    // A one-shot repaint can vanish on this path (the emulator's software
+    // decoder drops a third of its frames), so the corner toggles until seen;
+    // a toggle that never shows is a dead path, not a lost frame.
     const shows = (path, rgb) => {
         const { data } = PNG.sync.read(readFileSync(path));
         const want = [rgb >> 16, (rgb >> 8) & 0xff, rgb & 0xff];
@@ -364,24 +402,64 @@ try {
         return near;
     };
     const corners = [];
-    for (const [name, rgb] of [['magenta', 0xff00ff], ['cyan', 0x00ffff]]) {
-        writeFileSync(corner, rgb.toString(16).padStart(6, '0'));
+    // The fixture reports its own command line through /proc, so a run can
+    // prove which corner file the painter was told to watch.
+    const fixturePid = target.pid;
+    cornerDebug = null;
+    // The corner was painted before launch, so the opening keyframe already
+    // carries it: a missing magenta here is a dead path, not a lost frame,
+    // since every rendered frame descends from a keyframe that contained it.
+    // (Mid-session repaints were tried first; the emulator's software decoder
+    // drops a third of frames and a one-shot repaint can vanish forever.)
+    // What the host display itself shows, bypassing encode/relay/decode: if
+    // the corner is missing here, the painter never painted it.
+    try {
+        spawnSync('import', ['-window', 'root', '-display', display, join(out, 'xvfb-root.png')],
+            { timeout: 30000, env: { ...process.env, DISPLAY: display, XAUTHORITY: authority } });
+    } catch { /* evidence only */ }
+    {
+        const name = 'magenta', rgb = 0xff00ff;
         const shot = `05-corner-${name}.png`;
         let seen = 0;
-        for (const until = Date.now() + 20000; seen < 1000 && Date.now() < until; await sleep(500)) {
+        for (const until = Date.now() + 60000; seen < 1000 && Date.now() < until;) {
+            await sleep(2000);
             seen = shows(capture(shot), rgb);
         }
+        let fixtureCmd = null;
+        try { fixtureCmd = readFileSync(`/proc/${fixturePid}/cmdline`, 'utf8').replace(/\0/g, ' '); } catch { /* gone */ }
+        cornerDebug = { readback: readFileSync(corner, 'utf8'), fixtureCmd, corner };
         assert(seen >= 1000, `the desktop's far corner turned ${name}, but the app's picture shows ${seen} pixels of it`);
         corners.push({ colour: name, pixels: seen, capture: join(shot).replace(homedir(), '~') });
     }
 
-    // Input rode the same path: a tap inside the picture reaches the fixture.
-    const buttons = () => logs.fixture.split('\n').filter(line => line.includes('"button"')).length;
-    const beforeButtons = buttons();
-    adb('shell', 'input', 'tap', String(Math.round(1080 * 0.5)), String(Math.round(2400 * 0.25)));
-    await sleep(1500);
-    await waitFor(() => buttons() > beforeButtons, 'the tap to reach the desktop', 30000);
-    const button = logs.fixture.split('\n').filter(line => line.includes('"button"')).pop();
+    // Bridge capacity under real video load: repaint the corner as fast as
+    // the lab loop allows and measure what the bridge carries. The idle
+    // desktop above costs the bridge nothing, so only a driven source says
+    // what the batching can hold.
+    const markTcp = () => {
+        const last = JSON.parse(reports[reports.length - 1]);
+        return { at: last.at, ...(last.tcp ?? {}) };
+    };
+    const blastStart = markTcp();
+    const blastUntil = Date.now() + 15000;
+    for (let flip = 0; Date.now() < blastUntil; flip += 1) {
+        writeFileSync(corner, (flip % 2 === 0 ? 'ff00ff' : '00ffff'));
+        await sleep(400);
+    }
+    await waitFor(() => reports.length > 2 && JSON.parse(reports[reports.length - 1]).at > blastStart.at + 12000, 'post-blast samples', 60000);
+    const blastEnd = markTcp();
+    const blastSeconds = (blastEnd.at - blastStart.at) / 1000;
+    const blastBytes = (blastEnd.bytesFromEngine ?? 0) - (blastStart.bytesFromEngine ?? 0);
+    const blastCrossings = (blastEnd.bridgeEvents ?? 0) - (blastStart.bridgeEvents ?? 0);
+    const blastWrites = (blastEnd.bridgeWrites ?? 0) - (blastStart.bridgeWrites ?? 0);
+    const capacity = {
+        bytes: blastBytes,
+        seconds: blastSeconds,
+        mbPerSecond: blastBytes / Math.max(1, blastSeconds) / 1048576,
+        bridgeEventsPerSecond: blastCrossings / Math.max(1, blastSeconds),
+        bridgeWritesPerSecond: blastWrites / Math.max(1, blastSeconds),
+        bytesPerCrossing: blastCrossings > 0 ? blastBytes / blastCrossings : 0,
+    };
 
     // Throughput across the bridge: video bytes per second and the batched
     // crossing rate, from the app's own relay counters.
@@ -406,10 +484,12 @@ try {
         captures: [first, second, capture('03-tap-received.png')].map(path => path.replace(homedir(), '~')),
         reports: reports.length,
         droppedNonRelay: droppedNonRelay(),
+        droppedNonRelayOut: droppedNonRelayOut(),
         lastTcp: lastTimed?.tcp ?? lastReport().tcp,
         relayBytes,
         enginePort,
         throughput,
+        capacity,
         corners,
         tap: button.trim(),
     });
@@ -423,11 +503,13 @@ try {
             .reduce((total, stat) => total + (stat.framesDecoded ?? 0), 0));
         receipt.lastTcp = last.tcp ?? null;
         receipt.droppedNonRelay = Number(last.droppedNonRelay ?? 0);
+        receipt.droppedNonRelayOut = Number(last.droppedNonRelayOut ?? 0);
         receipt.relayBytes = relayBytes;
         receipt.enginePort = enginePort;
         receipt.loopback_tcp_port = enginePort || undefined;
         receipt.framesFirst = reports.length > 0 ? frames(reports[0]) : 0;
         receipt.framesLast = reports.length > 0 ? frames(reports[reports.length - 1]) : 0;
+        receipt.cornerDebug = cornerDebug ?? undefined;
     } catch { /* the receipt carries what it can */ }
     try { capture('00-failure.png'); } catch { /* the device may be gone */ }
     console.error(String(error));
@@ -440,9 +522,18 @@ try {
         } catch { child.exitCode ??= 0; }
     }
     for (const spec of reverses.splice(0)) { tryAdb('reverse', '--remove', spec); }
-    // The guest's uplink belongs to the device: hand it back however the run ends.
-    tryAdb('shell', 'svc', 'wifi', 'enable');
-    tryAdb('shell', 'svc', 'data', 'enable');
+    // The guest's routes belong to the device: hand them back however the run ends.
+    for (const restore of [
+        ['shell', 'ip', 'route', 'add', '10.0.2.0/24', 'dev', 'eth0', 'table', 'eth0', 'proto', 'static', 'scope', 'link'],
+        ['shell', 'ip', 'route', 'add', 'default', 'via', '10.0.2.2', 'dev', 'eth0', 'table', 'eth0', 'proto', 'static', 'mtu', '1500'],
+        ['shell', 'ip', 'route', 'add', '10.0.2.0/24', 'dev', 'wlan0', 'table', 'wlan0', 'proto', 'static', 'scope', 'link'],
+        ['shell', 'ip', 'route', 'add', 'default', 'via', '10.0.2.2', 'dev', 'wlan0', 'table', 'wlan0', 'proto', 'static'],
+        // The guest's IPv6 uplink is rebuilt by the platform itself.
+        ['shell', 'svc', 'wifi', 'disable'],
+        ['shell', 'svc', 'data', 'disable'],
+        ['shell', 'svc', 'wifi', 'enable'],
+        ['shell', 'svc', 'data', 'enable'],
+    ]) tryAdb(...restore);
     try { receiver?.close(); } catch { /* already gone */ }
     try { relayServer?.close(); } catch { /* already gone */ }
     if (xvfb) { try { await stopOwnedXvfb(xvfb); } catch (error) { receipt.cleanup = String(error); } }
