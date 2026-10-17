@@ -276,8 +276,16 @@ export default function App() {
         // screen does (`-desklinkKeyboardFit 1` at launch); off by default, so
         // the reference app keeps the whole screen.
         const keyboardFitSetting: unknown = Platform.OS === 'ios' ? Settings.get('desklinkKeyboardFit') : null;
+        // A relay-only lab journey carries the desktop over the app's own link
+        // (`-desklinkTcpRelay <ws-url> -desklinkRelayOnly 1` at launch),
+        // mirroring the Android deep link's `tcpRelay`/`relayOnly`.
+        const tcpRelaySetting: unknown = Platform.OS === 'ios' ? Settings.get('desklinkTcpRelay') : null;
+        const relayOnlySetting: unknown = Platform.OS === 'ios' ? Settings.get('desklinkRelayOnly') : null;
+        // Lab evidence: where the session posts its stats (`-desklinkReport
+        // <url>`), mirroring the Android deep link's `report`.
+        const reportSetting: unknown = Platform.OS === 'ios' ? Settings.get('desklinkReport') : null;
         return typeof url === 'string'
-            ? { url, report: null as string | null, cover: coverSetting === '1' || coverSetting === 'true' || coverSetting === 1, keyboardFit: keyboardFitSetting === '1' || keyboardFitSetting === 'true' || keyboardFitSetting === 1, tcpRelay: null as string | null, relayOnly: false, key: url }
+            ? { url, report: typeof reportSetting === 'string' ? reportSetting : null, cover: coverSetting === '1' || coverSetting === 'true' || coverSetting === 1, keyboardFit: keyboardFitSetting === '1' || keyboardFitSetting === 'true' || keyboardFitSetting === 1, tcpRelay: typeof tcpRelaySetting === 'string' ? tcpRelaySetting : null, relayOnly: relayOnlySetting === '1' || relayOnlySetting === 'true' || relayOnlySetting === 1, key: url }
             : null;
     });
     React.useEffect(() => {

@@ -74,7 +74,7 @@ export interface SessionOpenRequest {
      * set the kit opens the session as `loopbackTcp` does, listens on the
      * phone's own 127.0.0.1, and pipes every accepted connection through a
      * stream from this factory to the engine's loopback TCP port. Never sent
-     * on the wire. Android only: a build that cannot carry it refuses the
+     * on the wire. Native only: a build that cannot carry it refuses the
      * session, and the web binding never can, because a browser cannot dial a
      * JS socket.
      */

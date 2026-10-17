@@ -1,3 +1,4 @@
+import { requireOptionalNativeModule } from 'expo-modules-core';
 import type { MediaStream, RTCPeerConnection } from 'react-native-webrtc';
 import type { NativeDesklinkModule, NativeSessionEvent } from './native';
 import { requireWebRTC } from './webrtc.ios';
@@ -216,11 +217,31 @@ export const nativeDesklink: NativeDesklinkModule = {
         sizes.delete(id);
         keyboardActions.delete(id);
         surfaceActions.delete(id);
+        tcpBridgeModule?.stopTcpBridge(id);
         notifySurface();
         for (const listener of listeners) listener({ sessionId: id, name: 'closed', payload: {} });
         return true;
     },
     isAvailable() { return true; },
+    startTcpBridge(id) {
+        if (tcpBridgeModule == null) return null;
+        subscribeTcpBridge();
+        const port = tcpBridgeModule.startTcpBridge(id);
+        return typeof port === 'number' && port > 0 ? port : null;
+    },
+    tcpWrite(id, connection, data) {
+        return tcpBridgeModule?.tcpWrite(id, connection, data) ?? false;
+    },
+    tcpClose(id, connection) {
+        return tcpBridgeModule?.tcpClose(id, connection) ?? false;
+    },
+    stopTcpBridge(id) {
+        tcpBridgeModule?.stopTcpBridge(id);
+        return true;
+    },
+    getTcpBridgeStats(id) {
+        return tcpBridgeModule?.getTcpBridgeStats(id) ?? '{}';
+    },
     addListener(_name, handler) { listeners.add(handler); return { remove: () => { listeners.delete(handler); } }; },
 };
 
@@ -242,3 +263,35 @@ export function registerDesktopView(id: string, keyboard: KeyboardActions, surfa
     };
 }
 export function emitDesktopKeyboard(id: string, payload: Record<string, unknown>) { emit(id, 'keyboard', payload); }
+
+/**
+ * The relay route's native endpoint: the 127.0.0.1 listener the peer dials
+ * for its ICE-TCP checks. The WebRTC peer lives in JavaScript (the app's
+ * `react-native-webrtc` binding), which cannot listen on a socket, so the
+ * listener is a Swift Expo module; this binding only delegates to it and
+ * forwards its `tcpAccept`/`tcpData`/`tcpClosed` events into the session
+ * listeners the hook already holds. Null where the build cannot carry it —
+ * the session is then refused rather than opened with no path, as on Android.
+ */
+interface NativeTcpBridgeModule {
+    startTcpBridge(id: string): number | null;
+    tcpWrite(id: string, connection: number, data: string): boolean;
+    tcpClose(id: string, connection: number): boolean;
+    stopTcpBridge(id: string): boolean;
+    getTcpBridgeStats(id: string): string;
+    addListener(name: 'onSessionEvent', handler: (event: NativeSessionEvent) => void): { remove: () => void };
+}
+
+const tcpBridgeModule: NativeTcpBridgeModule | null =
+    requireOptionalNativeModule<NativeTcpBridgeModule>('DesklinkTcp') ?? null;
+
+/** Forward the native bridge's events once; relay sessions only ever start here. */
+let tcpBridgeSubscribed = false;
+function subscribeTcpBridge(): void {
+    if (tcpBridgeSubscribed || tcpBridgeModule == null) return;
+    tcpBridgeSubscribed = true;
+    tcpBridgeModule.addListener('onSessionEvent', (event) => {
+        if (event?.name !== 'tcpAccept' && event?.name !== 'tcpData' && event?.name !== 'tcpClosed') return;
+        emit(String(event.sessionId ?? ''), event.name, (event.payload ?? {}) as Record<string, unknown>);
+    });
+}
