@@ -79,7 +79,7 @@ const tagged = () => readdirSync('/proc').flatMap(name => {
     catch { return []; }
 });
 const driver = (port, token) => `
-${adapter === 'demo' ? `import { bridgeSignaling } from '/@fs/${worktree}/packages/desktop-client/example/App.tsx';` : ''}
+${adapter === 'demo' ? `import { bridgeSignaling } from '/@fs/${worktree}/packages/desktop-client/example/bridgeSignaling.ts';` : ''}
 const probe = window.__probe = { sessionId: null, peerId: 1, iceGeneration: 0, answerAt: null, errors: [], controls: [], pings: [] };
 window.addEventListener('unhandledrejection', e => probe.errors.push(String(e.reason)));
 const peer = new RTCPeerConnection({ iceServers: [] });
@@ -166,7 +166,7 @@ window.__measure = async () => {
 const hookDriver = (port, token) => `
 import React from 'react';
 import TestRenderer from 'react-test-renderer';
-import { bridgeSignaling } from '/@fs/${worktree}/packages/desktop-client/example/App.tsx';
+import { bridgeSignaling } from '/@fs/${worktree}/packages/desktop-client/example/bridgeSignaling.ts';
 import { useDesktopSession } from '/@fs/${worktree}/packages/desktop-client/src/useDesktopSession.ts';
 import { attachSurface, nativeDesklink } from '/@fs/${worktree}/packages/desktop-client/src/native.web.ts';
 const probe = window.__probe = { status: 'boot', failure: null, holdAt: null, sessionId: null, generation: null, offerError: null, answerAt: null, iceGeneration: 0, opens: [], authorizes: [], carriers: [], restarts: [], closes: [], log: [], errors: [], pings: [], controls: [] };
