@@ -18,6 +18,9 @@
 //! compositor delivers to the surface as a JSON line. `--background dark`
 //! paints the field dark instead of white.
 //!
+//! `--title <title> --window <W>x<H>` makes it an ordinary titled window of a
+//! fixed size instead of a fullscreen one, for a lab that shares one window.
+//!
 //! ```sh
 //! WAYLAND_DISPLAY=wayland-1 cargo run --example wl_stamp_target -- --mode scroll
 //! ```
@@ -80,6 +83,8 @@ struct State {
     wm_base: Option<xdg_wm_base::XdgWmBase>,
     /// Size the compositor configured, once acknowledged.
     size: Option<(usize, usize)>,
+    /// `--window`: a fixed size, whatever the compositor configures.
+    window: Option<(usize, usize)>,
     pending_size: (usize, usize),
     /// The output's current mode: the size to use when the first configure
     /// leaves it to the client, as a compositor does before a surface maps.
@@ -104,6 +109,8 @@ fn main() -> Result<()> {
     let mut freeze_file: Option<String> = None;
     let mut pointer_log = None;
     let mut background = WHITE;
+    let mut title = None;
+    let mut window = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -128,6 +135,12 @@ fn main() -> Result<()> {
                     other => bail!("--mode must be typing, scroll or still, not {other:?}"),
                 }
             }
+            "--title" => title = Some(args.next().context("--title needs a value")?),
+            "--window" => {
+                let size = args.next().context("--window needs <W>x<H>")?;
+                let (w, h) = size.split_once('x').context("--window needs <W>x<H>")?;
+                window = Some((w.parse()?, h.parse()?));
+            }
             "--rate" => rate = args.next().context("--rate needs a value")?.parse()?,
             "--freeze-file" => {
                 freeze_file = Some(args.next().context("--freeze-file needs a value")?)
@@ -151,6 +164,7 @@ fn main() -> Result<()> {
     let mut state = State {
         cursor_enabled: std::env::args().any(|a| a == "--cursor-fixture"),
         pointer_log,
+        window,
         ..State::default()
     };
     // Two round trips: the globals, then the output's mode events.
@@ -183,7 +197,17 @@ fn main() -> Result<()> {
     let xdg = wm_base.get_xdg_surface(&surface, &qh, ());
     let toplevel = xdg.get_toplevel(&qh, ());
     toplevel.set_app_id("desklink-stamp".into());
-    toplevel.set_fullscreen(None);
+    if let Some(title) = title {
+        toplevel.set_title(title);
+    }
+    match window {
+        // A fixed-size toplevel: compositors float it at that size.
+        Some((w, h)) => {
+            toplevel.set_min_size(w as i32, h as i32);
+            toplevel.set_max_size(w as i32, h as i32);
+        }
+        None => toplevel.set_fullscreen(None),
+    }
     surface.commit();
     while state.size.is_none() {
         queue.blocking_dispatch(&mut state)?;
@@ -450,7 +474,9 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for State {
             // need new buffers, which a fixed-size lab output never asks for.
             if state.size.is_none() {
                 let (w, h) = state.pending_size;
-                state.size = Some(if w > 0 && h > 0 {
+                state.size = Some(if let Some(window) = state.window {
+                    window
+                } else if w > 0 && h > 0 {
                     (w, h)
                 } else {
                     state.output_size

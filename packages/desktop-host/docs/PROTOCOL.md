@@ -198,7 +198,9 @@ build has, not what this machine can necessarily use.
 
 `input.unavailable_reason` and `input.grant` describe the portal/uinput path:
 without kernel input access a portal session opens and captures, but input
-messages are refused with `input-unavailable`. X display capture uses XTest
+messages are refused with `input-unavailable`. A Hyprland window share's
+pointer moves are the exception: they warp through Hyprland's own IPC instead
+of any device (see Input and clipboard). X display capture uses XTest
 instead and does not require that grant. The engine probes XTest on that named
 display; if it is unavailable, capture and clipboard still open, and input
 messages are refused with `input-unavailable`. X11 clipboard uses CLIPBOARD on the
@@ -270,7 +272,9 @@ animating in and out, with light and dark keylines so it reads on any content.
 On Wayland it uses a click-through layer-shell surface with an edge glow, drawn
 at the highest announced output integer scale, capped at 4; its bounded area is
 masked before capture/diff (pixels behind the effect can remain briefly stale).
-On bare X11 it is an override-redirect, click-through window that follows the
+On a located Hyprland window share the cue gets no pointer or click feedback —
+the engine places the pointer itself, so a stream fraction is not the window's
+desktop point (see Input and clipboard); keys still show. On bare X11 it is an override-redirect, click-through window that follows the
 pointer, so it stays
 visible over windows that set their own cursor and never replaces the cursor.
 Its size follows `Xft.dpi` from 96–384 DPI, defaulting to 1x otherwise;
@@ -687,6 +691,25 @@ sends `0,0` for every stream) while the pointer device spans the whole desktop,
 so a tap would land at the same fraction of the desktop instead of on the
 window. Keys, text, wheel, pointer `cancel` and `release_all` are unaffected;
 share the monitor to point and click.
+
+On Hyprland the engine places the pointer itself. Hyprland announces each
+window share by title on its event socket, and the engine takes the one window
+in `j/clients` with that title and the stream's size. That match runs once, at
+the first tap, and the announcement says nothing else about which share it is:
+if the shared window's title changes before that first tap and another window
+of the stream's size now carries the announced title, taps land on the other
+window; and when two window shares are announced at once (another session, or
+any other consumer of the portal), the engine cannot tell which announcement
+is this share's, so every tap refuses with `input-unavailable` for the
+session's lifetime. Each `move`, `down` and
+`up` warps the pointer to the window's current position plus the local point
+(so a window moved after the share started still maps); buttons and keys go
+through the input device as before. A tap is still refused with
+`input-unavailable` when the window cannot be told apart (no announcement,
+no such window, or several that look alike), when it has closed or sits on a
+hidden workspace, when another window covers the tapped point or a layer
+surface sits over it, or when the window hangs off screen. Other compositors
+keep the refusal above.
 
 The engine holds its own pressed-key/button state. `close`, `release_all`,
 control-channel loss and process exit all synthesize releases for exactly the

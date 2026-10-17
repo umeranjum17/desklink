@@ -45,6 +45,8 @@ mod h264_openh264;
 mod h264_vaapi;
 #[cfg(all(target_os = "macos", desklink_vpx))]
 mod h264_vt;
+#[cfg(target_os = "linux")]
+mod hyprland;
 #[cfg(any(
     target_os = "linux",
     all(any(target_os = "macos", target_os = "windows"), desklink_vpx)

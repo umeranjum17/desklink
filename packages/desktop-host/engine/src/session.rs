@@ -816,6 +816,11 @@ struct Inner {
     point_overlay: Mutex<Option<crate::indicator::Indicator>>,
     #[cfg(target_os = "linux")]
     point_desktop: PointDesktop,
+    /// A portal window share's place on a Hyprland desktop; absent elsewhere,
+    /// where a shared window's taps are refused. Dropped on close, which
+    /// closes its Hyprland event socket.
+    #[cfg(target_os = "linux")]
+    window: Mutex<Option<crate::hyprland::WindowLocator>>,
     capture: Mutex<Option<FrameSource>>,
     /// Absent for an encoded source: there is no local keyboard to translate a
     /// character through, because the client's keys are forwarded instead.
@@ -1195,6 +1200,8 @@ impl Session {
                 None
             };
         let mut cursor_info = serde_json::json!({"mode":"embedded", "positions":false});
+        #[cfg(target_os = "linux")]
+        let mut share_watch = None;
         let Selected {
             source,
             capture,
@@ -1225,6 +1232,9 @@ impl Session {
                     _ => {
                         #[cfg(target_os = "linux")]
                         {
+                            // Hyprland names the window it shares only on its
+                            // event socket, as the share starts.
+                            share_watch = crate::hyprland::ShareWatch::start();
                             portal::open(request.restore_token.as_deref(), request.cursor).await
                         }
                         #[cfg(not(target_os = "linux"))]
@@ -1354,6 +1364,10 @@ impl Session {
         let source_w = source.width.max(1) as usize;
         let source_h = source.height.max(1) as usize;
         let (width, height) = fit(source_w, source_h, request.max_width, request.max_height);
+        #[cfg(target_os = "linux")]
+        let window = share_watch
+            .filter(|_| source.source_type.as_deref() == Some("Window"))
+            .map(|watch| crate::hyprland::WindowLocator::new(watch, source.width, source.height));
 
         let bitrate_kbps = if request.bitrate_kbps == 0 {
             auto_bitrate(width, height)
@@ -1469,6 +1483,8 @@ impl Session {
             } else {
                 PointDesktop::Wayland
             },
+            #[cfg(target_os = "linux")]
+            window: Mutex::new(window),
             capture: Mutex::new(Some(capture)),
             layout: Mutex::new(Some(layout)),
             #[cfg(target_os = "linux")]
@@ -1567,6 +1583,8 @@ impl Session {
             point_overlay: Mutex::new(None),
             #[cfg(target_os = "linux")]
             point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
+            #[cfg(target_os = "linux")]
+            window: Mutex::new(None),
             capture: Mutex::new(None),
             layout: Mutex::new(None),
             #[cfg(target_os = "linux")]
@@ -2118,6 +2136,8 @@ impl Inner {
         drop(capture);
         #[cfg(target_os = "linux")]
         drop(self.audio.lock().ok().and_then(|mut held| held.take()));
+        #[cfg(target_os = "linux")]
+        drop(lock(&self.window).take());
         self.notify(SessionEvent::State {
             capture: "ended",
             transport: String::from("closed"),
@@ -2245,17 +2265,31 @@ impl Inner {
         }
         // A shared window's place on the desktop is unknown (the portal reports
         // no origin for it), while the pointer device spans the whole desktop:
-        // a tap would land somewhere the person never pointed.
+        // a tap would land somewhere the person never pointed. Only Hyprland
+        // says where the window is.
+        #[cfg(target_os = "linux")]
+        let located = lock(&self.window).is_some();
+        #[cfg(not(target_os = "linux"))]
+        let located = false;
+        let feedback = if located {
+            feedback.filter(|(kind, ..)| *kind == 'T')
+        } else {
+            feedback
+        };
         if self.source.source_type.as_deref() == Some("Window")
+            && !located
             && matches!(&message, ControlMessage::Pointer { phase, .. } if !matches!(phase, PointerPhase::Cancel))
         {
             self.reject(seq, "input-unavailable", WINDOW_POINTER_REFUSAL);
             return;
         }
+        // A located window's pointer moves through the compositor; only its
+        // buttons need the input device, which `pointer` checks first.
         if !matches!(
             &message,
             ControlMessage::ClipboardRead { .. } | ControlMessage::ClipboardWrite { .. }
-        ) && lock(&self.input).is_none()
+        ) && !(located && matches!(&message, ControlMessage::Pointer { .. }))
+            && lock(&self.input).is_none()
         {
             self.reject(seq, "input-unavailable", "no input backend");
             return;
@@ -2380,6 +2414,28 @@ impl Inner {
         // created for, and clamps to, the source's own pixels. One conversion
         // here keeps every caller honest.
         let (x, y) = to_source_pixels(x, y, (width, height), &self.source);
+        #[cfg(target_os = "linux")]
+        if let Some(window) = lock(&self.window).as_ref() {
+            let place = || {
+                window
+                    .place(x, y)
+                    .map_err(|message| ("input-unavailable", message))
+            };
+            return match phase {
+                PointerPhase::Move => place(),
+                PointerPhase::Down => {
+                    // Refused before the pointer moves: nothing could press.
+                    self.with_input(|_| Ok(()))?;
+                    place()?;
+                    self.with_input(|target| target.button(Button::from_number(button), true))
+                }
+                PointerPhase::Up => {
+                    self.with_input(|target| target.button(Button::from_number(button), false))?;
+                    place()
+                }
+                PointerPhase::Cancel => self.with_input(InputTarget::release_all),
+            };
+        }
         self.with_input(|target| match phase {
             PointerPhase::Move => target.move_absolute(x, y),
             PointerPhase::Down => {
@@ -3407,7 +3463,10 @@ fn spawn_peer_events(inner: &Arc<Inner>, mut events: tokio_mpsc::UnboundedReceiv
                     // desklink scout trace: the session's transport emit, one
                     // line after the peer event that caused it.
                     if crate::peer::dl_trace_on() {
-                        crate::peer::dl_eng!("session_transport_emit {}", format!("{state}").to_lowercase());
+                        crate::peer::dl_eng!(
+                            "session_transport_emit {}",
+                            format!("{state}").to_lowercase()
+                        );
                     }
                 }
                 PeerEvent::ControlOpen => {
@@ -3467,7 +3526,7 @@ fn available_parallelism() -> usize {
         .unwrap_or(4)
 }
 
-const WINDOW_POINTER_REFUSAL: &str = "a shared window cannot take taps: its place on the desktop is unknown; share the whole screen to point and click";
+pub(crate) const WINDOW_POINTER_REFUSAL: &str = "a shared window cannot take taps: its place on the desktop is unknown; share the whole screen to point and click";
 
 /// Encoded-surface pixels to the source's own pixels. The client aims at what it
 /// sees; the applier is sized and clamped to the source, so the layout origin
@@ -3583,6 +3642,8 @@ mod tests {
             point_overlay: Mutex::new(None),
             #[cfg(target_os = "linux")]
             point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
+            #[cfg(target_os = "linux")]
+            window: Mutex::new(None),
             capture: Mutex::new(None),
             layout: Mutex::new(None),
             #[cfg(target_os = "linux")]
@@ -3842,6 +3903,8 @@ mod tests {
             point_overlay: Mutex::new(None),
             #[cfg(target_os = "linux")]
             point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
+            #[cfg(target_os = "linux")]
+            window: Mutex::new(None),
             layout: Mutex::new(Some(Layout::from_environment().expect("a keymap"))),
             #[cfg(target_os = "linux")]
             audio: Mutex::new(None),

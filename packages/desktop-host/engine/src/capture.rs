@@ -303,7 +303,6 @@ fn run_loop(
         *pw::keys::MEDIA_CATEGORY => "Capture",
         *pw::keys::MEDIA_ROLE => "Screen",
     };
-    props.insert(*pw::keys::TARGET_OBJECT, node_id.to_string());
     let stream = pw::stream::StreamBox::new(&core, "desklink-capture", props)
         .context("pw_stream_new failed")?;
 
