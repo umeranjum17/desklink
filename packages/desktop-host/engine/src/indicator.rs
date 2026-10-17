@@ -369,7 +369,14 @@ mod tests {
         };
         let mut drained = vec![];
         for _ in 0..200 {
-            drained.extend(feed.drain().into_iter().map(|cue| cue.x));
+            // Each drain re-reports the last two remembered states, so the
+            // same state can arrive in several drains when the helper's lines
+            // are split across reads. Keep each state once, in pipe order.
+            for cue in feed.drain() {
+                if !drained.contains(&cue.x) {
+                    drained.push(cue.x);
+                }
+            }
             if drained.len() >= 3 {
                 break;
             }
