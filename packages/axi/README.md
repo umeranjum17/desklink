@@ -39,7 +39,7 @@ desklink-axi click @a3.7
 desklink-axi marks
 desklink-axi click 100,120
 desklink-axi type "hello"
-desklink-axi batch '[[{"verb":"snapshot","name":"ui"},{"verb":"click","args":["@ui.2"]},{"verb":"assert","args":["Saved"]}]]'
+desklink-axi batch '[{"verb":"snapshot","name":"ui"},{"verb":"click","args":["@ui.2"]},{"verb":"assert","args":["Saved"]}]'
 desklink-axi diff
 desklink-axi look @r1
 desklink-axi stop
