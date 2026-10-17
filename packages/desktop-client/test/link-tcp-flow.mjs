@@ -42,9 +42,8 @@
  *   DESKLINK_LINK_TCP_OUT     where the captures and logs go (default
  *                             /home/umer/lab-tmp/dl-kit-link-tcp)
  *   DESKLINK_ANDROID_SKIP_BUILD  1 reuses the APK the last run built
- *   DESKLINK_METRO_PORT       host port for Metro (default 8081); with a port
- *                             other than 8081 the build needs RCT_METRO_PORT
- *                             set to the same value
+ *   DESKLINK_METRO_PORT       host port for Metro (default 8081); the phone's
+ *                             8081 is reversed to it
  */
 import assert from 'node:assert/strict';
 import { execFile, spawn, spawnSync } from 'node:child_process';
@@ -85,8 +84,7 @@ const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex
 const attached = spawnSync('adb', ['devices'], { encoding: 'utf8' }).stdout.split('\n').slice(1)
     .map(line => line.trim().split(/\s+/)).filter(([, state]) => state === 'device').map(([serial]) => serial);
 const serial = process.env.ANDROID_SERIAL ?? attached[0];
-// The host port Metro serves on. The app must be built with the same port
-// (RCT_METRO_PORT at build time) when it is not 8081.
+// The host port Metro serves on; the phone's 8081 is reversed to it.
 const metroPort = Number(process.env.DESKLINK_METRO_PORT ?? 8081);
 assert(serial && attached.includes(serial),
     `name the device with ANDROID_SERIAL; adb reports ${attached.join(', ') || 'none'}`);
@@ -279,10 +277,10 @@ try {
         await new Promise((ok, failed) => {
             metroProbe.once('error', failed);
             metroProbe.listen(metroPort, host, ok);
-        }).catch(error => {
+        }).then(() => metroProbe.close(), error => {
+            if (host === '::1' && error.code === 'EADDRNOTAVAIL') return;
             throw new Error(`Metro needs host port ${metroPort}, which is already held on ${host} (another Metro on this host?): ${error.message}`);
         });
-        metroProbe.close();
     }
     metro = start('metro', 'npx', ['expo', 'start', '--port', String(metroPort)], { ...env, CI: '1' }, example);
     await waitFor(() => /Waiting on http/.test(logs.metro), 'Metro');
@@ -475,46 +473,48 @@ try {
     await waitFor(() => reports.length > 2 && JSON.parse(reports[reports.length - 1]).at > blastStart.at + 12000, 'post-blast samples', 60000);
     const blastEnd = markTcp();
     const blastSeconds = (blastEnd.at - blastStart.at) / 1000;
-    const blastBytes = (blastEnd.bytesFromEngine ?? 0) - (blastStart.bytesFromEngine ?? 0);
     const blastCrossings = (blastEnd.bridgeEvents ?? 0) - (blastStart.bridgeEvents ?? 0);
     const blastWrites = (blastEnd.bridgeWrites ?? 0) - (blastStart.bridgeWrites ?? 0);
-    // Uplink only, as above: the phone-to-engine bytes, not the video.
+    // bytesToEngine counts phone-to-engine bytes (uplink); bytesFromEngine counts engine-to-phone bytes (downlink, the video).
+    const blastBytesOf = (counter, direction) => {
+        const bytes = (blastEnd[counter] ?? 0) - (blastStart[counter] ?? 0);
+        return { direction, bytes, mbPerSecond: bytes / Math.max(1, blastSeconds) / 1048576 };
+    };
+    const uplink = blastBytesOf('bytesToEngine', 'uplink (phone to engine)');
+    const downlink = blastBytesOf('bytesFromEngine', 'downlink (engine to phone)');
     const capacity = {
-        direction: 'uplink (phone to engine)',
-        bytes: blastBytes,
         seconds: blastSeconds,
-        mbPerSecond: blastBytes / Math.max(1, blastSeconds) / 1048576,
+        uplink,
+        downlink,
         bridgeEventsPerSecond: blastCrossings / Math.max(1, blastSeconds),
         bridgeWritesPerSecond: blastWrites / Math.max(1, blastSeconds),
-        bytesPerCrossing: blastCrossings > 0 ? blastBytes / blastCrossings : 0,
+        bytesPerCrossing: blastCrossings > 0 ? (uplink.bytes + downlink.bytes) / blastCrossings : 0,
     };
 
-    // Throughput across the bridge, measured on the uplink: the phone's socket
-    // bytes toward the engine (`bytesFromEngine` in the app's counters, which
-    // TcpBridge.kt increments on the phone-to-engine path). The downlink video
-    // is not counted here, so these figures are not video throughput.
+    // bytesToEngine is phone-to-engine (uplink); bytesFromEngine is engine-to-phone (downlink, the video).
     const timed = reports.map(text => { try { return JSON.parse(text); } catch { return null; } })
         .filter(sample => sample && sample.tcp && typeof sample.at === 'number');
-    const firstTimed = timed.find(sample => (sample.tcp.bytesFromEngine ?? 0) > 0);
     const lastTimed = timed[timed.length - 1];
-    let throughput = null;
-    if (firstTimed && lastTimed && lastTimed.at > firstTimed.at) {
-        const bytes = (lastTimed.tcp.bytesFromEngine ?? 0) - (firstTimed.tcp.bytesFromEngine ?? 0);
+    const throughputOf = (counter, direction) => {
+        const firstTimed = timed.find(sample => (sample.tcp[counter] ?? 0) > 0);
+        if (!firstTimed || !lastTimed || lastTimed.at <= firstTimed.at) return null;
+        const bytes = (lastTimed.tcp[counter] ?? 0) - (firstTimed.tcp[counter] ?? 0);
         const seconds = (lastTimed.at - firstTimed.at) / 1000;
-        const crossings = (lastTimed.tcp.bridgeEvents ?? 0) - (firstTimed.tcp.bridgeEvents ?? 0);
-        throughput = {
-            direction: 'uplink (phone to engine)',
-            bytes, seconds,
-            mbPerSecond: bytes / seconds / 1048576,
-            bridgeEventsPerSecond: crossings / seconds,
-            bytesPerCrossing: crossings > 0 ? bytes / crossings : 0,
-        };
-    }
+        return { direction, bytes, seconds, mbPerSecond: bytes / seconds / 1048576 };
+    };
+    const throughput = {
+        uplink: throughputOf('bytesToEngine', 'uplink (phone to engine)'),
+        downlink: throughputOf('bytesFromEngine', 'downlink (engine to phone)'),
+    };
 
     // The picture never fell to `reconnecting` from its first live status to
     // the end of the run. The captures and the screenrecord above run while the
     // relay carries media, so a blocking call in this process shows up here.
-    const statusSequence = [...statuses].sort((a, b) => a.at - b.at).map(report => report.statusChange);
+    const statusSeqs = statuses.map(report => report.seq);
+    assert(statusSeqs.length > 0, 'the app posted no status report');
+    const missingSeqs = [...Array(Math.max(...statusSeqs)).keys()].map(index => index + 1).filter(seq => !statusSeqs.includes(seq));
+    assert.deepEqual(missingSeqs, [], `status reports never arrived: ${missingSeqs.join(', ')}`);
+    const statusSequence = [...statuses].sort((a, b) => a.seq - b.seq).map(report => report.statusChange);
     const firstLive = statusSequence.indexOf('live');
     assert(firstLive >= 0, `the app never reported live: ${statusSequence.join(' -> ')}`);
     const frozen = statusSequence.slice(firstLive).filter(status => status === 'reconnecting').length;

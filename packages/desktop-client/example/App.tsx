@@ -335,9 +335,11 @@ function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, relayOnly
     const { status } = desktop.snapshot;
     // Lab evidence of the relay-only run: every status change, so the run can
     // prove the picture never fell to `reconnecting` while the relay carried it.
+    const statusPosts = React.useRef(0);
     React.useEffect(() => {
         if (report === null || !relayOnly) return;
-        void fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), statusChange: status }) })
+        const seq = ++statusPosts.current;
+        void fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), seq, statusChange: status }) })
             .catch(() => undefined);
     }, [status, report, relayOnly]);
     const [copyError, setCopyError] = React.useState<string | null>(null);
