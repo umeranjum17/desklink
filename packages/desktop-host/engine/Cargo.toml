@@ -18,7 +18,7 @@ base64 = "0.22"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 anyhow = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "sync", "time", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "sync", "time", "signal", "net"] }
 libc = "0.2"
 bytes = "1"
 # rtc-sctp 0.21.1 is required through this stack: 0.21.0 replaces an
@@ -27,6 +27,9 @@ bytes = "1"
 # session. Cargo.lock pins 0.21.1; drop the pin when a later release carries it.
 webrtc = { version = "0.21", default-features = false, features = ["runtime-tokio", "crypto-ring"] }
 rtc = { version = "0.21", default-features = false, features = ["crypto-ring"] }
+# Parses ice server URLs when the engine sorts out which ones the WebRTC
+# stack can dial; the [patch.crates-io] entry below keeps this the vendored copy.
+rtc-ice = { version = "0.21", default-features = false }
 log = "0.4"
 async-trait = "0.1"
 rand = "0.8"

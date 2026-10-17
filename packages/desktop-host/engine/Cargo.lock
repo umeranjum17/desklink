@@ -557,6 +557,7 @@ dependencies = [
  "pipewire",
  "rand 0.8.8",
  "rtc",
+ "rtc-ice",
  "serde",
  "serde_json",
  "sha2",
