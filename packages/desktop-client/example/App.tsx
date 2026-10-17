@@ -26,6 +26,7 @@ import {
     type SessionEvent,
     type SessionSnapshot,
     type Signaling,
+    type TcpTransport,
 } from '@desklink/react-native';
 
 /** The height of controls a tablet's band takes, in points: status, a 96 pt modifier row and three 96 pt keys. */
@@ -33,19 +34,22 @@ const DECK_TALL = 560;
 /** The shortest edge that makes a screen a tablet's rather than a phone's. */
 const TABLET_MIN = 500;
 
-function connectionLink(link: string | null): { url: string; report: string | null; cover: boolean; keyboardFit: boolean; key: string } | null {
+function connectionLink(link: string | null): { url: string; report: string | null; cover: boolean; keyboardFit: boolean; tcpRelay: string | null; dropUdp: boolean; key: string } | null {
     if (!link) return null;
     try {
         const parsed = new URL(link);
         const url = parsed.searchParams.get('url');
         // A demo journey opts the picture into covering the view (`cover=1`)
         // instead of fitting the portrait width; anywhere else it is off.
-        return url ? { url, report: parsed.searchParams.get('report'), cover: parsed.searchParams.get('cover') === '1', keyboardFit: false, key: link } : null;
+        // `tcpRelay` carries the desktop over the app's own relay link instead
+        // of a forward (a lab WebSocket byte relay); `dropUdp=1` discards UDP
+        // candidates so the session can only use that relay.
+        return url ? { url, report: parsed.searchParams.get('report'), cover: parsed.searchParams.get('cover') === '1', keyboardFit: false, tcpRelay: parsed.searchParams.get('tcpRelay'), dropUdp: parsed.searchParams.get('dropUdp') === '1', key: link } : null;
     } catch { return null; }
 }
 
 /** The bridge re-serves the engine's local protocol; this unwraps its events for the hook. */
-export function bridgeSignaling(address: string, onEvent?: (event: SessionEvent) => void): Signaling & { open: Promise<void>; close: () => void } {
+export function bridgeSignaling(address: string, onEvent?: (event: SessionEvent) => void, filter?: (event: SessionEvent) => SessionEvent | null): Signaling & { open: Promise<void>; close: () => void } {
     const socket = new WebSocket(address);
     const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
     const handlers = new Set<(event: SessionEvent) => void>();
@@ -54,8 +58,10 @@ export function bridgeSignaling(address: string, onEvent?: (event: SessionEvent)
     let closed = false, seq = 0;
     let rejectOpen!: (error: Error) => void;
     const emit = (event: SessionEvent) => {
-        onEvent?.(event);
-        for (const handler of handlers) handler(event);
+        const kept = filter?.(event) ?? event;
+        if (kept === null) return;
+        onEvent?.(kept);
+        for (const handler of handlers) handler(kept);
     };
     const finish = () => {
         if (closed) return;
@@ -115,6 +121,103 @@ export function bridgeSignaling(address: string, onEvent?: (event: SessionEvent)
 }
 
 /**
+ * A generic lab byte relay over WebSocket: one socket per `open()` stream,
+ * binary messages each way. The relay dials the engine's loopback TCP port on
+ * the host; the kit's listener feeds the phone end. Product-neutral: plain
+ * bytes, no app or link names on the wire.
+ */
+export function wsTcpTransport(relayUrl: string): TcpTransport {
+    return {
+        open: () =>
+            new Promise((resolve, reject) => {
+                const socket = new WebSocket(relayUrl);
+                socket.binaryType = 'arraybuffer';
+                const handlers = new Set<(data: Uint8Array) => void>();
+                let settled = false;
+                socket.onopen = () => {
+                    if (settled) return;
+                    settled = true;
+                    resolve({
+                        write: (data) => {
+                            if (socket.readyState === WebSocket.OPEN) socket.send(data);
+                        },
+                        onData: (handler) => {
+                            handlers.add(handler);
+                            return () => handlers.delete(handler);
+                        },
+                        close: () => socket.close(),
+                    });
+                };
+                socket.onerror = () => {
+                    if (!settled) {
+                        settled = true;
+                        reject(new Error('the relay is unreachable'));
+                    }
+                };
+                socket.onclose = () => {
+                    if (!settled) {
+                        settled = true;
+                        reject(new Error('the relay closed'));
+                    }
+                };
+                socket.onmessage = (message) => {
+                    const data = message.data;
+                    if (data instanceof ArrayBuffer) handlers.forEach((handler) => handler(new Uint8Array(data)));
+                    else if (typeof data === 'string') handlers.forEach((handler) => handler(base64ToBytes(data)));
+                };
+            }),
+    };
+}
+
+/** Base64 to bytes, for text frames a relay may send instead of binary. */
+function base64ToBytes(text: string): Uint8Array {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    const values = new Uint8Array(128).fill(255);
+    for (let index = 0; index < chars.length; index += 1) values[chars.charCodeAt(index)] = index;
+    const clean = text.replace(/[^A-Za-z0-9+/=]/g, '');
+    const length = Math.floor((clean.length * 3) / 4) - (clean.endsWith('==') ? 2 : clean.endsWith('=') ? 1 : 0);
+    const out = new Uint8Array(Math.max(0, length));
+    let at = 0;
+    for (let index = 0; index + 3 < clean.length + 1; index += 4) {
+        const a = values[clean.charCodeAt(index)] ?? 0;
+        const b = values[clean.charCodeAt(index + 1)] ?? 0;
+        const c = clean[index + 2] === '=' ? 0 : (values[clean.charCodeAt(index + 2)] ?? 0);
+        const d = clean[index + 3] === '=' ? 0 : (values[clean.charCodeAt(index + 3)] ?? 0);
+        if (at < out.length) out[at] = ((a << 2) | (b >> 4)) & 0xff;
+        if (at + 1 < out.length) out[at + 1] = ((b << 4) | (c >> 2)) & 0xff;
+        if (at + 2 < out.length) out[at + 2] = ((c << 6) | d) & 0xff;
+        at += 3;
+    }
+    return out;
+}
+
+/**
+ * A lab counterfactual for a relay-only phone: drop every UDP candidate and
+ * strip UDP lines from SDP offers, so ICE can only use the relayed TCP route.
+ * Never on in the app itself; the journey link asks for it.
+ */
+export function dropUdpCandidates(event: SessionEvent): SessionEvent | null {
+    if (event.kind === 'candidate') {
+        return isUdpCandidate(event.candidate.candidate) ? null : event;
+    }
+    if (event.kind === 'description') {
+        const sdp = event.description.sdp
+            .split(/\r?\n/)
+            .filter((line) => !isUdpCandidate(line.replace(/^a=/, '')))
+            .join('\r\n');
+        return { ...event, description: { ...event.description, sdp } };
+    }
+    return event;
+}
+
+/** Whether this candidate line offers UDP. Anything else is kept. */
+function isUdpCandidate(candidate: string): boolean {
+    const fields = candidate.trim().split(/\s+/);
+    if (fields.length < 3 || !fields[0]?.startsWith('candidate:')) return false;
+    return fields[2]?.toLowerCase() === 'udp';
+}
+
+/**
  * What the status message tells the person. It uses status, frame readiness and
  * failure code; see SessionSnapshot.failure for why raw messages stay hidden.
  */
@@ -171,7 +274,7 @@ export default function App() {
         // the reference app keeps the whole screen.
         const keyboardFitSetting: unknown = Platform.OS === 'ios' ? Settings.get('desklinkKeyboardFit') : null;
         return typeof url === 'string'
-            ? { url, report: null as string | null, cover: coverSetting === '1' || coverSetting === 'true' || coverSetting === 1, keyboardFit: keyboardFitSetting === '1' || keyboardFitSetting === 'true' || keyboardFitSetting === 1, key: url }
+            ? { url, report: null as string | null, cover: coverSetting === '1' || coverSetting === 'true' || coverSetting === 1, keyboardFit: keyboardFitSetting === '1' || keyboardFitSetting === 'true' || keyboardFitSetting === 1, tcpRelay: null as string | null, dropUdp: false, key: url }
             : null;
     });
     React.useEffect(() => {
@@ -184,12 +287,12 @@ export default function App() {
     if (!connection) return <View style={[styles.root, styles.idle]}><StatusBar hidden /><Text style={styles.messageText}>Open a desktop connection link to connect.</Text></View>;
     return (
         <SafeAreaProvider>
-            <ConnectedDesktop key={connection.key} url={connection.url} report={connection.report} cover={connection.cover} keyboardFit={connection.keyboardFit} />
+            <ConnectedDesktop key={connection.key} url={connection.url} report={connection.report} cover={connection.cover} keyboardFit={connection.keyboardFit} tcpRelay={connection.tcpRelay} dropUdp={connection.dropUdp} />
         </SafeAreaProvider>
     );
 }
 
-function ConnectedDesktop({ url, report, cover, keyboardFit }: { url: string; report: string | null; cover: boolean; keyboardFit: boolean }) {
+function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, dropUdp }: { url: string; report: string | null; cover: boolean; keyboardFit: boolean; tcpRelay: string | null; dropUdp: boolean }) {
     const startedAt = React.useRef(Date.now());
     const root = React.useRef<View>(null);
     const presentedAt = React.useRef<number | null>(null);
@@ -197,6 +300,12 @@ function ConnectedDesktop({ url, report, cover, keyboardFit }: { url: string; re
     // camera cutout and home indicator, so none of them covers the desktop's corner.
     const insets = useSafeAreaInsets();
     const signaling = React.useRef<ReturnType<typeof bridgeSignaling> | null>(null);
+    // A relay journey carries the desktop over the app's own link: the
+    // transport below, through the journey's relay URL. Anywhere else the
+    // session keeps its forward-based loopback route.
+    const relay = React.useMemo(() => (tcpRelay ? wsTcpTransport(tcpRelay) : null), [tcpRelay]);
+    // Lab evidence that the relay leg filtered UDP: every dropped candidate.
+    const droppedUdp = React.useRef(0);
     const desktop = useDesktopSession({
         authorize: async () => {
             // A fresh authorization needs an open carrier; the bridge may retain
@@ -214,22 +323,30 @@ function ConnectedDesktop({ url, report, cover, keyboardFit }: { url: string; re
                         : [];
                 for (const line of lines) {
                     // SDP writes the same line with an `a=` prefix, which shifts
-                    // every field, so it is stripped before parsing.
+                    // every field, so it is stripped before parsing. Port 9 is
+                    // ICE's throwaway discard, not a listener; ephemeral ports
+                    // live above 1024.
                     const fields = line.replace(/^a=/, '').trim().split(/\s+/);
                     if (fields[2]?.toLowerCase() !== 'tcp') continue;
                     const port = Number(fields[5]);
-                    if (!Number.isInteger(port) || port === 0) continue;
+                    if (!Number.isInteger(port) || port < 1024) continue;
                     void fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), loopbackTcpPort: port }) })
                         .catch(() => undefined);
                 }
-            });
+            }, dropUdp ? (event) => {
+                const kept = dropUdpCandidates(event);
+                if (kept === null) droppedUdp.current += 1;
+                return kept;
+            } : undefined);
             await signaling.current.open;
             return {
                 signaling: signaling.current,
-                // The example runs over a plain adb-reverse forward in the
-                // harness, which is TCP only: ask for the engine's loopback
-                // route so the picture can reach the phone at all.
-                session: { loopbackTcp: true },
+                session: relay ? { tcpTransport: relay } : {
+                    // The example runs over a plain adb-reverse forward in the
+                    // harness, which is TCP only: ask for the engine's loopback
+                    // route so the picture can reach the phone at all.
+                    loopbackTcp: true,
+                },
             };
         },
     });
@@ -293,13 +410,14 @@ function ConnectedDesktop({ url, report, cover, keyboardFit }: { url: string; re
         const sample = async () => {
             try {
                 const stats = await desktop.getStats();
-                if (!stopped) await fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), startedAt: startedAt.current, presentedAt: presentedAt.current, stats }) });
+                const tcp = await desktop.getTcpTransportStats().catch(() => null);
+                if (!stopped) await fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), startedAt: startedAt.current, presentedAt: presentedAt.current, stats, tcp, droppedUdp: droppedUdp.current }) });
             } catch { /* Evidence collection never interrupts a desktop session. */ }
         };
         void sample();
         const timer = setInterval(() => { void sample(); }, 1000);
         return () => { stopped = true; clearInterval(timer); };
-    }, [status, desktop.getStats, report]);
+    }, [status, desktop.getStats, desktop.getTcpTransportStats, report]);
 
     return (
         <View ref={root} style={styles.root} onLayout={(event) => setScreen(event.nativeEvent.layout)}>

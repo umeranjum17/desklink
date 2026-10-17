@@ -145,6 +145,42 @@ session, so the forward has to follow it (`adb reverse tcp:<port> tcp:<port>`,
 forms fails after 20 seconds with that reason, rather than sitting on an empty
 view.
 
+### Relay-only phones
+
+A phone that reaches the computer only through the app's own relay link
+(mobile data, no shared LAN) has nothing to forward: signaling crosses the
+link, but WebRTC media needs its own path. `session.tcpTransport` supplies
+that path as a byte stream factory, and the kit does the rest — it opens the
+session with the loopback route above, listens on the phone's own `127.0.0.1`,
+and pipes every accepted connection through a stream from this factory to the
+engine's loopback TCP port:
+
+```tsx
+import type { TcpTransport } from '@desklink/react-native';
+
+const relay: TcpTransport = {
+  // One duplex per relayed connection, usually one per session.
+  open: () => openByteStreamToComputer(),
+};
+
+session: { tcpTransport: relay },
+```
+
+where `openByteStreamToComputer()` returns `{ write, onData, close }`:
+`write(bytes)` sends toward the engine, `onData(handler)` receives from it,
+`close()` ends that connection. The kit rewrites the engine's `127.0.0.1` TCP
+candidate to its listener's port before handing it to the native peer, so the
+peer dials the listener and the picture rides the application's link, still
+inside DTLS. Bytes cross the JS bridge in batches by size and deadline, never
+one call per packet; `getTcpTransportStats()` reports the bytes and the
+batched crossings for the session. A lab emulator held 720p30 video over the
+bridge at X MB/s in Y bridge crossings a second (see the PR). Without the
+option, behaviour is unchanged.
+
+Android only: a build whose native module cannot carry it refuses the session
+rather than opening one with no path. The web binding never carries it — a
+browser cannot dial a JS socket — and iOS follows in the next slice.
+
 ### What the package guarantees
 
 - **Hardware decoding where the platform has it.** Android and web decode the
