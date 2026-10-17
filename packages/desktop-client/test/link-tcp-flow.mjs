@@ -274,14 +274,20 @@ try {
     receipt.link = link.replace(token, '<bridge-token>');
     adb('shell', 'am', 'force-stop', 'dev.desklink.example');
     await sleep(1000);
+    tryAdb('shell', 'logcat', '-c');
     await waitFor(() => tryAdb('shell', 'am', 'start', '-n', 'dev.desklink.example/.MainActivity',
         '-a', 'android.intent.action.VIEW', '-d', `"${link}"`),
     'the app to answer its connection link', 120000);
     // The dev client loads its bundle over the network, so the guest uplink
-    // stays up for the launch and goes away the moment the bundle lands —
-    // before the app's JS boots, let alone before ICE gathers. Everything
-    // after (signaling, reports, relay) rides `adb reverse`.
+    // stays up for the launch and goes away the moment the app's JS boots —
+    // Metro finishing the bundle is not delivery (the app shows 99% while it
+    // still downloads). Everything after (signaling, reports, relay) rides
+    // `adb reverse`.
     await waitFor(() => /Android Bundled/.test(logs.metro), 'Metro to serve the bundle', 180000);
+    await waitFor(() => {
+        const boot = spawnSync('adb', ['-s', serial, 'shell', 'logcat', '-d'], { encoding: 'utf8', timeout: 30000 }).stdout;
+        return /Running ".+"|^.*ReactNativeJS.*:/m.test(boot);
+    }, "the app's JS to boot", 180000);
     // The relay-only network: the guest's uplink goes off, so the emulator
     // cannot reach the host's UDP at all — no candidate filtering could fake
     // this. Loopback and the reverses above are all that is left.
