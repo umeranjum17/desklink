@@ -46,8 +46,7 @@
  *                             8081 is reversed to it
  */
 import assert from 'node:assert/strict';
-import { execFile, spawn, spawnSync } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { connect } from 'node:net';
 import { homedir } from 'node:os';
@@ -91,7 +90,6 @@ assert(serial && attached.includes(serial),
 // The relay shares this process's event loop, so every adb call that can run
 // while media is relayed is async: a blocking spawnSync here stalls the relay,
 // and the engine's pings with it, which the app reads as a lost connection.
-const execFileAsync = promisify(execFile);
 const adbRun = (args, timeout = 120000) => spawnAsync('adb', ['-s', serial, ...args], { encoding: 'utf8', timeout, maxBuffer: 64 * 1024 * 1024 });
 const adb = async (...args) => {
     const done = await adbRun(args);
@@ -101,8 +99,8 @@ const adb = async (...args) => {
 const tryAdb = async (...args) => (await adbRun(args)).status === 0;
 const capture = async name => {
     const path = join(out, name);
-    const shot = await execFileAsync('adb', ['-s', serial, 'exec-out', 'screencap', '-p'], { encoding: 'buffer', timeout: 120000, maxBuffer: 256 * 1024 * 1024 }).catch(() => null);
-    assert(shot, 'the device could not be captured');
+    const shot = await spawnAsync('adb', ['-s', serial, 'exec-out', 'screencap', '-p'], { timeout: 120000, maxBuffer: 256 * 1024 * 1024 });
+    assert.equal(shot.status, 0, 'the device could not be captured');
     writeFileSync(path, shot.stdout);
     return path;
 };
@@ -375,8 +373,8 @@ try {
         writeFileSync(join(out, 'logcat-desklink.txt'), logcat);
     } catch { /* evidence only */ }
     try {
-        const hostUdp = (await execFileAsync('ss', ['-unp'], { encoding: 'utf8', timeout: 30000 })).stdout;
-        writeFileSync(join(out, 'host-ss-udp.txt'), hostUdp);
+        const hostUdp = await spawnAsync('ss', ['-unp'], { encoding: 'utf8', timeout: 30000 });
+        if (hostUdp.status === 0) writeFileSync(join(out, 'host-ss-udp.txt'), hostUdp.stdout);
     } catch { /* evidence only */ }
     const lastReport = () => JSON.parse(reports[reports.length - 1]);
     const firstTcp = lastReport().tcp;
@@ -437,10 +435,8 @@ try {
     // drops a third of frames and a one-shot repaint can vanish forever.)
     // What the host display itself shows, bypassing encode/relay/decode: if
     // the corner is missing here, the painter never painted it.
-    try {
-        await execFileAsync('import', ['-window', 'root', '-display', display, join(out, 'xvfb-root.png')],
-            { timeout: 30000, env: { ...process.env, DISPLAY: display, XAUTHORITY: authority } });
-    } catch { /* evidence only */ }
+    await spawnAsync('import', ['-window', 'root', '-display', display, join(out, 'xvfb-root.png')],
+        { timeout: 30000, env: { ...process.env, DISPLAY: display, XAUTHORITY: authority } });
     {
         const name = 'magenta', rgb = 0xff00ff;
         const shot = `05-corner-${name}.png`;
@@ -476,6 +472,7 @@ try {
     const blastCrossings = (blastEnd.bridgeEvents ?? 0) - (blastStart.bridgeEvents ?? 0);
     const blastWrites = (blastEnd.bridgeWrites ?? 0) - (blastStart.bridgeWrites ?? 0);
     // bytesToEngine counts phone-to-engine bytes (uplink); bytesFromEngine counts engine-to-phone bytes (downlink, the video).
+    // bridgeEvents counts downlink socket reads only, so downlink bytes are the only bytes it can divide.
     const blastBytesOf = (counter, direction) => {
         const bytes = (blastEnd[counter] ?? 0) - (blastStart[counter] ?? 0);
         return { direction, bytes, mbPerSecond: bytes / Math.max(1, blastSeconds) / 1048576 };
@@ -484,27 +481,31 @@ try {
     const downlink = blastBytesOf('bytesFromEngine', 'downlink (engine to phone)');
     const capacity = {
         seconds: blastSeconds,
-        uplink,
-        downlink,
-        bridgeEventsPerSecond: blastCrossings / Math.max(1, blastSeconds),
-        bridgeWritesPerSecond: blastWrites / Math.max(1, blastSeconds),
-        bytesPerCrossing: blastCrossings > 0 ? (uplink.bytes + downlink.bytes) / blastCrossings : 0,
+        uplink: { ...uplink, writesPerSecond: blastWrites / Math.max(1, blastSeconds) },
+        downlink: {
+            ...downlink,
+            bridgeEventsPerSecond: blastCrossings / Math.max(1, blastSeconds),
+            bytesPerCrossing: blastCrossings > 0 ? downlink.bytes / blastCrossings : 0,
+        },
     };
 
     // bytesToEngine is phone-to-engine (uplink); bytesFromEngine is engine-to-phone (downlink, the video).
     const timed = reports.map(text => { try { return JSON.parse(text); } catch { return null; } })
         .filter(sample => sample && sample.tcp && typeof sample.at === 'number');
     const lastTimed = timed[timed.length - 1];
-    const throughputOf = (counter, direction) => {
+    const throughputOf = (counter, direction, events) => {
         const firstTimed = timed.find(sample => (sample.tcp[counter] ?? 0) > 0);
         if (!firstTimed || !lastTimed || lastTimed.at <= firstTimed.at) return null;
         const bytes = (lastTimed.tcp[counter] ?? 0) - (firstTimed.tcp[counter] ?? 0);
         const seconds = (lastTimed.at - firstTimed.at) / 1000;
-        return { direction, bytes, seconds, mbPerSecond: bytes / seconds / 1048576 };
+        const window = { direction, bytes, seconds, mbPerSecond: bytes / seconds / 1048576 };
+        if (!events) return window;
+        const crossings = (lastTimed.tcp[events] ?? 0) - (firstTimed.tcp[events] ?? 0);
+        return { ...window, bridgeEventsPerSecond: crossings / seconds, bytesPerCrossing: crossings > 0 ? bytes / crossings : 0 };
     };
     const throughput = {
         uplink: throughputOf('bytesToEngine', 'uplink (phone to engine)'),
-        downlink: throughputOf('bytesFromEngine', 'downlink (engine to phone)'),
+        downlink: throughputOf('bytesFromEngine', 'downlink (engine to phone)', 'bridgeEvents'),
     };
 
     // The picture never fell to `reconnecting` from its first live status to
@@ -512,6 +513,9 @@ try {
     // relay carries media, so a blocking call in this process shows up here.
     const statusSeqs = statuses.map(report => report.seq);
     assert(statusSeqs.length > 0, 'the app posted no status report');
+    const sentSeq = Math.max(0, ...reports.map(text => JSON.parse(text).statusSeq ?? 0));
+    assert(sentSeq > 0, 'no app report carried the count of status reports it sent');
+    assert(Math.max(...statusSeqs) >= sentSeq, `the app sent ${sentSeq} status reports but the relay received ${Math.max(...statusSeqs)}`);
     const missingSeqs = [...Array(Math.max(...statusSeqs)).keys()].map(index => index + 1).filter(seq => !statusSeqs.includes(seq));
     assert.deepEqual(missingSeqs, [], `status reports never arrived: ${missingSeqs.join(', ')}`);
     const statusSequence = [...statuses].sort((a, b) => a.seq - b.seq).map(report => report.statusChange);

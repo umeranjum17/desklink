@@ -393,8 +393,8 @@ function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, relayOnly
     }, [status]);
     useJourney(root, status === 'live');
     React.useEffect(() => {
-        if (status !== 'live') return;
-        presentedAt.current ??= Date.now();
+        if (status === 'live') presentedAt.current ??= Date.now();
+        else if (!relayOnly) return;
         if (!report) return;
         let stopped = false;
         // Optional evidence collection stays off the visible desktop surface.
@@ -402,13 +402,13 @@ function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, relayOnly
             try {
                 const stats = await desktop.getStats();
                 const tcp = await desktop.getTcpTransportStats().catch(() => null);
-                if (!stopped) await fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), startedAt: startedAt.current, presentedAt: presentedAt.current, stats, tcp, droppedNonRelay: droppedNonRelay.current, droppedNonRelayOut: droppedNonRelayOut.current }) });
+                if (!stopped) await fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), startedAt: startedAt.current, presentedAt: presentedAt.current, stats, tcp, droppedNonRelay: droppedNonRelay.current, droppedNonRelayOut: droppedNonRelayOut.current, statusSeq: statusPosts.current }) });
             } catch { /* Evidence collection never interrupts a desktop session. */ }
         };
         void sample();
         const timer = setInterval(() => { void sample(); }, 1000);
         return () => { stopped = true; clearInterval(timer); };
-    }, [status, desktop.getStats, desktop.getTcpTransportStats, report]);
+    }, [status, desktop.getStats, desktop.getTcpTransportStats, report, relayOnly]);
     // A terminal state posts once, so a failed lab run still says why.
     React.useEffect(() => {
         if (!report) return;
