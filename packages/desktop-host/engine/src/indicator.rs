@@ -222,19 +222,29 @@ impl Indicator {
     }
 
     /// `desktop`: cues are compositor layout coordinates, drawn only where
-    /// they fall on the output the overlay opened on.
+    /// they fall on the output the overlay opened on. `origin` selects that
+    /// output by layout point, reusing the point helper's xdg-output
+    /// selection; without one the compositor places the surface.
     #[cfg(target_os = "linux")]
-    pub fn start_wayland(width: usize, height: usize, desktop: bool) -> Result<Self> {
+    pub fn start_wayland(
+        width: usize,
+        height: usize,
+        desktop: bool,
+        origin: Option<(i32, i32)>,
+    ) -> Result<Self> {
         let executable = std::env::current_exe()?;
-        Self::spawn(
-            Command::new(executable)
-                .arg("agent-overlay-wayland")
-                .arg(width.to_string())
-                .arg(height.to_string())
-                .args(desktop.then_some("desktop")),
-            1.0,
-            1.0,
-        )
+        let mut command = Command::new(executable);
+        command
+            .arg("agent-overlay-wayland")
+            .arg(width.to_string())
+            .arg(height.to_string());
+        if desktop {
+            command.arg("desktop");
+            if let Some((x, y)) = origin {
+                command.arg(x.to_string()).arg(y.to_string());
+            }
+        }
+        Self::spawn(&mut command, 1.0, 1.0)
     }
 
     #[cfg(target_os = "linux")]

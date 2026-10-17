@@ -68,8 +68,11 @@
  * moved; a window two windows look like, or one on a hidden workspace, is
  * refused; a monitor share keeps its path. A capture of the lab output (grim)
  * shows each tap's agent cue, and the agent's point, drawn on the desktop
- * point the tap landed on, and no cue for a tap on a second output the cue
- * did not open on; `DESKLINK_CUE_EVIDENCE_DIR` keeps those captures. Hyprland 0.56's headless backend has
+ * point the tap landed on. A tap landing on another output moves the cue
+ * helper onto it (respawned with the landed origin through the point
+ * helper's output selection, edge glow with it); a tap on the helper's own
+ * output reuses it, and closing the session reaps every helper.
+ * `DESKLINK_CUE_EVIDENCE_DIR` keeps those captures. Hyprland 0.56's headless backend has
  * no allocator of its own, so `DESKLINK_PORTAL_AQUAMARINE` names a directory
  * holding an aquamarine of the same version built with one lab patch: in
  * `src/backend/Headless.cpp`, `drmFD()` and `drmRenderNodeFD()` return a node
@@ -242,7 +245,25 @@ async function cage(dir) {
             if (!existsSync(command)) return;
             const results = JSON.parse(readFileSync(command, 'utf8')).map((args) => {
                 // `grim` captures a lab output, to see what the overlays drew.
-                const ran = args[0] === 'grim' ? spawnSync('grim', args.slice(1), { env: client, encoding: 'utf8' }) : hyprctl(args);
+                if (args[0] === 'grim') {
+                    const ran = spawnSync('grim', args.slice(1), { env: client, encoding: 'utf8' });
+                    return { status: ran.status, out: ran.stdout, err: ran.stderr };
+                }
+                // `helpers` lists the engine's overlay processes, to prove a
+                // cross-output move respawns one helper (new pid, old reaped)
+                // and a same-output tap reuses it (same pid, no leak).
+                if (args[0] === 'helpers') {
+                    const pids = { agent: [], point: [] };
+                    for (const pid of readdirSync('/proc')) {
+                        if (!/^\d+$/.test(pid)) continue;
+                        let cmd = '';
+                        try { cmd = readFileSync(`/proc/${pid}/cmdline`, 'utf8'); } catch { continue; }
+                        if (cmd.includes('agent-overlay-wayland')) pids.agent.push(Number(pid));
+                        if (cmd.includes('point-overlay-wayland')) pids.point.push(Number(pid));
+                    }
+                    return { status: 0, out: JSON.stringify(pids), err: '' };
+                }
+                const ran = hyprctl(args);
                 return { status: ran.status, out: ran.stdout, err: ran.stderr };
             });
             rmSync(command);
@@ -1080,9 +1101,10 @@ async function hyprlandInputProof(engine, dir, run) {
         return PNG.sync.read(readFileSync(path));
     };
     // The box of one colour's pixels in an output's logical points, inside
-    // the agent indicator's edge glow; null when none show.
-    const markBox = (png, [r, g, b], logicalWidth) => {
-        const scale = png.width / logicalWidth, edge = Math.ceil(10 * scale);
+    // the agent indicator's edge glow; null when none show. `margin` is the
+    // untouched edge band in logical points (the glow scan passes 0).
+    const markBox = (png, [r, g, b], logicalWidth, margin = 10) => {
+        const scale = png.width / logicalWidth, edge = Math.ceil(margin * scale);
         let box = null;
         for (let y = edge; y < png.height - edge; y++) for (let x = edge; x < png.width - edge; x++) {
             const i = (y * png.width + x) * 4;
@@ -1171,19 +1193,118 @@ async function hyprlandInputProof(engine, dir, run) {
         assert(point.drawn && Math.abs(point.drawn.x - point.expected.x) <= 2 && Math.abs(point.drawn.y - point.expected.y) <= 2,
             `the point is not where a press would land: ${JSON.stringify(point)}`);
         await engine.request('session.point', { session_id: notes.sessionId, clear: true });
-        // A press on an output other than the one the cue opened on still
-        // lands, and draws no cue at all rather than one in the wrong place.
+        // A press on another output moves the cue helper onto it: the cue
+        // draws where the tap landed there with its halo, a repeat tap on the
+        // helper's own output reuses it, and moving back and forth leaks no
+        // helper processes. Same for the point ring.
+        const helpers = async () => JSON.parse((await hypr(['helpers']))[0]);
+        const held = await helpers();
+        assert.equal(held.agent.length, 1, `the window share has no single cue helper: ${JSON.stringify(held)}`);
         await hypr(['output', 'create', 'headless', 'HEADLESS-2']);
         const second = JSON.parse((await hypr(['-j', 'monitors']))[0]).find((m) => m.name === 'HEADLESS-2');
         assert(second, 'the lab could not add a second output');
-        await moveWindow(window.address, second.x + 100, second.y + 100);
-        const away = await tapAt(0.5, 0.5, null);
-        away.cue = {
-            'HEADLESS-1': markBox(await capture('HEADLESS-1', 'away-1'), [0x12, 0x30, 0x47], logicalW),
-            'HEADLESS-2': markBox(await capture('HEADLESS-2', 'away-2'), [0x12, 0x30, 0x47], second.width / second.scale),
+        const outputs = {
+            'HEADLESS-1': { name: 'HEADLESS-1', x: 0, y: 0, logicalW },
+            'HEADLESS-2': { name: 'HEADLESS-2', x: second.x, y: second.y, logicalW: second.width / second.scale },
         };
-        assert.deepEqual(away.cue, { 'HEADLESS-1': null, 'HEADLESS-2': null }, `a press on another output drew a cue: ${JSON.stringify(away)}`);
+        // One output's capture: the cue's dark rim (its centre, 30 points
+        // below the rim's top) and the halo's vivid blue box; either is null
+        // when that output shows no cue at all.
+        const analyse = async (output, name) => {
+            const png = await capture(output.name, name);
+            const rim = markBox(png, [0x12, 0x30, 0x47], output.logicalW);
+            return {
+                cue: rim && { x: (rim.left + rim.right) / 2, y: rim.top + 30 },
+                halo: markBox(png, [0x29, 0x99, 0xff], output.logicalW),
+            };
+        };
+        const gapTo = (box, local) => {
+            const dx = local.x < box.left ? box.left - local.x : local.x > box.right ? local.x - box.right : 0;
+            const dy = local.y < box.top ? box.top - local.y : local.y > box.bottom ? local.y - box.bottom : 0;
+            return Math.hypot(dx, dy);
+        };
+        // A tap aimed at one output: it lands (cursorpos and the window's own
+        // log, as above), then the cue must sit where it landed on that
+        // output — halo with it — while the other output stays clean.
+        const tapAcross = async (outputName, fx, fy, tag) => {
+            const output = outputs[outputName];
+            const other = outputs[outputName === 'HEADLESS-1' ? 'HEADLESS-2' : 'HEADLESS-1'];
+            const x = Math.floor(fx * encoded.width), y = Math.floor(fy * encoded.height);
+            const sentAt = Date.now();
+            const reply = await control({ kind: 'pointer', phase: 'move', x, y, button: 1 });
+            const ackMs = Date.now() - sentAt;
+            const [now] = await titled('Umer notes');
+            const local = {
+                x: Math.floor(x * source.width / encoded.width) * now.size[0] / source.width,
+                y: Math.floor(y * source.height / encoded.height) * now.size[1] / source.height,
+            };
+            const expected = { x: Math.floor(now.at[0] + local.x), y: Math.floor(now.at[1] + local.y) };
+            const want = { x: expected.x - output.x, y: expected.y - output.y };
+            await sleep(150);
+            assert.equal(reply?.kind, 'ack', `a window-share tap was not applied: ${JSON.stringify(reply)}`);
+            const cursorpos = await cursor(), window_saw = pointerLog();
+            assert(Math.abs(cursorpos.x - expected.x) <= 1 && Math.abs(cursorpos.y - expected.y) <= 1,
+                `the pointer is not on the window's point: ${JSON.stringify({ expected, cursorpos })}`);
+            assert(window_saw && Math.abs(window_saw.x - local.x) <= 1 && Math.abs(window_saw.y - local.y) <= 1,
+                `the window did not get the pointer at its own point: ${JSON.stringify({ expected, window_saw })}`);
+            // First sight of the cue after the ack: how long the move took to show.
+            const ackAt = Date.now();
+            let first = (await analyse(output, `${tag}-first`)).cue;
+            let seenMs = first ? Date.now() - ackAt : null;
+            for (let i = 0; !first && i < 14; i++) {
+                await sleep(200);
+                first = (await analyse(output, `${tag}-poll${i}`)).cue;
+                if (first) seenMs = Date.now() - ackAt;
+            }
+            assert(first, `no cue appeared on ${outputName} within ~3s of the tap: ${JSON.stringify({ expected, want })}`);
+            // Settled: the cue sits where the tap landed, halo with it, and
+            // the other output shows nothing at all.
+            await sleep(600);
+            const settled = await analyse(output, tag);
+            assert(settled.cue && Math.abs(settled.cue.x - want.x) <= 2 && Math.abs(settled.cue.y - want.y) <= 2,
+                `the moved cue is not where the tap landed: ${JSON.stringify({ expected, want, cue: settled.cue })}`);
+            assert(settled.halo && gapTo(settled.halo, want) <= 45,
+                `the cue halo did not move with the tap: ${JSON.stringify({ want, halo: settled.halo })}`);
+            const quiet = await analyse(other, `${tag}-other`);
+            assert.equal(quiet.cue, null, `a press on ${outputName} left a cue on ${other.name}: ${JSON.stringify(quiet.cue)}`);
+            return { expected, want, ackMs, seenMs, pids: await helpers() };
+        };
+        await moveWindow(window.address, second.x + 100, second.y + 100);
+        const away = await tapAcross('HEADLESS-2', 0.5, 0.5, 'away');
+        assert.equal(away.pids.agent.length, 1, `the move left ${away.pids.agent.length} cue helpers: ${JSON.stringify(away.pids)}`);
+        assert.notDeepEqual(away.pids.agent, held.agent, `the cross-output tap kept the old helper: ${JSON.stringify({ held, away: away.pids })}`);
+        if (away.seenMs !== null && away.seenMs > 300) console.error(`SLOW move to HEADLESS-2: cue first seen ${away.seenMs} ms after the ack (ack ${away.ackMs} ms)`);
+        // A repeat tap where the helper already sits restarts nothing.
+        const stayed = await tapAcross('HEADLESS-2', 0.3, 0.6, 'stayed');
+        assert.deepEqual(stayed.pids.agent, away.pids.agent, `a tap on the cue's own output restarted it: ${JSON.stringify({ away: away.pids, stayed: stayed.pids })}`);
+        // The point ring follows the window onto the other output too, and
+        // repeats there without a new helper.
+        const marked2 = { x: Math.floor(source.width * 0.3), y: Math.floor(source.height * 0.6) };
+        await engine.request('session.point', { session_id: notes.sessionId, ...marked2, timeout_ms: 10_000 });
+        await sleep(300);
+        const ringPng = await capture('HEADLESS-2', 'point-away');
+        const ring2 = markBox(ringPng, [0x4c, 0x9e, 0xd0], outputs['HEADLESS-2'].logicalW);
+        const [at2] = await titled('Umer notes');
+        const wantRing2 = {
+            x: Math.floor(at2.at[0] + marked2.x * at2.size[0] / source.width) - second.x,
+            y: Math.floor(at2.at[1] + marked2.y * at2.size[1] / source.height) - second.y,
+        };
+        const drawn2 = ring2 && { x: (ring2.left + ring2.right) / 2, y: (ring2.top + ring2.bottom) / 2 };
+        assert(drawn2 && Math.abs(drawn2.x - wantRing2.x) <= 2 && Math.abs(drawn2.y - wantRing2.y) <= 2,
+            `the point is not where a press would land on the other output: ${JSON.stringify({ wantRing2, drawn2 })}`);
+        const pointHeld = (await helpers()).point;
+        await engine.request('session.point', { session_id: notes.sessionId, ...marked2, timeout_ms: 10_000 });
+        await sleep(300);
+        assert.deepEqual((await helpers()).point, pointHeld, `a point on its own output restarted its helper: ${JSON.stringify(pointHeld)}`);
+        await engine.request('session.point', { session_id: notes.sessionId, clear: true });
+        // Back on the first output, then there again: one move, one reuse.
         await moveWindow(window.address, ...moved);
+        const back = await tapAcross('HEADLESS-1', 0.5, 0.5, 'back');
+        assert.equal(back.pids.agent.length, 1, `the move back left ${back.pids.agent.length} cue helpers: ${JSON.stringify(back.pids)}`);
+        assert.notDeepEqual(back.pids.agent, stayed.pids.agent, `the move back kept the other output's helper: ${JSON.stringify({ stayed: stayed.pids, back: back.pids })}`);
+        if (back.seenMs !== null && back.seenMs > 300) console.error(`SLOW move to HEADLESS-1: cue first seen ${back.seenMs} ms after the ack (ack ${back.ackMs} ms)`);
+        const home = await tapAcross('HEADLESS-1', 0.7, 0.3, 'home');
+        assert.deepEqual(home.pids.agent, back.pids.agent, `a tap on the cue's own output restarted it: ${JSON.stringify({ back: back.pids, home: home.pids })}`);
         await hypr(['output', 'remove', 'HEADLESS-2']);
         // 3. Another window raised over the tapped point would take the
         // press: refused, and the pointer stays where it was.
@@ -1208,6 +1329,14 @@ async function hyprlandInputProof(engine, dir, run) {
         assert.match(hidden.message, /hidden workspace/);
         assert.deepEqual(await cursor(), before, 'a refused tap moved the pointer');
         await engine.request('session.close', { session_id: notes.sessionId });
+        // Closing the session reaps every helper: no leaked processes.
+        let reaped = null;
+        for (let i = 0; i < 50; i++) {
+            reaped = await helpers();
+            if (reaped.agent.length === 0 && reaped.point.length === 0) break;
+            await sleep(100);
+        }
+        assert.deepEqual(reaped, { agent: [], point: [] }, `the closed session leaked helpers: ${JSON.stringify(reaped)}`);
 
         // 6. Two windows look like the shared one: refused, never a guess.
         const { opened: twin, still: resting } = await share('Umer twin');
@@ -1230,7 +1359,13 @@ async function hyprlandInputProof(engine, dir, run) {
         if (evidence) for (const path of captures) copyFileSync(path, join(evidence, `${run.hyprlandConfig}-scale${run.scale}-${basename(path)}`));
         return {
             source: 'portal', compositor: 'hyprland', config: run.hyprlandConfig, scale: run.scale,
-            window: { encoded, source, samples, point, covered, press, hidden }, twin: ambiguous, monitor: monitorTap,
+            window: { encoded, source, samples, point, covered, press, hidden },
+            multiOutput: {
+                held, away, stayed,
+                point: { want: wantRing2, drawn: drawn2 },
+                back, home, reaped,
+            },
+            twin: ambiguous, monitor: monitorTap,
         };
     } finally {
         await browser.close();

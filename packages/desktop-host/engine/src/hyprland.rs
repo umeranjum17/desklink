@@ -303,6 +303,31 @@ impl WindowLocator {
     }
 }
 
+/// The name of the monitor holding desktop point `(px, py)`, if any.
+/// Geometry math matches `WindowLocator::locate`'s on-screen check, so a
+/// point a press landed on maps to the output whose overlay must draw it.
+pub fn monitor_containing(px: f64, py: f64) -> Result<Option<String>, String> {
+    let monitors = query("j/monitors")?;
+    for monitor in monitors.as_array().into_iter().flatten() {
+        if monitor["disabled"].as_bool() == Some(true) {
+            continue;
+        }
+        let scale = monitor["scale"].as_f64().filter(|scale| *scale > 0.0);
+        if let (Some(mx), Some(my), Some(mw), Some(mh), Some(scale)) = (
+            monitor["x"].as_f64(),
+            monitor["y"].as_f64(),
+            monitor["width"].as_f64(),
+            monitor["height"].as_f64(),
+            scale,
+        ) {
+            if (mx..mx + mw / scale).contains(&px) && (my..my + mh / scale).contains(&py) {
+                return Ok(monitor["name"].as_str().map(str::to_owned));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// A window's box in the layout: left, top, width, height.
 fn bounds(window: &Value) -> Option<(f64, f64, f64, f64)> {
     let pair = |key: &str| Some((window[key][0].as_f64()?, window[key][1].as_f64()?));

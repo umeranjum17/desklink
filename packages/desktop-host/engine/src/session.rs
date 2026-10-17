@@ -828,6 +828,13 @@ struct Inner {
     /// closes its Hyprland event socket.
     #[cfg(target_os = "linux")]
     window: Mutex<Option<crate::hyprland::WindowLocator>>,
+    /// Which Hyprland output the agent cue helper draws on (a located window
+    /// share's desktop mode): the helper respawns only when a press lands
+    /// elsewhere. Same for the point helper.
+    #[cfg(target_os = "linux")]
+    cue_output: Mutex<Option<String>>,
+    #[cfg(target_os = "linux")]
+    point_output: Mutex<Option<String>>,
     capture: Mutex<Option<FrameSource>>,
     /// Absent for an encoded source: there is no local keyboard to translate a
     /// character through, because the client's keys are forwarded instead.
@@ -1281,8 +1288,11 @@ impl Session {
                     share_watch.is_some() && source.source_type.as_deref() == Some("Window");
                 #[cfg(target_os = "linux")]
                 if request.agent_indicator {
+                    // No press has landed yet, so no output is chosen: the
+                    // compositor places this first helper, and the first
+                    // located press moves it onto the landed output.
                     indicator =
-                        crate::indicator::Indicator::start_wayland(source_w, source_h, desktop)
+                        crate::indicator::Indicator::start_wayland(source_w, source_h, desktop, None)
                             .ok();
                 }
                 #[cfg(target_os = "macos")]
@@ -1500,6 +1510,10 @@ impl Session {
             },
             #[cfg(target_os = "linux")]
             window: Mutex::new(window),
+            #[cfg(target_os = "linux")]
+            cue_output: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            point_output: Mutex::new(None),
             capture: Mutex::new(Some(capture)),
             layout: Mutex::new(Some(layout)),
             #[cfg(target_os = "linux")]
@@ -1600,6 +1614,10 @@ impl Session {
             point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
             #[cfg(target_os = "linux")]
             window: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            cue_output: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            point_output: Mutex::new(None),
             capture: Mutex::new(None),
             layout: Mutex::new(None),
             #[cfg(target_os = "linux")]
@@ -1746,6 +1764,10 @@ impl Session {
             if let Some(helper) = overlay.take() {
                 helper.stop();
             }
+            #[cfg(target_os = "linux")]
+            {
+                *lock(&self.inner.point_output) = None;
+            }
             return Ok(());
         }
         let (x, y) = params
@@ -1770,21 +1792,35 @@ impl Session {
             ));
         }
         // A located window's point shows where a press there would land, on
-        // the output holding it; the next may land on another output, so each
-        // gets its own helper.
+        // the output holding it; the helper moves only when that output
+        // changes, so repeats on one output reuse it with no new process.
         #[cfg(target_os = "linux")]
         let landed = match lock(&self.inner.window).as_ref() {
             Some(window) => {
                 let (px, py) = window
                     .locate(x, y)
                     .map_err(|message| SessionError::new("indicator-unavailable", message))?;
-                if let Some(helper) = overlay.take() {
-                    helper.stop();
-                }
                 Some((px.floor() as i64, py.floor() as i64))
             }
             None => None,
         };
+        #[cfg(target_os = "linux")]
+        let landed_output: Option<String> = match landed {
+            Some((px, py)) => {
+                crate::hyprland::monitor_containing(px as f64, py as f64).unwrap_or(None)
+            }
+            None => None,
+        };
+        #[cfg(target_os = "linux")]
+        if match (&landed, &landed_output) {
+            (Some(_), output) => lock(&self.inner.point_output).clone() != *output,
+            (None, _) => overlay.is_none(),
+        } {
+            if let Some(helper) = overlay.take() {
+                helper.stop();
+            }
+            *lock(&self.inner.point_output) = landed_output.clone();
+        }
         #[cfg(not(target_os = "windows"))]
         if overlay.is_none() {
             #[cfg(target_os = "linux")]
@@ -2146,6 +2182,11 @@ impl Inner {
         if let Some(helper) = lock(&self.point_overlay).take() {
             helper.stop();
         }
+        #[cfg(target_os = "linux")]
+        {
+            *lock(&self.cue_output) = None;
+            *lock(&self.point_output) = None;
+        }
         // Release first, then tear down: a stuck modifier is the one failure the
         // user cannot undo by reconnecting.
         if let Ok(mut input) = self.input.lock() {
@@ -2325,6 +2366,10 @@ impl Inner {
             self.reject(seq, "input-unavailable", "no input backend");
             return;
         }
+        // Only a located window-share press can move the cue helper: other
+        // paths have no desktop point to choose an output from.
+        #[cfg(target_os = "linux")]
+        let located_press = located && matches!(&message, ControlMessage::Pointer { .. });
         let outcome = match message {
             ControlMessage::Pointer {
                 phase,
@@ -2368,6 +2413,14 @@ impl Inner {
         };
         match outcome {
             Ok(()) => {
+                #[cfg(target_os = "linux")]
+                if located_press {
+                    // Onto the landed output before the cue is told where to
+                    // draw, so a cross-output tap draws there, not nowhere.
+                    if let Some((_, x, y)) = feedback {
+                        self.move_cue_to(x, y);
+                    }
+                }
                 if let Some((kind, x, y)) = feedback {
                     if let Ok(mut indicator) = self.indicator.lock() {
                         if let Some(indicator) = indicator.as_mut() {
@@ -2430,6 +2483,49 @@ impl Inner {
         match input.as_mut() {
             Some(target) => action(target).map_err(|error| ("input", format!("{error:#}"))),
             None => Err(("input-unavailable", String::from("no input backend"))),
+        }
+    }
+
+    /// Move the agent cue helper onto the output holding desktop point
+    /// `(x, y)`, where a located press just landed. A press on the helper's
+    /// own output reuses it with no new process; anything else respawns it
+    /// with the landed origin, which selects that output through the point
+    /// helper's xdg-output selection. Best-effort: when the output or the
+    /// respawn is unavailable, the standing helper keeps the cue.
+    #[cfg(target_os = "linux")]
+    fn move_cue_to(&self, x: i64, y: i64) {
+        let output = match crate::hyprland::monitor_containing(x as f64, y as f64) {
+            Ok(output) => output,
+            Err(error) => {
+                log::warn!("agent cue stays on its output: {error}");
+                return;
+            }
+        };
+        if lock(&self.cue_output).clone() == output {
+            return;
+        }
+        let Some(name) = output else { return };
+        let mut indicator = lock(&self.indicator);
+        if let Some(helper) = indicator.take() {
+            helper.stop();
+        }
+        let (width, height) = (
+            self.source.width.max(1) as usize,
+            self.source.height.max(1) as usize,
+        );
+        match crate::indicator::Indicator::start_wayland(
+            width,
+            height,
+            true,
+            Some((x as i32, y as i32)),
+        ) {
+            Ok(helper) => {
+                *indicator = Some(helper);
+                *lock(&self.cue_output) = Some(name);
+            }
+            Err(error) => {
+                log::warn!("agent cue stays on its output: the {name} helper did not start: {error:#}");
+            }
         }
     }
 
@@ -3685,6 +3781,10 @@ mod tests {
             point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
             #[cfg(target_os = "linux")]
             window: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            cue_output: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            point_output: Mutex::new(None),
             capture: Mutex::new(None),
             layout: Mutex::new(None),
             #[cfg(target_os = "linux")]
@@ -3946,6 +4046,10 @@ mod tests {
             point_desktop: PointDesktop::Unavailable("layer_shell_unavailable"),
             #[cfg(target_os = "linux")]
             window: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            cue_output: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            point_output: Mutex::new(None),
             layout: Mutex::new(Some(Layout::from_environment().expect("a keymap"))),
             #[cfg(target_os = "linux")]
             audio: Mutex::new(None),

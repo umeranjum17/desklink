@@ -289,9 +289,11 @@ masked before capture/diff (pixels behind the effect can remain briefly stale).
 On a located Hyprland window share each pointer cue goes to the desktop point
 the pointer landed on — the window's place plus the tapped point (see Input and
 clipboard) — and the window's picture holds no layer surface, so nothing is
-masked; a refused tap draws no cue. Known limit: the cue's surface sits on the
-one output the compositor gave it as the share started, and a tap landing on
-another output draws no cue. On bare X11 it is an override-redirect, click-through window that follows the
+masked; a refused tap draws no cue. When a tap lands on another output than
+the cue helper is on, the engine moves the helper there — respawning it with
+the landed layout point, which selects that output exactly like a point
+marker — and the cue draws at the landed point with its edge glow; a tap on
+the helper's own output reuses it with no new process. On bare X11 it is an override-redirect, click-through window that follows the
 pointer, so it stays
 visible over windows that set their own cursor and never replaces the cursor.
 Its size follows `Xft.dpi` from 96–384 DPI, defaulting to 1x otherwise;
@@ -625,7 +627,9 @@ origin, before video scaling (`geometry.source`, not `geometry.encoded`). On X11
 this is the root screen; on macOS it is the selected display, with native pixels
 converted to display points. On a located Hyprland window share (see Input and
 clipboard) they are the window's own pixels, and the ring shows on the desktop
-point a press there would land, on the output holding it; a point the window
+point a press there would land, on the output holding it; when a later point
+lands on another output the helper moves there, and a point on its own output
+reuses it with no new process. A point the window
 cannot take there is refused with `indicator-unavailable` and the reason. Both
 coordinates must be within its bounds. The
 ring may clip at an edge; its label stays inside the display. `timeout_ms`
