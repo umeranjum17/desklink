@@ -150,6 +150,9 @@ try {
     // streams that open before it is known wait for it (bounded), then dial.
     let enginePort = 0;
     const relayBytes = { wsToTcp: 0, tcpToWs: 0, streams: 0 };
+    const relayLog = join(out, 'relay.log');
+    const relayNote = (line) => writeFileSync(relayLog, `${Date.now()} ${line}\n`, { flag: 'a' });
+    relayNote('relay up');
     relayServer = new WebSocketServer({ host: '0.0.0.0', port: 0 });
     await new Promise(ok => relayServer.on('listening', ok));
     const relayPort = relayServer.address().port;
@@ -157,16 +160,20 @@ try {
     const relay = relayServer;
     relay.on('connection', (ws) => {
         relayBytes.streams += 1;
+        relayNote(`stream #${relayBytes.streams} open`);
         let socket = null, closed = false;
         const queued = [];
         const finish = () => {
             if (closed) return;
             closed = true;
+            relayNote(`stream #${relayBytes.streams} close (wsToTcp=${relayBytes.wsToTcp} tcpToWs=${relayBytes.tcpToWs})`);
             try { ws.close(); } catch { /* already gone */ }
             try { socket?.destroy(); } catch { /* already gone */ }
         };
         const pump = () => {
+            relayNote(`stream dialing 127.0.0.1:${enginePort}`);
             socket = connect(enginePort, '127.0.0.1', () => {
+                relayNote('stream dial ok');
                 for (const chunk of queued.splice(0)) socket.write(chunk);
             });
             socket.on('data', (chunk) => {
@@ -195,12 +202,14 @@ try {
     });
 
     const reports = [];
+    const reportsLog = join(out, 'reports.jsonl');
     receiver = createServer((request, response) => {
         const chunks = [];
         request.on('data', c => chunks.push(c));
         request.on('end', () => {
             const text = Buffer.concat(chunks).toString();
             reports.push(text);
+            writeFileSync(reportsLog, `${text}\n`, { flag: 'a' });
             try {
                 const report = JSON.parse(text);
                 if (Number.isInteger(report?.loopbackTcpPort) && report.loopbackTcpPort >= 1024 && enginePort === 0) {
@@ -347,6 +356,17 @@ try {
     console.log(`PASS: the example app shows a live desktop over its own relay on ${serial}; evidence ${out}`);
 } catch (error) {
     receipt.error = String(error);
+    try {
+        const last = JSON.parse(reports[reports.length - 1] ?? '{}');
+        receipt.lastTcp = last.tcp ?? null;
+        receipt.droppedUdp = Number(last.droppedUdp ?? 0);
+        receipt.relayBytes = relayBytes;
+        receipt.enginePort = enginePort;
+        receipt.loopback_tcp_port = enginePort || undefined;
+        const first = reports.length > 0 ? decoded(reports[0]) : 0;
+        receipt.framesFirst = first;
+        receipt.framesLast = reports.length > 0 ? decoded(reports[reports.length - 1]) : 0;
+    } catch { /* the receipt carries what it can */ }
     try { capture('00-failure.png'); } catch { /* the device may be gone */ }
     console.error(String(error));
 } finally {
