@@ -84,8 +84,18 @@ impl WindowLocator {
         }
     }
 
-    /// Put the pointer on `(x, y)` in the shared window's own pixels.
-    pub fn place(&self, x: i64, y: i64) -> Result<(), String> {
+    /// Put the pointer on `(x, y)` in the shared window's own pixels, and say
+    /// which desktop point that was.
+    pub fn place(&self, x: i64, y: i64) -> Result<(i64, i64), String> {
+        let (px, py) = self.locate(x, y)?;
+        let point = (px.floor() as i64, py.floor() as i64);
+        self.warp(point)?;
+        Ok(point)
+    }
+
+    /// The desktop point `(x, y)` in the shared window's own pixels shows
+    /// at, when a press there would reach the window.
+    pub fn locate(&self, x: i64, y: i64) -> Result<(f64, f64), String> {
         let (clients, monitors) = (query("j/clients")?, query("j/monitors")?);
         let clients = clients.as_array().map(Vec::as_slice).unwrap_or_default();
         // A window nobody sees has no point on the screen.
@@ -222,7 +232,7 @@ impl WindowLocator {
                 "a shared window cannot take taps where an overlay covers it",
             ));
         }
-        self.warp((px.floor() as i64, py.floor() as i64))
+        Ok((px, py))
     }
 
     /// The address of the one window Hyprland said it is sharing.

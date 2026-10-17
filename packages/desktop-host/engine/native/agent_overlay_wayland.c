@@ -97,7 +97,26 @@ struct Overlay {
     struct wl_surface *surface;
     struct Buffer buffers[2];
     int width, height, scale, source_w, source_h, configured, closed;
+    // Desktop mode: points are compositor layout coordinates, drawn only on
+    // the output this surface is on (`mine`), never scaled onto another.
+    int desktop; struct Output *mine;
 };
+static int locate(struct Overlay *o, double px, double py, double *x, double *y) {
+    if(!o->desktop)return desklink_wayland_geometry(o->source_w,o->source_h,o->width,o->height,px,py,x,y);
+    struct Output *m=o->mine;
+    if(!m||!m->valid||px<m->x||py<m->y||px>=m->x+m->w||py>=m->y+m->h)return 0;
+    *x=px-m->x;*y=py-m->y;
+    return 1;
+}
+static void surface_enter(void *data, struct wl_surface *surface, struct wl_output *output) {
+    (void)surface;struct Overlay *o=data;
+    for(int i=0;i<o->output_count;i++)if(o->outputs[i].handle==output)o->mine=&o->outputs[i];
+}
+static void surface_leave(void *data, struct wl_surface *surface, struct wl_output *output) {
+    (void)surface;struct Overlay *o=data;
+    if(o->mine&&o->mine->handle==output)o->mine=NULL;
+}
+static const struct wl_surface_listener surface_listener={.enter=surface_enter,.leave=surface_leave};
 static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec/1e9; }
 static void registry_global(void *data, struct wl_registry *registry, uint32_t name, const char *interface, uint32_t version) {
     struct Overlay *o=data;
@@ -214,9 +233,9 @@ static void draw_point(struct Overlay *o,struct Buffer *b,double x,double y,cons
     }
 }
 
-static int overlay_main(int source_w,int source_h,int point_mode,int origin_known,int origin_x,int origin_y) {
+static int overlay_main(int source_w,int source_h,int point_mode,int origin_known,int origin_x,int origin_y,int desktop) {
 
-    struct Overlay o={.source_w=source_w,.source_h=source_h,.scale=1};
+    struct Overlay o={.source_w=source_w,.source_h=source_h,.scale=1,.desktop=desktop};
     o.display=wl_display_connect(NULL);
     if(!o.display)return 2;
     struct wl_registry *registry=wl_display_get_registry(o.display);
@@ -225,18 +244,18 @@ static int overlay_main(int source_w,int source_h,int point_mode,int origin_know
     if(!o.shell){puts("layer_shell_unavailable");fflush(stdout);wl_display_disconnect(o.display);return 2;}
     if(!o.compositor||!o.shm){wl_display_disconnect(o.display);return 2;}
     struct wl_output *selected=NULL;int matches=0;
-    if(point_mode) {
-        if(o.output_manager) {
-            for(int i=0;i<o.output_count;i++) {
-                struct Output *out=&o.outputs[i];
-                out->logical=wl_proxy_marshal_flags(o.output_manager,1,&xdg_output_interface,wl_proxy_get_version(o.output_manager),0,NULL,out->handle);
-                wl_proxy_add_listener(out->logical,logical_listener,out);
-            }
-            if(wl_display_roundtrip(o.display)<0)return 2;
-        }
+    if((point_mode||desktop) && o.output_manager) {
         for(int i=0;i<o.output_count;i++) {
             struct Output *out=&o.outputs[i];
-            if(origin_known && out->valid && origin_x>=out->x && origin_y>=out->y && origin_x<out->x+out->w && origin_y<out->y+out->h){selected=out->handle;matches++;}
+            out->logical=wl_proxy_marshal_flags(o.output_manager,1,&xdg_output_interface,wl_proxy_get_version(o.output_manager),0,NULL,out->handle);
+            wl_proxy_add_listener(out->logical,logical_listener,out);
+        }
+        if(wl_display_roundtrip(o.display)<0)return 2;
+    }
+    if(point_mode) {
+        for(int i=0;i<o.output_count;i++) {
+            struct Output *out=&o.outputs[i];
+            if(origin_known && out->valid && origin_x>=out->x && origin_y>=out->y && origin_x<out->x+out->w && origin_y<out->y+out->h){selected=out->handle;o.mine=out;matches++;}
         }
         if(matches>1)selected=NULL;
         if(!selected && o.output_count==1 && (!origin_known || !o.output_manager))selected=o.outputs[0].handle;
@@ -250,6 +269,8 @@ static int overlay_main(int source_w,int source_h,int point_mode,int origin_know
     FT_Library library=NULL;FT_Face font=point_mode?point_font(&library):NULL;
     if(point_mode&&!font){wl_display_disconnect(o.display);return 2;}
     o.surface=wl_compositor_create_surface(o.compositor);
+    // An agent cue's surface lands where the compositor puts it; it learns which output that is.
+    if(desktop && !point_mode)wl_surface_add_listener(o.surface,&surface_listener,&o);
     o.layer=wl_proxy_marshal_flags(o.shell,0,&layer_surface_interface,1,0,NULL,o.surface,selected,3,point_mode?"desklink-point":"desklink-agent");
     wl_proxy_add_listener(o.layer,layer_listener,&o);
     uint32_t anchor,keyboard_focus,empty_input;
@@ -289,19 +310,23 @@ static int overlay_main(int source_w,int source_h,int point_mode,int origin_know
                     if(point_mode && kind=='P') {
                         unsigned timeout=0;int offset=0;
                         if(sscanf(pending,"P %lf %lf %u %n",&px,&py,&timeout,&offset)==3 && offset && timeout>=1 && timeout<=120000 && strlen(pending+offset)<=96) {
-                            desklink_wayland_geometry(o.source_w,o.source_h,o.width,o.height,px,py,&x,&y);
-                            snprintf(label,sizeof(label),"%s",pending+offset);deadline=now()+timeout/1000.0;active=1;dirty=1;visible=1;
+                            snprintf(label,sizeof(label),"%s",pending+offset);deadline=now()+timeout/1000.0;active=1;dirty=1;
+                            visible=locate(&o,px,py,&x,&y);
                         }
                     }
                     else if(kind=='S')ending=now();
                     else if(kind=='M'||kind=='C'||kind=='T'||kind=='A') {
+                        int placed=1;
                         if(px>=0&&py>=0) {
-                            if(desklink_wayland_geometry(o.source_w,o.source_h,o.width,o.height,px,py,&tx,&ty)
-                                && !positioned){x=tx;y=ty;positioned=1;cue_started=now();}
+                            placed=locate(&o,px,py,&tx,&ty);
+                            if(placed && !positioned){x=tx;y=ty;positioned=1;cue_started=now();}
+                            // A desktop point off this output has no place here:
+                            // the cue hides rather than show anywhere else.
+                            if(!placed && o.desktop){positioned=0;cue_started=0;}
                         }
                         if(!active)started=now();
                         active=1;
-                        if(kind=='C')click=now();
+                        if(kind=='C' && (placed||!o.desktop))click=now();
                         if(kind=='T')typed=now();
                     }
                 }
@@ -331,8 +356,8 @@ static int overlay_main(int source_w,int source_h,int point_mode,int origin_know
     return 0;
 }
 
-int desklink_agent_overlay_wayland(int w,int h){return overlay_main(w,h,0,0,0,0);}
-int desklink_point_overlay_wayland(int w,int h,int known,int x,int y){return overlay_main(w,h,1,known,x,y);}
+int desklink_agent_overlay_wayland(int w,int h,int desktop){return overlay_main(w,h,0,0,0,0,desktop);}
+int desklink_point_overlay_wayland(int w,int h,int known,int x,int y,int desktop){return overlay_main(w,h,1,known,x,y,desktop);}
 
 // Read-only capability probe for idempotent clear before a helper exists.
 int desklink_wayland_layer_shell_available(void) {

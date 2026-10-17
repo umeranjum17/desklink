@@ -66,7 +66,10 @@
  * a tap on a shared window lands on that window's point (Hyprland's
  * `cursorpos`, and the window's own pointer log), still after the window has
  * moved; a window two windows look like, or one on a hidden workspace, is
- * refused; a monitor share keeps its path. Hyprland 0.56's headless backend has
+ * refused; a monitor share keeps its path. A capture of the lab output (grim)
+ * shows each tap's agent cue, and the agent's point, drawn on the desktop
+ * point the tap landed on, and no cue for a tap on a second output the cue
+ * did not open on; `DESKLINK_CUE_EVIDENCE_DIR` keeps those captures. Hyprland 0.56's headless backend has
  * no allocator of its own, so `DESKLINK_PORTAL_AQUAMARINE` names a directory
  * holding an aquamarine of the same version built with one lab patch: in
  * `src/backend/Headless.cpp`, `drmFD()` and `drmRenderNodeFD()` return a node
@@ -238,7 +241,8 @@ async function cage(dir) {
             const command = join(dir, 'hypr-command');
             if (!existsSync(command)) return;
             const results = JSON.parse(readFileSync(command, 'utf8')).map((args) => {
-                const ran = hyprctl(args);
+                // `grim` captures a lab output, to see what the overlays drew.
+                const ran = args[0] === 'grim' ? spawnSync('grim', args.slice(1), { env: client, encoding: 'utf8' }) : hyprctl(args);
                 return { status: ran.status, out: ran.stdout, err: ran.stderr };
             });
             rmSync(command);
@@ -1066,6 +1070,28 @@ async function hyprlandInputProof(engine, dir, run) {
         `hl.dsp.window.alter_zorder({ mode = "top", window = "address:${address}" })`);
     const hideWindow = (address) => dispatch(['movetoworkspacesilent', `2,address:${address}`],
         `hl.dsp.window.move({ workspace = "2", follow = false, window = "address:${address}" })`);
+    // What the overlays drew, read off a capture of one lab output.
+    const { PNG } = await import('pngjs');
+    const captures = [];
+    const capture = async (output, name) => {
+        const path = join(dir, `${name}.png`);
+        await hypr(['grim', '-o', output, path]);
+        captures.push(path);
+        return PNG.sync.read(readFileSync(path));
+    };
+    // The box of one colour's pixels in an output's logical points, inside
+    // the agent indicator's edge glow; null when none show.
+    const markBox = (png, [r, g, b], logicalWidth) => {
+        const scale = png.width / logicalWidth, edge = Math.ceil(10 * scale);
+        let box = null;
+        for (let y = edge; y < png.height - edge; y++) for (let x = edge; x < png.width - edge; x++) {
+            const i = (y * png.width + x) * 4;
+            if (Math.abs(png.data[i] - r) > 6 || Math.abs(png.data[i + 1] - g) > 6 || Math.abs(png.data[i + 2] - b) > 6) continue;
+            box = box ? { left: Math.min(box.left, x), top: Math.min(box.top, y), right: Math.max(box.right, x), bottom: Math.max(box.bottom, y) }
+                : { left: x, top: y, right: x, bottom: y };
+        }
+        return box && Object.fromEntries(Object.entries(box).map(([side, at]) => [side, at / scale]));
+    };
     const pointerLog = () => {
         const lines = existsSync(join(dir, 'pointer.log')) ? readFileSync(join(dir, 'pointer.log'), 'utf8').trim().split('\n').filter(Boolean) : [];
         return lines.length ? JSON.parse(lines.at(-1)) : null;
@@ -1098,7 +1124,7 @@ async function hyprlandInputProof(engine, dir, run) {
         const [window] = await titled('Umer notes');
         const encoded = notes.geometry.encoded, source = notes.geometry.source;
         const samples = [];
-        const tapAt = async (fx, fy) => {
+        const tapAt = async (fx, fy, cueOn = 'HEADLESS-1') => {
             const x = Math.floor(fx * encoded.width), y = Math.floor(fy * encoded.height);
             const reply = await control({ kind: 'pointer', phase: 'move', x, y, button: 1 });
             const [now] = await titled('Umer notes');
@@ -1116,6 +1142,13 @@ async function hyprlandInputProof(engine, dir, run) {
                 `the pointer is not on the window's point: ${JSON.stringify(sample)}`);
             assert(sample.window_saw && Math.abs(sample.window_saw.x - local.x) <= 1 && Math.abs(sample.window_saw.y - local.y) <= 1,
                 `the window did not get the pointer at its own point: ${JSON.stringify(sample)}`);
+            if (!cueOn) return sample;
+            // The cue eases onto its point; its dark rim reaches 30 points out.
+            await sleep(600);
+            const rim = markBox(await capture(cueOn, `cue-${samples.length}`), [0x12, 0x30, 0x47], logicalW);
+            sample.cue = rim && { x: (rim.left + rim.right) / 2, y: rim.top + 30 };
+            assert(sample.cue && Math.abs(sample.cue.x - sample.expected.x) <= 2 && Math.abs(sample.cue.y - sample.expected.y) <= 2,
+                `the click cue is not where the tap landed: ${JSON.stringify(sample)}`);
             return sample;
         };
         await moveWindow(window.address, Math.floor(logicalW / 10), Math.floor(logicalH / 8));
@@ -1126,6 +1159,32 @@ async function hyprlandInputProof(engine, dir, run) {
         await moveWindow(window.address, ...moved);
         assert.deepEqual((await titled('Umer notes'))[0].at, moved, 'the lab could not move the window');
         await tapAt(0.5, 0.5);
+        // The agent's point marks where a press there would land.
+        const marked = { x: Math.floor(source.width * 0.3), y: Math.floor(source.height * 0.6) };
+        await engine.request('session.point', { session_id: notes.sessionId, ...marked, timeout_ms: 10_000 });
+        await sleep(300);
+        const ring = markBox(await capture('HEADLESS-1', 'point'), [0x4c, 0x9e, 0xd0], logicalW);
+        const point = {
+            expected: { x: Math.floor(moved[0] + marked.x * window.size[0] / source.width), y: Math.floor(moved[1] + marked.y * window.size[1] / source.height) },
+            drawn: ring && { x: (ring.left + ring.right) / 2, y: (ring.top + ring.bottom) / 2 },
+        };
+        assert(point.drawn && Math.abs(point.drawn.x - point.expected.x) <= 2 && Math.abs(point.drawn.y - point.expected.y) <= 2,
+            `the point is not where a press would land: ${JSON.stringify(point)}`);
+        await engine.request('session.point', { session_id: notes.sessionId, clear: true });
+        // A press on an output other than the one the cue opened on still
+        // lands, and draws no cue at all rather than one in the wrong place.
+        await hypr(['output', 'create', 'headless', 'HEADLESS-2']);
+        const second = JSON.parse((await hypr(['-j', 'monitors']))[0]).find((m) => m.name === 'HEADLESS-2');
+        assert(second, 'the lab could not add a second output');
+        await moveWindow(window.address, second.x + 100, second.y + 100);
+        const away = await tapAt(0.5, 0.5, null);
+        away.cue = {
+            'HEADLESS-1': markBox(await capture('HEADLESS-1', 'away-1'), [0x12, 0x30, 0x47], logicalW),
+            'HEADLESS-2': markBox(await capture('HEADLESS-2', 'away-2'), [0x12, 0x30, 0x47], second.width / second.scale),
+        };
+        assert.deepEqual(away.cue, { 'HEADLESS-1': null, 'HEADLESS-2': null }, `a press on another output drew a cue: ${JSON.stringify(away)}`);
+        await moveWindow(window.address, ...moved);
+        await hypr(['output', 'remove', 'HEADLESS-2']);
         // 3. Another window raised over the tapped point would take the
         // press: refused, and the pointer stays where it was.
         const still = await cursor();
@@ -1167,9 +1226,11 @@ async function hyprlandInputProof(engine, dir, run) {
         assert.equal(monitorTap?.message, 'no input backend', `the monitor share's tap changed path: ${JSON.stringify(monitorTap)}`);
         await engine.request('session.close', { session_id: monitor.sessionId });
 
+        const evidence = process.env.DESKLINK_CUE_EVIDENCE_DIR;
+        if (evidence) for (const path of captures) copyFileSync(path, join(evidence, `${run.hyprlandConfig}-scale${run.scale}-${basename(path)}`));
         return {
             source: 'portal', compositor: 'hyprland', config: run.hyprlandConfig, scale: run.scale,
-            window: { encoded, source, samples, covered, press, hidden }, twin: ambiguous, monitor: monitorTap,
+            window: { encoded, source, samples, point, covered, press, hidden }, twin: ambiguous, monitor: monitorTap,
         };
     } finally {
         await browser.close();

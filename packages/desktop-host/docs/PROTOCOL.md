@@ -272,9 +272,12 @@ animating in and out, with light and dark keylines so it reads on any content.
 On Wayland it uses a click-through layer-shell surface with an edge glow, drawn
 at the highest announced output integer scale, capped at 4; its bounded area is
 masked before capture/diff (pixels behind the effect can remain briefly stale).
-On a located Hyprland window share the cue gets no pointer or click feedback —
-the engine places the pointer itself, so a stream fraction is not the window's
-desktop point (see Input and clipboard); keys still show. On bare X11 it is an override-redirect, click-through window that follows the
+On a located Hyprland window share each pointer cue goes to the desktop point
+the pointer landed on — the window's place plus the tapped point (see Input and
+clipboard) — and the window's picture holds no layer surface, so nothing is
+masked; a refused tap draws no cue. Known limit: the cue's surface sits on the
+one output the compositor gave it as the share started, and a tap landing on
+another output draws no cue. On bare X11 it is an override-redirect, click-through window that follows the
 pointer, so it stays
 visible over windows that set their own cursor and never replaces the cursor.
 Its size follows `Xft.dpi` from 96–384 DPI, defaulting to 1x otherwise;
@@ -600,7 +603,11 @@ label. A new point replaces the previous one and restarts its timer.
 Coordinates are integers in the **selected desktop's original pixels**, top-left
 origin, before video scaling (`geometry.source`, not `geometry.encoded`). On X11
 this is the root screen; on macOS it is the selected display, with native pixels
-converted to display points. Both coordinates must be within its bounds. The
+converted to display points. On a located Hyprland window share (see Input and
+clipboard) they are the window's own pixels, and the ring shows on the desktop
+point a press there would land, on the output holding it; a point the window
+cannot take there is refused with `indicator-unavailable` and the reason. Both
+coordinates must be within its bounds. The
 ring may clip at an edge; its label stays inside the display. `timeout_ms`
 defaults to 3000 and must be an integer from 1 to 120000. Labels are at most 96
 printable ASCII bytes, including spaces; other labels are refused rather than

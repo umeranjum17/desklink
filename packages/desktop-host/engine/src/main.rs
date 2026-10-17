@@ -136,9 +136,16 @@ use tokio::sync::mpsc as tokio_mpsc;
 unsafe extern "C" {
     fn desklink_point_overlay_main(display: *const std::ffi::c_char) -> i32;
     fn desklink_agent_overlay_main(display: *const std::ffi::c_char) -> i32;
-    fn desklink_agent_overlay_wayland(source_w: i32, source_h: i32) -> i32;
+    fn desklink_agent_overlay_wayland(source_w: i32, source_h: i32, desktop: i32) -> i32;
     fn desklink_wayland_layer_shell_available() -> i32;
-    fn desklink_point_overlay_wayland(w: i32, h: i32, known: i32, x: i32, y: i32) -> i32;
+    fn desklink_point_overlay_wayland(
+        w: i32,
+        h: i32,
+        known: i32,
+        x: i32,
+        y: i32,
+        desktop: i32,
+    ) -> i32;
 }
 
 #[cfg(target_os = "linux")]
@@ -183,12 +190,17 @@ fn main() {
         },
         "point-overlay-wayland" => {
             let values: Vec<i32> = args.iter().skip(1).filter_map(|v| v.parse().ok()).collect();
-            if values.len() != 5 || values[0] <= 0 || values[1] <= 0 {
+            if !(5..=6).contains(&values.len()) || values[0] <= 0 || values[1] <= 0 {
                 2
             } else {
                 unsafe {
                     desklink_point_overlay_wayland(
-                        values[0], values[1], values[2], values[3], values[4],
+                        values[0],
+                        values[1],
+                        values[2],
+                        values[3],
+                        values[4],
+                        values.get(5).copied().unwrap_or(0),
                     )
                 }
             }
@@ -199,7 +211,8 @@ fn main() {
             if width <= 0 || height <= 0 {
                 2
             } else {
-                unsafe { desklink_agent_overlay_wayland(width, height) }
+                let desktop = i32::from(args.get(3).map(String::as_str) == Some("desktop"));
+                unsafe { desklink_agent_overlay_wayland(width, height, desktop) }
             }
         }
         "capabilities" => {
