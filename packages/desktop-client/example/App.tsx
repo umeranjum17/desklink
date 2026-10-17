@@ -50,7 +50,7 @@ function connectionLink(link: string | null): { url: string; report: string | nu
 }
 
 /** The bridge re-serves the engine's local protocol; this unwraps its events for the hook. */
-export function bridgeSignaling(address: string, onEvent?: (event: SessionEvent) => void, filter?: (event: SessionEvent) => SessionEvent | null): Signaling & { open: Promise<void>; close: () => void } {
+export function bridgeSignaling(address: string, onEvent?: (event: SessionEvent) => void, filter?: (event: SessionEvent) => SessionEvent | null, onRequest?: (method: string, params: Record<string, unknown>) => void, requestFilter?: (method: string, params: Record<string, unknown>) => Record<string, unknown> | null): Signaling & { open: Promise<void>; close: () => void } {
     const socket = new WebSocket(address);
     const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
     const handlers = new Set<(event: SessionEvent) => void>();
@@ -106,10 +106,15 @@ export function bridgeSignaling(address: string, onEvent?: (event: SessionEvent)
             if (closed) throw transportError();
             await open;
             if (closed) throw transportError();
+            onRequest?.(method, params ?? {});
+            const filtered = requestFilter === undefined ? (params ?? {}) : requestFilter(method, params ?? {});
+            // A filtered-out request never leaves: the hook ignores the
+            // result and only hears failures, so an empty answer stands in.
+            if (filtered === null) return {} as T;
             return new Promise<T>((resolve, reject) => {
                 const id = ++seq;
                 pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
-                try { socket.send(JSON.stringify({ id, method, params: params ?? {} })); }
+                try { socket.send(JSON.stringify({ id, method, params: filtered })); }
                 catch { finish(); socket.close(); }
             });
         },
@@ -302,13 +307,23 @@ function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, relayOnly
     // transport below, through the journey's relay URL. Anywhere else the
     // session keeps its forward-based loopback route.
     const relay = React.useMemo(() => (tcpRelay ? wsTcpTransport(tcpRelay) : null), [tcpRelay]);
-    // Lab evidence that the relay leg filtered UDP: every dropped candidate.
+    // Lab evidence of the relay-only simulation: every dropped candidate.
     const droppedNonRelay = React.useRef(0);
+    const droppedNonRelayOut = React.useRef(0);
     const desktop = useDesktopSession({
         authorize: async () => {
             // A fresh authorization needs an open carrier; the bridge may retain
             // the old session briefly after its previous socket closes.
             signaling.current?.close();
+            // Lab marker: the kit has loaded its native module by now (the
+            // dynamic import resolves before authorize runs), while ICE has
+            // not started yet. The lab drops the guest uplink on this mark
+            // and the session waits below, so ICE gathers with no route.
+            if (report !== null && relayOnly) {
+                void fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), authorizing: true }) })
+                    .catch(() => undefined);
+                await new Promise(wait => setTimeout(wait, 3000));
+            }
             signaling.current = bridgeSignaling(url, event => {
                 // The engine's loopback ICE port is ephemeral and may arrive in
                 // the offer itself or as a later candidate, so a harness that
@@ -352,6 +367,27 @@ function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, relayOnly
                 const kept = keepRelayCandidateOnly(event);
                 if (kept === null) droppedNonRelay.current += 1;
                 return kept;
+            } : undefined, relayOnly ? (method, params) => {
+                // Lab inventory of what the phone sends: the answer and its
+                // own candidates. Posted raw; the lab redacts nothing since
+                // these never leave the host. Non-relay locals never reach
+                // the engine either: without that, the engine validates a
+                // reflexive path from the phone's own checks and nominates
+                // around the relay.
+                if (report === null) return;
+                if (method === 'session.description' || method === 'session.candidate') {
+                    void fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), sent: method, params }) })
+                        .catch(() => undefined);
+                }
+            } : undefined, relayOnly ? (method, params) => {
+                // The engine must not learn a phone route either: drop every
+                // local candidate that is not the relayed TCP one, so no
+                // reflexive path can form around the relay.
+                if (method !== 'session.candidate') return params;
+                const line = typeof params.candidate === 'string' ? params.candidate : '';
+                if (isLoopbackTcpCandidate(line)) return params;
+                droppedNonRelayOut.current += 1;
+                return null;
             } : undefined);
             await signaling.current.open;
             return {
@@ -426,13 +462,20 @@ function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, relayOnly
             try {
                 const stats = await desktop.getStats();
                 const tcp = await desktop.getTcpTransportStats().catch(() => null);
-                if (!stopped) await fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), startedAt: startedAt.current, presentedAt: presentedAt.current, stats, tcp, droppedNonRelay: droppedNonRelay.current }) });
+                if (!stopped) await fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), startedAt: startedAt.current, presentedAt: presentedAt.current, stats, tcp, droppedNonRelay: droppedNonRelay.current, droppedNonRelayOut: droppedNonRelayOut.current }) });
             } catch { /* Evidence collection never interrupts a desktop session. */ }
         };
         void sample();
         const timer = setInterval(() => { void sample(); }, 1000);
         return () => { stopped = true; clearInterval(timer); };
     }, [status, desktop.getStats, desktop.getTcpTransportStats, report]);
+    // A terminal state posts once, so a failed lab run still says why.
+    React.useEffect(() => {
+        if (!report) return;
+        if (status !== 'failed' && status !== 'ended') return;
+        void fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), terminal: status, failure: desktop.snapshot.failure }) })
+            .catch(() => undefined);
+    }, [status, report]);
 
     return (
         <View ref={root} style={styles.root} onLayout={(event) => setScreen(event.nativeEvent.layout)}>
