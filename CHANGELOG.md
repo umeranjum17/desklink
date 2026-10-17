@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.5.8
+
+Joint patch release; protocol version remains 3. All packages move together.
+
+### Added
+
+- The engine now also offers IPv6 host candidates, so a phone whose only
+  route is a carrier IPv6 address gets the picture directly instead of
+  finding no path without a relay.
 
 ### Fixed
 
@@ -9,6 +17,11 @@
   instead of being hidden (cue) or drawn as if the window filled the screen
   (point). A tap landing on an output other than the cue's draws no cue. See
   [PROTOCOL.md](packages/desktop-host/docs/PROTOCOL.md#input-and-clipboard-the-sessions-control-channel).
+- A first desktop session whose network path never forms now ends once with
+  `never-connected` instead of cycling reopens, so the host stops restarting
+  its engine and capture and the app sees one clear failure. A session that
+  showed a picture and then drops keeps the old reopen path. See the README's
+  [connection states](packages/desktop-client/README.md#what-the-package-guarantees).
 
 ## 0.5.7
 
