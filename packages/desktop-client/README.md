@@ -247,6 +247,14 @@ view.
   dies), so a roam longer than the client's own ~15 s `failed` still returns to
   the same session; an SDP or candidate failure, which means the negotiation
   itself is broken, reopens with fresh authority instead of staying stuck.
+  A first open whose path never reaches `connected` and never shows a frame
+  is different: it fails once with code `never-connected` — on the peer's ICE
+  `failed`, or at the 20 s first-frame bound, whichever comes first — closes
+  that session and does not reopen, since the same network gives the same
+  answer and every reopen restarts the host's capture. Usually the phone has
+  no direct route and the app supplied no relay (ICE) servers; `connect()`
+  tries again on demand. A first frame that never comes over a path that did
+  connect stays a `transport` failure and reopens as before.
   Every event carries its engine session id where the carrier preserves it,
   and the session ignores anything naming a session it no longer holds, so a
   previous generation's queued offer or revocation cannot corrupt or kill a
@@ -288,8 +296,9 @@ view.
   status by itself: the status follows the picture and the peer's transport, so
   it reads `reconnecting` only once the picture stops or the stall watchdog
   fires. While the loop runs, a session that has shown a picture never reports
-  `failed` or a transport failure; one that never showed a picture reports the
-  first-frame transport failure after 20 s and the loop stops. A new carrier
+  `failed` or a transport failure; one that never showed a picture reports its
+  first-frame failure after 20 s (`never-connected` when its path never
+  formed) and the loop stops. A new carrier
   picks up the same session after a short grace for the old ICE pair, sized by
   how long the picture has been still: stills under 4 s wait out the blip
   (200 ms), stills past it take one stats beat (50 ms) and ask for the restart

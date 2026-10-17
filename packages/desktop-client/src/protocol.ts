@@ -159,7 +159,14 @@ export type SessionFailure =
     | { code: 'incompatible-version'; message: string }
     | { code: 'source-changed'; message: string }
     | { code: 'revoked'; message: string }
+    /** A path that formed and was lost; the session reopens on its own. */
     | { code: 'transport'; message: string }
+    /**
+     * A first open whose media path never reached `connected`: no frame, and
+     * no reopen, because the same network gives the same answer. Usually the
+     * phone has no direct route and the app supplied no relay (ICE) servers.
+     */
+    | { code: 'never-connected'; message: string }
     | { code: 'input-unavailable'; message: string }
     | { code: 'platform'; message: string };
 

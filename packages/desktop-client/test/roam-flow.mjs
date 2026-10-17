@@ -13,6 +13,10 @@
 // Record the standalone 20s roam's actual outcome against the unchanged 2s bar.
 // P3a: --adapter hook mounts the real hook over the demo carrier; --authorize-revoked
 // makes the app's authorize() refuse from the cut on.
+// --scenario never-connected --adapter hook: the link discards every datagram
+// before the first open, so ICE never connects; the hook must end once with
+// `never-connected` within the 20 s first-frame bound, closing that one session
+// and opening no other for 60 s.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -55,7 +59,9 @@ assert(['same-address', 'new-address'].includes(pathMode), 'unknown --path');
 assert(!mediaCut || (!stallCarrier && pathMode === 'same-address'), '--media-cut cannot be combined with --stall-carrier or --path new-address');
 assert(!driverRestart || scenario === 'roam', '--driver-restart requires roam');
 assert(Number.isInteger(outage) && outage >= 1000 && outage <= 60000, '--outage must be 1000..60000 ms');
-assert(['roam', 'abandon', 'close-in-window'].includes(scenario), 'unknown --scenario');
+assert(['roam', 'abandon', 'close-in-window', 'never-connected'].includes(scenario), 'unknown --scenario');
+const neverConnected = scenario === 'never-connected';
+assert(!neverConnected || hook, '--scenario never-connected requires --adapter hook');
 assert(args[0] && !args[0].startsWith('--'), 'supply a fresh evidence directory first');
 const evidence = resolve(args[0]);
 assert(!existsSync(evidence), 'refusing to overwrite evidence');
@@ -366,9 +372,30 @@ async function run() {
         pageVideo = page.video();
         page.on('pageerror', error => appendFileSync(join(evidence, 'browser.log'), `${Date.now()} ${error}\n`));
         page.on('requestfailed', request => appendFileSync(join(evidence, 'browser.log'), `${Date.now()} ${request.url()} ${request.failure()?.errorText}\n`));
+        // No candidate pair can answer: the hook opens on a path that never forms.
+        if (neverConnected) link.set({ discard: true }, 'never-connected cut');
         await page.goto(vite.resolvedUrls.local[0]);
         await page.waitForFunction(() => typeof window.__measure === 'function');
         const measure = () => page.evaluate(() => window.__measure());
+        if (neverConnected) {
+            // The status log, not the status: a reopen leaves `failed` at once.
+            await wait(async () => (await measure()).log.some(([, status]) => status === 'failed'), 30000, 'first open fails');
+            const first = await measure();
+            result.endedAfterOpenMs = first.log.find(([, status]) => status === 'failed')[0] - first.opens[0];
+            await sleep(Math.max(0, first.opens[0] + 60000 - Date.now()));
+            const m = await measure();
+            const engine = method => result.tap.filter(e => e.direction === 'bridge->engine' && e.method === method).length;
+            Object.assign(result, { status: m.status, failure: m.failure, statusLog: m.log, opens: m.opens.length, closes: m.closes.length,
+                authorizes: m.authorizes.length, engineOpens: engine('session.open'), engineCloses: engine('session.close'),
+                framesDecoded: Object.values(m.frames).reduce((a, b) => a + b, 0), counters: link.counters, pageErrors: m.errors });
+            assert.equal(m.failure, 'never-connected', 'failure code');
+            assert.equal(m.status, 'failed', 'status 60 s after the open');
+            assert(result.endedAfterOpenMs <= 21000, `ended ${result.endedAfterOpenMs} ms after the open, past the 20 s first-frame bound`);
+            assert.deepEqual({ opens: result.opens, closes: result.closes, engineOpens: result.engineOpens, engineCloses: result.engineCloses },
+                { opens: 1, closes: 1, engineOpens: 1, engineCloses: 1 }, 'one open and one close in 60 s');
+            assert(result.counters.discarded > 0, 'the link never saw the path it cut');
+            return;
+        }
         await wait(async () => { const m = await measure(); return m.channel === 'open' && Object.values(m.frames).some(n => n > 5); }, 20000, 'decoded live video and input');
         await verifyOwnedXvfb(xvfb);
         await page.evaluate(() => window.__hold());
