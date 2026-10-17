@@ -150,7 +150,10 @@ try {
     const bridgePort = probe.address().port;
     probe.close();
     bridge = start('bridge', process.execPath,
-        ['packages/desktop-host/bin/desklink-host.mjs', 'bridge', '--source', 'x11', '--display', display, '--listen', `0.0.0.0:${bridgePort}`], xenv);
+        ['packages/desktop-host/bin/desklink-host.mjs', 'bridge', '--source', 'x11', '--display', display, '--listen', `0.0.0.0:${bridgePort}`],
+        // The engine's own ICE nomination trace (stderr): the selected pair's
+        // local/remote addresses prove which path the media took.
+        { ...xenv, DESKLINK_ICE_TRACE: '1' });
     await waitFor(() => /^open\s+http/m.test(logs.bridge), 'the bridge URL');
     const token = /token[= ](\S+)/.exec(logs.bridge)[1];
 
@@ -294,6 +297,10 @@ try {
     try {
         const logcat = spawnSync('adb', ['-s', serial, 'logcat', '-d', '-s', 'DesklinkSession:I', 'DesklinkTcpBridge:I'], { encoding: 'utf8', timeout: 60000 }).stdout;
         writeFileSync(join(out, 'logcat-desklink.txt'), logcat);
+    } catch { /* evidence only */ }
+    try {
+        const hostUdp = spawnSync('ss', ['-unp'], { encoding: 'utf8', timeout: 30000 }).stdout;
+        writeFileSync(join(out, 'host-ss-udp.txt'), hostUdp);
     } catch { /* evidence only */ }
     const lastReport = () => JSON.parse(reports[reports.length - 1]);
     const firstTcp = lastReport().tcp;
