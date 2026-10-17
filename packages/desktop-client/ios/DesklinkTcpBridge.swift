@@ -22,7 +22,10 @@ final class DesklinkTcpBridge {
   private static let flushBytes = 8192
 
   private let lock = NSLock()
-  private let work = DispatchQueue(label: "desklink-tcpbridge")
+  // The accept loop blocks in accept() and the pumps block in recv(): every
+  // connection needs its own worker, so this queue is concurrent. (A serial
+  // queue starves every pump behind the accept loop, and no byte ever moves.)
+  private let work = DispatchQueue(label: "desklink-tcpbridge", attributes: .concurrent)
   private let onEvent: (String, [String: Any]) -> Void
   private var serverFd: Int32 = -1
   private var sockets: [Int: Int32] = [:]
