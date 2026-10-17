@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.5.8
+
+Joint patch release; protocol version remains 3. All packages move together.
 
 ### Fixed
 
