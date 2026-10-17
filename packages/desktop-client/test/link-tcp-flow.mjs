@@ -116,6 +116,7 @@ let xvfb, target, bridge, metro, receiver, relayServer;
 // The relay's engine port, its byte counters, and every app report: declared
 // out here so the failure receipt can summarise them too.
 let enginePort = 0;
+const enginePorts = new Set();
 const relayBytes = { wsToTcp: 0, tcpToWs: 0, streams: 0 };
 const reports = [];
 // Every session status the app reports, in the order it changed.
@@ -176,8 +177,9 @@ try {
     const token = /token[= ](\S+)/.exec(logs.bridge)[1];
 
     // The relay: each WebSocket connection is one relayed TCP connection to
-    // the engine loopback port its URL names (`port`, from the kit). The port
-    // is per session, so a session reopened after a failure names a new one.
+    // the engine loopback port its URL names (`port`, from the kit). The relay
+    // dials only a port some app report has carried, and waits (bounded) for
+    // the report that carries a new session's port to arrive.
     // The relay, like every other socket the app opens, is reached over `adb
     // reverse` (TCP only), because the guest's own uplink goes away below.
     const relayLog = join(out, 'relay.log');
@@ -214,8 +216,14 @@ try {
             socket.on('error', finish);
             socket.on('close', finish);
         };
-        if (Number.isInteger(target) && target >= 1024) pump();
-        else { relayNote(`stream names no engine port: ${request.url}`); finish(); }
+        const deadline = Date.now() + 60000;
+        const dialWhenReported = () => {
+            if (closed) return;
+            if (enginePorts.has(target)) { pump(); return; }
+            if (Date.now() > deadline) { relayNote(`stream names an unreported port: ${target}`); finish(); return; }
+            setTimeout(dialWhenReported, 100);
+        };
+        dialWhenReported();
         ws.on('message', (data) => {
             const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
             relayBytes.wsToTcp += chunk.length;
@@ -239,8 +247,9 @@ try {
             // the last report as the app's current state.
             if (report?.statusChange !== undefined) statuses.push(report);
             else reports.push(text);
-            if (Number.isInteger(report?.loopbackTcpPort) && report.loopbackTcpPort >= 1024 && enginePort === 0) {
-                enginePort = report.loopbackTcpPort;
+            if (Number.isInteger(report?.loopbackTcpPort) && report.loopbackTcpPort >= 1024) {
+                enginePorts.add(report.loopbackTcpPort);
+                enginePort ||= report.loopbackTcpPort;
             }
             response.writeHead(204, { 'Access-Control-Allow-Origin': '*' });
             response.end();

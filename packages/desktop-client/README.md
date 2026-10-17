@@ -160,8 +160,8 @@ import type { TcpTransport } from '@desklink/react-native';
 
 const relay: TcpTransport = {
   // One duplex per relayed connection, usually one per session, to the
-  // engine loopback TCP port the kit names.
-  open: ({ port }) => openByteStreamToComputer(port),
+  // engine loopback TCP port the kit passes.
+  open: (port) => openByteStreamToComputer(port),
 };
 
 session: { tcpTransport: relay },
@@ -170,12 +170,16 @@ session: { tcpTransport: relay },
 where `openByteStreamToComputer(port)` connects to `127.0.0.1:<port>` on the
 computer and returns `{ write, onData, close }`: `write(bytes)` sends toward
 the engine, `onData(handler)` receives from it, `close()` ends that
-connection. The engine picks the port per session, and a session that fails
-(a stall long enough to exhaust ICE restarts) is replaced by one on a new
-port, so dial the `port` each `open` names rather than one learned earlier. The kit rewrites the engine's `127.0.0.1` TCP
-candidate to its listener's port before handing it to the native peer, so the
-peer dials the listener and the picture rides the application's link, still
-inside DTLS. Bytes cross the JS bridge in batches by size (16 KB) and deadline
+connection. The engine picks a loopback port per session. A stall long enough
+to fail a session is recovered by the next session, which names its own port,
+so dial the port each `open` passes rather than one learned earlier. Restarts
+within one session keep its listener, as before. The computer-side relay must
+dial only an engine port it learned from its own engine (from the app's
+report, or an allowlist it keeps) and refuse any other port: a port named over
+the link is not proof of anything. The kit rewrites the engine's `127.0.0.1`
+TCP candidate to its listener's port before handing it to the native peer, so
+the peer dials the listener and the picture rides the application's link,
+still inside DTLS. Bytes cross the JS bridge in batches by size (16 KB) and deadline
 (15 ms), never one call per packet: a lab session's video crossed in about a
 dozen bridge calls a second, and a 10 MB blast through the same batching
 measured about 29 MB/s JS-to-native — two orders of magnitude above what a

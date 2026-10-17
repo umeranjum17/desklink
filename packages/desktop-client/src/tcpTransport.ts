@@ -32,25 +32,17 @@ export interface TcpTransportStream {
     close(): void;
 }
 
-/** Where one relayed connection goes on the computer. */
-export interface TcpTransportTarget {
-    /**
-     * The engine's loopback TCP port this connection is for: the port its
-     * candidate offers. The engine picks it per session, so a new session
-     * after a failed one names a new port; dial this one, not a remembered one.
-     */
-    port: number;
-}
-
 /**
  * The application's byte stream factory. `open` runs once per TCP connection
  * the phone's listener accepts — usually one per session — and returns its
- * duplex, connected to the engine's loopback TCP port that `target` names. It
- * may be async; while it is pending, bytes from the phone wait in the kit
- * rather than being dropped.
+ * duplex, connected to the engine's loopback TCP port `port`. The engine picks
+ * that port per session, so a new session after a failed one passes a new one;
+ * dial the port each `open` passes, not a remembered one. It may be async;
+ * while it is pending, bytes from the phone wait in the kit rather than being
+ * dropped.
  */
 export interface TcpTransport {
-    open(target: TcpTransportTarget): TcpTransportStream | Promise<TcpTransportStream>;
+    open(port: number): TcpTransportStream | Promise<TcpTransportStream>;
 }
 
 /** Counters for one relayed session, for evidence and throughput. */
@@ -113,11 +105,6 @@ export function base64Decode(text: string): Uint8Array {
     return out;
 }
 
-/**
- * Whether this candidate line is the engine's loopback TCP offer: TCP to its
- * own 127.0.0.1. Only that line is ever rewritten; anything else — UDP host
- * candidates, relay candidates — passes through untouched.
- */
 function candidateFields(candidate: string): string[] {
     return candidate.trim().replace(/^a=/, '').trim().split(/\s+/);
 }
@@ -127,6 +114,11 @@ function isLoopbackTcpFields(fields: string[]): boolean {
     return fields[2]?.toLowerCase() === 'tcp' && fields[4] === '127.0.0.1';
 }
 
+/**
+ * Whether this candidate line is the engine's loopback TCP offer: TCP to its
+ * own 127.0.0.1. Only that line is ever rewritten; anything else — UDP host
+ * candidates, relay candidates — passes through untouched.
+ */
 export function isLoopbackTcpCandidate(candidate: string): boolean {
     return isLoopbackTcpFields(candidateFields(candidate));
 }
@@ -247,7 +239,7 @@ export class TcpBridge {
         this.connections.set(connection, entry);
         void (async () => {
             try {
-                const stream = await this.transport.open({ port: this.enginePort });
+                const stream = await this.transport.open(this.enginePort);
                 if (this.stopped || !entry.open) {
                     stream.close();
                     return;

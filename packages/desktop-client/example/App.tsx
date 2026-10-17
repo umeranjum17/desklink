@@ -57,7 +57,7 @@ function connectionLink(link: string | null): { url: string; report: string | nu
  */
 export function wsTcpTransport(relayUrl: string): TcpTransport {
     return {
-        open: ({ port }) =>
+        open: (port) =>
             new Promise((resolve, reject) => {
                 const socket = new WebSocket(`${relayUrl}${relayUrl.includes('?') ? '&' : '?'}port=${port}`);
                 socket.binaryType = 'arraybuffer';
