@@ -1,0 +1,369 @@
+#!/usr/bin/env node
+/**
+ * The relay-only leg: the example app carries the desktop over its own link.
+ *
+ * The phone has no route to the computer but the app's relay: the journey link
+ * carries `tcpRelay=<ws-url>` and `dropUdp=1`, so the app opens its session with
+ * `tcpTransport`, the kit listens on the phone's 127.0.0.1, and every accepted
+ * connection is piped through a lab WebSocket relay on the host to the engine's
+ * loopback TCP port. UDP candidates are discarded in the app before they reach
+ * the peer, so ICE can only use the bridged TCP route; the host firewall is
+ * never touched.
+ *
+ * What it proves:
+ *
+ *  - a live picture over the bridge: the app's inbound video statistics keep
+ *    counting decoded frames while the fixture repaints its far corner and the
+ *    phone's captures show each new colour;
+ *  - the bytes rode the bridge: the app's relay counters (`tcp` in its
+ *    reports) and the relay's own byte totals both advance in both directions,
+ *    and the JS-to-native crossings stay batched (a handful a second, not one
+ *    per packet);
+ *  - input rode the same path: a tap inside the picture reaches the fixture,
+ *    and two mapping taps land on the desktop points the fingers cover.
+ *
+ * The host side runs here, on a private Xvfb (display >= 170, its own cookie),
+ * with the repository's own `x11_target` fixture repainting, the bridge on a
+ * loopback port, and `WAYLAND_DISPLAY` empty. The device is an attached
+ * emulator (ANDROID_SERIAL, DESKLINK_ANDROID_HOST=10.0.2.2 on an emulator);
+ * this flow never starts, stops or configures one.
+ *
+ * Usage:
+ *
+ *   npm run build && cargo build --manifest packages/desktop-host/engine/Cargo.toml \
+ *     --example x11_target
+ *   node packages/desktop-client/test/link-tcp-flow.mjs
+ *
+ * Environment:
+ *
+ *   ANDROID_SERIAL            device serial to drive (default the only device
+ *                             `adb devices` reports)
+ *   DESKLINK_ANDROID_HOST     address this machine has where the device runs:
+ *                             10.0.2.2 on an emulator
+ *   DESKLINK_LINK_TCP_OUT     where the captures and logs go (default
+ *                             /home/umer/lab-tmp/dl-kit-link-tcp)
+ *   DESKLINK_ANDROID_SKIP_BUILD  1 reuses the APK the last run built
+ */
+import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
+import { connect } from 'node:net';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { WebSocketServer } from 'ws';
+import { PNG } from 'pngjs';
+import {
+    assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb,
+} from '../../desktop-host/test/lab-safety.mjs';
+
+assertNoAmbientDesktop();
+assert(process.platform === 'linux', 'this private-Xvfb proof requires Linux');
+const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+const out = resolve(process.env.DESKLINK_LINK_TCP_OUT ?? '/home/umer/lab-tmp/dl-kit-link-tcp');
+mkdirSync(out, { recursive: true });
+const scratch = mkdtempSync(join(homedir(), '.cache', 'desklink-link-tcp-'));
+const engine = resolve(process.env.DESKLINK_ENGINE ?? join(repo, 'packages/desktop-host/engine/target/debug/desklink-host'));
+const fixture = resolve(process.env.DESKLINK_VERIFY_TARGET ?? join(repo, 'packages/desktop-host/engine/target/debug/examples/x11_target'));
+const example = join(repo, 'packages/desktop-client/example');
+const apk = join(example, 'android/app/build/outputs/apk/debug/app-debug.apk');
+const claim = claimPrivateDisplay({ from: 170, count: 40 });
+const display = claim.display;
+const host = process.env.DESKLINK_ANDROID_HOST ?? '10.0.2.2';
+const env = { ...process.env, WAYLAND_DISPLAY: '', TMPDIR: scratch, DESKLINK_ENGINE: engine };
+const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
+const attached = spawnSync('adb', ['devices'], { encoding: 'utf8' }).stdout.split('\n').slice(1)
+    .map(line => line.trim().split(/\s+/)).filter(([, state]) => state === 'device').map(([serial]) => serial);
+const serial = process.env.ANDROID_SERIAL ?? attached[0];
+assert(serial && attached.includes(serial),
+    `name the device with ANDROID_SERIAL; adb reports ${attached.join(', ') || 'none'}`);
+const adb = (...args) => {
+    const done = spawnSync('adb', ['-s', serial, ...args], { encoding: 'utf8', timeout: 120000 });
+    assert.equal(done.status, 0, `adb ${args.join(' ')} failed: ${done.stderr}`);
+    return done.stdout;
+};
+const tryAdb = (...args) =>
+    spawnSync('adb', ['-s', serial, ...args], { encoding: 'utf8', timeout: 120000 }).status === 0;
+const capture = name => {
+    const path = join(out, name);
+    const shot = spawnSync('sh', ['-c', `adb -s ${serial} exec-out screencap -p > ${path}`]);
+    assert.equal(shot.status, 0, 'the device could not be captured');
+    return path;
+};
+const logs = { bridge: '', fixture: '', metro: '' };
+const receipt = {
+    outcome: 'FAIL', serial, sourceHead: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim(),
+    media_path: 'TCP only, through the relay: the phone listener piped over a lab WebSocket relay to the engine loopback port; UDP candidates discarded in the app',
+};
+const children = [];
+let xvfb, target, bridge, metro, receiver, relayServer;
+const reverses = [];
+const reverse = (...args) => {
+    adb('reverse', ...args);
+    reverses.push(args[0]);
+};
+
+const start = (name, cmd, args, childEnv, cwd = repo) => {
+    const child = spawn(cmd, args, { cwd, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.on('data', c => { logs[name] += c; });
+    child.stderr.on('data', c => { logs[name] += c; });
+    children.push([name, child]);
+    return child;
+};
+const waitFor = async (ready, what, ms = 60000) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) { if (ready()) return; await sleep(200); }
+    throw new Error(`timed out waiting for ${what}`);
+};
+
+try {
+    for (const path of [engine, fixture]) assert(existsSync(path), `missing binary: ${path}: build the engine first`);
+    Object.assign(receipt, { engine, engineSha256: hash(engine), fixtureSha256: hash(fixture), example, display });
+
+    const authority = join(scratch, 'Xauthority');
+    spawnSync('xauth', ['-f', authority, 'add', display, '.', randomBytes(16).toString('hex')]);
+    xvfb = start('xvfb', 'Xvfb', [display, '-sigstop', '-noreset', '-auth', authority, '-screen', '0', '1280x720x24', '-nolisten', 'tcp']);
+    trackOwnedXvfb(xvfb, display);
+    const state = pid => { try { return readFileSync(`/proc/${pid}/status`, 'utf8'); } catch { return null; } };
+    await waitFor(() => state(xvfb.pid)?.includes('State:\tT'), 'Xvfb initialization');
+    await verifyOwnedXvfb(xvfb);
+    xvfb.kill('SIGCONT');
+    const xenv = { ...env, DISPLAY: display, XAUTHORITY: authority };
+    const corner = join(scratch, 'corner');
+    target = start('fixture', fixture, ['--animate', '--move', '--corner', corner], xenv);
+    await waitFor(() => logs.fixture.includes('"ready"'), 'the fixture to be ready');
+
+    const probe = createServer();
+    await new Promise(ok => probe.listen(0, '0.0.0.0', ok));
+    const bridgePort = probe.address().port;
+    probe.close();
+    bridge = start('bridge', process.execPath,
+        ['packages/desktop-host/bin/desklink-host.mjs', 'bridge', '--source', 'x11', '--display', display, '--listen', `0.0.0.0:${bridgePort}`], xenv);
+    await waitFor(() => /^open\s+http/m.test(logs.bridge), 'the bridge URL');
+    const token = /token[= ](\S+)/.exec(logs.bridge)[1];
+
+    // The relay: each WebSocket connection is one relayed TCP connection. The
+    // engine's loopback port is ephemeral and learned from the app's reports;
+    // streams that open before it is known wait for it (bounded), then dial.
+    let enginePort = 0;
+    const relayBytes = { wsToTcp: 0, tcpToWs: 0, streams: 0 };
+    relayServer = new WebSocketServer({ host: '0.0.0.0', port: 0 });
+    await new Promise(ok => relayServer.on('listening', ok));
+    const relayPort = relayServer.address().port;
+    receipt.relayPort = relayPort;
+    const relay = relayServer;
+    relay.on('connection', (ws) => {
+        relayBytes.streams += 1;
+        let socket = null, closed = false;
+        const queued = [];
+        const finish = () => {
+            if (closed) return;
+            closed = true;
+            try { ws.close(); } catch { /* already gone */ }
+            try { socket?.destroy(); } catch { /* already gone */ }
+        };
+        const pump = () => {
+            socket = connect(enginePort, '127.0.0.1', () => {
+                for (const chunk of queued.splice(0)) socket.write(chunk);
+            });
+            socket.on('data', (chunk) => {
+                relayBytes.tcpToWs += chunk.length;
+                if (ws.readyState === ws.OPEN) ws.send(chunk);
+            });
+            socket.on('error', finish);
+            socket.on('close', finish);
+        };
+        const deadline = Date.now() + 60000;
+        const dialWhenReady = () => {
+            if (closed) return;
+            if (enginePort > 0) { pump(); return; }
+            if (Date.now() > deadline) { finish(); return; }
+            setTimeout(dialWhenReady, 100);
+        };
+        dialWhenReady();
+        ws.on('message', (data) => {
+            const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
+            relayBytes.wsToTcp += chunk.length;
+            if (socket !== null) socket.write(chunk);
+            else if (queued.reduce((n, c) => n + c.length, 0) < 1048576) queued.push(chunk);
+        });
+        ws.on('error', finish);
+        ws.on('close', finish);
+    });
+
+    const reports = [];
+    receiver = createServer((request, response) => {
+        const chunks = [];
+        request.on('data', c => chunks.push(c));
+        request.on('end', () => {
+            const text = Buffer.concat(chunks).toString();
+            reports.push(text);
+            try {
+                const report = JSON.parse(text);
+                if (Number.isInteger(report?.loopbackTcpPort) && report.loopbackTcpPort >= 1024 && enginePort === 0) {
+                    enginePort = report.loopbackTcpPort;
+                }
+            } catch { /* not JSON; kept raw */ }
+            response.writeHead(204, { 'Access-Control-Allow-Origin': '*' });
+            response.end();
+        });
+    });
+    await new Promise(ok => receiver.listen(0, '0.0.0.0', ok));
+
+    if (process.env.DESKLINK_ANDROID_SKIP_BUILD !== '1') {
+        const build = spawnSync('flock', ['/tmp/fm-desklink-heavy.lock', 'bash', '-c', [
+            'rm -rf node_modules/@desklink',
+            'npm install --no-audit --no-fund',
+            'npx expo prebuild --platform android --no-install',
+            'cd android && ./gradlew --no-daemon assembleDebug',
+        ].join(' && ')], { cwd: example, env, encoding: 'utf8', timeout: 3600000 });
+        writeFileSync(join(out, 'build.log'), `${build.stdout ?? ''}${build.stderr ?? ''}`);
+        assert.equal(build.status, 0, 'the example app did not build; see build.log');
+    }
+    assert(existsSync(apk), `no APK at ${apk}: build the example app first`);
+    receipt.apkSha256 = hash(apk);
+
+    const onEmulator = /^emulator-/.test(serial);
+    const metroProbe = createServer();
+    const metroBound = new Promise((ok, failed) => {
+        metroProbe.once('error', failed);
+        metroProbe.listen(onEmulator ? 8081 : 0, '127.0.0.1', ok);
+    });
+    await metroBound.catch(error => {
+        throw new Error(`an emulator reaches Metro only on the host's own 8081, which is already held: ${error.message}`);
+    });
+    const metroPort = metroProbe.address().port;
+    metroProbe.close();
+    metro = start('metro', 'npx', ['expo', 'start', '--port', String(metroPort)], { ...env, CI: '1' }, example);
+    await waitFor(() => /Waiting on http/.test(logs.metro), 'Metro');
+    adb('install', '-r', '-g', apk);
+    reverse('tcp:8081', `tcp:${metroPort}`);
+
+    const link = `desklink-example://connect?url=${encodeURIComponent(`ws://${host}:${bridgePort}/desktop?token=${token}`)}`
+        + `&report=${encodeURIComponent(`http://${host}:${receiver.address().port}/report`)}`
+        + `&tcpRelay=${encodeURIComponent(`ws://${host}:${relayPort}/tcp`)}&dropUdp=1`;
+    receipt.link = link.replace(token, '<bridge-token>');
+    adb('shell', 'am', 'force-stop', 'dev.desklink.example');
+    await sleep(1000);
+    await waitFor(() => tryAdb('shell', 'am', 'start', '-n', 'dev.desklink.example/.MainActivity',
+        '-a', 'android.intent.action.VIEW', '-d', `"${link}"`),
+    'the app to answer its connection link', 120000);
+    await waitFor(() => reports.length > 0, "the app's own report", 180000);
+    await waitFor(() => enginePort > 0, "the engine's loopback ICE port", 120000);
+    receipt.loopback_tcp_port = enginePort;
+    await waitFor(() => {
+        const last = JSON.parse(reports[reports.length - 1] ?? '{}');
+        return typeof last.presentedAt === 'number' && last.presentedAt > 0;
+    }, 'the first presented frame', 180000);
+
+    // Liveness from the app's own inbound video statistics, over the bridge.
+    const decoded = report => (JSON.parse(report).stats ?? [])
+        .filter(stat => stat.type === 'inbound-rtp')
+        .reduce((total, stat) => total + (stat.framesDecoded ?? 0), 0);
+    await waitFor(() => reports.length > 1 && decoded(reports[reports.length - 1]) > decoded(reports[0]),
+        'the app to decode further video frames', 60000);
+    const lastReport = () => JSON.parse(reports[reports.length - 1]);
+    const firstTcp = lastReport().tcp;
+    assert(firstTcp && firstTcp.port > 0, 'the relay reports its listener port');
+    assert(firstTcp.bytesFromEngine > 0, 'bytes crossed the bridge from the engine');
+    const droppedUdp = () => Number(lastReport().droppedUdp ?? 0);
+    await waitFor(() => droppedUdp() > 0, 'the app to discard UDP candidates', 60000);
+    // A clip of the live picture, recorded on the device.
+    const clipDevice = '/sdcard/link-tcp-clip.mp4';
+    adb('shell', 'rm', '-f', clipDevice);
+    spawnSync('adb', ['-s', serial, 'shell', 'screenrecord', '--time-limit', '10', clipDevice],
+        { timeout: 30000 });
+    adb('pull', clipDevice, join(out, 'clip-relayed-desktop.mp4'));
+    await sleep(2000);
+    const first = capture('01-relayed-desktop.png');
+    await sleep(6000);
+    const second = capture('02-relayed-desktop-later.png');
+
+    // Every change, wherever on the desktop: the fixture repaints its far
+    // corner in place, and the app's picture must show each new colour.
+    const shows = (path, rgb) => {
+        const { data } = PNG.sync.read(readFileSync(path));
+        const want = [rgb >> 16, (rgb >> 8) & 0xff, rgb & 0xff];
+        let near = 0;
+        for (let at = 0; at < data.length; at += 4) {
+            if (want.every((value, channel) => Math.abs(data[at + channel] - value) < 48)) near++;
+        }
+        return near;
+    };
+    const corners = [];
+    for (const [name, rgb] of [['magenta', 0xff00ff], ['cyan', 0x00ffff]]) {
+        writeFileSync(corner, rgb.toString(16).padStart(6, '0'));
+        const shot = `05-corner-${name}.png`;
+        let seen = 0;
+        for (const until = Date.now() + 20000; seen < 1000 && Date.now() < until; await sleep(500)) {
+            seen = shows(capture(shot), rgb);
+        }
+        assert(seen >= 1000, `the desktop's far corner turned ${name}, but the app's picture shows ${seen} pixels of it`);
+        corners.push({ colour: name, pixels: seen, capture: join(shot).replace(homedir(), '~') });
+    }
+
+    // Input rode the same path: a tap inside the picture reaches the fixture.
+    const buttons = () => logs.fixture.split('\n').filter(line => line.includes('"button"')).length;
+    const beforeButtons = buttons();
+    adb('shell', 'input', 'tap', String(Math.round(1080 * 0.5)), String(Math.round(2400 * 0.25)));
+    await sleep(1500);
+    await waitFor(() => buttons() > beforeButtons, 'the tap to reach the desktop', 30000);
+    const button = logs.fixture.split('\n').filter(line => line.includes('"button"')).pop();
+
+    // Throughput across the bridge: video bytes per second and the batched
+    // crossing rate, from the app's own relay counters.
+    const timed = reports.map(text => { try { return JSON.parse(text); } catch { return null; } })
+        .filter(sample => sample && sample.tcp && typeof sample.at === 'number');
+    const firstTimed = timed.find(sample => (sample.tcp.bytesFromEngine ?? 0) > 0);
+    const lastTimed = timed[timed.length - 1];
+    let throughput = null;
+    if (firstTimed && lastTimed && lastTimed.at > firstTimed.at) {
+        const bytes = (lastTimed.tcp.bytesFromEngine ?? 0) - (firstTimed.tcp.bytesFromEngine ?? 0);
+        const seconds = (lastTimed.at - firstTimed.at) / 1000;
+        const crossings = (lastTimed.tcp.bridgeEvents ?? 0) - (firstTimed.tcp.bridgeEvents ?? 0);
+        throughput = {
+            bytes, seconds,
+            mbPerSecond: bytes / seconds / 1048576,
+            bridgeEventsPerSecond: crossings / seconds,
+            bytesPerCrossing: crossings > 0 ? bytes / crossings : 0,
+        };
+    }
+
+    Object.assign(receipt, {
+        captures: [first, second, capture('03-tap-received.png')].map(path => path.replace(homedir(), '~')),
+        reports: reports.length,
+        droppedUdp: droppedUdp(),
+        lastTcp: lastTimed?.tcp ?? lastReport().tcp,
+        relayBytes,
+        enginePort,
+        throughput,
+        corners,
+        tap: button.trim(),
+    });
+    receipt.outcome = 'PASS';
+    console.log(`PASS: the example app shows a live desktop over its own relay on ${serial}; evidence ${out}`);
+} catch (error) {
+    receipt.error = String(error);
+    try { capture('00-failure.png'); } catch { /* the device may be gone */ }
+    console.error(String(error));
+} finally {
+    for (const [, child] of children) { try { child.kill('SIGTERM'); } catch { /* already gone */ } }
+    await sleep(700);
+    for (const [, child] of children) {
+        try {
+            if (child.pid > 0) { process.kill(child.pid, 0); child.kill('SIGKILL'); }
+        } catch { child.exitCode ??= 0; }
+    }
+    for (const spec of reverses.splice(0)) { tryAdb('reverse', '--remove', spec); }
+    try { receiver?.close(); } catch { /* already gone */ }
+    try { relayServer?.close(); } catch { /* already gone */ }
+    if (xvfb) { try { await stopOwnedXvfb(xvfb); } catch (error) { receipt.cleanup = String(error); } }
+    claim.release();
+    rmSync(scratch, { recursive: true, force: true });
+    for (const name of ['bridge', 'fixture', 'metro']) writeFileSync(join(out, `${name}.log`), logs[name]);
+    writeFileSync(join(out, 'run.json'), `${JSON.stringify(receipt, null, 2)}\n`);
+}
+process.exit(receipt.outcome === 'PASS' ? 0 : 1);

@@ -17,7 +17,10 @@ export type NativeEventName =
     | 'control'
     | 'keyboard'
     | 'failure'
-    | 'closed';
+    | 'closed'
+    | 'tcpAccept'
+    | 'tcpData'
+    | 'tcpClosed';
 
 export interface NativeSessionEvent {
     sessionId: string;
@@ -47,6 +50,21 @@ export interface NativeDesklinkModule {
     closeSession(id: string): boolean;
     /** Video reception and codec statistics, excluding network addresses and credentials. */
     getStats?(id: string): Promise<string>;
+    /**
+     * Relay-only route (Android): listen on the phone's 127.0.0.1 for the
+     * native peer's ICE-TCP dial, returning the listener's port, or 0/null
+     * when the listener cannot start. Absent where the build cannot carry it
+     * (web, and iOS until its slice lands).
+     */
+    startTcpBridge?(id: string): number | null;
+    /** Bytes toward the engine on one relayed connection, base64, batched by the caller. */
+    tcpWrite?(id: string, connection: number, data: string): boolean;
+    /** End one relayed connection from the consumer side. */
+    tcpClose?(id: string, connection: number): boolean;
+    /** End the listener and every relayed connection. */
+    stopTcpBridge?(id: string): boolean;
+    /** Socket counters for the relay, as JSON; call crossings are counted in JS. */
+    getTcpBridgeStats?(id: string): string;
     isAvailable(): boolean;
     addListener?(name: 'onSessionEvent', handler: (event: NativeSessionEvent) => void): { remove: () => void };
 }
