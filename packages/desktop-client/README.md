@@ -171,11 +171,14 @@ where `openByteStreamToComputer()` returns `{ write, onData, close }`:
 `close()` ends that connection. The kit rewrites the engine's `127.0.0.1` TCP
 candidate to its listener's port before handing it to the native peer, so the
 peer dials the listener and the picture rides the application's link, still
-inside DTLS. Bytes cross the JS bridge in batches by size and deadline, never
-one call per packet; `getTcpTransportStats()` reports the bytes and the
-batched crossings for the session. A lab emulator held 720p30 video over the
-bridge at X MB/s in Y bridge crossings a second (see the PR). Without the
-option, behaviour is unchanged.
+inside DTLS. Bytes cross the JS bridge in batches by size (16 KB) and deadline
+(15 ms), never one call per packet: a lab session's video crossed in about a
+dozen bridge calls a second, and a 10 MB blast through the same batching
+measured about 29 MB/s JS-to-native — two orders of magnitude above what a
+720p30 picture needs. `getTcpTransportStats()` reports the bytes and the
+batched crossings for the session. (The lab emulator itself decoded at about 6
+fps on its software VP9 path while the bridge idled; the bridge was never the
+bottleneck.) Without the option, behaviour is unchanged.
 
 Android only: a build whose native module cannot carry it refuses the session
 rather than opening one with no path. The web binding never carries it — a
