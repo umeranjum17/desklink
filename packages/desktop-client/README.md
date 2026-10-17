@@ -174,9 +174,10 @@ connection. The engine picks a loopback port per session. A stall long enough
 to fail a session is recovered by the next session, which names its own port,
 so dial the port each `open` passes rather than one learned earlier. Restarts
 within one session keep its listener, as before. The computer-side relay must
-dial only an engine port it learned from its own engine (from the app's
-report, or an allowlist it keeps) and refuse any other port: a port named over
-the link is not proof of anything. The kit rewrites the engine's `127.0.0.1`
+dial only an engine port it learns from a source it trusts on the computer side
+(its own engine host or config), and refuse any other port: nothing the phone
+sends, including a port named in the link URL or reported by the app, is proof
+of anything. The kit rewrites the engine's `127.0.0.1`
 TCP candidate to its listener's port before handing it to the native peer, so
 the peer dials the listener and the picture rides the application's link,
 still inside DTLS. Bytes cross the JS bridge in batches by size (16 KB) and deadline

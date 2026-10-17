@@ -139,7 +139,7 @@ function loopbackTcpPort(fields: string[]): number {
  * throwaway discard port: rewriting it would dial the listener for a
  * candidate nothing listens on.
  */
-export function rewriteLoopbackTcpCandidate(candidate: string, port: number): string {
+function rewriteLoopbackTcpCandidate(candidate: string, port: number): string {
     if (!Number.isInteger(port) || port <= 0) return candidate;
     const fields = candidateFields(candidate);
     const enginePort = loopbackTcpPort(fields);
@@ -154,7 +154,7 @@ export function rewriteLoopbackTcpCandidate(candidate: string, port: number): st
  * port. The engine's offer carries its own loopback port, so without this the
  * peer would dial the engine's port on the phone's loopback and never connect.
  */
-export function rewriteLoopbackTcpSdp(sdp: string, port: number): string {
+function rewriteLoopbackTcpSdp(sdp: string, port: number): string {
     if (!(port > 0)) return sdp;
     return sdp
         .split(/\r?\n/)

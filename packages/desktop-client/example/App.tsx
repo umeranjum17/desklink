@@ -274,6 +274,7 @@ function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, relayOnly
                     if (fields[2]?.toLowerCase() !== 'tcp') continue;
                     const port = Number(fields[5]);
                     if (!Number.isInteger(port) || port < 1024) continue;
+                    // The example relay trusts this report endpoint only because it is loopback test code; not a pattern for product relays.
                     void fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), loopbackTcpPort: port }) })
                         .catch(() => undefined);
                 }

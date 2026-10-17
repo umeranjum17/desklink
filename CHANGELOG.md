@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- A relay passed as `session.tcpTransport` must now dial the port its
+  `TcpTransport.open(port)` receives. A relay that ignores that argument and
+  keeps dialing the port it learned first still stalls after a network stall.
+
 ### Fixed
 
 - After a network stall long enough to fail a relay-only session

@@ -247,6 +247,7 @@ try {
             // the last report as the app's current state.
             if (report?.statusChange !== undefined) statuses.push(report);
             else reports.push(text);
+            // Lab relay trusts the report endpoint only because it is loopback test code; not a pattern for product relays.
             if (Number.isInteger(report?.loopbackTcpPort) && report.loopbackTcpPort >= 1024) {
                 enginePorts.add(report.loopbackTcpPort);
                 enginePort ||= report.loopbackTcpPort;
