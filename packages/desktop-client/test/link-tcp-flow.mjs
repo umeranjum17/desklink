@@ -42,6 +42,9 @@
  *   DESKLINK_LINK_TCP_OUT     where the captures and logs go (default
  *                             /home/umer/lab-tmp/dl-kit-link-tcp)
  *   DESKLINK_ANDROID_SKIP_BUILD  1 reuses the APK the last run built
+ *   DESKLINK_METRO_PORT       host port for Metro (default 8081); with a port
+ *                             other than 8081 the build needs RCT_METRO_PORT
+ *                             set to the same value
  */
 import assert from 'node:assert/strict';
 import { execFile, spawn, spawnSync } from 'node:child_process';
@@ -82,6 +85,9 @@ const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex
 const attached = spawnSync('adb', ['devices'], { encoding: 'utf8' }).stdout.split('\n').slice(1)
     .map(line => line.trim().split(/\s+/)).filter(([, state]) => state === 'device').map(([serial]) => serial);
 const serial = process.env.ANDROID_SERIAL ?? attached[0];
+// The host port Metro serves on. The app must be built with the same port
+// (RCT_METRO_PORT at build time) when it is not 8081.
+const metroPort = Number(process.env.DESKLINK_METRO_PORT ?? 8081);
 assert(serial && attached.includes(serial),
     `name the device with ANDROID_SERIAL; adb reports ${attached.join(', ') || 'none'}`);
 // The relay shares this process's event loop, so every adb call that can run
@@ -270,18 +276,17 @@ try {
     // the phone's own loopback.
     // Metro may answer on either loopback, so both are probed: a Metro on
     // `::1` alone would pass a 127.0.0.1-only check and then fail inside Expo.
-    // The app itself reaches Metro at 10.0.2.2:8081, so the port cannot move.
     for (const host of ['127.0.0.1', '::1']) {
         const metroProbe = createServer();
         await new Promise((ok, failed) => {
             metroProbe.once('error', failed);
-            metroProbe.listen(8081, host, ok);
+            metroProbe.listen(metroPort, host, ok);
         }).catch(error => {
-            throw new Error(`Metro needs the host's own 8081, which is already held on ${host} (another Metro on this host?): ${error.message}`);
+            throw new Error(`Metro needs host port ${metroPort}, which is already held on ${host} (another Metro on this host?): ${error.message}`);
         });
         metroProbe.close();
     }
-    metro = start('metro', 'npx', ['expo', 'start', '--port', '8081'], { ...env, CI: '1' }, example);
+    metro = start('metro', 'npx', ['expo', 'start', '--port', String(metroPort)], { ...env, CI: '1' }, example);
     await waitFor(() => /Waiting on http/.test(logs.metro), 'Metro');
     await adb('install', '-r', '-g', apk);
     // Route surgery below needs privilege; the emulator's userdebug build
@@ -290,7 +295,9 @@ try {
     await adb('wait-for-device');
     // Every socket the app opens rides `adb reverse` (TCP only): signaling,
     // reports, the relay, and the bundle.
-    await reverse('tcp:8081', 'tcp:8081');
+    // The device's own 8081 is what the app asks for; the reverse carries it to
+    // the host port Metro took.
+    await reverse('tcp:8081', `tcp:${metroPort}`);
     await reverse(`tcp:${bridgePort}`, `tcp:${bridgePort}`);
     await reverse(`tcp:${receiver.address().port}`, `tcp:${receiver.address().port}`);
     await reverse(`tcp:${relayPort}`, `tcp:${relayPort}`);
