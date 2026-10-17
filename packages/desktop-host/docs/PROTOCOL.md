@@ -385,6 +385,12 @@ lease, or guarantee recovery within 2 seconds. Engine-side ends remain terminal.
 //   "description":{"type":"offer","sdp":"v=0\r\n…"}}}
 ```
 
+The engine offers UDP host candidates on every IPv4 interface and, when this
+computer has an IPv6 address other than loopback and link-local, on every such
+IPv6 address too. A phone off home Wi-Fi often has only a carrier IPv6 address,
+and that is its one direct path here. Loopback and link-local addresses are
+never offered.
+
 With `loopback_tcp`, the engine also listens for ICE over TCP on
 `127.0.0.1` and offers that passive candidate. It is for a client whose only
 way to this computer is a forward of its loopback, such as an SSH tunnel: the
