@@ -286,7 +286,8 @@ try {
     const dumpSockets = (tag) => {
         try {
             const tcp = adb('shell', 'cat', '/proc/net/tcp');
-            writeFileSync(netLog, `\n### ${tag} /proc/net/tcp\n${tcp}\n`, { flag: 'a' });
+            const udp = adb('shell', 'cat', '/proc/net/udp');
+            writeFileSync(netLog, `\n### ${tag} /proc/net/tcp\n${tcp}\n\n### ${tag} /proc/net/udp\n${udp}\n`, { flag: 'a' });
         } catch { /* evidence only */ }
     };
     dumpSockets('presented');
@@ -297,6 +298,7 @@ try {
     const lastReport = () => JSON.parse(reports[reports.length - 1]);
     const firstTcp = lastReport().tcp;
     assert(firstTcp && firstTcp.port > 0, 'the relay reports its listener port');
+    dumpSockets('pre-assert');
     assert(firstTcp.bytesFromEngine > 0, 'bytes crossed the bridge from the engine');
     const droppedNonRelay = () => Number(lastReport().droppedNonRelay ?? 0);
     await waitFor(() => droppedNonRelay() > 0, 'the app to discard non-relay candidates', 60000);
