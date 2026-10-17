@@ -267,6 +267,21 @@ try {
     reverse(`tcp:${relayPort}`, `tcp:${relayPort}`);
     receipt.media_path = 'TCP only, through adb-reverse forwards: the guest uplink is off, so the emulator has no IP route to the host; the phone listener is piped over a reverse to the engine loopback port';
     receipt.reverses = reverses.slice();
+
+    const link = `desklink-example://connect?url=${encodeURIComponent(`ws://127.0.0.1:${bridgePort}/desktop?token=${token}`)}`
+        + `&report=${encodeURIComponent(`http://127.0.0.1:${receiver.address().port}/report`)}`
+        + `&tcpRelay=${encodeURIComponent(`ws://127.0.0.1:${relayPort}/tcp`)}&relayOnly=1`;
+    receipt.link = link.replace(token, '<bridge-token>');
+    adb('shell', 'am', 'force-stop', 'dev.desklink.example');
+    await sleep(1000);
+    await waitFor(() => tryAdb('shell', 'am', 'start', '-n', 'dev.desklink.example/.MainActivity',
+        '-a', 'android.intent.action.VIEW', '-d', `"${link}"`),
+    'the app to answer its connection link', 120000);
+    // The dev client loads its bundle over the network, so the guest uplink
+    // stays up for the launch and goes away the moment the bundle lands —
+    // before the app's JS boots, let alone before ICE gathers. Everything
+    // after (signaling, reports, relay) rides `adb reverse`.
+    await waitFor(() => /Android Bundled/.test(logs.metro), 'Metro to serve the bundle', 180000);
     // The relay-only network: the guest's uplink goes off, so the emulator
     // cannot reach the host's UDP at all — no candidate filtering could fake
     // this. Loopback and the reverses above are all that is left.
@@ -280,16 +295,6 @@ try {
     assert(!/1 received|1 packets received/.test(pingHost.stdout), 'the host is unreachable from the guest');
     const pingLoopback = spawnSync('adb', ['-s', serial, 'shell', 'ping', '-c1', '-W3', '127.0.0.1'], { encoding: 'utf8', timeout: 30000 });
     assert(/1 received|1 packets received/.test(pingLoopback.stdout), 'the guest loopback is up');
-
-    const link = `desklink-example://connect?url=${encodeURIComponent(`ws://127.0.0.1:${bridgePort}/desktop?token=${token}`)}`
-        + `&report=${encodeURIComponent(`http://127.0.0.1:${receiver.address().port}/report`)}`
-        + `&tcpRelay=${encodeURIComponent(`ws://127.0.0.1:${relayPort}/tcp`)}&relayOnly=1`;
-    receipt.link = link.replace(token, '<bridge-token>');
-    adb('shell', 'am', 'force-stop', 'dev.desklink.example');
-    await sleep(1000);
-    await waitFor(() => tryAdb('shell', 'am', 'start', '-n', 'dev.desklink.example/.MainActivity',
-        '-a', 'android.intent.action.VIEW', '-d', `"${link}"`),
-    'the app to answer its connection link', 120000);
     await waitFor(() => reports.length > 0, "the app's own report", 180000);
     await waitFor(() => enginePort > 0, "the engine's loopback ICE port", 120000);
     receipt.loopback_tcp_port = enginePort;
