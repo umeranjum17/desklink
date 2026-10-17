@@ -6,9 +6,11 @@
  * carries `tcpRelay=<ws-url>` and `relayOnly=1`, so the app opens its session with
  * `tcpTransport`, the kit listens on the phone's 127.0.0.1, and every accepted
  * connection is piped through a lab WebSocket relay on the host to the engine's
- * loopback TCP port. non-relay candidates are discarded in the app before they reach
- * the peer, so ICE can only use the bridged TCP route; the host firewall is
- * never touched.
+ * loopback TCP port. The guest's own uplink is switched off, so it has no IP
+ * route to the host at all — every socket the app opens rides `adb reverse`
+ * (TCP only), and an in-app allowlist keeps only the relayed TCP candidate,
+ * so ICE can only use the bridged TCP route. The host firewall is never
+ * touched.
  *
  * What it proves:
  *
@@ -25,8 +27,7 @@
  * The host side runs here, on a private Xvfb (display >= 170, its own cookie),
  * with the repository's own `x11_target` fixture repainting, the bridge on a
  * loopback port, and `WAYLAND_DISPLAY` empty. The device is an attached
- * emulator (ANDROID_SERIAL, DESKLINK_ANDROID_HOST=10.0.2.2 on an emulator);
- * this flow never starts, stops or configures one.
+ * emulator (ANDROID_SERIAL); this flow never starts, stops or configures one.
  *
  * Usage:
  *
@@ -38,8 +39,6 @@
  *
  *   ANDROID_SERIAL            device serial to drive (default the only device
  *                             `adb devices` reports)
- *   DESKLINK_ANDROID_HOST     address this machine has where the device runs:
- *                             10.0.2.2 on an emulator
  *   DESKLINK_LINK_TCP_OUT     where the captures and logs go (default
  *                             /home/umer/lab-tmp/dl-kit-link-tcp)
  *   DESKLINK_ANDROID_SKIP_BUILD  1 reuses the APK the last run built
@@ -76,7 +75,6 @@ const example = join(repo, 'packages/desktop-client/example');
 const apk = join(example, 'android/app/build/outputs/apk/debug/app-debug.apk');
 const claim = claimPrivateDisplay({ from: 170, count: 40 });
 const display = claim.display;
-const host = process.env.DESKLINK_ANDROID_HOST ?? '10.0.2.2';
 const env = { ...process.env, WAYLAND_DISPLAY: '', TMPDIR: scratch, DESKLINK_ENGINE: engine };
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 const attached = spawnSync('adb', ['devices'], { encoding: 'utf8' }).stdout.split('\n').slice(1)
@@ -160,6 +158,8 @@ try {
     // The relay: each WebSocket connection is one relayed TCP connection. The
     // engine's loopback port is ephemeral and learned from the app's reports;
     // streams that open before it is known wait for it (bounded), then dial.
+    // The relay, like every other socket the app opens, is reached over `adb
+    // reverse` (TCP only), because the guest's own uplink goes away below.
     const relayLog = join(out, 'relay.log');
     const relayNote = (line) => writeFileSync(relayLog, `${Date.now()} ${line}\n`, { flag: 'a' });
     relayNote('relay up');
@@ -244,25 +244,46 @@ try {
     assert(existsSync(apk), `no APK at ${apk}: build the example app first`);
     receipt.apkSha256 = hash(apk);
 
-    const onEmulator = /^emulator-/.test(serial);
+    // Metro serves the bundle; the app reaches it over `adb reverse`, the same
+    // TCP-only road every other socket in this run takes. The guest's uplink
+    // goes away below, so 10.0.2.2 is dead and the bundle must come through
+    // the phone's own loopback.
     const metroProbe = createServer();
-    const metroBound = new Promise((ok, failed) => {
+    await new Promise((ok, failed) => {
         metroProbe.once('error', failed);
-        metroProbe.listen(onEmulator ? 8081 : 0, '127.0.0.1', ok);
+        metroProbe.listen(8081, '127.0.0.1', ok);
+    }).catch(error => {
+        throw new Error(`Metro needs the host's own 8081 for the reverse, which is already held: ${error.message}`);
     });
-    await metroBound.catch(error => {
-        throw new Error(`an emulator reaches Metro only on the host's own 8081, which is already held: ${error.message}`);
-    });
-    const metroPort = metroProbe.address().port;
     metroProbe.close();
-    metro = start('metro', 'npx', ['expo', 'start', '--port', String(metroPort)], { ...env, CI: '1' }, example);
+    metro = start('metro', 'npx', ['expo', 'start', '--port', '8081'], { ...env, CI: '1' }, example);
     await waitFor(() => /Waiting on http/.test(logs.metro), 'Metro');
     adb('install', '-r', '-g', apk);
-    reverse('tcp:8081', `tcp:${metroPort}`);
+    // Every socket the app opens rides `adb reverse` (TCP only): signaling,
+    // reports, the relay, and the bundle.
+    reverse('tcp:8081', 'tcp:8081');
+    reverse(`tcp:${bridgePort}`, `tcp:${bridgePort}`);
+    reverse(`tcp:${receiver.address().port}`, `tcp:${receiver.address().port}`);
+    reverse(`tcp:${relayPort}`, `tcp:${relayPort}`);
+    receipt.media_path = 'TCP only, through adb-reverse forwards: the guest uplink is off, so the emulator has no IP route to the host; the phone listener is piped over a reverse to the engine loopback port';
+    receipt.reverses = reverses.slice();
+    // The relay-only network: the guest's uplink goes off, so the emulator
+    // cannot reach the host's UDP at all — no candidate filtering could fake
+    // this. Loopback and the reverses above are all that is left.
+    adb('shell', 'svc', 'wifi', 'disable');
+    adb('shell', 'svc', 'data', 'disable');
+    await sleep(3000);
+    const guestRoutes = adb('shell', 'ip', 'route');
+    writeFileSync(join(out, 'guest-routes.txt'), guestRoutes);
+    assert(!/10\.0\.2\.0\/24/.test(guestRoutes), 'the guest uplink is down: no route to the host');
+    const pingHost = spawnSync('adb', ['-s', serial, 'shell', 'ping', '-c1', '-W3', '10.0.2.2'], { encoding: 'utf8', timeout: 30000 });
+    assert(!/1 received|1 packets received/.test(pingHost.stdout), 'the host is unreachable from the guest');
+    const pingLoopback = spawnSync('adb', ['-s', serial, 'shell', 'ping', '-c1', '-W3', '127.0.0.1'], { encoding: 'utf8', timeout: 30000 });
+    assert(/1 received|1 packets received/.test(pingLoopback.stdout), 'the guest loopback is up');
 
-    const link = `desklink-example://connect?url=${encodeURIComponent(`ws://${host}:${bridgePort}/desktop?token=${token}`)}`
-        + `&report=${encodeURIComponent(`http://${host}:${receiver.address().port}/report`)}`
-        + `&tcpRelay=${encodeURIComponent(`ws://${host}:${relayPort}/tcp`)}&relayOnly=1`;
+    const link = `desklink-example://connect?url=${encodeURIComponent(`ws://127.0.0.1:${bridgePort}/desktop?token=${token}`)}`
+        + `&report=${encodeURIComponent(`http://127.0.0.1:${receiver.address().port}/report`)}`
+        + `&tcpRelay=${encodeURIComponent(`ws://127.0.0.1:${relayPort}/tcp`)}&relayOnly=1`;
     receipt.link = link.replace(token, '<bridge-token>');
     adb('shell', 'am', 'force-stop', 'dev.desklink.example');
     await sleep(1000);
@@ -408,6 +429,9 @@ try {
         } catch { child.exitCode ??= 0; }
     }
     for (const spec of reverses.splice(0)) { tryAdb('reverse', '--remove', spec); }
+    // The guest's uplink belongs to the device: hand it back however the run ends.
+    tryAdb('shell', 'svc', 'wifi', 'enable');
+    tryAdb('shell', 'svc', 'data', 'enable');
     try { receiver?.close(); } catch { /* already gone */ }
     try { relayServer?.close(); } catch { /* already gone */ }
     if (xvfb) { try { await stopOwnedXvfb(xvfb); } catch (error) { receipt.cleanup = String(error); } }
