@@ -17,6 +17,7 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class DesklinkModule : Module() {
   private val sessions = ConcurrentHashMap<String, DesktopSession>()
+  private val bridges = ConcurrentHashMap<String, TcpBridge>()
   private var nextId = 0
 
   private val eglContext = lazy {
@@ -108,11 +109,37 @@ class DesklinkModule : Module() {
 
     Function("closeSession") { id: String ->
       sessions.remove(id)?.shutdown()
+      bridges.remove(id)?.stop()
       views.remove(id)
       true
     }
 
     Function("isAvailable") { true }
+
+    // Relay-only route: the phone listener the native peer dials for its
+    // ICE-TCP checks. One bridge per session; the JS side pipes each accepted
+    // connection through the consumer's stream to the engine's loopback port.
+    Function("startTcpBridge") { id: String ->
+      if (!sessions.containsKey(id)) return@Function 0
+      bridges.getOrPut(id) { TcpBridge { name, payload -> emit(name, id, payload) } }.start()
+    }
+
+    Function("tcpWrite") { id: String, connection: Int, data: String ->
+      bridges[id]?.write(connection, data) ?: false
+    }
+
+    Function("tcpClose") { id: String, connection: Int ->
+      bridges[id]?.close(connection) ?: false
+    }
+
+    Function("stopTcpBridge") { id: String ->
+      bridges.remove(id)?.stop()
+      true
+    }
+
+    Function("getTcpBridgeStats") { id: String ->
+      bridges[id]?.statsJson() ?: "{}"
+    }
 
     AsyncFunction("getStats") { id: String, promise: Promise ->
       val session = sessions[id]
@@ -161,6 +188,8 @@ class DesklinkModule : Module() {
     OnDestroy {
       for (session in sessions.values) session.shutdown()
       sessions.clear()
+      for (bridge in bridges.values) bridge.stop()
+      bridges.clear()
       views.clear()
     }
   }

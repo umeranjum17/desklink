@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 
 import type { NativeDesklinkModule } from './native';
+import { TcpBridge, rewriteLoopbackTcpCandidate, rewriteLoopbackTcpSdp } from './tcpTransport';
+import type { TcpTransportStats } from './tcpTransport';
 import type {
     ControlMessage,
     CursorSample,
@@ -307,6 +309,12 @@ export interface DesktopSession {
     snapshot: SessionSnapshot;
     /** Video reception and codec diagnostics, without network addresses. */
     getStats: () => Promise<Array<Record<string, unknown>>>;
+    /**
+     * Relay-route counters for a session opened with `tcpTransport`, or null
+     * when no relay is active. Bytes are what crossed the bridge; calls are
+     * the batched crossings that carried them.
+     */
+    getTcpTransportStats: () => Promise<TcpTransportStats | null>;
     /** The native session handle, or null when nothing is open. */
     nativeId: string | null;
     connect: () => Promise<void>;
@@ -443,6 +451,10 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const dialing = useRef<{ inFlight: boolean; since: number; retry?: ReturnType<typeof setTimeout> } | null>(null);
     /** Set with a reopen that skips its backoff: the host no longer holds the session at all. */
     const reopenAtOnce = useRef(false);
+    /** The relay bridge for a `tcpTransport` session, or null without one. */
+    const tcpBridge = useRef<TcpBridge | null>(null);
+    /** The phone listener's port, for rewriting the engine's candidate. */
+    const tcpPort = useRef(0);
     const optionsRef = useRef(options);
     optionsRef.current = options;
 
@@ -904,6 +916,12 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         return JSON.parse(await nativeDesklink.getStats(id));
     }, []);
 
+    const getTcpTransportStats = useCallback(async (): Promise<TcpTransportStats | null> => {
+        const bridge = tcpBridge.current;
+        if (bridge == null || nativeRef.current == null) return null;
+        return bridge.stats();
+    }, []);
+
     const fitToView = useCallback(() => {
         const id = nativeRef.current;
         if (id != null) nativeDesklink?.fitToView(id);
@@ -917,6 +935,9 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const discardSession = useCallback(() => {
         generationToken.current += 1;
         cancelFirstFrame();
+        tcpBridge.current?.stop();
+        tcpBridge.current = null;
+        tcpPort.current = 0;
         const id = nativeRef.current;
         nativeRef.current = null;
         inputEnabled.current = false;
@@ -1003,7 +1024,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 // for, through its policy or directly: renegotiation
                 // transients after it are expected, not a new outage.
                 if (presentedRef.current) restartGraceUntil.current = Date.now() + RESTART_GRACE_MS;
-                nativeDesklink?.setRemoteDescription(native, 'offer', event.description.sdp);
+                nativeDesklink?.setRemoteDescription(native, 'offer', rewriteLoopbackTcpSdp(event.description.sdp, tcpPort.current));
                 return;
             case 'candidate':
                 if (native == null || held == null) {
@@ -1018,7 +1039,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 if (!current) return;
                 nativeDesklink?.addRemoteCandidate(
                     native,
-                    event.candidate.candidate,
+                    rewriteLoopbackTcpCandidate(event.candidate.candidate, tcpPort.current),
                     event.candidate.sdpMid ?? null,
                     event.candidate.sdpMLineIndex ?? null,
                 );
@@ -1108,8 +1129,9 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 ttl_seconds: authorization.session.ttlSeconds,
                 // A TCP-only path (an SSH tunnel, `adb reverse`) can only be
                 // reached on the engine's loopback, which the engine offers
-                // only when the app asks. Off by default, as on the wire.
-                ...(authorization.session.loopbackTcp ? { loopback_tcp: true } : {}),
+                // only when the app asks. Off by default, as on the wire. A
+                // relay transport implies it: the bridge is the forward.
+                ...((authorization.session.loopbackTcp || authorization.session.tcpTransport ? { loopback_tcp: true } : {})),
             });
         } catch (error) {
             const message = error instanceof Error ? error.message : 'the desktop could not start';
@@ -1135,6 +1157,27 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 refuse('the native session could not be created');
                 return;
             }
+            // A relay session needs its listener before any offer arrives: the
+            // engine's loopback candidate is rewritten to this port, and the
+            // stashed offer below is replayed through the same rewrite.
+            tcpBridge.current?.stop();
+            tcpBridge.current = null;
+            tcpPort.current = 0;
+            if (authorization.session.tcpTransport != null) {
+                if (platform?.startTcpBridge == null) {
+                    platform?.closeSession(id);
+                    refuse('this build cannot carry the desktop over a relay link');
+                    return;
+                }
+                const bridge = TcpBridge.start(platform, id, authorization.session.tcpTransport);
+                if (bridge == null) {
+                    platform?.closeSession(id);
+                    refuse('the relay listener could not start');
+                    return;
+                }
+                tcpBridge.current = bridge;
+                tcpPort.current = bridge.port;
+            }
             if (token !== generationToken.current) {
                 platform?.closeSession(id);
                 return;
@@ -1150,11 +1193,11 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             pendingOffer.current = null;
             if (stashedOffer !== null
                 && (stashedOffer.sessionId === undefined || stashedOffer.sessionId === openedResult.sessionId)) {
-                platform?.setRemoteDescription(id, 'offer', stashedOffer.sdp);
+                platform?.setRemoteDescription(id, 'offer', rewriteLoopbackTcpSdp(stashedOffer.sdp, tcpPort.current));
             }
             for (const candidate of pendingCandidates.current.splice(0)) {
                 if (candidate.sessionId !== undefined && candidate.sessionId !== openedResult.sessionId) continue;
-                platform?.addRemoteCandidate(id, candidate.candidate, candidate.sdpMid, candidate.sdpMLineIndex);
+                platform?.addRemoteCandidate(id, rewriteLoopbackTcpCandidate(candidate.candidate, tcpPort.current), candidate.sdpMid, candidate.sdpMLineIndex);
             }
 
             if (token === generationToken.current) established = true;
@@ -1389,6 +1432,15 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                         if (typeof event.payload.key === 'string') pressKey(event.payload.key)();
                         else if (typeof event.payload.text === 'string') typeText(event.payload.text);
                         return;
+                    case 'tcpAccept':
+                        tcpBridge.current?.accept(Number(event.payload.connection));
+                        return;
+                    case 'tcpData':
+                        tcpBridge.current?.receive(Number(event.payload.connection), String(event.payload.data ?? ''));
+                        return;
+                    case 'tcpClosed':
+                        tcpBridge.current?.remoteClosed(Number(event.payload.connection));
+                        return;
                     case 'failure':
                         // Only an ICE failure is held; an SDP or candidate
                         // failure is terminal exactly as before.
@@ -1527,6 +1579,9 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         cancelRestart();
         cancelStall();
         cancelFirstFrame();
+        tcpBridge.current?.stop();
+        tcpBridge.current = null;
+        tcpPort.current = 0;
         if (mediaTimer.current !== null) clearTimeout(mediaTimer.current);
         mediaTimer.current = null;
         generationToken.current += 1;
@@ -1603,6 +1658,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         setInputEnabled,
         fitToView,
         getStats,
+        getTcpTransportStats,
         setOrientation,
         send,
         modifiers,
@@ -1622,6 +1678,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         setInputEnabled,
         fitToView,
         getStats,
+        getTcpTransportStats,
         setOrientation,
         send,
         modifiers,
