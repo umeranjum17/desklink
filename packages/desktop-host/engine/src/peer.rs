@@ -1930,13 +1930,15 @@ pub(crate) mod tests {
         );
     }
 
-    /// A STUN responder on the loopback that answers every Binding request
-    /// with the requester's own address, the way a real STUN server would.
+    /// A STUN responder bound on the wildcard that answers every Binding
+    /// request with the requester's own address, the way a real STUN server
+    /// would. Reach it at the address `primary_ip` names, not at its bind
+    /// address: the wildcard receives for every interface.
     async fn stun_responder() -> std::net::SocketAddr {
         use rtc::stun::message::Setter;
-        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        let socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
             .await
-            .expect("a loopback socket");
+            .expect("a socket");
         let addr = socket.local_addr().expect("a bound port");
         tokio::spawn(async move {
             let mut buffer = vec![0u8; 1500];
@@ -1963,15 +1965,36 @@ pub(crate) mod tests {
         addr
     }
 
+    /// The interface address this machine sources its own traffic from — the
+    /// address a socket bound to this machine's interfaces can reach. The
+    /// peer binds one socket per non-loopback interface (loopback is skipped
+    /// when host candidates are gathered), and Windows' strong-host model
+    /// refuses to send an interface-bound datagram to 127.0.0.1, where the
+    /// Linux weak-host model allows it — so a loopback STUN fixture gathers
+    /// nothing on Windows. A real STUN server sits on the subnet, and the
+    /// fixture does the same. The probe is a connected UDP socket: the OS
+    /// resolves the route and its source address without sending a packet.
+    fn primary_ip() -> std::net::IpAddr {
+        let probe = std::net::UdpSocket::bind("0.0.0.0:0").and_then(|probe| {
+            probe.connect("192.0.2.1:9")?; // TEST-NET-1: connected UDP sends nothing
+            probe.local_addr()
+        });
+        match probe {
+            Ok(addr) if !addr.ip().is_unspecified() && !addr.ip().is_loopback() => addr.ip(),
+            _ => std::net::IpAddr::from([127, 0, 0, 1]),
+        }
+    }
+
     /// One ice_servers entry listing two URLs must put both in front of the
     /// peer connection: the first responder here never answers, so any
     /// reflexive candidate can only have come from the second URL. The engine
     /// used to forward only the first URL of each entry, which lost the rest.
     #[tokio::test]
     async fn the_second_url_of_an_ice_server_entry_gathers_a_reflexive_candidate() {
+        let ip = primary_ip();
         // A server that never answers: bound, so its port cannot be reused,
         // and silent, so it is as good as unreachable.
-        let silent = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        let silent = tokio::net::UdpSocket::bind("0.0.0.0:0")
             .await
             .expect("a socket");
         let unreachable = silent.local_addr().expect("a port");
@@ -1981,7 +2004,10 @@ pub(crate) mod tests {
         let (_peer, _offer) = VideoPeer::offer(
             TransportOptions {
                 ice_servers: vec![(
-                    vec![format!("stun:{unreachable}"), format!("stun:{answering}")],
+                    vec![
+                        format!("stun:{ip}:{}", unreachable.port()),
+                        format!("stun:{ip}:{}", answering.port()),
+                    ],
                     None,
                     None,
                 )],
@@ -1996,7 +2022,7 @@ pub(crate) mod tests {
 
         // Host candidates arrive without the network; the reflexive one needs
         // the binding round trip through the second URL of the entry.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             let event = tokio::time::timeout_at(deadline, events_rx.recv())
                 .await
