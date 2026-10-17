@@ -65,6 +65,10 @@ assert(process.platform === 'linux', 'this private-Xvfb proof requires Linux');
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const out = resolve(process.env.DESKLINK_LINK_TCP_OUT ?? '/home/umer/lab-tmp/dl-kit-link-tcp');
 mkdirSync(out, { recursive: true });
+// Per-run files, never appended across runs.
+for (const stale of ['reports.jsonl', 'relay.log', 'phone-tcp.txt', 'logcat-desklink.txt']) {
+    try { rmSync(join(out, stale), { force: true }); } catch { /* fresh run */ }
+}
 const scratch = mkdtempSync(join(homedir(), '.cache', 'desklink-link-tcp-'));
 const engine = resolve(process.env.DESKLINK_ENGINE ?? join(repo, 'packages/desktop-host/engine/target/debug/desklink-host'));
 const fixture = resolve(process.env.DESKLINK_VERIFY_TARGET ?? join(repo, 'packages/desktop-host/engine/target/debug/examples/x11_target'));
@@ -276,6 +280,20 @@ try {
         .reduce((total, stat) => total + (stat.framesDecoded ?? 0), 0);
     await waitFor(() => reports.length > 1 && decoded(reports[reports.length - 1]) > decoded(reports[0]),
         'the app to decode further video frames', 60000);
+    // Whose sockets carried it: every TCP socket on the phone (127.0.0.1 is
+    // 0100007F), plus the native session's own receive stats from logcat.
+    const netLog = join(out, 'phone-tcp.txt');
+    const dumpSockets = (tag) => {
+        try {
+            const tcp = adb('shell', 'cat', '/proc/net/tcp');
+            writeFileSync(netLog, `\n### ${tag} /proc/net/tcp\n${tcp}\n`, { flag: 'a' });
+        } catch { /* evidence only */ }
+    };
+    dumpSockets('presented');
+    try {
+        const logcat = spawnSync('adb', ['-s', serial, 'logcat', '-d', '-s', 'DesklinkSession:I', 'DesklinkTcpBridge:I'], { encoding: 'utf8', timeout: 60000 }).stdout;
+        writeFileSync(join(out, 'logcat-desklink.txt'), logcat);
+    } catch { /* evidence only */ }
     const lastReport = () => JSON.parse(reports[reports.length - 1]);
     const firstTcp = lastReport().tcp;
     assert(firstTcp && firstTcp.port > 0, 'the relay reports its listener port');
@@ -360,14 +378,15 @@ try {
     receipt.error = String(error);
     try {
         const last = JSON.parse(reports[reports.length - 1] ?? '{}');
+        const frames = text => ((JSON.parse(text).stats ?? []).filter(stat => stat.type === 'inbound-rtp')
+            .reduce((total, stat) => total + (stat.framesDecoded ?? 0), 0));
         receipt.lastTcp = last.tcp ?? null;
         receipt.droppedNonRelay = Number(last.droppedNonRelay ?? 0);
         receipt.relayBytes = relayBytes;
         receipt.enginePort = enginePort;
         receipt.loopback_tcp_port = enginePort || undefined;
-        const first = reports.length > 0 ? decoded(reports[0]) : 0;
-        receipt.framesFirst = first;
-        receipt.framesLast = reports.length > 0 ? decoded(reports[reports.length - 1]) : 0;
+        receipt.framesFirst = reports.length > 0 ? frames(reports[0]) : 0;
+        receipt.framesLast = reports.length > 0 ? frames(reports[reports.length - 1]) : 0;
     } catch { /* the receipt carries what it can */ }
     try { capture('00-failure.png'); } catch { /* the device may be gone */ }
     console.error(String(error));
