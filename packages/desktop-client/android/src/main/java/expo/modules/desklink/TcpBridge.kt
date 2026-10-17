@@ -11,7 +11,9 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import org.json.JSONObject
@@ -39,6 +41,8 @@ class TcpBridge(private val onEvent: (String, Map<String, Any?>) -> Unit) {
   }
   private var server: ServerSocket? = null
   private val sockets = ConcurrentHashMap<Int, Socket>()
+  /** One writer per connection: its batches leave in submit order, one at a time. */
+  private val writers = ConcurrentHashMap<Int, ExecutorService>()
   private var nextConnection = 0
   private val totalConnections = AtomicInteger(0)
   private val openConnections = AtomicInteger(0)
@@ -74,6 +78,9 @@ class TcpBridge(private val onEvent: (String, Map<String, Any?>) -> Unit) {
           break
         }
         val connection = synchronized(this) { ++nextConnection }
+        writers[connection] = Executors.newSingleThreadExecutor { runnable ->
+          Thread(runnable, "desklink-tcpbridge-writer").apply { isDaemon = true }
+        }
         sockets[connection] = socket
         totalConnections.incrementAndGet()
         openConnections.incrementAndGet()
@@ -126,22 +133,28 @@ class TcpBridge(private val onEvent: (String, Map<String, Any?>) -> Unit) {
   /** Bytes toward the engine on one connection; already batched by the caller. */
   fun write(connection: Int, data: String): Boolean {
     val socket = sockets[connection] ?: return false
+    val writer = writers[connection] ?: return false
     val bytes = try {
       Base64.decode(data, Base64.DEFAULT)
     } catch (error: IllegalArgumentException) {
       return false
     }
-    pool.execute {
-      try {
-        val output = socket.getOutputStream()
-        output.write(bytes)
-        output.flush()
-        bytesToEngine.addAndGet(bytes.size.toLong())
-      } catch (error: IOException) {
-        close(connection, true)
+    return try {
+      writer.execute {
+        try {
+          val output = socket.getOutputStream()
+          output.write(bytes)
+          output.flush()
+          bytesToEngine.addAndGet(bytes.size.toLong())
+        } catch (error: IOException) {
+          close(connection, true)
+        }
       }
+      true
+    } catch (error: RejectedExecutionException) {
+      // The connection closed between the lookup and the submit.
+      false
     }
-    return true
   }
 
   /** End one connection; the consumer asked, or its socket died. */
@@ -151,6 +164,7 @@ class TcpBridge(private val onEvent: (String, Map<String, Any?>) -> Unit) {
 
   private fun close(connection: Int, emit: Boolean): Boolean {
     val socket = sockets.remove(connection) ?: return false
+    writers.remove(connection)?.shutdownNow()
     openConnections.decrementAndGet()
     runCatching { socket.close() }
     if (emit) emit("tcpClosed", mapOf("connection" to connection))
