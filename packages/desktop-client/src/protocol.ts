@@ -14,6 +14,11 @@
  * only describe the subset a client needs.
  */
 
+import type { TcpTransport } from './tcpTransport';
+
+export type { TcpTransport, TcpTransportStats, TcpTransportStream } from './tcpTransport';
+export { isLoopbackTcpCandidate } from './tcpTransport';
+
 export const PROTOCOL_VERSION = 3;
 
 /**
@@ -63,6 +68,17 @@ export interface SessionOpenRequest {
      * prefers UDP whenever it has one.
      */
     loopbackTcp?: boolean;
+    /**
+     * Carry that loopback TCP offer over the application's own relay link, for
+     * a phone with no forward of its own (mobile data, no shared LAN). With it
+     * set the kit opens the session as `loopbackTcp` does, listens on the
+     * phone's own 127.0.0.1, and pipes every accepted connection through a
+     * stream from this factory to the engine's loopback TCP port. Never sent
+     * on the wire. Android only: a build that cannot carry it refuses the
+     * session, and the web binding never can, because a browser cannot dial a
+     * JS socket.
+     */
+    tcpTransport?: TcpTransport;
 }
 
 export interface SessionOpenResult {
