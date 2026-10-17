@@ -42,18 +42,25 @@ it.each(entries)('%s refuses before commands, builds, skips or desktop contact',
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-const python = spawnSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8', timeout: 4000 }).stdout?.trim();
+// Starting a Python interpreter is the slowest thing these checks do: a cold
+// hosted runner loads the runtime and stdlib before the flow's own refusal
+// guard can run, and that start has nothing to do with what the test proves.
+// This bounds a hung interpreter, not a slow one, so it is far above any real
+// start; the test below waits on the same budget for both of its spawns.
+const INTERPRETER_DEADLINE_MS = 60_000;
+
+const python = spawnSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8', timeout: INTERPRETER_DEADLINE_MS }).stdout?.trim();
 it.skipIf(!python)('Wayland point flow refuses before dependencies, files or compositor contact', () => {
   for (const key of ['DISPLAY', 'WAYLAND_DISPLAY']) {
     const result = spawnSync(python, [join(root, 'packages/desktop-host/engine/test/point-wayland-flow.py')], {
-      env: { ...process.env, DISPLAY: '', WAYLAND_DISPLAY: '', [key]: 'not-a-real-display' }, encoding: 'utf8', timeout: 4000,
+      env: { ...process.env, DISPLAY: '', WAYLAND_DISPLAY: '', [key]: 'not-a-real-display' }, encoding: 'utf8', timeout: INTERPRETER_DEADLINE_MS,
     });
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(1);
     expect(result.stdout).toBe('');
     expect(result.stderr).toContain(`private lab refuses ambient ${key}`);
   }
-});
+}, INTERPRETER_DEADLINE_MS * 2);
 
 it('refuses direct execution of the portal cage outside its owned PID namespace', () => {
   const result = spawnSync(process.execPath, [join(root, 'packages/desktop-host/test/portal-g2g-flow.mjs'), '--cage', '/nonexistent'], {
