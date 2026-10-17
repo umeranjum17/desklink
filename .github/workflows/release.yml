@@ -48,9 +48,11 @@ permissions:
   contents: read
 
 # Publishes must not overlap: queue main pushes instead of cancelling them.
+# Pull-request runs only prove the build and pack matrix (publish is main-only),
+# so a superseded PR run is cancelled instead of spending runners on a stale head.
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Gate: the repo's test suite plus the version lockstep invariant. The
