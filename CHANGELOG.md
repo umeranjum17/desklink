@@ -21,7 +21,7 @@ Joint patch release; protocol version remains 3. All packages move together.
   `never-connected` instead of cycling reopens, so the host stops restarting
   its engine and capture and the app sees one clear failure. A session that
   showed a picture and then drops keeps the old reopen path. See the README's
-  [connection states](packages/desktop-client/README.md).
+  [connection states](packages/desktop-client/README.md#what-the-package-guarantees).
 
 ## 0.5.7
 
