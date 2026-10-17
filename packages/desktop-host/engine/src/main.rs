@@ -136,7 +136,14 @@ use tokio::sync::mpsc as tokio_mpsc;
 unsafe extern "C" {
     fn desklink_point_overlay_main(display: *const std::ffi::c_char) -> i32;
     fn desklink_agent_overlay_main(display: *const std::ffi::c_char) -> i32;
-    fn desklink_agent_overlay_wayland(source_w: i32, source_h: i32, desktop: i32) -> i32;
+    fn desklink_agent_overlay_wayland(
+        source_w: i32,
+        source_h: i32,
+        desktop: i32,
+        origin_known: i32,
+        origin_x: i32,
+        origin_y: i32,
+    ) -> i32;
     fn desklink_wayland_layer_shell_available() -> i32;
     fn desklink_point_overlay_wayland(
         w: i32,
@@ -212,7 +219,21 @@ fn main() {
                 2
             } else {
                 let desktop = i32::from(args.get(3).map(String::as_str) == Some("desktop"));
-                unsafe { desklink_agent_overlay_wayland(width, height, desktop) }
+                // A desktop cue respawned after a press names the layout
+                // point that chose its output: `w h desktop ox oy`.
+                let (known, ox, oy) = match (args.get(4), args.get(5)) {
+                    (Some(x), Some(y)) => match (x.parse(), y.parse()) {
+                        (Ok(x), Ok(y)) => (1, x, y),
+                        _ => (0, 0, 0),
+                    },
+                    _ => (0, 0, 0),
+                };
+                let (known, ox, oy) = if desktop == 1 {
+                    (known, ox, oy)
+                } else {
+                    (0, 0, 0)
+                };
+                unsafe { desklink_agent_overlay_wayland(width, height, desktop, known, ox, oy) }
             }
         }
         "capabilities" => {

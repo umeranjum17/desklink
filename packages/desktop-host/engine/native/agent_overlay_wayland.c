@@ -252,7 +252,9 @@ static int overlay_main(int source_w,int source_h,int point_mode,int origin_know
         }
         if(wl_display_roundtrip(o.display)<0)return 2;
     }
-    if(point_mode) {
+    // Point markers always name their output; a desktop agent cue does once
+    // the engine has seen a press land, so the cue opens on that output.
+    if(point_mode || (desktop && origin_known)) {
         for(int i=0;i<o.output_count;i++) {
             struct Output *out=&o.outputs[i];
             if(origin_known && out->valid && origin_x>=out->x && origin_y>=out->y && origin_x<out->x+out->w && origin_y<out->y+out->h){selected=out->handle;o.mine=out;matches++;}
@@ -269,8 +271,9 @@ static int overlay_main(int source_w,int source_h,int point_mode,int origin_know
     FT_Library library=NULL;FT_Face font=point_mode?point_font(&library):NULL;
     if(point_mode&&!font){wl_display_disconnect(o.display);return 2;}
     o.surface=wl_compositor_create_surface(o.compositor);
-    // An agent cue's surface lands where the compositor puts it; it learns which output that is.
-    if(desktop && !point_mode)wl_surface_add_listener(o.surface,&surface_listener,&o);
+    // A desktop surface learns which output it is on, whether the compositor
+    // placed it or a layout origin selected it.
+    if(desktop)wl_surface_add_listener(o.surface,&surface_listener,&o);
     o.layer=wl_proxy_marshal_flags(o.shell,0,&layer_surface_interface,1,0,NULL,o.surface,selected,3,point_mode?"desklink-point":"desklink-agent");
     wl_proxy_add_listener(o.layer,layer_listener,&o);
     uint32_t anchor,keyboard_focus,empty_input;
@@ -356,7 +359,7 @@ static int overlay_main(int source_w,int source_h,int point_mode,int origin_know
     return 0;
 }
 
-int desklink_agent_overlay_wayland(int w,int h,int desktop){return overlay_main(w,h,0,0,0,0,desktop);}
+int desklink_agent_overlay_wayland(int w,int h,int desktop,int known,int x,int y){return overlay_main(w,h,0,known,x,y,desktop);}
 int desklink_point_overlay_wayland(int w,int h,int known,int x,int y,int desktop){return overlay_main(w,h,1,known,x,y,desktop);}
 
 // Read-only capability probe for idempotent clear before a helper exists.

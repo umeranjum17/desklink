@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- On a Hyprland **window** share, a tap landing on another output than the
+  agent cue helper is on now moves the helper there — the cue and
+  `session.point`'s ring draw where the tap landed, edge glow with them —
+  instead of drawing no cue. A tap on the helper's own output reuses it with
+  no new process, and closing the session reaps every helper. See
+  [PROTOCOL.md](packages/desktop-host/docs/PROTOCOL.md#input-and-clipboard-the-sessions-control-channel).
+
 ## 0.5.8
 
 Joint patch release; protocol version remains 3. All packages move together.
