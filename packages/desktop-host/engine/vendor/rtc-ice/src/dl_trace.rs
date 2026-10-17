@@ -1,7 +1,7 @@
 //! desklink scout instrumentation (dev-only, `DESKLINK_ICE_TRACE=1`).
 //!
 //! Timestamped stderr trace of the ICE agent's restart/check/nomination timeline
-//! for task dl-roam-postnom-attr. Not part of the shipped patch; see
+//! for ICE restart diagnosis. Not part of the shipped patch; see
 //! DESKLINK-PATCH.md. Every call site is marked `// desklink scout trace:` so the
 //! whole diff is trivially droppable.
 
