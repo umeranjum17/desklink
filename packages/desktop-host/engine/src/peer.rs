@@ -258,7 +258,10 @@ pub enum PeerEvent {
 /// Transport settings the consumer chose for this session.
 #[derive(Debug, Clone)]
 pub struct TransportOptions {
-    pub ice_servers: Vec<(String, Option<String>, Option<String>)>,
+    /// One entry per ICE server the consumer asked for, carrying every URL
+    /// that entry listed; the engine has already left out the ones the
+    /// WebRTC stack cannot dial and reported those to the consumer.
+    pub ice_servers: Vec<(Vec<String>, Option<String>, Option<String>)>,
     /// Listen for ICE over TCP on the loopback too. A phone that reaches this
     /// computer only through SSH has no UDP path; it forwards this port over
     /// the SSH connection it already has, and the picture rides that.
@@ -871,8 +874,8 @@ impl VideoPeer {
                 options
                     .ice_servers
                     .iter()
-                    .map(|(url, username, credential)| RTCIceServer {
-                        urls: vec![url.clone()],
+                    .map(|(urls, username, credential)| RTCIceServer {
+                        urls: urls.clone(),
                         username: username.clone().unwrap_or_default(),
                         credential: credential.clone().unwrap_or_default(),
                     })
@@ -1925,5 +1928,85 @@ pub(crate) mod tests {
             !passive(&offered(false).await),
             "no one else is offered a port on the loopback"
         );
+    }
+
+    /// A STUN responder on the loopback that answers every Binding request
+    /// with the requester's own address, the way a real STUN server would.
+    async fn stun_responder() -> std::net::SocketAddr {
+        use rtc::stun::message::Setter;
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback socket");
+        let addr = socket.local_addr().expect("a bound port");
+        tokio::spawn(async move {
+            let mut buffer = vec![0u8; 1500];
+            while let Ok((size, peer)) = socket.recv_from(&mut buffer).await {
+                let mut request = rtc::stun::message::Message::new();
+                request.raw = buffer[..size].to_vec();
+                if request.decode().is_err() {
+                    continue;
+                }
+                let mut response = rtc::stun::message::Message::new();
+                response.set_type(rtc::stun::message::BINDING_SUCCESS);
+                response.transaction_id = request.transaction_id;
+                let mapped = rtc::stun::xoraddr::XorMappedAddress {
+                    ip: peer.ip(),
+                    port: peer.port(),
+                };
+                if mapped.add_to(&mut response).is_err() {
+                    continue;
+                }
+                response.write_header();
+                let _ = socket.send_to(&response.raw, peer).await;
+            }
+        });
+        addr
+    }
+
+    /// One ice_servers entry listing two URLs must put both in front of the
+    /// peer connection: the first responder here never answers, so any
+    /// reflexive candidate can only have come from the second URL. The engine
+    /// used to forward only the first URL of each entry, which lost the rest.
+    #[tokio::test]
+    async fn the_second_url_of_an_ice_server_entry_gathers_a_reflexive_candidate() {
+        // A server that never answers: bound, so its port cannot be reused,
+        // and silent, so it is as good as unreachable.
+        let silent = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("a socket");
+        let unreachable = silent.local_addr().expect("a port");
+        let answering = stun_responder().await;
+
+        let (events, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_peer, _offer) = VideoPeer::offer(
+            TransportOptions {
+                ice_servers: vec![(
+                    vec![format!("stun:{unreachable}"), format!("stun:{answering}")],
+                    None,
+                    None,
+                )],
+                loopback_tcp: false,
+                pace_bps: 20_000_000.0,
+            },
+            events,
+            VideoCodec::Vp9,
+        )
+        .await
+        .expect("a peer connection");
+
+        // Host candidates arrive without the network; the reflexive one needs
+        // the binding round trip through the second URL of the entry.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let event = tokio::time::timeout_at(deadline, events_rx.recv())
+                .await
+                .expect("no reflexive candidate was ever gathered")
+                .expect("the peer event stream ended");
+            if let PeerEvent::Candidate { candidate, .. } = event {
+                if candidate.contains(" typ srflx ") {
+                    break;
+                }
+            }
+        }
     }
 }

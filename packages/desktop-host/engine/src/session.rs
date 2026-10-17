@@ -703,7 +703,7 @@ pub struct OpenRequest {
     pub max_height: usize,
     pub bitrate_kbps: u32,
     pub max_fps: u32,
-    pub ice_servers: Vec<(String, Option<String>, Option<String>)>,
+    pub ice_servers: Vec<(Vec<String>, Option<String>, Option<String>)>,
     pub restore_token: Option<String>,
     pub ttl: Option<Duration>,
     /// Offer a passive ICE-TCP candidate on the loopback, for a forwarded client.
@@ -761,6 +761,13 @@ pub enum SessionEvent {
     /// that was dropped.
     KeyframeRequest {
         generation: u64,
+    },
+    /// An ICE server URL the request asked for that the peer's configuration
+    /// does not carry: one the WebRTC stack cannot dial (TURN over anything
+    /// but UDP). Reported once per open, naming the URL, so a skipped URL is
+    /// a warning the consumer sees rather than a silent drop.
+    IceServerSkipped {
+        url: String,
     },
     RestoreToken(String),
     CaptureStopped {

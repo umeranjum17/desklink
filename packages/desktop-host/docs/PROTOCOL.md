@@ -265,6 +265,20 @@ rate and X11 capture loop; portal capture offers it as the preferred PipeWire
 frame rate, and macOS sets its ScreenCaptureKit stream minimum frame interval.
 A source may still supply fewer frames.
 
+`ice_servers` carries the STUN/TURN servers the user brought, one object per
+server with every URL that server lists. Each URL an entry lists reaches the
+WebRTC stack with that entry's `username` and `credential` — listing
+`stun:a` and `stun:b` in one entry uses both, so a fallback behind an
+unreachable primary still gathers candidates. A TURN URL (`turn:`/`turns:`)
+whose transport is not UDP — `?transport=tcp`, or a bare `turns:` URL, which
+is TLS over TCP by default — is one the WebRTC stack cannot dial: the engine
+leaves it out of the configuration and reports it once with a
+`session.iceServerSkipped` warning event naming the URL, so a skipped URL is
+never a silent drop. Everything else in the entry — including a URL the
+parser cannot read — is handed to the WebRTC stack unchanged, whose own
+verdict then applies: for example a `turn:` URL on an entry without both a
+`username` and a `credential` refuses the open in the stack's own words.
+
 `agent_indicator` is opt-in local feedback for an agent controller; desklink-axi
 sets it for sessions it drives (except Windows); human phone control omits it. On
 Linux it adds an eased arrow inside a halo that brightens on clicks and keys,

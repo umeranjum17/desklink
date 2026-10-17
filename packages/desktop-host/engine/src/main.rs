@@ -542,6 +542,47 @@ async fn serve() -> Result<()> {
     Ok(())
 }
 
+/// Splits the requested ICE servers into the configuration the peer gets and
+/// the URLs this engine leaves out. Every URL the WebRTC stack can dial goes
+/// through with its entry's username and credential — all of an entry's URLs,
+/// so a fallback behind an unreachable primary still gathers candidates. A
+/// TURN URL whose transport is not UDP is one the stack cannot dial, so it is
+/// skipped here and reported once by the caller, never dropped silently. A
+/// URL the parser cannot read is forwarded unchanged: the peer connection
+/// owns that verdict and refuses the open in its own words.
+#[cfg(any(
+    target_os = "linux",
+    all(any(target_os = "macos", target_os = "windows"), desklink_vpx)
+))]
+fn usable_ice_servers(
+    servers: Vec<protocol::IceServerParam>,
+) -> (
+    Vec<(Vec<String>, Option<String>, Option<String>)>,
+    Vec<String>,
+) {
+    use rtc_ice::url::{ProtoType, SchemeType, Url};
+    let mut usable = Vec::new();
+    let mut skipped = Vec::new();
+    for server in servers {
+        let mut urls = Vec::with_capacity(server.urls.len());
+        for url in server.urls {
+            let undialable = Url::parse_url(&url).is_ok_and(|parsed| {
+                matches!(parsed.scheme, SchemeType::Turn | SchemeType::Turns)
+                    && parsed.proto != ProtoType::Udp
+            });
+            if undialable {
+                skipped.push(url);
+            } else {
+                urls.push(url);
+            }
+        }
+        if !urls.is_empty() {
+            usable.push((urls, server.username, server.credential));
+        }
+    }
+    (usable, skipped)
+}
+
 #[cfg(any(
     target_os = "linux",
     all(any(target_os = "macos", target_os = "windows"), desklink_vpx)
@@ -616,6 +657,10 @@ fn render_event(notice: session::Notice) -> Option<String> {
             "session.capture.stopped",
             serde_json::json!({ "sessionId": session_id, "reason": reason }),
         ),
+        session::SessionEvent::IceServerSkipped { url } => (
+            "session.iceServerSkipped",
+            serde_json::json!({ "sessionId": session_id, "url": url }),
+        ),
         session::SessionEvent::Revoked { reason, code } => (
             "session.revoked",
             serde_json::json!({ "sessionId": session_id, "reason": reason, "code": code }),
@@ -672,6 +717,7 @@ async fn dispatch(
             }
             let params: protocol::OpenParams = serde_json::from_value(request.params.clone())
                 .map_err(|error| ErrorBody::new("malformed", error.to_string()))?;
+            let usable = usable_ice_servers(params.ice_servers);
             let open = session::OpenRequest {
                 source: params.source,
                 cursor: params.cursor,
@@ -685,16 +731,7 @@ async fn dispatch(
                 agent_indicator: params.agent_indicator,
                 local_frames: params.local_frames,
                 audio: params.audio,
-                ice_servers: params
-                    .ice_servers
-                    .into_iter()
-                    .filter_map(|server| {
-                        server
-                            .urls
-                            .first()
-                            .map(|url| (url.clone(), server.username, server.credential))
-                    })
-                    .collect(),
+                ice_servers: usable.0,
             };
             let session = session::Session::open(open, events.clone())
                 .await
@@ -713,6 +750,15 @@ async fn dispatch(
                 "agentIndicator": session.agent_indicator(),
                 "audio": session.audio_info(),
             });
+            // URLs the WebRTC stack cannot dial were left out of the peer's
+            // configuration; each skipped one is named once instead of
+            // vanishing from a multi-URL entry without a trace.
+            for url in usable.1 {
+                let _ = events.send(session::Notice {
+                    session_id: session.id().to_owned(),
+                    event: session::SessionEvent::IceServerSkipped { url },
+                });
+            }
             *current = Some(session);
             Ok(result)
         }
@@ -944,6 +990,26 @@ mod tests {
         assert_eq!(
             parsed,
             serde_json::json!({"event":"session.cursor","params":{"sessionId":"cursor-session","x":32,"y":64,"visible":false,"timestamp_us":123456}})
+        );
+    }
+
+    #[test]
+    fn the_skipped_ice_server_warning_names_the_url_once() {
+        let line = render_event(session::Notice {
+            session_id: String::from("session-1"),
+            event: session::SessionEvent::IceServerSkipped {
+                url: String::from("turn:turn.example.com:3478?transport=tcp"),
+            },
+        })
+        .expect("a skipped-URL warning is renderable");
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed["event"], "session.iceServerSkipped");
+        assert_eq!(
+            parsed["params"],
+            serde_json::json!({
+                "sessionId": "session-1",
+                "url": "turn:turn.example.com:3478?transport=tcp"
+            })
         );
     }
 
