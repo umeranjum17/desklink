@@ -118,19 +118,26 @@ export function base64Decode(text: string): Uint8Array {
  * own 127.0.0.1. Only that line is ever rewritten; anything else — UDP host
  * candidates, relay candidates — passes through untouched.
  */
-export function isLoopbackTcpCandidate(candidate: string): boolean {
-    const fields = candidate.trim().replace(/^a=/, '').trim().split(/\s+/);
+function candidateFields(candidate: string): string[] {
+    return candidate.trim().replace(/^a=/, '').trim().split(/\s+/);
+}
+
+function isLoopbackTcpFields(fields: string[]): boolean {
     if (fields.length < 6 || !fields[0]?.startsWith('candidate:')) return false;
     return fields[2]?.toLowerCase() === 'tcp' && fields[4] === '127.0.0.1';
+}
+
+export function isLoopbackTcpCandidate(candidate: string): boolean {
+    return isLoopbackTcpFields(candidateFields(candidate));
 }
 
 /**
  * The engine port a loopback TCP candidate offers, or 0 for any other line and
  * for ICE's throwaway discard port, which nothing listens on.
  */
-function loopbackTcpPort(candidate: string): number {
-    if (!isLoopbackTcpCandidate(candidate)) return 0;
-    const port = Number(candidate.trim().replace(/^a=/, '').trim().split(/\s+/)[5]);
+function loopbackTcpPort(fields: string[]): number {
+    if (!isLoopbackTcpFields(fields)) return 0;
+    const port = Number(fields[5]);
     return Number.isInteger(port) && port >= 1024 ? port : 0;
 }
 
@@ -142,10 +149,10 @@ function loopbackTcpPort(candidate: string): number {
  */
 export function rewriteLoopbackTcpCandidate(candidate: string, port: number): string {
     if (!Number.isInteger(port) || port <= 0) return candidate;
-    const enginePort = loopbackTcpPort(candidate);
+    const fields = candidateFields(candidate);
+    const enginePort = loopbackTcpPort(fields);
     if (enginePort === 0 || enginePort === port) return candidate;
     const prefixed = candidate.startsWith('a=');
-    const fields = candidate.trim().replace(/^a=/, '').trim().split(/\s+/);
     const rewritten = [...fields.slice(0, 5), String(port), ...fields.slice(6)].join(' ');
     return prefixed ? `a=${rewritten}` : rewritten;
 }
@@ -222,14 +229,14 @@ export class TcpBridge {
      */
     rewriteSdp(sdp: string): string {
         for (const line of sdp.split(/\r?\n/)) {
-            if (line.startsWith('a=candidate:')) this.enginePort = loopbackTcpPort(line) || this.enginePort;
+            if (line.startsWith('a=candidate:')) this.enginePort = loopbackTcpPort(candidateFields(line)) || this.enginePort;
         }
         return rewriteLoopbackTcpSdp(sdp, this.port);
     }
 
     /** One trickled engine candidate for the phone, as `rewriteSdp` does. */
     rewriteCandidate(candidate: string): string {
-        this.enginePort = loopbackTcpPort(candidate) || this.enginePort;
+        this.enginePort = loopbackTcpPort(candidateFields(candidate)) || this.enginePort;
         return rewriteLoopbackTcpCandidate(candidate, this.port);
     }
 
