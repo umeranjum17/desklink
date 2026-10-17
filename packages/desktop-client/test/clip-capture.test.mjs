@@ -28,6 +28,8 @@ esac
 `;
 
 const hasFfmpeg = spawnSync('ffmpeg', ['-version']).status === 0;
+// The fake phone is a shell script, so it only answers where a POSIX shell runs.
+const runsFakePhone = process.platform !== 'win32';
 
 // Runs captureClip against the fake phone and returns what it made and did.
 const clipWithPhone = (mode, seconds) => {
@@ -52,8 +54,9 @@ const clipWithPhone = (mode, seconds) => {
                 adb, serial: 'fake-serial', seconds, devicePath: '/sdcard/clip.mp4', outPath, scratch: dir,
             });
             const calls = readFileSync(log, 'utf8');
-            const codec = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
-                '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', outPath], { encoding: 'utf8' }).stdout.trim();
+            // ffprobe ships with ffmpeg, and only the hasFfmpeg-gated test reads it.
+            const codec = hasFfmpeg ? spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
+                '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', outPath], { encoding: 'utf8' }).stdout.trim() : '';
             return { result, calls, codec };
         } finally {
             for (const key of Object.keys(fake)) delete process.env[key];
@@ -63,14 +66,14 @@ const clipWithPhone = (mode, seconds) => {
     }
 };
 
-it('keeps screenrecord as the first choice when the phone allows it', () => {
+it.skipIf(!runsFakePhone)('keeps screenrecord as the first choice when the phone allows it', () => {
     const { result, calls } = clipWithPhone('allowed', 1);
     expect(result.mode).toBe('screenrecord');
     expect(calls).toContain('shell screenrecord --time-limit 1 /sdcard/clip.mp4');
     expect(calls).not.toContain('exec-out screencap');
 });
 
-it.skipIf(!hasFfmpeg)('falls back to a screencap timelapse when screenrecord is denied', { timeout: 60000 }, () => {
+it.skipIf(!runsFakePhone || !hasFfmpeg)('falls back to a screencap timelapse when screenrecord is denied', { timeout: 60000 }, () => {
     const { result, calls, codec } = clipWithPhone('denied', 1);
     expect(result.mode).toBe('timelapse');
     expect(result.frames).toBeGreaterThan(0);
