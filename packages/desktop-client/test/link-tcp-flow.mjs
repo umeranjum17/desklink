@@ -367,14 +367,14 @@ try {
     await waitFor(() => droppedNonRelay() > 0, 'the app to discard non-relay candidates', 60000);
     const droppedNonRelayOut = () => Number(lastReport().droppedNonRelayOut ?? 0);
     await waitFor(() => droppedNonRelayOut() > 0, 'the app to withhold non-relay locals', 60000);
-    // A clip of the live picture: the device's own screenrecord, or a screencap timelapse when the phone denies it.
+    // A clip of the live picture: the device's own screenrecord, or a screencap timelapse when it is unavailable.
     const clip = captureClip({
         serial, seconds: 10, devicePath: '/sdcard/link-tcp-clip.mp4',
         outPath: join(out, 'clip-relayed-desktop.mp4'), scratch,
     });
     receipt.clip = clip;
     console.log(clip.mode === 'timelapse'
-        ? `clip-relayed-desktop.mp4 is a TIMELAPSE: screenrecord was denied; ${clip.frames} screencap frames at ${clip.fps} fps`
+        ? `clip-relayed-desktop.mp4 is a TIMELAPSE: screenrecord unavailable; ${clip.frames} screencap frames at ${clip.fps} fps`
         : 'clip-relayed-desktop.mp4 is a screenrecord clip');
     await sleep(2000);
     const first = capture('01-relayed-desktop.png');
