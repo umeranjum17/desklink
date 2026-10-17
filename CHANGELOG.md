@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- A relay-only phone (`session.tcpTransport`) now gets its picture back after
+  a network stall long enough to fail the session. `TcpTransport.open` now
+  receives `{ port }`, the engine loopback TCP port that connection is for.
+  The engine picks a new port for each session, so a relay that kept dialing
+  the first session's port could not reach any later session. See
+  [the relay-only section](packages/desktop-client/README.md#relay-only-phones).
 - On a Hyprland **window** share, a tap landing on another output than the
   agent cue helper is on now moves the helper there — the cue and
   `session.point`'s ring draw where the tap landed, edge glow with them —

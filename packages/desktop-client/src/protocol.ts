@@ -16,7 +16,7 @@
 
 import type { TcpTransport } from './tcpTransport';
 
-export type { TcpTransport, TcpTransportStats, TcpTransportStream } from './tcpTransport';
+export type { TcpTransport, TcpTransportStats, TcpTransportStream, TcpTransportTarget } from './tcpTransport';
 export { isLoopbackTcpCandidate } from './tcpTransport';
 
 export const PROTOCOL_VERSION = 3;

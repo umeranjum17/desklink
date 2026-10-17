@@ -51,15 +51,15 @@ function connectionLink(link: string | null): { url: string; report: string | nu
 
 /**
  * A generic lab byte relay over WebSocket: one socket per `open()` stream,
- * binary messages each way. The relay dials the engine's loopback TCP port on
- * the host; the kit's listener feeds the phone end. Product-neutral: plain
- * bytes, no app or link names on the wire.
+ * binary messages each way. The relay dials the engine's loopback TCP port the
+ * kit names (`port` on the URL) on the host; the kit's listener feeds the
+ * phone end. Product-neutral: plain bytes, no app or link names on the wire.
  */
 export function wsTcpTransport(relayUrl: string): TcpTransport {
     return {
-        open: () =>
+        open: ({ port }) =>
             new Promise((resolve, reject) => {
-                const socket = new WebSocket(relayUrl);
+                const socket = new WebSocket(`${relayUrl}${relayUrl.includes('?') ? '&' : '?'}port=${port}`);
                 socket.binaryType = 'arraybuffer';
                 const handlers = new Set<(data: Uint8Array) => void>();
                 let settled = false;

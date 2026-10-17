@@ -159,16 +159,20 @@ engine's loopback TCP port:
 import type { TcpTransport } from '@desklink/react-native';
 
 const relay: TcpTransport = {
-  // One duplex per relayed connection, usually one per session.
-  open: () => openByteStreamToComputer(),
+  // One duplex per relayed connection, usually one per session, to the
+  // engine loopback TCP port the kit names.
+  open: ({ port }) => openByteStreamToComputer(port),
 };
 
 session: { tcpTransport: relay },
 ```
 
-where `openByteStreamToComputer()` returns `{ write, onData, close }`:
-`write(bytes)` sends toward the engine, `onData(handler)` receives from it,
-`close()` ends that connection. The kit rewrites the engine's `127.0.0.1` TCP
+where `openByteStreamToComputer(port)` connects to `127.0.0.1:<port>` on the
+computer and returns `{ write, onData, close }`: `write(bytes)` sends toward
+the engine, `onData(handler)` receives from it, `close()` ends that
+connection. The engine picks the port per session, and a session that fails
+(a stall long enough to exhaust ICE restarts) is replaced by one on a new
+port, so dial the `port` each `open` names rather than one learned earlier. The kit rewrites the engine's `127.0.0.1` TCP
 candidate to its listener's port before handing it to the native peer, so the
 peer dials the listener and the picture rides the application's link, still
 inside DTLS. Bytes cross the JS bridge in batches by size (16 KB) and deadline
