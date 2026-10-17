@@ -6,16 +6,27 @@
  * `adb exec-out screencap -p` frames and encoded here as an H.264 timelapse at
  * the rate the device actually gave, so the run still has a clip. The caller
  * labels a timelapse as one in its run output.
+ *
+ * Every command is awaited, never spawnSync: the caller's relay shares this
+ * process's event loop, and a blocked loop stalls the relay for the whole clip.
  */
-import { spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 
-export function captureClip({ adb = 'adb', serial, seconds, devicePath, outPath, scratch }) {
-    const run = (...args) => spawnSync(adb, ['-s', serial, ...args], { timeout: 120000 });
-    run('shell', 'rm', '-f', devicePath);
-    const recorded = run('shell', 'screenrecord', '--time-limit', String(seconds), devicePath);
-    if (recorded.status === 0 && run('pull', devicePath, outPath).status === 0 && statSync(outPath).size > 0) {
+const execFileAsync = promisify(execFile);
+
+// Resolves with a status and Buffers, like spawnSync, and never rejects.
+export const spawnAsync = (file, args, options) => execFileAsync(file, args, { encoding: 'buffer', ...options })
+    .then(({ stdout, stderr }) => ({ status: 0, stdout, stderr }),
+        error => ({ status: typeof error.code === 'number' ? error.code : null, stdout: error.stdout ?? Buffer.alloc(0), stderr: error.stderr ?? Buffer.alloc(0) }));
+
+export async function captureClip({ adb = 'adb', serial, seconds, devicePath, outPath, scratch }) {
+    const run = (...args) => spawnAsync(adb, ['-s', serial, ...args], { timeout: 120000 });
+    await run('shell', 'rm', '-f', devicePath);
+    const recorded = await run('shell', 'screenrecord', '--time-limit', String(seconds), devicePath);
+    if (recorded.status === 0 && (await run('pull', devicePath, outPath)).status === 0 && statSync(outPath).size > 0) {
         return { mode: 'screenrecord' };
     }
 
@@ -23,7 +34,7 @@ export function captureClip({ adb = 'adb', serial, seconds, devicePath, outPath,
     const started = Date.now();
     let frames = 0;
     while (Date.now() - started < seconds * 1000) {
-        const shot = spawnSync(adb, ['-s', serial, 'exec-out', 'screencap', '-p'],
+        const shot = await spawnAsync(adb, ['-s', serial, 'exec-out', 'screencap', '-p'],
             { timeout: 30000, maxBuffer: 64 * 1024 * 1024 });
         if (shot.status !== 0 || shot.stdout.length === 0) break;
         writeFileSync(join(dir, `f_${frames}.png`), shot.stdout);
@@ -36,7 +47,7 @@ export function captureClip({ adb = 'adb', serial, seconds, devicePath, outPath,
         throw new Error(`screenrecord failed (${reason}) and no screencap frame came back`);
     }
     const fps = frames / elapsed;
-    const encoded = spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-framerate', fps.toFixed(3),
+    const encoded = await spawnAsync('ffmpeg', ['-y', '-loglevel', 'error', '-framerate', fps.toFixed(3),
         '-i', join(dir, 'f_%d.png'), '-pix_fmt', 'yuv420p', '-c:v', 'libx264', '-crf', '30', outPath],
     { timeout: 600000 });
     rmSync(dir, { recursive: true, force: true });

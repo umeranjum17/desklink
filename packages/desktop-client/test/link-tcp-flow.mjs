@@ -22,7 +22,9 @@
  *    and the JS-to-native crossings stay batched (a handful a second, not one
  *    per packet);
  *  - input rode the same path: a tap inside the picture reaches the fixture,
- *    and two mapping taps land on the desktop points the fingers cover.
+ *    and two mapping taps land on the desktop points the fingers cover;
+ *  - the picture never fell to `reconnecting` from its first live status to
+ *    the end of the run, and every status report the app sent arrived.
  *
  * The host side runs here, on a private Xvfb (display >= 170, its own cookie),
  * with the repository's own `x11_target` fixture repainting, the bridge on a
@@ -42,6 +44,8 @@
  *   DESKLINK_LINK_TCP_OUT     where the captures and logs go (default
  *                             /home/umer/lab-tmp/dl-kit-link-tcp)
  *   DESKLINK_ANDROID_SKIP_BUILD  1 reuses the APK the last run built
+ *   DESKLINK_METRO_PORT       host port for Metro (default 8081); the phone's
+ *                             8081 is reversed to it
  */
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -58,7 +62,7 @@ import { PNG } from 'pngjs';
 import {
     assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb,
 } from '../../desktop-host/test/lab-safety.mjs';
-import { captureClip } from './clip-capture.mjs';
+import { captureClip, spawnAsync } from './clip-capture.mjs';
 
 assertNoAmbientDesktop();
 assert(process.platform === 'linux', 'this private-Xvfb proof requires Linux');
@@ -81,19 +85,25 @@ const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex
 const attached = spawnSync('adb', ['devices'], { encoding: 'utf8' }).stdout.split('\n').slice(1)
     .map(line => line.trim().split(/\s+/)).filter(([, state]) => state === 'device').map(([serial]) => serial);
 const serial = process.env.ANDROID_SERIAL ?? attached[0];
+// The host port Metro serves on; the phone's 8081 is reversed to it.
+const metroPort = Number(process.env.DESKLINK_METRO_PORT ?? 8081);
 assert(serial && attached.includes(serial),
     `name the device with ANDROID_SERIAL; adb reports ${attached.join(', ') || 'none'}`);
-const adb = (...args) => {
-    const done = spawnSync('adb', ['-s', serial, ...args], { encoding: 'utf8', timeout: 120000 });
+// The relay shares this process's event loop, so every adb call that can run
+// while media is relayed is async: a blocking spawnSync here stalls the relay,
+// and the engine's pings with it, which the app reads as a lost connection.
+const adbRun = (args, timeout = 120000) => spawnAsync('adb', ['-s', serial, ...args], { encoding: 'utf8', timeout, maxBuffer: 64 * 1024 * 1024 });
+const adb = async (...args) => {
+    const done = await adbRun(args);
     assert.equal(done.status, 0, `adb ${args.join(' ')} failed: ${done.stderr}`);
     return done.stdout;
 };
-const tryAdb = (...args) =>
-    spawnSync('adb', ['-s', serial, ...args], { encoding: 'utf8', timeout: 120000 }).status === 0;
-const capture = name => {
+const tryAdb = async (...args) => (await adbRun(args)).status === 0;
+const capture = async name => {
     const path = join(out, name);
-    const shot = spawnSync('sh', ['-c', `adb -s ${serial} exec-out screencap -p > ${path}`]);
+    const shot = await spawnAsync('adb', ['-s', serial, 'exec-out', 'screencap', '-p'], { timeout: 120000, maxBuffer: 256 * 1024 * 1024 });
     assert.equal(shot.status, 0, 'the device could not be captured');
+    writeFileSync(path, shot.stdout);
     return path;
 };
 const logs = { bridge: '', fixture: '', metro: '' };
@@ -108,11 +118,13 @@ let xvfb, target, bridge, metro, receiver, relayServer;
 let enginePort = 0;
 const relayBytes = { wsToTcp: 0, tcpToWs: 0, streams: 0 };
 const reports = [];
+// Every session status the app reports, in the order it changed.
+const statuses = [];
 // Corner-file handshake evidence, for the same reason.
 let cornerDebug = null;
 const reverses = [];
-const reverse = (...args) => {
-    adb('reverse', ...args);
+const reverse = async (...args) => {
+    await adb('reverse', ...args);
     reverses.push(args[0]);
 };
 
@@ -125,7 +137,7 @@ const start = (name, cmd, args, childEnv, cwd = repo) => {
 };
 const waitFor = async (ready, what, ms = 60000) => {
     const until = Date.now() + ms;
-    while (Date.now() < until) { if (ready()) return; await sleep(200); }
+    while (Date.now() < until) { if (await ready()) return; await sleep(200); }
     throw new Error(`timed out waiting for ${what}`);
 };
 
@@ -225,14 +237,16 @@ try {
         request.on('data', c => chunks.push(c));
         request.on('end', () => {
             const text = Buffer.concat(chunks).toString();
-            reports.push(text);
             writeFileSync(reportsLog, `${text}\n`, { flag: 'a' });
-            try {
-                const report = JSON.parse(text);
-                if (Number.isInteger(report?.loopbackTcpPort) && report.loopbackTcpPort >= 1024 && enginePort === 0) {
-                    enginePort = report.loopbackTcpPort;
-                }
-            } catch { /* not JSON; kept raw */ }
+            let report = null;
+            try { report = JSON.parse(text); } catch { /* not JSON; kept raw */ }
+            // A status change is kept apart from the samples: every sample reads
+            // the last report as the app's current state.
+            if (report?.statusChange !== undefined) statuses.push(report);
+            else reports.push(text);
+            if (Number.isInteger(report?.loopbackTcpPort) && report.loopbackTcpPort >= 1024 && enginePort === 0) {
+                enginePort = report.loopbackTcpPort;
+            }
             response.writeHead(204, { 'Access-Control-Allow-Origin': '*' });
             response.end();
         });
@@ -256,27 +270,33 @@ try {
     // TCP-only road every other socket in this run takes. The guest's uplink
     // goes away below, so 10.0.2.2 is dead and the bundle must come through
     // the phone's own loopback.
-    const metroProbe = createServer();
-    await new Promise((ok, failed) => {
-        metroProbe.once('error', failed);
-        metroProbe.listen(8081, '127.0.0.1', ok);
-    }).catch(error => {
-        throw new Error(`Metro needs the host's own 8081 for the reverse, which is already held: ${error.message}`);
-    });
-    metroProbe.close();
-    metro = start('metro', 'npx', ['expo', 'start', '--port', '8081'], { ...env, CI: '1' }, example);
+    // Metro may answer on either loopback, so both are probed: a Metro on
+    // `::1` alone would pass a 127.0.0.1-only check and then fail inside Expo.
+    for (const host of ['127.0.0.1', '::1']) {
+        const metroProbe = createServer();
+        await new Promise((ok, failed) => {
+            metroProbe.once('error', failed);
+            metroProbe.listen(metroPort, host, ok);
+        }).then(() => metroProbe.close(), error => {
+            if (host === '::1' && error.code === 'EADDRNOTAVAIL') return;
+            throw new Error(`Metro needs host port ${metroPort}, which is already held on ${host} (another Metro on this host?): ${error.message}`);
+        });
+    }
+    metro = start('metro', 'npx', ['expo', 'start', '--port', String(metroPort)], { ...env, CI: '1' }, example);
     await waitFor(() => /Waiting on http/.test(logs.metro), 'Metro');
-    adb('install', '-r', '-g', apk);
+    await adb('install', '-r', '-g', apk);
     // Route surgery below needs privilege; the emulator's userdebug build
     // grants it. Restarting adbd drops nothing this run needs yet.
-    adb('root');
-    adb('wait-for-device');
+    await adb('root');
+    await adb('wait-for-device');
     // Every socket the app opens rides `adb reverse` (TCP only): signaling,
     // reports, the relay, and the bundle.
-    reverse('tcp:8081', 'tcp:8081');
-    reverse(`tcp:${bridgePort}`, `tcp:${bridgePort}`);
-    reverse(`tcp:${receiver.address().port}`, `tcp:${receiver.address().port}`);
-    reverse(`tcp:${relayPort}`, `tcp:${relayPort}`);
+    // The device's own 8081 is what the app asks for; the reverse carries it to
+    // the host port Metro took.
+    await reverse('tcp:8081', `tcp:${metroPort}`);
+    await reverse(`tcp:${bridgePort}`, `tcp:${bridgePort}`);
+    await reverse(`tcp:${receiver.address().port}`, `tcp:${receiver.address().port}`);
+    await reverse(`tcp:${relayPort}`, `tcp:${relayPort}`);
     receipt.media_path = 'TCP only, through adb-reverse forwards: the guest uplink is off, so the emulator has no IP route to the host; the phone listener is piped over a reverse to the engine loopback port';
     receipt.reverses = reverses.slice();
 
@@ -284,9 +304,9 @@ try {
         + `&report=${encodeURIComponent(`http://127.0.0.1:${receiver.address().port}/report`)}`
         + `&tcpRelay=${encodeURIComponent(`ws://127.0.0.1:${relayPort}/tcp`)}&relayOnly=1`;
     receipt.link = link.replace(token, '<bridge-token>');
-    adb('shell', 'am', 'force-stop', 'dev.desklink.example');
+    await adb('shell', 'am', 'force-stop', 'dev.desklink.example');
     await sleep(1000);
-    tryAdb('shell', 'logcat', '-c');
+    await tryAdb('shell', 'logcat', '-c');
     await waitFor(() => tryAdb('shell', 'am', 'start', '-n', 'dev.desklink.example/.MainActivity',
         '-a', 'android.intent.action.VIEW', '-d', `"${link}"`),
     'the app to answer its connection link', 120000);
@@ -304,22 +324,22 @@ try {
     await waitFor(() => reports.some(text => {
         try { return JSON.parse(text).authorizing === true; } catch { return false; }
     }), 'the app to authorize', 180000);
-    adb('shell', 'ip', 'route', 'flush', 'table', 'eth0');
-    adb('shell', 'ip', 'route', 'flush', 'table', 'wlan0');
-    adb('shell', 'ip', '-6', 'route', 'flush', 'table', 'eth0');
-    adb('shell', 'ip', '-6', 'route', 'flush', 'table', 'wlan0');
+    await adb('shell', 'ip', 'route', 'flush', 'table', 'eth0');
+    await adb('shell', 'ip', 'route', 'flush', 'table', 'wlan0');
+    await adb('shell', 'ip', '-6', 'route', 'flush', 'table', 'eth0');
+    await adb('shell', 'ip', '-6', 'route', 'flush', 'table', 'wlan0');
     await sleep(1000);
-    const guestRoutes = spawnSync('adb', ['-s', serial, 'shell', 'ip', 'route', 'get', '10.0.2.2'], { encoding: 'utf8', timeout: 30000 });
-    const guestAddrs = adb('shell', 'ip', 'addr', 'show', 'eth0');
+    const guestRoutes = await adbRun(['shell', 'ip', 'route', 'get', '10.0.2.2'], 30000);
+    const guestAddrs = await adb('shell', 'ip', 'addr', 'show', 'eth0');
     writeFileSync(join(out, 'guest-routes.txt'), `get 10.0.2.2:\n${guestRoutes.stdout}${guestRoutes.stderr}\neth0:\n${guestAddrs}\n`);
     assert(guestRoutes.status !== 0 || /unreachable/i.test(guestRoutes.stdout), 'the guest has no route to the host');
     assert(/inet 10\.0\.2\.15\/24/.test(guestAddrs), 'the guest keeps its address so ICE still gathers');
-    const guestRoutes6 = spawnSync('adb', ['-s', serial, 'shell', 'ip', '-6', 'route', 'get', 'fd7a:115c:a1e0::4137:a101'], { encoding: 'utf8', timeout: 30000 });
+    const guestRoutes6 = await adbRun(['shell', 'ip', '-6', 'route', 'get', 'fd7a:115c:a1e0::4137:a101'], 30000);
     writeFileSync(join(out, 'guest-routes.txt'), `get 10.0.2.2:\n${guestRoutes.stdout}${guestRoutes.stderr}\neth0:\n${guestAddrs}\nget fd7a:115c:a1e0::4137:a101:\n${guestRoutes6.stdout}${guestRoutes6.stderr}\n`, { flag: 'a' });
     assert(guestRoutes6.status !== 0 || /unreachable/i.test(guestRoutes6.stdout), 'the guest has no IPv6 route off-host either');
-    const pingHost = spawnSync('adb', ['-s', serial, 'shell', 'ping', '-c1', '-W3', '10.0.2.2'], { encoding: 'utf8', timeout: 30000 });
+    const pingHost = await adbRun(['shell', 'ping', '-c1', '-W3', '10.0.2.2'], 30000);
     assert(!/1 received|1 packets received/.test(pingHost.stdout), 'the host is unreachable from the guest');
-    const pingLoopback = spawnSync('adb', ['-s', serial, 'shell', 'ping', '-c1', '-W3', '127.0.0.1'], { encoding: 'utf8', timeout: 30000 });
+    const pingLoopback = await adbRun(['shell', 'ping', '-c1', '-W3', '127.0.0.1'], 30000);
     assert(/1 received|1 packets received/.test(pingLoopback.stdout), 'the guest loopback is up');
     await waitFor(() => reports.length > 0, "the app's own report", 180000);
     {
@@ -342,33 +362,33 @@ try {
     // Whose sockets carried it: every TCP socket on the phone (127.0.0.1 is
     // 0100007F), plus the native session's own receive stats from logcat.
     const netLog = join(out, 'phone-tcp.txt');
-    const dumpSockets = (tag) => {
+    const dumpSockets = async (tag) => {
         try {
-            const tcp = adb('shell', 'cat', '/proc/net/tcp');
-            const udp = adb('shell', 'cat', '/proc/net/udp');
+            const tcp = await adb('shell', 'cat', '/proc/net/tcp');
+            const udp = await adb('shell', 'cat', '/proc/net/udp');
             writeFileSync(netLog, `\n### ${tag} /proc/net/tcp\n${tcp}\n\n### ${tag} /proc/net/udp\n${udp}\n`, { flag: 'a' });
         } catch { /* evidence only */ }
     };
-    dumpSockets('presented');
+    await dumpSockets('presented');
     try {
-        const logcat = spawnSync('adb', ['-s', serial, 'logcat', '-d', '-s', 'DesklinkSession:I', 'DesklinkTcpBridge:I'], { encoding: 'utf8', timeout: 60000 }).stdout;
+        const logcat = (await adbRun(['logcat', '-d', '-s', 'DesklinkSession:I', 'DesklinkTcpBridge:I'], 60000)).stdout;
         writeFileSync(join(out, 'logcat-desklink.txt'), logcat);
     } catch { /* evidence only */ }
     try {
-        const hostUdp = spawnSync('ss', ['-unp'], { encoding: 'utf8', timeout: 30000 }).stdout;
-        writeFileSync(join(out, 'host-ss-udp.txt'), hostUdp);
+        const hostUdp = await spawnAsync('ss', ['-unp'], { encoding: 'utf8', timeout: 30000 });
+        if (hostUdp.status === 0) writeFileSync(join(out, 'host-ss-udp.txt'), hostUdp.stdout);
     } catch { /* evidence only */ }
     const lastReport = () => JSON.parse(reports[reports.length - 1]);
     const firstTcp = lastReport().tcp;
     assert(firstTcp && firstTcp.port > 0, 'the relay reports its listener port');
-    dumpSockets('pre-assert');
+    await dumpSockets('pre-assert');
     assert(firstTcp.bytesFromEngine > 0, 'bytes crossed the bridge from the engine');
     const droppedNonRelay = () => Number(lastReport().droppedNonRelay ?? 0);
     await waitFor(() => droppedNonRelay() > 0, 'the app to discard non-relay candidates', 60000);
     const droppedNonRelayOut = () => Number(lastReport().droppedNonRelayOut ?? 0);
     await waitFor(() => droppedNonRelayOut() > 0, 'the app to withhold non-relay locals', 60000);
     // A clip of the live picture: the device's own screenrecord, or a screencap timelapse when it is unavailable.
-    const clip = captureClip({
+    const clip = await captureClip({
         serial, seconds: 10, devicePath: '/sdcard/link-tcp-clip.mp4',
         outPath: join(out, 'clip-relayed-desktop.mp4'), scratch,
     });
@@ -377,16 +397,16 @@ try {
         ? `clip-relayed-desktop.mp4 is a TIMELAPSE: screenrecord unavailable; ${clip.frames} screencap frames at ${clip.fps} fps`
         : 'clip-relayed-desktop.mp4 is a screenrecord clip');
     await sleep(2000);
-    const first = capture('01-relayed-desktop.png');
+    const first = await capture('01-relayed-desktop.png');
     await sleep(6000);
-    const second = capture('02-relayed-desktop-later.png');
+    const second = await capture('02-relayed-desktop-later.png');
 
     // Input rode the same path: a tap inside the picture reaches the fixture,
     // proved by the engine log (instant, no video lag involved), before any
     // pixel assertions below.
     const buttons = () => logs.fixture.split('\n').filter(line => line.includes('"button"')).length;
     const beforeButtons = buttons();
-    adb('shell', 'input', 'tap', String(Math.round(1080 * 0.5)), String(Math.round(2400 * 0.25)));
+    await adb('shell', 'input', 'tap', String(Math.round(1080 * 0.5)), String(Math.round(2400 * 0.25)));
     await sleep(1500);
     await waitFor(() => buttons() > beforeButtons, 'the tap to reach the desktop', 30000);
     const button = logs.fixture.split('\n').filter(line => line.includes('"button"')).pop();
@@ -417,17 +437,15 @@ try {
     // drops a third of frames and a one-shot repaint can vanish forever.)
     // What the host display itself shows, bypassing encode/relay/decode: if
     // the corner is missing here, the painter never painted it.
-    try {
-        spawnSync('import', ['-window', 'root', '-display', display, join(out, 'xvfb-root.png')],
-            { timeout: 30000, env: { ...process.env, DISPLAY: display, XAUTHORITY: authority } });
-    } catch { /* evidence only */ }
+    await spawnAsync('import', ['-window', 'root', '-display', display, join(out, 'xvfb-root.png')],
+        { timeout: 30000, env: { ...process.env, DISPLAY: display, XAUTHORITY: authority } });
     {
         const name = 'magenta', rgb = 0xff00ff;
         const shot = `05-corner-${name}.png`;
         let seen = 0;
         for (const until = Date.now() + 60000; seen < 1000 && Date.now() < until;) {
             await sleep(2000);
-            seen = shows(capture(shot), rgb);
+            seen = shows(await capture(shot), rgb);
         }
         let fixtureCmd = null;
         try { fixtureCmd = readFileSync(`/proc/${fixturePid}/cmdline`, 'utf8').replace(/\0/g, ' '); } catch { /* gone */ }
@@ -453,39 +471,64 @@ try {
     await waitFor(() => reports.length > 2 && JSON.parse(reports[reports.length - 1]).at > blastStart.at + 12000, 'post-blast samples', 60000);
     const blastEnd = markTcp();
     const blastSeconds = (blastEnd.at - blastStart.at) / 1000;
-    const blastBytes = (blastEnd.bytesFromEngine ?? 0) - (blastStart.bytesFromEngine ?? 0);
     const blastCrossings = (blastEnd.bridgeEvents ?? 0) - (blastStart.bridgeEvents ?? 0);
     const blastWrites = (blastEnd.bridgeWrites ?? 0) - (blastStart.bridgeWrites ?? 0);
+    // bytesToEngine counts phone-to-engine bytes (uplink); bytesFromEngine counts engine-to-phone bytes (downlink, the video).
+    // bridgeEvents counts downlink socket reads only, so downlink bytes are the only bytes it can divide.
+    const blastBytesOf = (counter, direction) => {
+        const bytes = (blastEnd[counter] ?? 0) - (blastStart[counter] ?? 0);
+        return { direction, bytes, mbPerSecond: bytes / Math.max(1, blastSeconds) / 1048576 };
+    };
+    const uplink = blastBytesOf('bytesToEngine', 'uplink (phone to engine)');
+    const downlink = blastBytesOf('bytesFromEngine', 'downlink (engine to phone)');
     const capacity = {
-        bytes: blastBytes,
         seconds: blastSeconds,
-        mbPerSecond: blastBytes / Math.max(1, blastSeconds) / 1048576,
-        bridgeEventsPerSecond: blastCrossings / Math.max(1, blastSeconds),
-        bridgeWritesPerSecond: blastWrites / Math.max(1, blastSeconds),
-        bytesPerCrossing: blastCrossings > 0 ? blastBytes / blastCrossings : 0,
+        uplink: { ...uplink, writesPerSecond: blastWrites / Math.max(1, blastSeconds) },
+        downlink: {
+            ...downlink,
+            bridgeEventsPerSecond: blastCrossings / Math.max(1, blastSeconds),
+            bytesPerCrossing: blastCrossings > 0 ? downlink.bytes / blastCrossings : 0,
+        },
     };
 
-    // Throughput across the bridge: video bytes per second and the batched
-    // crossing rate, from the app's own relay counters.
+    // bytesToEngine is phone-to-engine (uplink); bytesFromEngine is engine-to-phone (downlink, the video).
     const timed = reports.map(text => { try { return JSON.parse(text); } catch { return null; } })
         .filter(sample => sample && sample.tcp && typeof sample.at === 'number');
-    const firstTimed = timed.find(sample => (sample.tcp.bytesFromEngine ?? 0) > 0);
     const lastTimed = timed[timed.length - 1];
-    let throughput = null;
-    if (firstTimed && lastTimed && lastTimed.at > firstTimed.at) {
-        const bytes = (lastTimed.tcp.bytesFromEngine ?? 0) - (firstTimed.tcp.bytesFromEngine ?? 0);
+    const throughputOf = (counter, direction, events) => {
+        const firstTimed = timed.find(sample => (sample.tcp[counter] ?? 0) > 0);
+        if (!firstTimed || !lastTimed || lastTimed.at <= firstTimed.at) return null;
+        const bytes = (lastTimed.tcp[counter] ?? 0) - (firstTimed.tcp[counter] ?? 0);
         const seconds = (lastTimed.at - firstTimed.at) / 1000;
-        const crossings = (lastTimed.tcp.bridgeEvents ?? 0) - (firstTimed.tcp.bridgeEvents ?? 0);
-        throughput = {
-            bytes, seconds,
-            mbPerSecond: bytes / seconds / 1048576,
-            bridgeEventsPerSecond: crossings / seconds,
-            bytesPerCrossing: crossings > 0 ? bytes / crossings : 0,
-        };
-    }
+        const window = { direction, bytes, seconds, mbPerSecond: bytes / seconds / 1048576 };
+        if (!events) return window;
+        const crossings = (lastTimed.tcp[events] ?? 0) - (firstTimed.tcp[events] ?? 0);
+        return { ...window, bridgeEventsPerSecond: crossings / seconds, bytesPerCrossing: crossings > 0 ? bytes / crossings : 0 };
+    };
+    const throughput = {
+        uplink: throughputOf('bytesToEngine', 'uplink (phone to engine)'),
+        downlink: throughputOf('bytesFromEngine', 'downlink (engine to phone)', 'bridgeEvents'),
+    };
+
+    // The picture never fell to `reconnecting` from its first live status to
+    // the end of the run. The captures and the screenrecord above run while the
+    // relay carries media, so a blocking call in this process shows up here.
+    const statusSeqs = statuses.map(report => report.seq);
+    assert(statusSeqs.length > 0, 'the app posted no status report');
+    const sentSeq = Math.max(0, ...reports.map(text => JSON.parse(text).statusSeq ?? 0));
+    assert(sentSeq > 0, 'no app report carried the count of status reports it sent');
+    assert(Math.max(...statusSeqs) >= sentSeq, `the app sent ${sentSeq} status reports but the relay received ${Math.max(...statusSeqs)}`);
+    const missingSeqs = [...Array(Math.max(...statusSeqs)).keys()].map(index => index + 1).filter(seq => !statusSeqs.includes(seq));
+    assert.deepEqual(missingSeqs, [], `status reports never arrived: ${missingSeqs.join(', ')}`);
+    const statusSequence = [...statuses].sort((a, b) => a.seq - b.seq).map(report => report.statusChange);
+    const firstLive = statusSequence.indexOf('live');
+    assert(firstLive >= 0, `the app never reported live: ${statusSequence.join(' -> ')}`);
+    const frozen = statusSequence.slice(firstLive).filter(status => status === 'reconnecting').length;
+    assert.equal(frozen, 0, `the picture reported reconnecting ${frozen} time(s) after going live: ${statusSequence.join(' -> ')}`);
 
     Object.assign(receipt, {
-        captures: [first, second, capture('03-tap-received.png')].map(path => path.replace(homedir(), '~')),
+        statusSequence,
+        captures: [first, second, await capture('03-tap-received.png')].map(path => path.replace(homedir(), '~')),
         reports: reports.length,
         droppedNonRelay: droppedNonRelay(),
         droppedNonRelayOut: droppedNonRelayOut(),
@@ -515,7 +558,7 @@ try {
         receipt.framesLast = reports.length > 0 ? frames(reports[reports.length - 1]) : 0;
         receipt.cornerDebug = cornerDebug ?? undefined;
     } catch { /* the receipt carries what it can */ }
-    try { capture('00-failure.png'); } catch { /* the device may be gone */ }
+    try { await capture('00-failure.png'); } catch { /* the device may be gone */ }
     console.error(String(error));
 } finally {
     for (const [, child] of children) { try { child.kill('SIGTERM'); } catch { /* already gone */ } }
@@ -525,7 +568,7 @@ try {
             if (child.pid > 0) { process.kill(child.pid, 0); child.kill('SIGKILL'); }
         } catch { child.exitCode ??= 0; }
     }
-    for (const spec of reverses.splice(0)) { tryAdb('reverse', '--remove', spec); }
+    for (const spec of reverses.splice(0)) { await tryAdb('reverse', '--remove', spec); }
     // The guest's routes belong to the device: hand them back however the run ends.
     for (const restore of [
         ['shell', 'ip', 'route', 'add', '10.0.2.0/24', 'dev', 'eth0', 'table', 'eth0', 'proto', 'static', 'scope', 'link'],
@@ -537,7 +580,7 @@ try {
         ['shell', 'svc', 'data', 'disable'],
         ['shell', 'svc', 'wifi', 'enable'],
         ['shell', 'svc', 'data', 'enable'],
-    ]) tryAdb(...restore);
+    ]) await tryAdb(...restore);
     try { receiver?.close(); } catch { /* already gone */ }
     try { relayServer?.close(); } catch { /* already gone */ }
     if (xvfb) { try { await stopOwnedXvfb(xvfb); } catch (error) { receipt.cleanup = String(error); } }

@@ -32,7 +32,7 @@ const hasFfmpeg = spawnSync('ffmpeg', ['-version']).status === 0;
 const runsFakePhone = process.platform !== 'win32';
 
 // Runs captureClip against the fake phone and returns what it made and did.
-const clipWithPhone = (mode, seconds) => {
+const clipWithPhone = async (mode, seconds) => {
     const dir = mkdtempSync(join(tmpdir(), 'desklink-clip-'));
     try {
         const adb = join(dir, 'adb');
@@ -50,7 +50,7 @@ const clipWithPhone = (mode, seconds) => {
         Object.assign(process.env, fake);
         const outPath = join(dir, 'clip.mp4');
         try {
-            const result = captureClip({
+            const result = await captureClip({
                 adb, serial: 'fake-serial', seconds, devicePath: '/sdcard/clip.mp4', outPath, scratch: dir,
             });
             const calls = readFileSync(log, 'utf8');
@@ -66,15 +66,15 @@ const clipWithPhone = (mode, seconds) => {
     }
 };
 
-it.skipIf(!runsFakePhone)('keeps screenrecord as the first choice when the phone allows it', () => {
-    const { result, calls } = clipWithPhone('allowed', 1);
+it.skipIf(!runsFakePhone)('keeps screenrecord as the first choice when the phone allows it', async () => {
+    const { result, calls } = await clipWithPhone('allowed', 1);
     expect(result.mode).toBe('screenrecord');
     expect(calls).toContain('shell screenrecord --time-limit 1 /sdcard/clip.mp4');
     expect(calls).not.toContain('exec-out screencap');
 });
 
-it.skipIf(!runsFakePhone || !hasFfmpeg)('falls back to a screencap timelapse when screenrecord is denied', { timeout: 60000 }, () => {
-    const { result, calls, codec } = clipWithPhone('denied', 1);
+it.skipIf(!runsFakePhone || !hasFfmpeg)('falls back to a screencap timelapse when screenrecord is denied', { timeout: 60000 }, async () => {
+    const { result, calls, codec } = await clipWithPhone('denied', 1);
     expect(result.mode).toBe('timelapse');
     expect(result.frames).toBeGreaterThan(0);
     expect(calls).toContain('shell screenrecord --time-limit 1 /sdcard/clip.mp4');

@@ -515,8 +515,11 @@ clipboard transfer is confirmed by a pill above them.
 
 For device evidence, an optional `report` query parameter accepts a URL-encoded
 HTTP endpoint. While live, the example posts receiver statistics and connection
-and first-presentation timestamps once per second. Collection failures do not
-interrupt the session. Without that parameter, no evidence is posted.
+and first-presentation timestamps once per second. With `relayOnly=1` it also
+posts every status change as `{ seq, statusChange }` (numbered from 1), keeps
+posting the samples while not live, and carries `statusSeq` (the status posts
+sent so far) in each sample. Collection failures do not interrupt the session.
+Without that parameter, no evidence is posted.
 
 ## Licence
 
