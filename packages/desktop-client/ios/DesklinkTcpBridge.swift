@@ -17,7 +17,7 @@ import Foundation
  */
 final class DesklinkTcpBridge {
   /** A read that finds nothing this fast flushes what it already holds. */
-  private static let readTimeoutMicroseconds: __suseconds_t = 12_000
+  private static let readTimeoutMicroseconds: Int32 = 12_000
   /** A flush carries at most this many bytes: batches, not per-packet storms. */
   private static let flushBytes = 8192
 
@@ -67,7 +67,7 @@ final class DesklinkTcpBridge {
       lock.unlock()
       return 0
     }
-    let port = boundPort(fd: fd)
+    let port = Self.boundPort(fd: fd)
     guard port > 0 else {
       Darwin.close(fd)
       lock.unlock()
