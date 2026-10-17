@@ -22,7 +22,9 @@
  *    and the JS-to-native crossings stay batched (a handful a second, not one
  *    per packet);
  *  - input rode the same path: a tap inside the picture reaches the fixture,
- *    and two mapping taps land on the desktop points the fingers cover.
+ *    and two mapping taps land on the desktop points the fingers cover;
+ *  - the picture never fell to `reconnecting` from its first live status to
+ *    the end of the run, and every status report the app sent arrived.
  *
  * The host side runs here, on a private Xvfb (display >= 170, its own cookie),
  * with the repository's own `x11_target` fixture repainting, the bridge on a
