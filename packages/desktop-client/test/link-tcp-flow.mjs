@@ -58,6 +58,7 @@ import { PNG } from 'pngjs';
 import {
     assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb,
 } from '../../desktop-host/test/lab-safety.mjs';
+import { captureClip } from './clip-capture.mjs';
 
 assertNoAmbientDesktop();
 assert(process.platform === 'linux', 'this private-Xvfb proof requires Linux');
@@ -366,12 +367,15 @@ try {
     await waitFor(() => droppedNonRelay() > 0, 'the app to discard non-relay candidates', 60000);
     const droppedNonRelayOut = () => Number(lastReport().droppedNonRelayOut ?? 0);
     await waitFor(() => droppedNonRelayOut() > 0, 'the app to withhold non-relay locals', 60000);
-    // A clip of the live picture, recorded on the device.
-    const clipDevice = '/sdcard/link-tcp-clip.mp4';
-    adb('shell', 'rm', '-f', clipDevice);
-    spawnSync('adb', ['-s', serial, 'shell', 'screenrecord', '--time-limit', '10', clipDevice],
-        { timeout: 30000 });
-    adb('pull', clipDevice, join(out, 'clip-relayed-desktop.mp4'));
+    // A clip of the live picture: the device's own screenrecord, or a screencap timelapse when it is unavailable.
+    const clip = captureClip({
+        serial, seconds: 10, devicePath: '/sdcard/link-tcp-clip.mp4',
+        outPath: join(out, 'clip-relayed-desktop.mp4'), scratch,
+    });
+    receipt.clip = clip;
+    console.log(clip.mode === 'timelapse'
+        ? `clip-relayed-desktop.mp4 is a TIMELAPSE: screenrecord unavailable; ${clip.frames} screencap frames at ${clip.fps} fps`
+        : 'clip-relayed-desktop.mp4 is a screenrecord clip');
     await sleep(2000);
     const first = capture('01-relayed-desktop.png');
     await sleep(6000);
