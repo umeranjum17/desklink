@@ -204,6 +204,20 @@ npm test
 npm run test:engine
 ```
 
+Before opening a PR, repeat the tests your change adds or edits:
+
+```sh
+scripts/repeat-changed-tests.sh
+```
+
+On Linux, it compares against `origin/main` and finds changed engine `#[test]`
+functions plus changed vitest test files. It runs each of them with half the
+repeats pinned to one busy core, prints one line per test, and exits non-zero
+on any failure. Engine tests default to 1000 repeats because their timing flakes
+are rare; vitest files default to 20. Tests marked `#[ignore]`, including the
+ones that need a task-owned lab compositor, are listed as skipped and never run.
+`--runs N` and `--base <ref>` override the defaults.
+
 Engine tests need the native libraries [CI installs](.github/workflows/ci.yml).
 Desktop integration checks refuse ambient `DISPLAY`/`WAYLAND_DISPLAY` before
 contact; unset both before running them. Use only verified, high-display,
