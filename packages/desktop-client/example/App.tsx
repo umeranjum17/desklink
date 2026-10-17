@@ -333,6 +333,13 @@ function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, relayOnly
         },
     });
     const { status } = desktop.snapshot;
+    // Lab evidence of the relay-only run: every status change, so the run can
+    // prove the picture never fell to `reconnecting` while the relay carried it.
+    React.useEffect(() => {
+        if (report === null || !relayOnly) return;
+        void fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), statusChange: status }) })
+            .catch(() => undefined);
+    }, [status, report, relayOnly]);
     const [copyError, setCopyError] = React.useState<string | null>(null);
     // Where the picture ended: on a tall screen the deck fills the band under
     // it, so the screen is controls rather than empty space.
