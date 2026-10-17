@@ -7,7 +7,8 @@ import { PROTOCOL_VERSION, type EngineEvent } from './protocol.js';
 // private state would not prove what a consumer sees.
 const SCRIPT = `
     const readline = require('node:readline');
-    readline.createInterface({input: process.stdin}).on('line', line => {
+    const input = readline.createInterface({input: process.stdin});
+    input.on('line', line => {
         const request = JSON.parse(line);
         if (request.method === 'hello') {
             process.stdout.write(JSON.stringify({id: request.id, result: {protocol: ${PROTOCOL_VERSION}}}) + '\\n');
@@ -23,7 +24,10 @@ const SCRIPT = `
             process.stdout.write(JSON.stringify({id: request.id, result: {ok: true}}) + '\\n');
         }
     });
-    setInterval(() => {}, 1000);
+    // A real engine exits once the client stops talking. Without this the fake
+    // one outlives \`stdin.end()\` and every test here waits out stop()'s SIGKILL
+    // fallback instead of the engine actually exiting.
+    input.on('close', () => process.exit(0));
 `;
 
 const ORDER = [
