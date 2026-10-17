@@ -344,6 +344,10 @@ function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, relayOnly
                         void fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), offered: line }) })
                             .catch(() => undefined);
                     }
+                    if (event.kind === 'description') {
+                        void fetch(report, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at: Date.now(), offeredSdp: event.description.sdp }) })
+                            .catch(() => undefined);
+                    }
                 }
                 const kept = keepRelayCandidateOnly(event);
                 if (kept === null) droppedNonRelay.current += 1;
