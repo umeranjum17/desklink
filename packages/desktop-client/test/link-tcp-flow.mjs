@@ -3,10 +3,10 @@
  * The relay-only leg: the example app carries the desktop over its own link.
  *
  * The phone has no route to the computer but the app's relay: the journey link
- * carries `tcpRelay=<ws-url>` and `dropUdp=1`, so the app opens its session with
+ * carries `tcpRelay=<ws-url>` and `relayOnly=1`, so the app opens its session with
  * `tcpTransport`, the kit listens on the phone's 127.0.0.1, and every accepted
  * connection is piped through a lab WebSocket relay on the host to the engine's
- * loopback TCP port. UDP candidates are discarded in the app before they reach
+ * loopback TCP port. non-relay candidates are discarded in the app before they reach
  * the peer, so ICE can only use the bridged TCP route; the host firewall is
  * never touched.
  *
@@ -100,6 +100,11 @@ const receipt = {
 };
 const children = [];
 let xvfb, target, bridge, metro, receiver, relayServer;
+// The relay's engine port, its byte counters, and every app report: declared
+// out here so the failure receipt can summarise them too.
+let enginePort = 0;
+const relayBytes = { wsToTcp: 0, tcpToWs: 0, streams: 0 };
+const reports = [];
 const reverses = [];
 const reverse = (...args) => {
     adb('reverse', ...args);
@@ -148,8 +153,6 @@ try {
     // The relay: each WebSocket connection is one relayed TCP connection. The
     // engine's loopback port is ephemeral and learned from the app's reports;
     // streams that open before it is known wait for it (bounded), then dial.
-    let enginePort = 0;
-    const relayBytes = { wsToTcp: 0, tcpToWs: 0, streams: 0 };
     const relayLog = join(out, 'relay.log');
     const relayNote = (line) => writeFileSync(relayLog, `${Date.now()} ${line}\n`, { flag: 'a' });
     relayNote('relay up');
@@ -201,7 +204,6 @@ try {
         ws.on('close', finish);
     });
 
-    const reports = [];
     const reportsLog = join(out, 'reports.jsonl');
     receiver = createServer((request, response) => {
         const chunks = [];
@@ -253,7 +255,7 @@ try {
 
     const link = `desklink-example://connect?url=${encodeURIComponent(`ws://${host}:${bridgePort}/desktop?token=${token}`)}`
         + `&report=${encodeURIComponent(`http://${host}:${receiver.address().port}/report`)}`
-        + `&tcpRelay=${encodeURIComponent(`ws://${host}:${relayPort}/tcp`)}&dropUdp=1`;
+        + `&tcpRelay=${encodeURIComponent(`ws://${host}:${relayPort}/tcp`)}&relayOnly=1`;
     receipt.link = link.replace(token, '<bridge-token>');
     adb('shell', 'am', 'force-stop', 'dev.desklink.example');
     await sleep(1000);
@@ -278,8 +280,8 @@ try {
     const firstTcp = lastReport().tcp;
     assert(firstTcp && firstTcp.port > 0, 'the relay reports its listener port');
     assert(firstTcp.bytesFromEngine > 0, 'bytes crossed the bridge from the engine');
-    const droppedUdp = () => Number(lastReport().droppedUdp ?? 0);
-    await waitFor(() => droppedUdp() > 0, 'the app to discard UDP candidates', 60000);
+    const droppedNonRelay = () => Number(lastReport().droppedNonRelay ?? 0);
+    await waitFor(() => droppedNonRelay() > 0, 'the app to discard non-relay candidates', 60000);
     // A clip of the live picture, recorded on the device.
     const clipDevice = '/sdcard/link-tcp-clip.mp4';
     adb('shell', 'rm', '-f', clipDevice);
@@ -344,7 +346,7 @@ try {
     Object.assign(receipt, {
         captures: [first, second, capture('03-tap-received.png')].map(path => path.replace(homedir(), '~')),
         reports: reports.length,
-        droppedUdp: droppedUdp(),
+        droppedNonRelay: droppedNonRelay(),
         lastTcp: lastTimed?.tcp ?? lastReport().tcp,
         relayBytes,
         enginePort,
@@ -359,7 +361,7 @@ try {
     try {
         const last = JSON.parse(reports[reports.length - 1] ?? '{}');
         receipt.lastTcp = last.tcp ?? null;
-        receipt.droppedUdp = Number(last.droppedUdp ?? 0);
+        receipt.droppedNonRelay = Number(last.droppedNonRelay ?? 0);
         receipt.relayBytes = relayBytes;
         receipt.enginePort = enginePort;
         receipt.loopback_tcp_port = enginePort || undefined;
