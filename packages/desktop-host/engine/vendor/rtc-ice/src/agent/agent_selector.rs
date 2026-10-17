@@ -10,7 +10,7 @@ use stun::textattrs::*;
 
 use crate::attributes::{control::*, priority::*, use_candidate::*};
 use crate::candidate::{candidate_pair::*, *};
-// desklink scout trace (dl-roam-postnom-attr):
+// desklink scout trace: dev-only ICE timeline instrumentation.
 use crate::dl_trace;
 use crate::dl_trace::dl_ice;
 

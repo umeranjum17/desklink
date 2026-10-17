@@ -561,7 +561,7 @@ const uiBound = (label, quick = false) => {
 /**
  * Our own app, and only ours, has to be what is in front: a run that loses the
  * app to the launcher would otherwise read the phone's own wallpaper as the
- * desktop picture and tap the captain's home screen.
+ * desktop picture and tap the test phone's home screen.
  */
 const ourAppInFront = id => (adbTry('shell', 'dumpsys activity activities | grep -m1 topResumedActivity').stdout ?? '').includes(id);
 const bringOurAppToFront = id => adb('shell', 'am', 'start', '-n', `${id}/.MainActivity`);
@@ -957,7 +957,7 @@ const quickstartJourney = async () => {
     assert(applicationId, 'no applicationId in the quickstart build.gradle');
     receipt.app.application_id = applicationId;
     mark('apk-ready');
-    // No `-g`: nothing is pre-granted on the captain's phone, so the journey
+    // No `-g`: nothing is pre-granted on the test phone, so the journey
     // proves only what a new user actually taps.
     const installed = spawnSync('adb', ['-s', serial, 'install', '-r', '-t', '--no-streaming', quickApk], { encoding: 'utf8', timeout: 900000 });
     assert.equal(installed.status, 0, `adb install failed: ${installed.stderr ?? installed.stdout ?? installed.signal}`);

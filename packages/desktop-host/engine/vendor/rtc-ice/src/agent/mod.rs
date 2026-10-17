@@ -38,7 +38,7 @@ use stun::xoraddr::*;
 
 use crate::candidate::candidate_peer_reflexive::CandidatePeerReflexiveConfig;
 use crate::candidate::{candidate_pair::*, *};
-// desklink scout trace (dl-roam-postnom-attr):
+// desklink scout trace: dev-only ICE timeline instrumentation.
 use crate::dl_trace;
 use crate::dl_trace::dl_ice;
 use crate::mdns::{MulticastDnsMode, create_multicast_dns, generate_multicast_dns_name};

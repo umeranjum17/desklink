@@ -1,4 +1,4 @@
-// Flow check for dl-rn-reconnect1: real engine on a private Xvfb + real
+// Flow check for client reconnect: real engine on a private Xvfb + real
 // @desklink/react-native hook and web binding in a driver page, real Chromium.
 // Freezes the server side (engine + bridge, SIGSTOP) for 5 s, 25 s and
 // 45 s — the host-unreachable drop: ICE, signaling and hook timers keep

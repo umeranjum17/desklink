@@ -47,7 +47,7 @@ use webrtc::peer_connection::{
 };
 use webrtc::runtime::default_runtime;
 
-// desklink scout trace (dl-roam-postnom-attr): engine-side restart timeline.
+// desklink scout trace: engine-side restart timeline.
 // Enabled with `DESKLINK_ICE_TRACE=1`; stamps microseconds since the Unix epoch
 // so these lines interleave with the vendored ICE agent's `[ice ...]` lines in
 // one order. Droppable: grep `desklink scout trace`.
@@ -477,7 +477,7 @@ impl PeerConnectionEventHandler for Handler {
     }
 
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
-        // desklink scout trace (dl-roam-postnom-attr): the engine's rtc-level
+        // desklink scout trace: the engine's rtc-level
         // transport state event, on the same microsecond clock as the vendored
         // agent's `[ice ...]` lines, so the rtc Connected gate is separable.
         if dl_trace_on() {

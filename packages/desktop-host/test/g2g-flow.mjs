@@ -507,7 +507,7 @@ async function runScenario(scenario, vite) {
             else {
                 documentChrome = await startChrome(chromeBinary, `file://${resolve(documentPath)}`, true);
                 await documentChrome.until("document.readyState === 'complete' && document.body.innerText.length > 100", 20_000, 'readable document fixture');
-                documentAxiEnv = { ...process.env, CHROME_DEVTOOLS_AXI_BROWSER_URL: documentChrome.browserUrl, CHROME_DEVTOOLS_AXI_SESSION: `dl-pm-10-doc-${process.pid}`, DESKLINK_G2G_SESSION: `g2g-${process.pid}` };
+                documentAxiEnv = { ...process.env, CHROME_DEVTOOLS_AXI_BROWSER_URL: documentChrome.browserUrl, CHROME_DEVTOOLS_AXI_SESSION: `dl-doc-${process.pid}`, DESKLINK_G2G_SESSION: `g2g-${process.pid}` };
                 const adapter = (args, label) => {
                     const result = spawnSync('chrome-devtools-axi', args, { env: documentAxiEnv, encoding: 'utf8', timeout: 60_000 });
                     writeFileSync(`${recordingPath}.${label}.txt`, `${result.stdout ?? ''}\n${result.stderr ?? ''}`);
