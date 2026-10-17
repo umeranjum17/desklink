@@ -145,6 +145,45 @@ session, so the forward has to follow it (`adb reverse tcp:<port> tcp:<port>`,
 forms fails after 20 seconds with that reason, rather than sitting on an empty
 view.
 
+### Relay-only phones
+
+A phone that reaches the computer only through the app's own relay link
+(mobile data, no shared LAN) has nothing to forward: signaling crosses the
+link, but WebRTC media needs its own path. `session.tcpTransport` supplies
+that path as a byte stream factory, and the kit does the rest — it opens the
+session with the loopback route above, listens on the phone's own `127.0.0.1`,
+and pipes every accepted connection through a stream from this factory to the
+engine's loopback TCP port:
+
+```tsx
+import type { TcpTransport } from '@desklink/react-native';
+
+const relay: TcpTransport = {
+  // One duplex per relayed connection, usually one per session.
+  open: () => openByteStreamToComputer(),
+};
+
+session: { tcpTransport: relay },
+```
+
+where `openByteStreamToComputer()` returns `{ write, onData, close }`:
+`write(bytes)` sends toward the engine, `onData(handler)` receives from it,
+`close()` ends that connection. The kit rewrites the engine's `127.0.0.1` TCP
+candidate to its listener's port before handing it to the native peer, so the
+peer dials the listener and the picture rides the application's link, still
+inside DTLS. Bytes cross the JS bridge in batches by size (16 KB) and deadline
+(15 ms), never one call per packet: a lab session's video crossed in about a
+dozen bridge calls a second, and a 10 MB blast through the same batching
+measured about 29 MB/s JS-to-native — two orders of magnitude above what a
+720p30 picture needs. `getTcpTransportStats()` reports the bytes and the
+batched crossings for the session. (The lab emulator itself decoded at about 6
+fps on its software VP9 path while the bridge idled; the bridge was never the
+bottleneck.) Without the option, behaviour is unchanged.
+
+Android only: a build whose native module cannot carry it refuses the session
+rather than opening one with no path. The web binding never carries it — a
+browser cannot dial a JS socket — and iOS follows in the next slice.
+
 ### What the package guarantees
 
 - **Hardware decoding where the platform has it.** Android and web decode the
