@@ -18,7 +18,7 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 
 // Resolves with a status and Buffers, like spawnSync, and never rejects.
-const spawnAsync = (file, args, options) => execFileAsync(file, args, { encoding: 'buffer', ...options })
+export const spawnAsync = (file, args, options) => execFileAsync(file, args, { encoding: 'buffer', ...options })
     .then(({ stdout, stderr }) => ({ status: 0, stdout, stderr }),
         error => ({ status: typeof error.code === 'number' ? error.code : null, stdout: error.stdout ?? Buffer.alloc(0), stderr: error.stderr ?? Buffer.alloc(0) }));
 

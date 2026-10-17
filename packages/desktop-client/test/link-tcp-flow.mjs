@@ -62,7 +62,7 @@ import { PNG } from 'pngjs';
 import {
     assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb,
 } from '../../desktop-host/test/lab-safety.mjs';
-import { captureClip } from './clip-capture.mjs';
+import { captureClip, spawnAsync } from './clip-capture.mjs';
 
 assertNoAmbientDesktop();
 assert(process.platform === 'linux', 'this private-Xvfb proof requires Linux');
@@ -94,9 +94,7 @@ assert(serial && attached.includes(serial),
 // while media is relayed is async: a blocking spawnSync here stalls the relay,
 // and the engine's pings with it, which the app reads as a lost connection.
 const execFileAsync = promisify(execFile);
-const adbRun = (args, timeout = 120000) => execFileAsync('adb', ['-s', serial, ...args], { encoding: 'utf8', timeout, maxBuffer: 64 * 1024 * 1024 })
-    .then(({ stdout }) => ({ status: 0, stdout, stderr: '' }),
-        error => ({ status: typeof error.code === 'number' ? error.code : 1, stdout: error.stdout ?? '', stderr: error.stderr ?? '' }));
+const adbRun = (args, timeout = 120000) => spawnAsync('adb', ['-s', serial, ...args], { encoding: 'utf8', timeout, maxBuffer: 64 * 1024 * 1024 });
 const adb = async (...args) => {
     const done = await adbRun(args);
     assert.equal(done.status, 0, `adb ${args.join(' ')} failed: ${done.stderr}`);
