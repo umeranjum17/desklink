@@ -332,6 +332,17 @@ the SDP and candidates to the client and brings back the answer.
   "description":{"type":"offer","sdp":"v=0\r\n…"}}}
 ```
 
+A renegotiation offer may include `geometry` when the captured source changes
+size. It uses the same shape as the `session.open` result; consumers should
+apply its encoded dimensions to the presented surface. Older hosts omit it.
+
+```jsonc
+{"event":"session.description","params":{"sessionId":"…","generation":1,
+  "description":{"type":"offer","sdp":"v=0\r\n…"},
+  "geometry":{"source":{"width":1200,"height":600},
+    "encoded":{"width":1200,"height":600},"origin":{"x":0,"y":0}}}}
+```
+
 ```jsonc
 {"id":5,"method":"session.description","params":{"session_id":"…","generation":1,
   "description":{"type":"answer","sdp":"v=0\r\n…"}}}

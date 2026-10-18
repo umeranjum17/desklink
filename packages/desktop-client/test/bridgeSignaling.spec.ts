@@ -34,6 +34,24 @@ async function heard(filter?: (event: SessionEvent) => SessionEvent | null): Pro
     return lines;
 }
 
+async function heardOfferGeometry(): Promise<SessionEvent | undefined> {
+    const geometry = { source: { width: 1200, height: 600 }, encoded: { width: 1200, height: 600 }, origin: { x: 0, y: 0 } };
+    server = new WebSocketServer({ port: 0 });
+    server.on('connection', (socket) => socket.send(JSON.stringify({
+        event: 'session.description',
+        params: { sessionId: 's', description: { type: 'offer', sdp: 'v=0' }, geometry },
+    })));
+    const { port } = server.address() as { port: number };
+    return await new Promise<SessionEvent | undefined>((done) => {
+        let signaling: ReturnType<typeof bridgeSignaling> | undefined;
+        signaling = bridgeSignaling(`ws://127.0.0.1:${port}/desktop`, (event) => {
+            if (event.kind !== 'description') return;
+            signaling?.close();
+            done(event);
+        });
+    });
+}
+
 describe('bridgeSignaling inbound filter', () => {
     it('drops what the filter rejects', async () => {
         expect(await heard((event) => (event.kind === 'candidate' && event.candidate.candidate === UDP ? null : event))).toEqual([TCP]);
@@ -41,5 +59,12 @@ describe('bridgeSignaling inbound filter', () => {
 
     it('passes every event without a filter', async () => {
         expect(await heard()).toEqual([UDP, TCP]);
+    });
+
+    it('keeps renegotiation geometry when parsing an offer', async () => {
+        expect(await heardOfferGeometry()).toMatchObject({
+            kind: 'description',
+            geometry: { source: { width: 1200, height: 600 }, encoded: { width: 1200, height: 600 } },
+        });
     });
 });

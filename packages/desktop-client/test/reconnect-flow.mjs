@@ -96,7 +96,7 @@ socket.addEventListener('message', (event) => {
     }
     const p = msg.params ?? {};
     let translated = null;
-    if (msg.event === 'session.description') translated = { kind: 'description', description: { type: p.description.type, sdp: p.description.sdp }, sessionId: p.sessionId };
+    if (msg.event === 'session.description') translated = { kind: 'description', description: { type: p.description.type, sdp: p.description.sdp }, geometry: p.geometry, sessionId: p.sessionId };
     else if (msg.event === 'session.candidate') translated = { kind: 'candidate', candidate: { candidate: p.candidate, sdpMid: p.sdpMid ?? null, sdpMLineIndex: p.sdpMLineIndex ?? null }, sessionId: p.sessionId };
     else if (msg.event === 'session.state') translated = { kind: 'state', capture: p.capture, transport: p.transport, firstFrame: p.firstFrame, sessionId: p.sessionId };
     else if (msg.event === 'session.restoreToken') translated = { kind: 'restoreToken', token: p.token, sessionId: p.sessionId };

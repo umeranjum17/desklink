@@ -149,7 +149,7 @@ export interface OpenedSession {
 
 export type EngineEvent =
     | { event: 'session.cursor'; params: { sessionId: string; x: number; y: number; visible: boolean; timestamp_us: number; hotspot?: { x: number; y: number } } }
-    | { event: 'session.description'; params: { sessionId: string; generation: number; description: { type: 'offer'; sdp: string } } }
+    | { event: 'session.description'; params: { sessionId: string; generation: number; description: { type: 'offer'; sdp: string }; geometry?: SurfaceGeometry } }
     | {
           event: 'session.candidate';
           params: {
