@@ -27,9 +27,15 @@ const STREAMS = 0, WS_TO_TCP = 1, TCP_TO_WS = 2;
 export async function startTcpRelay({ log }) {
     const counters = new Float64Array(new SharedArrayBuffer(3 * Float64Array.BYTES_PER_ELEMENT));
     const worker = new Worker(new URL(import.meta.url), { workerData: { log, counters } });
-    let exited = false;
-    worker.on('exit', () => { exited = true; });
-    worker.on('error', error => console.error(`tcp relay worker failed: ${error.stack ?? error}`));
+    let exited = false, failure = null;
+    worker.on('exit', code => {
+        exited = true;
+        if (code !== 0) failure ??= `the relay exited with code ${code}`;
+    });
+    worker.on('error', error => {
+        failure = error.stack ?? String(error);
+        console.error(`tcp relay worker failed: ${failure}`);
+    });
     const port = await new Promise((ok, failed) => {
         worker.once('message', ok);
         worker.once('error', failed);
@@ -38,6 +44,7 @@ export async function startTcpRelay({ log }) {
     return {
         port,
         bytes: () => ({ wsToTcp: counters[WS_TO_TCP], tcpToWs: counters[TCP_TO_WS], streams: counters[STREAMS] }),
+        failure: () => failure,
         allowPort: enginePort => worker.postMessage(enginePort),
         // The log ends before the thread does, so the last stream notes land.
         close: () => new Promise(done => {
