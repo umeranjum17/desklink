@@ -46,7 +46,7 @@ export function bridgeSignaling(address: string, onEvent?: (event: SessionEvent)
         }
         const p = msg.params ?? {};
         let event: SessionEvent | null = null;
-        if (msg.event === 'session.description') event = { kind: 'description', description: p.description, sessionId: p.sessionId };
+        if (msg.event === 'session.description') event = { kind: 'description', description: p.description, geometry: p.geometry, sessionId: p.sessionId };
         else if (msg.event === 'session.candidate') event = { kind: 'candidate', candidate: { candidate: p.candidate, sdpMid: p.sdpMid ?? null, sdpMLineIndex: p.sdpMLineIndex ?? null }, sessionId: p.sessionId };
         else if (msg.event === 'session.state') event = { kind: 'state', capture: p.capture, transport: p.transport, firstFrame: p.firstFrame, sessionId: p.sessionId };
         else if (msg.event === 'session.revoked') event = { kind: 'revoked', reason: p.reason, code: p.code, sessionId: p.sessionId };

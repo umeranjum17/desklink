@@ -121,7 +121,7 @@ export interface CursorSample {
 export type SessionEvent =
     /** Optional carrier notification, distinct from the native peer's `closed`. */
     | { kind: 'carrier-closed'; sessionId?: never }
-    | { kind: 'description'; description: RtcDescription; sessionId?: string }
+    | { kind: 'description'; description: RtcDescription; geometry?: SurfaceGeometry; sessionId?: string }
     | { kind: 'candidate'; candidate: RtcCandidate; sessionId?: string }
     | ({ kind: 'cursor' } & CursorSample)
     | { kind: 'state'; capture: string; transport: string; firstFrame: boolean; sessionId?: string }

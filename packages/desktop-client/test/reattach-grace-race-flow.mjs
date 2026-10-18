@@ -37,9 +37,11 @@ import { fileURLToPath } from 'node:url';
 const worktree = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const SRC = join(worktree, 'packages/desktop-client/src');
 const args = process.argv.slice(2);
-const scratch = args[0] ? resolve(args[0]) : mkdtempSync(join(tmpdir(), 'dl-reattach-race-'));
+const geometryOnly = args.includes('--geometry-only');
+const evidenceArg = args.find((arg) => arg !== '--geometry-only');
+const scratch = evidenceArg ? resolve(evidenceArg) : mkdtempSync(join(tmpdir(), 'dl-reattach-race-'));
 mkdirSync(scratch, { recursive: true });
-const ownedScratch = args[0] ? null : scratch;
+const ownedScratch = evidenceArg ? null : scratch;
 
 const chrome = process.env.DESKLINK_CHROME
     ?? ['/usr/bin/chromium', '/usr/bin/google-chrome-stable'].find(existsSync);
@@ -60,7 +62,7 @@ import { useDesktopSession } from '__SRC__/useDesktopSession';
 import { attachSurface, nativeDesklink } from '__SRC__/native.web';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const probe = window.__probe = { status: 'boot', frames: 0, restarts: [], log: [], opens: [], closes: [], pings: 0 };
+const probe = window.__probe = { status: 'boot', frames: 0, restarts: [], log: [], opens: [], closes: [], pings: 0, surfaceSizes: [] };
 window.addEventListener('unhandledrejection', (e) => { probe.error = String(e.reason); });
 
 // The grace's stats read is parked while this is true, so a disconnect can be
@@ -68,6 +70,11 @@ window.addEventListener('unhandledrejection', (e) => { probe.error = String(e.re
 window.__holdStats = false;
 const parkedStats = [];
 const realGetStats = nativeDesklink.getStats.bind(nativeDesklink);
+const realSetSurfaceSize = nativeDesklink.setSurfaceSize.bind(nativeDesklink);
+nativeDesklink.setSurfaceSize = (id, width, height) => {
+    probe.surfaceSizes.push([width, height]);
+    return realSetSurfaceSize(id, width, height);
+};
 nativeDesklink.getStats = (id) => window.__holdStats
     ? new Promise((resolveStats) => parkedStats.push(() => realGetStats(id).then(resolveStats, () => resolveStats('[]'))))
     : realGetStats(id);
@@ -79,13 +86,13 @@ window.__releaseStats = () => {
 
 // The other end: a real RTCPeerConnection producing real video.
 const canvas = document.createElement('canvas');
-canvas.width = 320; canvas.height = 180;
+canvas.width = 600; canvas.height = 1200;
 const ctx = canvas.getContext('2d');
 let drawing = true; let tick = 0; let still = null;
 const frame = () => {
     tick += 1;
     ctx.fillStyle = 'hsl(' + ((tick * 7) % 360) + ' 80% 50%)';
-    ctx.fillRect(0, 0, 320, 180);
+    ctx.fillRect(0, 0, 600, 1200);
 };
 const draw = () => {
     if (!drawing) return;
@@ -122,10 +129,10 @@ let onAnswer = null;
 
 const carriers = [];
 const current = () => carriers[carriers.length - 1];
-async function sendOffer(options) {
+async function sendOffer(options, geometry) {
     const offer = await engine.createOffer(options);
     await engine.setLocalDescription(offer);
-    current().emit({ kind: 'description', description: { type: 'offer', sdp: offer.sdp } });
+    current().emit({ kind: 'description', description: { type: 'offer', sdp: offer.sdp }, ...(geometry === undefined ? {} : { geometry }) });
 }
 engine.onicecandidate = (e) => {
     if (e.candidate === null) return;
@@ -143,8 +150,8 @@ function newCarrier() {
                 carrier.generation += 1;
                 setTimeout(() => { void sendOffer(); }, 0);
                 return { sessionId: 'sess-race', generation: carrier.generation,
-                    source: { kind: 'screen', width: 320, height: 180, origin: { x: 0, y: 0 } },
-                    geometry: { source: { width: 320, height: 180 }, encoded: { width: 320, height: 180 }, origin: { x: 0, y: 0 } } };
+                    source: { kind: 'screen', width: 600, height: 1200, origin: { x: 0, y: 0 } },
+                    geometry: { source: { width: 600, height: 1200 }, encoded: { width: 600, height: 1200 }, origin: { x: 0, y: 0 } } };
             }
             if (method === 'session.description') {
                 if (params.description.type === 'answer') await engine.setRemoteDescription({ type: 'answer', sdp: params.description.sdp });
@@ -178,7 +185,7 @@ function Harness() {
             if (!link.up) throw Object.assign(new Error('the desktop is unreachable'), { code: 'transport' });
             const carrier = newCarrier();
             if (window.__onAuthorize) { const resolveReattach = window.__onAuthorize; window.__onAuthorize = null; setTimeout(resolveReattach, 0); }
-            return { signaling: carrier, session: { maxWidth: 320, maxHeight: 180, maxFps: 30 } };
+            return { signaling: carrier, session: { maxWidth: 1200, maxHeight: 1200, maxFps: 30 } };
         },
         onStateChange: (s) => { if (s.status !== probe.status) probe.log.push([Date.now(), s.status]); probe.status = s.status; },
         onError: (f) => { probe.error = f.code; },
@@ -221,6 +228,37 @@ window.__phaseProtection = async () => {
     await cutAndReattach({});
     await sleep(600);
     return { restarts: probe.restarts.length - before };
+};
+
+window.__phaseGeometry = async () => {
+    const initial = window.__session.snapshot.geometry;
+    if (initial?.source?.width !== 600 || initial?.source?.height !== 1200) {
+        throw new Error('expected the live session to start at 600x1200; got ' + JSON.stringify(initial));
+    }
+    await sendOffer({ iceRestart: true });
+    const unchanged = await new Promise((resolve) => {
+        const deadline = Date.now() + 3000;
+        const poll = () => {
+            if (window.__session.snapshot.geometry?.source?.width === 600) return resolve(window.__session.snapshot.geometry);
+            if (Date.now() >= deadline) return resolve(null);
+            setTimeout(poll, 20);
+        };
+        poll();
+    });
+    if (unchanged == null) throw new Error('offer without geometry changed or lost the existing geometry');
+    const swapped = { source: { width: 1200, height: 600 }, encoded: { width: 1200, height: 600 }, origin: { x: 0, y: 0 } };
+    await sendOffer({ iceRestart: true }, swapped);
+    const updated = await new Promise((resolve) => {
+        const deadline = Date.now() + 3000;
+        const poll = () => {
+            const geometry = window.__session.snapshot.geometry;
+            if (geometry?.source?.width === 1200 && geometry?.source?.height === 600) return resolve(geometry);
+            if (Date.now() >= deadline) return resolve(null);
+            setTimeout(poll, 20);
+        };
+        poll();
+    });
+    return { initial, unchanged, updated, surfaceSizes: probe.surfaceSizes.slice() };
 };
 
 window.__phaseRace = async () => {
@@ -322,6 +360,19 @@ async function main() {
         await wait(async () => { const p = await page.evaluate(() => window.__probe); return p.status === 'live' && p.frames > 3; }, 30000, 'live picture with advancing frames');
         await new Promise((r) => setTimeout(r, 1500)); // let the media watcher poll once so a baseline exists
 
+        const geometry = await page.evaluate(() => window.__phaseGeometry());
+        assert.deepEqual(geometry.initial.source, { width: 600, height: 1200 });
+        assert.deepEqual(geometry.unchanged.source, { width: 600, height: 1200 }, 'an offer without geometry keeps the current size');
+        assert.deepEqual(geometry.updated?.source, { width: 1200, height: 600 }, 'an offer with geometry updates the live session');
+        assert.deepEqual(geometry.updated.encoded, { width: 1200, height: 600 }, 'the live session records encoded dimensions');
+        assert(geometry.surfaceSizes.some(([width, height]) => width === 1200 && height === 600), 'the presented native surface receives the encoded dimensions');
+        if (geometryOnly) {
+            const result = { status: 'pass', chrome, geometry };
+            writeFileSync(join(scratch, 'geometry-result.json'), JSON.stringify(result, null, 2) + '\n');
+            console.log('GEOMETRY-RESULT ' + JSON.stringify(result));
+            return;
+        }
+
         const protection = await page.evaluate(() => window.__phaseProtection());
         assert.equal(protection.restarts, 0, `the wait spent a restart while the picture was moving: ${JSON.stringify(protection)}`);
 
@@ -359,7 +410,7 @@ async function main() {
         const second = await page.evaluate((leg) => window.__phaseOutage(leg), { downMs: 6000, carrierMs: 0, lagMs: 1000, watchMs: 4000 });
         held('second outage', second);
 
-        const result = { status: 'pass', chrome, protection, race, afterRelease, afterEvent, outage, second };
+        const result = { status: 'pass', chrome, geometry, protection, race, afterRelease, afterEvent, outage, second };
         writeFileSync(join(scratch, 'race-result.json'), JSON.stringify(result, null, 2) + '\n');
         console.log('RACE-RESULT ' + JSON.stringify(result));
     } finally {

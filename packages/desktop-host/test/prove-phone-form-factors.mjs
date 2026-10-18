@@ -83,7 +83,7 @@ socket.addEventListener('message', (event) => {
         return;
     }
     const p = msg.params ?? {}; let t = null;
-    if (msg.event === 'session.description') t = { kind: 'description', description: p.description, sessionId: p.sessionId };
+    if (msg.event === 'session.description') t = { kind: 'description', description: p.description, geometry: p.geometry, sessionId: p.sessionId };
     else if (msg.event === 'session.candidate') t = { kind: 'candidate', candidate: p.candidate, sdpMid: p.sdpMid ?? null, sdpMLineIndex: p.sdpMLineIndex ?? null, sessionId: p.sessionId };
     else if (msg.event === 'session.state') t = { kind: 'state', capture: p.capture, transport: p.transport, firstFrame: p.firstFrame, sessionId: p.sessionId };
     else if (msg.event === 'session.restoreToken') t = { kind: 'restoreToken', token: p.token, sessionId: p.sessionId };

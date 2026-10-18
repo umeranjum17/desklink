@@ -382,7 +382,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
      * subscription starts before `session.open`, so anything that arrives
      * before the native session exists waits here and is replayed into it.
      */
-    const pendingOffer = useRef<{ sdp: string; sessionId?: string } | null>(null);
+    const pendingOffer = useRef<{ sdp: string; geometry?: SurfaceGeometry; sessionId?: string } | null>(null);
     const pendingCursorEvents = useRef<CursorSample[]>([]);
     const pendingCandidates = useRef<Array<{ candidate: string; sdpMid: string | null; sdpMLineIndex: number | null; sessionId?: string }>>([]);
     const attempts = useRef(0);
@@ -1013,10 +1013,14 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             case 'description':
                 if (event.description.type !== 'offer') return;
                 if (native == null || held == null) {
-                    pendingOffer.current = { sdp: event.description.sdp, sessionId: event.sessionId };
+                    pendingOffer.current = { sdp: event.description.sdp, geometry: event.geometry, sessionId: event.sessionId };
                     return;
                 }
                 if (!current) return;
+                if (event.geometry !== undefined) {
+                    update({ geometry: event.geometry });
+                    nativeDesklink?.setSurfaceSize(native, event.geometry.encoded.width, event.geometry.encoded.height);
+                }
                 // A mid-session re-offer is a restart this session asked
                 // for, through its policy or directly: renegotiation
                 // transients after it are expected, not a new outage.
@@ -1188,6 +1192,10 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             pendingOffer.current = null;
             if (stashedOffer !== null
                 && (stashedOffer.sessionId === undefined || stashedOffer.sessionId === openedResult.sessionId)) {
+                if (stashedOffer.geometry !== undefined) {
+                    update({ geometry: stashedOffer.geometry });
+                    platform?.setSurfaceSize(id, stashedOffer.geometry.encoded.width, stashedOffer.geometry.encoded.height);
+                }
                 platform?.setRemoteDescription(id, 'offer', tcpBridge.current?.rewriteSdp(stashedOffer.sdp) ?? stashedOffer.sdp);
             }
             for (const candidate of pendingCandidates.current.splice(0)) {

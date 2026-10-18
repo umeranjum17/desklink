@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.9
+
+Joint patch release; protocol version remains 3. All packages move together.
+
+### Fixed
+
+- A renegotiation offer can update the presented desktop geometry, including
+  the native surface's encoded dimensions, so a rotated desktop uses its new
+  size. Offers from older hosts without geometry keep the current size.
+
 ## Unreleased
 
 ### Changed
