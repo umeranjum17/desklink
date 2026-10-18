@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 
 import type { NativeDesklinkModule } from './native';
-import { TcpBridge, rewriteLoopbackTcpCandidate, rewriteLoopbackTcpSdp } from './tcpTransport';
+import { TcpBridge } from './tcpTransport';
 import type { TcpTransportStats } from './tcpTransport';
 import type {
     ControlMessage,
@@ -453,8 +453,6 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
     const reopenAtOnce = useRef(false);
     /** The relay bridge for a `tcpTransport` session, or null without one. */
     const tcpBridge = useRef<TcpBridge | null>(null);
-    /** The phone listener's port, for rewriting the engine's candidate. */
-    const tcpPort = useRef(0);
     const optionsRef = useRef(options);
     optionsRef.current = options;
 
@@ -937,7 +935,6 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         cancelFirstFrame();
         tcpBridge.current?.stop();
         tcpBridge.current = null;
-        tcpPort.current = 0;
         const id = nativeRef.current;
         nativeRef.current = null;
         inputEnabled.current = false;
@@ -1024,7 +1021,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 // for, through its policy or directly: renegotiation
                 // transients after it are expected, not a new outage.
                 if (presentedRef.current) restartGraceUntil.current = Date.now() + RESTART_GRACE_MS;
-                nativeDesklink?.setRemoteDescription(native, 'offer', rewriteLoopbackTcpSdp(event.description.sdp, tcpPort.current));
+                nativeDesklink?.setRemoteDescription(native, 'offer', tcpBridge.current?.rewriteSdp(event.description.sdp) ?? event.description.sdp);
                 return;
             case 'candidate':
                 if (native == null || held == null) {
@@ -1039,7 +1036,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                 if (!current) return;
                 nativeDesklink?.addRemoteCandidate(
                     native,
-                    rewriteLoopbackTcpCandidate(event.candidate.candidate, tcpPort.current),
+                    tcpBridge.current?.rewriteCandidate(event.candidate.candidate) ?? event.candidate.candidate,
                     event.candidate.sdpMid ?? null,
                     event.candidate.sdpMLineIndex ?? null,
                 );
@@ -1162,7 +1159,6 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             // stashed offer below is replayed through the same rewrite.
             tcpBridge.current?.stop();
             tcpBridge.current = null;
-            tcpPort.current = 0;
             if (authorization.session.tcpTransport != null) {
                 if (platform?.startTcpBridge == null) {
                     platform?.closeSession(id);
@@ -1176,7 +1172,6 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                     return;
                 }
                 tcpBridge.current = bridge;
-                tcpPort.current = bridge.port;
             }
             if (token !== generationToken.current) {
                 platform?.closeSession(id);
@@ -1193,11 +1188,11 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             pendingOffer.current = null;
             if (stashedOffer !== null
                 && (stashedOffer.sessionId === undefined || stashedOffer.sessionId === openedResult.sessionId)) {
-                platform?.setRemoteDescription(id, 'offer', rewriteLoopbackTcpSdp(stashedOffer.sdp, tcpPort.current));
+                platform?.setRemoteDescription(id, 'offer', tcpBridge.current?.rewriteSdp(stashedOffer.sdp) ?? stashedOffer.sdp);
             }
             for (const candidate of pendingCandidates.current.splice(0)) {
                 if (candidate.sessionId !== undefined && candidate.sessionId !== openedResult.sessionId) continue;
-                platform?.addRemoteCandidate(id, rewriteLoopbackTcpCandidate(candidate.candidate, tcpPort.current), candidate.sdpMid, candidate.sdpMLineIndex);
+                platform?.addRemoteCandidate(id, tcpBridge.current?.rewriteCandidate(candidate.candidate) ?? candidate.candidate, candidate.sdpMid, candidate.sdpMLineIndex);
             }
 
             if (token === generationToken.current) established = true;
@@ -1581,7 +1576,6 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         cancelFirstFrame();
         tcpBridge.current?.stop();
         tcpBridge.current = null;
-        tcpPort.current = 0;
         if (mediaTimer.current !== null) clearTimeout(mediaTimer.current);
         mediaTimer.current = null;
         generationToken.current += 1;

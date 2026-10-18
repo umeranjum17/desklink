@@ -35,11 +35,14 @@ export interface TcpTransportStream {
 /**
  * The application's byte stream factory. `open` runs once per TCP connection
  * the phone's listener accepts — usually one per session — and returns its
- * duplex. It may be async; while it is pending, bytes from the phone wait in
- * the kit rather than being dropped.
+ * duplex, connected to the engine's loopback TCP port `port`. The engine picks
+ * that port per session, so a new session after a failed one passes a new one;
+ * dial the port each `open` passes, not a remembered one. It may be async;
+ * while it is pending, bytes from the phone wait in the kit rather than being
+ * dropped.
  */
 export interface TcpTransport {
-    open(): TcpTransportStream | Promise<TcpTransportStream>;
+    open(port: number): TcpTransportStream | Promise<TcpTransportStream>;
 }
 
 /** Counters for one relayed session, for evidence and throughput. */
@@ -102,15 +105,32 @@ export function base64Decode(text: string): Uint8Array {
     return out;
 }
 
+function candidateFields(candidate: string): string[] {
+    return candidate.trim().replace(/^a=/, '').trim().split(/\s+/);
+}
+
+function isLoopbackTcpFields(fields: string[]): boolean {
+    if (fields.length < 6 || !fields[0]?.startsWith('candidate:')) return false;
+    return fields[2]?.toLowerCase() === 'tcp' && fields[4] === '127.0.0.1';
+}
+
 /**
  * Whether this candidate line is the engine's loopback TCP offer: TCP to its
  * own 127.0.0.1. Only that line is ever rewritten; anything else — UDP host
  * candidates, relay candidates — passes through untouched.
  */
 export function isLoopbackTcpCandidate(candidate: string): boolean {
-    const fields = candidate.trim().replace(/^a=/, '').trim().split(/\s+/);
-    if (fields.length < 6 || !fields[0]?.startsWith('candidate:')) return false;
-    return fields[2]?.toLowerCase() === 'tcp' && fields[4] === '127.0.0.1';
+    return isLoopbackTcpFields(candidateFields(candidate));
+}
+
+/**
+ * The engine port a loopback TCP candidate offers, or 0 for any other line and
+ * for ICE's throwaway discard port, which nothing listens on.
+ */
+function loopbackTcpPort(fields: string[]): number {
+    if (!isLoopbackTcpFields(fields)) return 0;
+    const port = Number(fields[5]);
+    return Number.isInteger(port) && port >= 1024 ? port : 0;
 }
 
 /**
@@ -119,12 +139,12 @@ export function isLoopbackTcpCandidate(candidate: string): boolean {
  * throwaway discard port: rewriting it would dial the listener for a
  * candidate nothing listens on.
  */
-export function rewriteLoopbackTcpCandidate(candidate: string, port: number): string {
-    if (!isLoopbackTcpCandidate(candidate) || !Number.isInteger(port) || port <= 0) return candidate;
+function rewriteLoopbackTcpCandidate(candidate: string, port: number): string {
+    if (!Number.isInteger(port) || port <= 0) return candidate;
+    const fields = candidateFields(candidate);
+    const enginePort = loopbackTcpPort(fields);
+    if (enginePort === 0 || enginePort === port) return candidate;
     const prefixed = candidate.startsWith('a=');
-    const fields = candidate.trim().replace(/^a=/, '').trim().split(/\s+/);
-    const enginePort = Number(fields[5]);
-    if (!Number.isInteger(enginePort) || enginePort < 1024 || enginePort === port) return candidate;
     const rewritten = [...fields.slice(0, 5), String(port), ...fields.slice(6)].join(' ');
     return prefixed ? `a=${rewritten}` : rewritten;
 }
@@ -134,7 +154,7 @@ export function rewriteLoopbackTcpCandidate(candidate: string, port: number): st
  * port. The engine's offer carries its own loopback port, so without this the
  * peer would dial the engine's port on the phone's loopback and never connect.
  */
-export function rewriteLoopbackTcpSdp(sdp: string, port: number): string {
+function rewriteLoopbackTcpSdp(sdp: string, port: number): string {
     if (!(port > 0)) return sdp;
     return sdp
         .split(/\r?\n/)
@@ -169,6 +189,8 @@ export class TcpBridge {
     private readonly transport: TcpTransport;
     private readonly connections = new Map<number, BridgeConnection>();
     private stopped = false;
+    /** The engine port this session's candidate offers, for `open`. */
+    private enginePort = 0;
     /** JS-to-native crossings so far. */
     private writes = 0;
     /** Native-to-JS crossings so far. */
@@ -193,6 +215,23 @@ export class TcpBridge {
         return new TcpBridge(native, sessionId, transport, port);
     }
 
+    /**
+     * The engine's offer for the phone: its loopback TCP candidates point at
+     * this listener, and the engine port they named is what `open` dials.
+     */
+    rewriteSdp(sdp: string): string {
+        for (const line of sdp.split(/\r?\n/)) {
+            if (line.startsWith('a=candidate:')) this.enginePort = loopbackTcpPort(candidateFields(line)) || this.enginePort;
+        }
+        return rewriteLoopbackTcpSdp(sdp, this.port);
+    }
+
+    /** One trickled engine candidate for the phone, as `rewriteSdp` does. */
+    rewriteCandidate(candidate: string): string {
+        this.enginePort = loopbackTcpPort(candidateFields(candidate)) || this.enginePort;
+        return rewriteLoopbackTcpCandidate(candidate, this.port);
+    }
+
     /** A phone socket was accepted: open its consumer stream. */
     accept(connection: number): void {
         if (this.stopped || this.connections.has(connection)) return;
@@ -200,7 +239,7 @@ export class TcpBridge {
         this.connections.set(connection, entry);
         void (async () => {
             try {
-                const stream = await this.transport.open();
+                const stream = await this.transport.open(this.enginePort);
                 if (this.stopped || !entry.open) {
                     stream.close();
                     return;

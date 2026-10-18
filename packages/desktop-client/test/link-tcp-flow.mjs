@@ -116,6 +116,7 @@ let xvfb, target, bridge, metro, receiver, relayServer;
 // The relay's engine port, its byte counters, and every app report: declared
 // out here so the failure receipt can summarise them too.
 let enginePort = 0;
+const enginePorts = new Set();
 const relayBytes = { wsToTcp: 0, tcpToWs: 0, streams: 0 };
 const reports = [];
 // Every session status the app reports, in the order it changed.
@@ -175,9 +176,10 @@ try {
     await waitFor(() => /^open\s+http/m.test(logs.bridge), 'the bridge URL');
     const token = /token[= ](\S+)/.exec(logs.bridge)[1];
 
-    // The relay: each WebSocket connection is one relayed TCP connection. The
-    // engine's loopback port is ephemeral and learned from the app's reports;
-    // streams that open before it is known wait for it (bounded), then dial.
+    // The relay: each WebSocket connection is one relayed TCP connection to
+    // the engine loopback port its URL names (`port`, from the kit). The relay
+    // dials only a port some app report has carried, and waits (bounded) for
+    // the report that carries a new session's port to arrive.
     // The relay, like every other socket the app opens, is reached over `adb
     // reverse` (TCP only), because the guest's own uplink goes away below.
     const relayLog = join(out, 'relay.log');
@@ -188,7 +190,8 @@ try {
     const relayPort = relayServer.address().port;
     receipt.relayPort = relayPort;
     const relay = relayServer;
-    relay.on('connection', (ws) => {
+    relay.on('connection', (ws, request) => {
+        const target = Number(new URL(request.url, 'ws://relay').searchParams.get('port'));
         relayBytes.streams += 1;
         relayNote(`stream #${relayBytes.streams} open`);
         let socket = null, closed = false;
@@ -201,8 +204,8 @@ try {
             try { socket?.destroy(); } catch { /* already gone */ }
         };
         const pump = () => {
-            relayNote(`stream dialing 127.0.0.1:${enginePort}`);
-            socket = connect(enginePort, '127.0.0.1', () => {
+            relayNote(`stream dialing 127.0.0.1:${target}`);
+            socket = connect(target, '127.0.0.1', () => {
                 relayNote('stream dial ok');
                 for (const chunk of queued.splice(0)) socket.write(chunk);
             });
@@ -214,13 +217,13 @@ try {
             socket.on('close', finish);
         };
         const deadline = Date.now() + 60000;
-        const dialWhenReady = () => {
+        const dialWhenReported = () => {
             if (closed) return;
-            if (enginePort > 0) { pump(); return; }
-            if (Date.now() > deadline) { finish(); return; }
-            setTimeout(dialWhenReady, 100);
+            if (enginePorts.has(target)) { pump(); return; }
+            if (Date.now() > deadline) { relayNote(`stream names an unreported port: ${target}`); finish(); return; }
+            setTimeout(dialWhenReported, 100);
         };
-        dialWhenReady();
+        dialWhenReported();
         ws.on('message', (data) => {
             const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
             relayBytes.wsToTcp += chunk.length;
@@ -244,8 +247,10 @@ try {
             // the last report as the app's current state.
             if (report?.statusChange !== undefined) statuses.push(report);
             else reports.push(text);
-            if (Number.isInteger(report?.loopbackTcpPort) && report.loopbackTcpPort >= 1024 && enginePort === 0) {
-                enginePort = report.loopbackTcpPort;
+            // Lab relay trusts the report endpoint only because it is loopback test code; not a pattern for product relays.
+            if (Number.isInteger(report?.loopbackTcpPort) && report.loopbackTcpPort >= 1024) {
+                enginePorts.add(report.loopbackTcpPort);
+                enginePort ||= report.loopbackTcpPort;
             }
             response.writeHead(204, { 'Access-Control-Allow-Origin': '*' });
             response.end();

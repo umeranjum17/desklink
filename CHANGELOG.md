@@ -2,8 +2,20 @@
 
 ## Unreleased
 
+### Changed
+
+- A relay passed as `session.tcpTransport` must now dial the port its
+  `TcpTransport.open(port)` receives. A relay that ignores that argument and
+  keeps dialing the port it learned first still stalls after a network stall.
+
 ### Fixed
 
+- After a network stall long enough to fail a relay-only session
+  (`session.tcpTransport`), the next session now dials its own engine port:
+  `TcpTransport.open(port)` receives the loopback TCP port each connection is
+  for, instead of a relay that kept dialing the first session's port. Restarts
+  within one session are unchanged. See
+  [the relay-only section](packages/desktop-client/README.md#relay-only-phones).
 - On a Hyprland **window** share, a tap landing on another output than the
   agent cue helper is on now moves the helper there — the cue and
   `session.point`'s ring draw where the tap landed, edge glow with them —
