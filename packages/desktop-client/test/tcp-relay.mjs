@@ -27,6 +27,9 @@ const STREAMS = 0, WS_TO_TCP = 1, TCP_TO_WS = 2;
 export async function startTcpRelay({ log }) {
     const counters = new Float64Array(new SharedArrayBuffer(3 * Float64Array.BYTES_PER_ELEMENT));
     const worker = new Worker(new URL(import.meta.url), { workerData: { log, counters } });
+    let exited = false;
+    worker.on('exit', () => { exited = true; });
+    worker.on('error', error => console.error(`tcp relay worker failed: ${error.stack ?? error}`));
     const port = await new Promise((ok, failed) => {
         worker.once('message', ok);
         worker.once('error', failed);
@@ -38,6 +41,7 @@ export async function startTcpRelay({ log }) {
         allowPort: enginePort => worker.postMessage(enginePort),
         // The log ends before the thread does, so the last stream notes land.
         close: () => new Promise(done => {
+            if (exited) { done(); return; }
             worker.once('exit', done);
             worker.postMessage('close');
         }),
@@ -47,14 +51,22 @@ export async function startTcpRelay({ log }) {
 if (!isMainThread) {
     const { counters } = workerData;
     const logStream = createWriteStream(workerData.log, { flags: 'a' });
-    const note = line => logStream.write(`${Date.now()} ${line}\n`);
+    let logging = true;
+    logStream.on('error', error => {
+        logging = false;
+        console.error(`tcp relay log stopped: ${error.message}`);
+    });
+    const note = line => { if (logging) logStream.write(`${Date.now()} ${line}\n`); };
     const enginePorts = new Set();
+    const streams = new Set();
     note('relay up');
     const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
     parentPort.on('message', (message) => {
         if (message !== 'close') { enginePorts.add(message); return; }
+        for (const finish of streams) finish();
         for (const client of server.clients) client.terminate();
         server.close();
+        logging = false;
         logStream.end(() => process.exit(0));
     });
     server.on('listening', () => parentPort.postMessage(server.address().port));
@@ -67,10 +79,12 @@ if (!isMainThread) {
         const finish = () => {
             if (closed) return;
             closed = true;
+            streams.delete(finish);
             note(`stream #${stream} close (wsToTcp=${counters[WS_TO_TCP]} tcpToWs=${counters[TCP_TO_WS]})`);
             try { ws.close(); } catch { /* already gone */ }
             try { socket?.destroy(); } catch { /* already gone */ }
         };
+        streams.add(finish);
         const pump = () => {
             note(`stream #${stream} dialing 127.0.0.1:${target}`);
             socket = connect(target, '127.0.0.1', () => {
