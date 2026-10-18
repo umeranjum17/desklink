@@ -7,11 +7,11 @@
  * blocks, and a client sees about 2 s without frames as a frozen picture. So the
  * relay runs in a worker with its own event loop, writes its log through a
  * stream, and shares its byte counters through memory: nothing the flow does
- * can stall it.
+ * can stall reads or writes on a live stream.
  *
  * The relay dials only a port the flow has allowed (one some app report has
  * carried), and waits (bounded) for the report that carries a new session's
- * port to arrive.
+ * port to arrive, so a new stream's dial waits on the flow.
  */
 import { createWriteStream } from 'node:fs';
 import { connect } from 'node:net';
@@ -53,7 +53,11 @@ export async function startTcpRelay({ log }) {
         // The log ends before the thread does, so the last stream notes land.
         close: () => new Promise(done => {
             if (exited) { done(); return; }
-            worker.once('exit', done);
+            const timer = setTimeout(() => {
+                failure ??= 'the relay close timed out';
+                worker.terminate();
+            }, 5000);
+            worker.once('exit', () => { clearTimeout(timer); done(); });
             worker.postMessage('close');
         }),
     };
