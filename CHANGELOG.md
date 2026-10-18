@@ -10,6 +10,10 @@
   instead of drawing no cue. A tap on the helper's own output reuses it with
   no new process, and closing the session reaps every helper. See
   [PROTOCOL.md](packages/desktop-host/docs/PROTOCOL.md#input-and-clipboard-the-sessions-control-channel).
+- A relay (ICE-TCP) video session no longer drops to its rate floor from the
+  relay's delivery jitter. A TCP path backs off only on a queue above 100 ms;
+  UDP paths keep 25 ms. See
+  [PROTOCOL.md](packages/desktop-host/docs/PROTOCOL.md#state).
 
 ## 0.5.8
 
