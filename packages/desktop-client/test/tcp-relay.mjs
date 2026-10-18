@@ -36,6 +36,9 @@ export async function startTcpRelay({ log }) {
         failure = error.stack ?? String(error);
         console.error(`tcp relay worker failed: ${failure}`);
     });
+    worker.on('message', message => {
+        if (message?.logError) failure ??= `the relay log stopped: ${message.logError}`;
+    });
     const port = await new Promise((ok, failed) => {
         worker.once('message', ok);
         worker.once('error', failed);
@@ -61,6 +64,7 @@ if (!isMainThread) {
     let logging = true;
     logStream.on('error', error => {
         logging = false;
+        parentPort.postMessage({ logError: error.message });
         console.error(`tcp relay log stopped: ${error.message}`);
     });
     const note = line => { if (logging) logStream.write(`${Date.now()} ${line}\n`); };
@@ -81,7 +85,7 @@ if (!isMainThread) {
         const target = Number(new URL(request.url, 'ws://relay').searchParams.get('port'));
         const stream = ++counters[STREAMS];
         note(`stream #${stream} open`);
-        let socket = null, closed = false;
+        let socket = null, connected = false, closed = false;
         const queued = [];
         const finish = () => {
             if (closed) return;
@@ -96,6 +100,7 @@ if (!isMainThread) {
             note(`stream #${stream} dialing 127.0.0.1:${target}`);
             socket = connect(target, '127.0.0.1', () => {
                 note(`stream #${stream} dial ok`);
+                connected = true;
                 for (const chunk of queued.splice(0)) socket.write(chunk);
             });
             socket.on('data', (chunk) => {
@@ -116,8 +121,13 @@ if (!isMainThread) {
         ws.on('message', (data) => {
             const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
             counters[WS_TO_TCP] += chunk.length;
-            if (socket !== null) socket.write(chunk);
-            else if (queued.reduce((n, c) => n + c.length, 0) < 1048576) queued.push(chunk);
+            if (connected) { socket.write(chunk); return; }
+            if (queued.reduce((n, c) => n + c.length, 0) + chunk.length > 1048576) {
+                note(`stream #${stream} queued bytes over 1 MiB before dial: closing`);
+                finish();
+                return;
+            }
+            queued.push(chunk);
         });
         ws.on('error', finish);
         ws.on('close', finish);
