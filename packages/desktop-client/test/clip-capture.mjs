@@ -7,8 +7,8 @@
  * the rate the device actually gave, so the run still has a clip. The caller
  * labels a timelapse as one in its run output.
  *
- * Every command is awaited, never spawnSync: the caller's relay shares this
- * process's event loop, and a blocked loop stalls the relay for the whole clip.
+ * Every command is awaited, never spawnSync: a relay on the caller's event loop
+ * stalls for the whole clip while a blocking command runs.
  */
 import { execFile } from 'node:child_process';
 import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';

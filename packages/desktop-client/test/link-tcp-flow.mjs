@@ -50,19 +50,18 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { connect } from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
-import { WebSocketServer } from 'ws';
 import { PNG } from 'pngjs';
 import {
     assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb,
 } from '../../desktop-host/test/lab-safety.mjs';
 import { captureClip, spawnAsync } from './clip-capture.mjs';
+import { startTcpRelay } from './tcp-relay.mjs';
 
 assertNoAmbientDesktop();
 assert(process.platform === 'linux', 'this private-Xvfb proof requires Linux');
@@ -89,9 +88,8 @@ const serial = process.env.ANDROID_SERIAL ?? attached[0];
 const metroPort = Number(process.env.DESKLINK_METRO_PORT ?? 8081);
 assert(serial && attached.includes(serial),
     `name the device with ANDROID_SERIAL; adb reports ${attached.join(', ') || 'none'}`);
-// The relay shares this process's event loop, so every adb call that can run
-// while media is relayed is async: a blocking spawnSync here stalls the relay,
-// and the engine's pings with it, which the app reads as a lost connection.
+// Every adb call that can run while media is relayed is async, so the report
+// receiver on this event loop keeps answering; the relay has its own thread.
 const adbRun = (args, timeout = 120000) => spawnAsync('adb', ['-s', serial, ...args], { encoding: 'utf8', timeout, maxBuffer: 64 * 1024 * 1024 });
 const adb = async (...args) => {
     const done = await adbRun(args);
@@ -112,12 +110,10 @@ const receipt = {
     media_path: 'TCP only, through the relay: the phone listener piped over a lab WebSocket relay to the engine loopback port; UDP candidates discarded in the app',
 };
 const children = [];
-let xvfb, target, bridge, metro, receiver, relayServer;
-// The relay's engine port, its byte counters, and every app report: declared
-// out here so the failure receipt can summarise them too.
+let xvfb, target, bridge, metro, receiver, relay;
+// The relay's engine port and every app report: declared out here so the
+// failure receipt can summarise them too.
 let enginePort = 0;
-const enginePorts = new Set();
-const relayBytes = { wsToTcp: 0, tcpToWs: 0, streams: 0 };
 const reports = [];
 // Every session status the app reports, in the order it changed.
 const statuses = [];
@@ -176,63 +172,13 @@ try {
     await waitFor(() => /^open\s+http/m.test(logs.bridge), 'the bridge URL');
     const token = /token[= ](\S+)/.exec(logs.bridge)[1];
 
-    // The relay: each WebSocket connection is one relayed TCP connection to
-    // the engine loopback port its URL names (`port`, from the kit). The relay
-    // dials only a port some app report has carried, and waits (bounded) for
-    // the report that carries a new session's port to arrive.
-    // The relay, like every other socket the app opens, is reached over `adb
-    // reverse` (TCP only), because the guest's own uplink goes away below.
-    const relayLog = join(out, 'relay.log');
-    const relayNote = (line) => writeFileSync(relayLog, `${Date.now()} ${line}\n`, { flag: 'a' });
-    relayNote('relay up');
-    relayServer = new WebSocketServer({ host: '127.0.0.1', port: 0 });
-    await new Promise(ok => relayServer.on('listening', ok));
-    const relayPort = relayServer.address().port;
+    // The relay (`tcp-relay.mjs`) runs on its own thread, so nothing this flow
+    // does on its own event loop can stall it. Like every other socket the app
+    // opens, it is reached over `adb reverse` (TCP only), because the guest's
+    // own uplink goes away below.
+    relay = await startTcpRelay({ log: join(out, 'relay.log') });
+    const relayPort = relay.port;
     receipt.relayPort = relayPort;
-    const relay = relayServer;
-    relay.on('connection', (ws, request) => {
-        const target = Number(new URL(request.url, 'ws://relay').searchParams.get('port'));
-        relayBytes.streams += 1;
-        relayNote(`stream #${relayBytes.streams} open`);
-        let socket = null, closed = false;
-        const queued = [];
-        const finish = () => {
-            if (closed) return;
-            closed = true;
-            relayNote(`stream #${relayBytes.streams} close (wsToTcp=${relayBytes.wsToTcp} tcpToWs=${relayBytes.tcpToWs})`);
-            try { ws.close(); } catch { /* already gone */ }
-            try { socket?.destroy(); } catch { /* already gone */ }
-        };
-        const pump = () => {
-            relayNote(`stream dialing 127.0.0.1:${target}`);
-            socket = connect(target, '127.0.0.1', () => {
-                relayNote('stream dial ok');
-                for (const chunk of queued.splice(0)) socket.write(chunk);
-            });
-            socket.on('data', (chunk) => {
-                relayBytes.tcpToWs += chunk.length;
-                if (ws.readyState === ws.OPEN) ws.send(chunk);
-            });
-            socket.on('error', finish);
-            socket.on('close', finish);
-        };
-        const deadline = Date.now() + 60000;
-        const dialWhenReported = () => {
-            if (closed) return;
-            if (enginePorts.has(target)) { pump(); return; }
-            if (Date.now() > deadline) { relayNote(`stream names an unreported port: ${target}`); finish(); return; }
-            setTimeout(dialWhenReported, 100);
-        };
-        dialWhenReported();
-        ws.on('message', (data) => {
-            const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
-            relayBytes.wsToTcp += chunk.length;
-            if (socket !== null) socket.write(chunk);
-            else if (queued.reduce((n, c) => n + c.length, 0) < 1048576) queued.push(chunk);
-        });
-        ws.on('error', finish);
-        ws.on('close', finish);
-    });
 
     const reportsLog = join(out, 'reports.jsonl');
     receiver = createServer((request, response) => {
@@ -240,18 +186,18 @@ try {
         request.on('data', c => chunks.push(c));
         request.on('end', () => {
             const text = Buffer.concat(chunks).toString();
-            writeFileSync(reportsLog, `${text}\n`, { flag: 'a' });
             let report = null;
             try { report = JSON.parse(text); } catch { /* not JSON; kept raw */ }
+            // Lab relay trusts the report endpoint only because it is loopback test code; not a pattern for product relays.
+            if (Number.isInteger(report?.loopbackTcpPort) && report.loopbackTcpPort >= 1024) {
+                relay.allowPort(report.loopbackTcpPort);
+                enginePort ||= report.loopbackTcpPort;
+            }
+            writeFileSync(reportsLog, `${text}\n`, { flag: 'a' });
             // A status change is kept apart from the samples: every sample reads
             // the last report as the app's current state.
             if (report?.statusChange !== undefined) statuses.push(report);
             else reports.push(text);
-            // Lab relay trusts the report endpoint only because it is loopback test code; not a pattern for product relays.
-            if (Number.isInteger(report?.loopbackTcpPort) && report.loopbackTcpPort >= 1024) {
-                enginePorts.add(report.loopbackTcpPort);
-                enginePort ||= report.loopbackTcpPort;
-            }
             response.writeHead(204, { 'Access-Control-Allow-Origin': '*' });
             response.end();
         });
@@ -517,7 +463,7 @@ try {
 
     // The picture never fell to `reconnecting` from its first live status to
     // the end of the run. The captures and the screenrecord above run while the
-    // relay carries media, so a blocking call in this process shows up here.
+    // relay carries media, so a relay this flow's own work stalls shows up here.
     const statusSeqs = statuses.map(report => report.seq);
     assert(statusSeqs.length > 0, 'the app posted no status report');
     const sentSeq = Math.max(0, ...reports.map(text => JSON.parse(text).statusSeq ?? 0));
@@ -538,13 +484,16 @@ try {
         droppedNonRelay: droppedNonRelay(),
         droppedNonRelayOut: droppedNonRelayOut(),
         lastTcp: lastTimed?.tcp ?? lastReport().tcp,
-        relayBytes,
+        relayBytes: relay.bytes(),
         enginePort,
         throughput,
         capacity,
         corners,
         tap: button.trim(),
     });
+    await relay.close();
+    receipt.relayFailure = relay.failure() ?? null;
+    if (receipt.relayFailure) throw new Error(`the relay failed: ${receipt.relayFailure}`);
     receipt.outcome = 'PASS';
     console.log(`PASS: the example app shows a live desktop over its own relay on ${serial}; evidence ${out}`);
 } catch (error) {
@@ -556,7 +505,7 @@ try {
         receipt.lastTcp = last.tcp ?? null;
         receipt.droppedNonRelay = Number(last.droppedNonRelay ?? 0);
         receipt.droppedNonRelayOut = Number(last.droppedNonRelayOut ?? 0);
-        receipt.relayBytes = relayBytes;
+        receipt.relayBytes = relay?.bytes();
         receipt.enginePort = enginePort;
         receipt.loopback_tcp_port = enginePort || undefined;
         receipt.framesFirst = reports.length > 0 ? frames(reports[0]) : 0;
@@ -587,7 +536,8 @@ try {
         ['shell', 'svc', 'data', 'enable'],
     ]) await tryAdb(...restore);
     try { receiver?.close(); } catch { /* already gone */ }
-    try { relayServer?.close(); } catch { /* already gone */ }
+    await relay?.close();
+    receipt.relayFailure = relay?.failure() ?? null;
     if (xvfb) { try { await stopOwnedXvfb(xvfb); } catch (error) { receipt.cleanup = String(error); } }
     claim.release();
     rmSync(scratch, { recursive: true, force: true });
