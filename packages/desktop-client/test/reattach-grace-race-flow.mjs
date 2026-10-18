@@ -236,6 +236,13 @@ window.__phaseGeometry = async () => {
         throw new Error('expected the live session to start at 600x1200; got ' + JSON.stringify(initial));
     }
     await sendOffer({ iceRestart: true });
+    await new Promise((resolve, reject) => {
+        const deadline = Date.now() + 3000;
+        const check = () => engine.signalingState === 'stable' ? resolve() : Date.now() >= deadline
+            ? reject(new Error('first renegotiation offer was not answered'))
+            : setTimeout(check, 20);
+        check();
+    });
     const unchanged = await new Promise((resolve) => {
         const deadline = Date.now() + 3000;
         const poll = () => {
