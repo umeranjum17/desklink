@@ -104,7 +104,8 @@ import { PNG } from 'pngjs';
 import { macLane, CLEAN_SCRIPT } from './mac-lane.mjs';
 import { pictureBox } from './picture-box.mjs';
 import { spawnAsync } from './clip-capture.mjs';
-import { WebSocket, WebSocketServer } from 'ws';
+import { WebSocket } from 'ws';
+import { startWsRelay } from './ws-relay.mjs';
 
 import { assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
 
@@ -589,7 +590,7 @@ async function cleanup() {
         } catch (error) { log('simulator cleanup:', error.message); }
     }
     page?.close();
-    relay?.close();
+    await relay?.close();
     rememberBrowserHelpers();
     if (pagePid) await stopProcess(pagePid, 'page browser');
     rememberBrowserHelpers();
@@ -692,39 +693,13 @@ async function main() {
 
     // ---- the relay the simulator connects to: it records what crosses it ----------
     const crossed = { opened: null, offer: null, answer: null };
-    relay = new WebSocketServer({ host: hostAddr, port: 0, path: '/desktop' });
-    relay.on('connection', (client, request) => {
-        const upstream = new WebSocket(`ws://127.0.0.1:${bridgePort}${request.url}`);
-        const queued = [];
-        const methods = new Map();
-        upstream.on('open', () => { for (const line of queued.splice(0)) upstream.send(line); });
-        upstream.on('message', (raw) => {
-            const line = String(raw);
-            const message = JSON.parse(line);
-            if (message.event === 'session.description' && crossed.offer === null) {
-                crossed.offer = message.params.description.sdp;
-                writeFileSync(join(out, 'offer.sdp'), crossed.offer);
-            }
-            if (methods.get(message.id) === 'session.open' && message.result) crossed.opened = message.result;
-            if (client.readyState === WebSocket.OPEN) client.send(line);
-        });
-        client.on('message', (raw) => {
-            const line = String(raw);
-            const message = JSON.parse(line);
-            methods.set(message.id, message.method);
-            if (message.method === 'session.description' && message.params?.description?.type === 'answer' && crossed.answer === null) {
-                crossed.answer = message.params.description.sdp;
-                writeFileSync(join(out, 'answer.sdp'), crossed.answer);
-            }
-            if (upstream.readyState === WebSocket.OPEN) upstream.send(line); else queued.push(line);
-        });
-        client.on('close', () => upstream.close());
-        upstream.on('close', () => client.close());
-        upstream.on('error', () => client.close());
-    });
-    await new Promise((listening) => relay.once('listening', listening));
-    const relayUrl = `ws://${hostAddr}:${relay.address().port}/desktop?token=${token}`;
-    log(`relay on ${hostAddr}:${relay.address().port}`);
+    relay = await startWsRelay({ host: hostAddr, path: '/desktop', upstream: `ws://127.0.0.1:${bridgePort}`, evidence: out, onEvent(message) {
+        if (message.event === 'session.description' && crossed.offer === null) crossed.offer = message.params.description.sdp;
+        if (message._opened) crossed.opened = message._opened;
+        if (message._answer) crossed.answer = message._answer;
+    } });
+    const relayUrl = `ws://${hostAddr}:${relay.port}/desktop?token=${token}`;
+    log(`relay on ${hostAddr}:${relay.port}`);
 
     // ---- launch on the simulator ---------------------------------------------------
     await macAsync(`mkdir -p "$D/tmp"

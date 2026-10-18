@@ -20,12 +20,13 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFile, appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { WebSocket, WebSocketServer } from 'ws';
+import { WebSocket } from 'ws';
+import { startWsRelay } from './ws-relay.mjs';
 import { ShapedLink, startSignalling } from './shaped-link.mjs';
 import { assertNoAmbientDesktop, claimPrivateDisplay, stopOwnedXvfb, trackOwnedXvfb, verifyOwnedXvfb } from '../../desktop-host/test/lab-safety.mjs';
 
@@ -250,10 +251,9 @@ async function run() {
     assert(existsSync(engine) && existsSync(fixture), 'build task-owned desklink-host and x11_target first');
     const scratch = mkdtempSync(join(tmpdir(), 'dl-roam-'));
     let claim, xvfb, target, bridge, signalling, relay, vite, context, pageVideo;
-    let fixtureLog = '', fixtureBuffer = '', refused = 0, blocked = false, holdMetrics = false, stalled = false;
+    let fixtureLog = '', fixtureBuffer = '';
     const observedFixture = [];
-    const upstreams = new Set();
-    const link = new ShapedLink((...items) => appendFileSync(join(evidence, 'link.log'), `${Date.now()} ${items.join(' ')}\n`));
+    const link = new ShapedLink((...items) => appendFile(join(evidence, 'link.log'), `${Date.now()} ${items.join(' ')}\n`, error => { if (error) console.error(`link log: ${error.message}`); }));
     const fixtureRows = () => fixtureLog.split('\n').flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
     const wait = async (check, ms, why) => {
         const deadline = Date.now() + ms;
@@ -311,42 +311,9 @@ async function run() {
             }
         });
         signalling = await startSignalling(link, bridge.port, token, { relayOnly: driverRestart || hook });
-        relay = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: () => { if (blocked) refused++; return !blocked; } });
-        relay.on('connection', client => {
-            const host = new WebSocket(`ws://127.0.0.1:${signalling.port}/desktop?token=${token}`);
-            upstreams.add(host);
-            const queue = [];
-            const forward = raw => {
-                // A stalled carrier is blackholed, not closed: the socket stays
-                // open but carries nothing, which is the tailnet case the
-                // client cannot see as a close.
-                if (stalled) return;
-                if (host.readyState !== WebSocket.OPEN) { queue.push(raw); return; }
-                host.send(raw);
-                if (killDuringRestart && JSON.parse(String(raw)).method === 'session.restart_ice') {
-                    // Dispatch to the real bridge, then cut before forwarding its reply.
-                    tap('restart-carrier-cut', {}); client.terminate();
-                }
-            };
-            host.on('open', () => { for (const raw of queue.splice(0)) forward(raw); });
-            client.on('message', forward);
-            const heldIds = new Set();
-            client.on('message', raw => {
-                const message = JSON.parse(String(raw));
-                if (holdMetrics && message.method === 'session.metrics') heldIds.add(message.id);
-            });
-            host.on('message', raw => {
-                if (stalled) return;
-                if (heldIds.has(JSON.parse(String(raw)).id)) return; // Withhold a real reply until the carrier cut.
-                if (client.readyState === WebSocket.OPEN) client.send(String(raw));
-            });
-            host.on('close', () => { upstreams.delete(host); client.terminate(); });
-            host.on('error', error => { tap('relay-error', { message: error.message }); client.terminate(); });
-            client.on('close', () => host.close());
-        });
-        await new Promise(resolve => relay.once('listening', resolve));
+        relay = await startWsRelay({ host: '127.0.0.1', upstream: `ws://127.0.0.1:${signalling.port}`, controlCount: 4, onEvent: event => { if (event._restartCut) tap('restart-carrier-cut', {}); } });
         writeFileSync(join(scratch, 'index.html'), '<video autoplay muted style="width:100%;height:100vh"></video><script type="module" src="/driver.js"></script>');
-        writeFileSync(join(scratch, 'driver.js'), (hook ? hookDriver : driver)(relay.address().port, token));
+        writeFileSync(join(scratch, 'driver.js'), (hook ? hookDriver : driver)(relay.port, token));
         const { createServer } = await import('vite');
         const stub = join(scratch, 'app-stub.js');
         writeFileSync(stub, `export const Linking = {}, Platform = {}, Pressable = null, ScrollView = null, Settings = {}, StatusBar = null, StyleSheet = { create: x => x }, Text = null, View = null, AppState = { addEventListener: () => ({ remove() {} }) }, SafeAreaProvider = null, useSafeAreaInsets = () => ({}), ClipboardConfirmation = null, DesktopView = null, ModifierKeys = null, useDesktopSession = () => ({});`);
@@ -409,17 +376,18 @@ async function run() {
         await page.screenshot({ path: join(evidence, 'before.png') });
         result.before = await measure();
         if (adapter === 'demo') {
-            holdMetrics = true;
+            relay.mode(2, true);
             await page.evaluate(() => window.__carrierRequest());
             await wait(async () => (await measure()).pending === 1, 1000, 'real carrier request awaiting reply');
         }
-        result.cutAt = Date.now(); blocked = true;
+        result.cutAt = Date.now(); relay.mode(0, true);
         if (authorizeRevoked) await page.evaluate(() => { window.__revoked = true; });
         if (!productRetention || scenario === 'roam') link.set({ discard: true }, 'roam cut');
         // A stalled carrier keeps its socket open and swallows everything; the
         // default cuts it so the relay closes upstream.
-        if (stallCarrier) stalled = true;
-        else if (!mediaCut) for (const client of relay.clients) client.terminate();
+        relay.mode(3, killDuringRestart);
+        if (stallCarrier) relay.mode(1, true);
+        else if (!mediaCut) relay.clients.terminate();
         if (adapter === 'demo') {
             await sleep(1000);
             result.carrierAfterCut = await measure();
@@ -440,17 +408,17 @@ async function run() {
             await page.close();
         }
         // A real attempted handshake demonstrates admission refusal during outage.
-        const denied = new WebSocket(`ws://127.0.0.1:${relay.address().port}/desktop`);
+        const denied = new WebSocket(`ws://127.0.0.1:${relay.port}/desktop`);
         denied.on('error', () => {});
         await new Promise(resolve => denied.once('close', resolve));
         await sleep(Math.max(0, result.cutAt + outage - Date.now()));
-        result.refused = refused;
+        result.refused = relay.refused;
         result.atPathBack = scenario === 'close-in-window' ? null : await measure();
         result.backAt = Date.now();
         if (scenario !== 'abandon') {
             if (pathMode === 'new-address') await link.rebindBrowserSide();
-            blocked = false; link.set({}, 'path back');
-            if (stallCarrier) stalled = false;
+            relay.mode(0, false); link.set({}, 'path back');
+            if (stallCarrier) relay.mode(1, false);
         }
         const held = result.before;
         let last = result.atPathBack, recovered = null;
@@ -685,7 +653,7 @@ async function run() {
                     }
                 }
             }],
-            ['relay', async () => { for (const client of relay?.clients ?? []) client.terminate(); for (const host of upstreams) host.terminate(); if (relay) await new Promise(resolve => relay.close(resolve)); }],
+            ['relay', async () => { if (relay) await relay.close(); }],
             ['signalling', () => signalling?.close()], ['link', () => link.close()], ['vite', () => vite?.close()], ['bridge', () => bridge?.close()],
             ['fixture', async () => { if (target?.exitCode === null) { target.kill('SIGTERM'); await wait(() => target.exitCode !== null || target.signalCode !== null, 3000, 'fixture exit'); } }],
             ['xvfb', () => xvfb && stopOwnedXvfb(xvfb)], ['claim', () => claim?.release()], ['scratch', () => rmSync(scratch, { recursive: true, force: true })],

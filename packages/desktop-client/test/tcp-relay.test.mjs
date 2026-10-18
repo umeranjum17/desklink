@@ -8,6 +8,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { startTcpRelay } from './tcp-relay.mjs';
+import { startWsRelay } from './ws-relay.mjs';
 
 // The far ends live in their own process, as the engine and the phone do: an
 // echo server for the engine port and a WebSocket client that sends a probe
@@ -77,6 +78,39 @@ it('keeps relaying while the thread that started it is blocked', async () => {
         await relay.close();
         expect(readFileSync(join(dir, 'relay.log'), 'utf8')).toMatch(/stream #1 dial ok/);
         rmSync(dir, { recursive: true, force: true });
+    }
+}, 30000);
+
+it('keeps the WebSocket proxy flowing while the flow thread blocks', async () => {
+    let proxy;
+    const farEnds = spawn(process.execPath, ['--input-type=module', '-e', `
+import { createServer } from 'node:net';
+import { createInterface } from 'node:readline';
+import WebSocket, { WebSocketServer } from 'ws';
+const upstream = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+upstream.on('connection', ws => ws.on('message', data => ws.send(data)));
+upstream.on('listening', () => console.log(JSON.stringify({ port: upstream.address().port })));
+createInterface({ input: process.stdin }).once('line', line => {
+ const ws = new WebSocket(line); let echoes = 0;
+ ws.on('message', () => { if (++echoes === 1) console.log(JSON.stringify({ flowing: true })); });
+ ws.on('open', () => { const timer = setInterval(() => ws.send('probe'), 25); setTimeout(() => { clearInterval(timer); console.log(JSON.stringify({ echoes })); process.exit(0); }, 4500); });
+});`], { cwd: dirname(fileURLToPath(import.meta.url)), stdio: ['pipe', 'pipe', 'inherit'] });
+    try {
+        const lines = createInterface({ input: farEnds.stdout })[Symbol.asyncIterator]();
+        const next = async () => JSON.parse((await lines.next()).value);
+        const { port } = await next();
+        proxy = await startWsRelay({ upstream: `ws://127.0.0.1:${port}` });
+        farEnds.stdin.write(`ws://127.0.0.1:${proxy.port}\n`);
+        expect(await next()).toEqual({ flowing: true });
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2500);
+        const { echoes } = await next();
+        expect(echoes).toBeGreaterThan(40);
+        expect(proxy.bytes().clientToUpstream).toBeGreaterThan(0);
+        expect(proxy.bytes().upstreamToClient).toBeGreaterThan(0);
+        await proxy.close();
+    } finally {
+        farEnds.kill();
+        if (proxy) await proxy.close();
     }
 }, 30000);
 
