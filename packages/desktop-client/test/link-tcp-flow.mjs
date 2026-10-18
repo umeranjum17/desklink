@@ -132,9 +132,14 @@ const start = (name, cmd, args, childEnv, cwd = repo) => {
     children.push([name, child]);
     return child;
 };
+let receiverFailure;
 const waitFor = async (ready, what, ms = 60000) => {
     const until = Date.now() + ms;
-    while (Date.now() < until) { if (await ready()) return; await sleep(200); }
+    while (Date.now() < until) {
+        if (receiverFailure) throw receiverFailure;
+        if (await ready()) return;
+        await sleep(200);
+    }
     throw new Error(`timed out waiting for ${what}`);
 };
 
@@ -193,7 +198,14 @@ try {
                 relay.allowPort(report.loopbackTcpPort);
                 enginePort ||= report.loopbackTcpPort;
             }
-            writeFileSync(reportsLog, `${text}\n`, { flag: 'a' });
+            try {
+                writeFileSync(reportsLog, `${text}\n`, { flag: 'a' });
+            } catch (error) {
+                receiverFailure = error;
+                response.writeHead(500);
+                response.end();
+                return;
+            }
             // A status change is kept apart from the samples: every sample reads
             // the last report as the app's current state.
             if (report?.statusChange !== undefined) statuses.push(report);
@@ -494,6 +506,7 @@ try {
     await relay.close();
     receipt.relayFailure = relay.failure() ?? null;
     if (receipt.relayFailure) throw new Error(`the relay failed: ${receipt.relayFailure}`);
+    if (receiverFailure) throw receiverFailure;
     receipt.outcome = 'PASS';
     console.log(`PASS: the example app shows a live desktop over its own relay on ${serial}; evidence ${out}`);
 } catch (error) {
