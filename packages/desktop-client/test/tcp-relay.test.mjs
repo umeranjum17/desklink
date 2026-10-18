@@ -92,6 +92,60 @@ it('keeps relaying when its log cannot be written', async () => {
         session?.ws.terminate();
         session?.echo.close();
         await relay.close();
+        expect(relay.failure()).toMatch(/the relay log stopped/);
+        rmSync(dir, { recursive: true, force: true });
+    }
+}, 30000);
+
+it('delivers bytes sent before the engine port is allowed, in order', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desklink-relay-'));
+    const relay = await startTcpRelay({ log: join(dir, 'relay.log') });
+    const echo = createServer(socket => socket.pipe(socket));
+    let ws;
+    try {
+        await new Promise(ok => echo.listen(0, '127.0.0.1', ok));
+        const port = echo.address().port;
+        ws = new WebSocket(`ws://127.0.0.1:${relay.port}/tcp?port=${port}`);
+        await new Promise((ok, failed) => { ws.once('open', ok); ws.once('error', failed); });
+        const sent = ['one-', 'two-', 'three-', 'four'];
+        for (const chunk of sent) ws.send(chunk);
+        await new Promise(ok => setTimeout(ok, 300));
+        relay.allowPort(port);
+        const want = sent.join('');
+        let echoed = '';
+        await new Promise(ok => {
+            ws.on('message', data => {
+                echoed += data;
+                if (echoed.length === want.length) ok();
+            });
+        });
+        expect(echoed).toBe(want);
+    } finally {
+        ws?.terminate();
+        echo.close();
+        await relay.close();
+        rmSync(dir, { recursive: true, force: true });
+    }
+}, 30000);
+
+it('closes a stream whose pre-dial bytes pass the cap rather than dropping them', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'desklink-relay-'));
+    const relay = await startTcpRelay({ log: join(dir, 'relay.log') });
+    const echo = createServer(socket => socket.pipe(socket));
+    let ws;
+    try {
+        await new Promise(ok => echo.listen(0, '127.0.0.1', ok));
+        const port = echo.address().port;
+        ws = new WebSocket(`ws://127.0.0.1:${relay.port}/tcp?port=${port}`);
+        await new Promise((ok, failed) => { ws.once('open', ok); ws.once('error', failed); });
+        const closed = new Promise(ok => ws.once('close', ok));
+        const chunk = Buffer.alloc(256 * 1024, 'x');
+        for (let i = 0; i < 5; i++) ws.send(chunk);
+        await closed;
+    } finally {
+        ws?.terminate();
+        echo.close();
+        await relay.close();
         rmSync(dir, { recursive: true, force: true });
     }
 }, 30000);

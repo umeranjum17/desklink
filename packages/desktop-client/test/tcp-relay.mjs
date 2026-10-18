@@ -33,14 +33,15 @@ export async function startTcpRelay({ log }) {
         if (code !== 0) failure ??= `the relay exited with code ${code}`;
     });
     worker.on('error', error => {
-        failure = error.stack ?? String(error);
-        console.error(`tcp relay worker failed: ${failure}`);
+        const stack = error.stack ?? String(error);
+        failure ??= stack;
+        console.error(`tcp relay worker failed: ${stack}`);
     });
     worker.on('message', message => {
         if (message?.logError) failure ??= `the relay log stopped: ${message.logError}`;
     });
     const port = await new Promise((ok, failed) => {
-        worker.once('message', ok);
+        worker.on('message', message => { if (typeof message === 'number') ok(message); });
         worker.once('error', failed);
         worker.once('exit', code => failed(new Error(`the relay exited (${code}) before listening`)));
     });

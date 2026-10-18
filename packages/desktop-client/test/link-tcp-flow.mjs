@@ -533,8 +533,8 @@ try {
         ['shell', 'svc', 'data', 'enable'],
     ]) await tryAdb(...restore);
     try { receiver?.close(); } catch { /* already gone */ }
-    receipt.relayFailure = relay?.failure() ?? null;
     await relay?.close();
+    receipt.relayFailure = relay?.failure() ?? null;
     if (xvfb) { try { await stopOwnedXvfb(xvfb); } catch (error) { receipt.cleanup = String(error); } }
     claim.release();
     rmSync(scratch, { recursive: true, force: true });
