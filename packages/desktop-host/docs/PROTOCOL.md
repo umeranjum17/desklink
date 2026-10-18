@@ -516,7 +516,9 @@ FIR), and when the coded size changes that way, so a receiver never has to scale
 references across a size change. `target_kbps` is the current rate target after
 any back-off: for a standing queue on the path, measured from the receiver's
 transport-wide congestion feedback (RTP `transport-cc`), and for the loss
-its receiver reports carry. It starts at the requested ceiling capped at
+its receiver reports carry. A path that runs over ICE-TCP backs off only on a
+queue above 100 ms, not 25 ms, so a relay's delivery jitter does not pull the
+target to its floor. It starts at the requested ceiling capped at
 3000 kbps on an unknown link, then grows toward the ceiling on clean
 loss/delay feedback. `codec` is what frames go out in
 (`vp9` or `h264`) and `encoder` what codes them (`libvpx`, `videotoolbox`,
