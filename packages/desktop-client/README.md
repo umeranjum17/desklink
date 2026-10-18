@@ -177,9 +177,9 @@ within one session keep its listener, as before. The computer-side relay must
 dial only an engine port it learns from a source it trusts on the computer side
 (its own engine host or config), and refuse any other port: nothing the phone
 sends, including a port named in the link URL or reported by the app, is proof
-of anything. Run it where nothing else blocks it: a relay that stops reading
-for about two seconds freezes the picture, and the session restarts ICE to
-recover. The kit rewrites the engine's `127.0.0.1` TCP candidate to its
+of anything. Run it where nothing else blocks it: a relay that shares a thread with blocking
+work stops reading while that work blocks, and about two seconds without frames
+reads as a frozen picture; the session restarts ICE to recover. The kit rewrites the engine's `127.0.0.1` TCP candidate to its
 listener's port before handing it to the native peer, so the peer dials the
 listener and the picture rides the application's link, still inside DTLS. Bytes
 cross the JS bridge in batches by size (16 KB) and deadline (15 ms), never one

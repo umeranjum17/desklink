@@ -3,11 +3,11 @@
  * relayed TCP connection to the engine loopback port its URL names (`port`,
  * from the kit).
  *
- * A flow's own work blocks the thread it runs on: a synchronous file append
- * under host disk pressure held one for 22 s on the test phone, and a blocked
- * relay is a frozen picture the app rightly reads as lost. So the relay runs in
- * a worker with its own event loop, writes its log through a stream, and
- * shares its byte counters through memory: nothing the flow does can stall it.
+ * A relay that shares a thread with blocking work stops reading while that work
+ * blocks, and a client sees about 2 s without frames as a frozen picture. So the
+ * relay runs in a worker with its own event loop, writes its log through a
+ * stream, and shares its byte counters through memory: nothing the flow does
+ * can stall it.
  *
  * The relay dials only a port the flow has allowed (one some app report has
  * carried), and waits (bounded) for the report that carries a new session's

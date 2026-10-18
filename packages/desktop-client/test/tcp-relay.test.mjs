@@ -64,8 +64,7 @@ it('keeps relaying while the thread that started it is blocked', async () => {
         relay.allowPort(echoPort);
         farEnds.stdin.write(`ws://127.0.0.1:${relay.port}/tcp?port=${echoPort}\n`);
         expect(await next()).toEqual({ flowing: true });
-        // What a synchronous append did on the test phone under host disk
-        // pressure: this thread stops, without spending CPU, for seconds.
+        // A thread blocked on synchronous work: it stops reading without spending CPU.
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);
         const { longest, echoes } = await next();
         expect(echoes).toBeGreaterThan(10);
@@ -110,12 +109,12 @@ it('delivers bytes sent before the engine port is allowed, in order', async () =
         let echoed = '';
         ws.on('message', data => { echoed += data; });
         const sent = [];
+        relay.allowPort(port);
         const sending = setInterval(() => {
             const chunk = `${sent.length},`;
             sent.push(chunk);
             ws.send(chunk);
         }, 1);
-        relay.allowPort(port);
         await new Promise(ok => setTimeout(ok, 300));
         clearInterval(sending);
         const want = sent.join('');
@@ -128,7 +127,7 @@ it('delivers bytes sent before the engine port is allowed, in order', async () =
     }
 }, 30000);
 
-it('closes a stream whose pre-dial bytes pass the cap rather than dropping them', async () => {
+it('closes a stream whose pre-dial bytes pass the 1 MiB cap', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'desklink-relay-'));
     const relay = await startTcpRelay({ log: join(dir, 'relay.log') });
     const echo = createServer(socket => socket.pipe(socket));

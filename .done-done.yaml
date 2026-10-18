@@ -34,10 +34,11 @@ journeys:
 # phone (ANDROID_SERIAL, DESKLINK_ANDROID_OUT, DESKLINK_ROAM_APP_ADDRESS = this
 # host's LAN IPv4; its header has the recipe).
 # The relay-only Android journey (picture, tap and status over the app's own TCP
-# relay, never `reconnecting` after the first live) runs via
-# packages/desktop-client/test/link-tcp-flow.mjs on an attached emulator (its header
-# has the recipe); its relay runs on its own thread (test/tcp-relay.mjs), and
-# test/tcp-relay.test.mjs (in `npm test`) blocks the flow's thread to prove it.
+# relay, never `reconnecting` after the first live) is packages/desktop-client/test/
+# link-tcp-flow.mjs, run on an attached emulator or phone per its header. Its relay
+# runs on its own thread (test/tcp-relay.mjs); test/tcp-relay.test.mjs (in `npm test`)
+# checks that relaying continues while the thread that started it is blocked, and
+# that pre-dial bytes arrive in order.
 # The engine's IPv6 path (IPv6 host candidates, picture to a client that can only
 # send from ::1) runs via `cargo test --bin desklink-host peer::tests::` in
 # packages/desktop-host/engine; it skips with a printed reason on a host with no

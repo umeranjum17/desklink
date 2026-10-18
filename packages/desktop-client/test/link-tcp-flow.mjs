@@ -186,18 +186,18 @@ try {
         request.on('data', c => chunks.push(c));
         request.on('end', () => {
             const text = Buffer.concat(chunks).toString();
-            writeFileSync(reportsLog, `${text}\n`, { flag: 'a' });
             let report = null;
             try { report = JSON.parse(text); } catch { /* not JSON; kept raw */ }
-            // A status change is kept apart from the samples: every sample reads
-            // the last report as the app's current state.
-            if (report?.statusChange !== undefined) statuses.push(report);
-            else reports.push(text);
             // Lab relay trusts the report endpoint only because it is loopback test code; not a pattern for product relays.
             if (Number.isInteger(report?.loopbackTcpPort) && report.loopbackTcpPort >= 1024) {
                 relay.allowPort(report.loopbackTcpPort);
                 enginePort ||= report.loopbackTcpPort;
             }
+            writeFileSync(reportsLog, `${text}\n`, { flag: 'a' });
+            // A status change is kept apart from the samples: every sample reads
+            // the last report as the app's current state.
+            if (report?.statusChange !== undefined) statuses.push(report);
+            else reports.push(text);
             response.writeHead(204, { 'Access-Control-Allow-Origin': '*' });
             response.end();
         });
@@ -491,6 +491,9 @@ try {
         corners,
         tap: button.trim(),
     });
+    await relay.close();
+    receipt.relayFailure = relay.failure() ?? null;
+    if (receipt.relayFailure) throw new Error(`the relay failed: ${receipt.relayFailure}`);
     receipt.outcome = 'PASS';
     console.log(`PASS: the example app shows a live desktop over its own relay on ${serial}; evidence ${out}`);
 } catch (error) {
