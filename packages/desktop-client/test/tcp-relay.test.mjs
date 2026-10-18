@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
@@ -107,19 +107,19 @@ it('delivers bytes sent before the engine port is allowed, in order', async () =
         const port = echo.address().port;
         ws = new WebSocket(`ws://127.0.0.1:${relay.port}/tcp?port=${port}`);
         await new Promise((ok, failed) => { ws.once('open', ok); ws.once('error', failed); });
-        const sent = ['one-', 'two-', 'three-', 'four'];
-        for (const chunk of sent) ws.send(chunk);
-        await new Promise(ok => setTimeout(ok, 300));
-        relay.allowPort(port);
-        const want = sent.join('');
         let echoed = '';
-        await new Promise(ok => {
-            ws.on('message', data => {
-                echoed += data;
-                if (echoed.length === want.length) ok();
-            });
-        });
-        expect(echoed).toBe(want);
+        ws.on('message', data => { echoed += data; });
+        const sent = [];
+        const sending = setInterval(() => {
+            const chunk = `${sent.length},`;
+            sent.push(chunk);
+            ws.send(chunk);
+        }, 1);
+        relay.allowPort(port);
+        await new Promise(ok => setTimeout(ok, 300));
+        clearInterval(sending);
+        const want = sent.join('');
+        await vi.waitFor(() => expect(echoed).toBe(want), { timeout: 5000 });
     } finally {
         ws?.terminate();
         echo.close();
