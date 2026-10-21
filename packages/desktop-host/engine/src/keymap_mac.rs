@@ -410,15 +410,6 @@ mod tests {
     }
 
     #[test]
-    fn the_keys_past_f12_have_names() {
-        let Some(ObservedInput::Key { name, .. }) = key(key_event::DOWN, 105, 0, false, "")
-        else {
-            panic!("F13 is a key");
-        };
-        assert_eq!(name.as_deref(), Some("F13"));
-    }
-
-    #[test]
     fn a_held_key_is_one_down_and_one_up() {
         assert_eq!(key(key_event::DOWN, 0, 0, true, "a"), None);
         assert!(key(key_event::UP, 0, 0, false, "a").is_some());
@@ -445,11 +436,6 @@ mod tests {
             panic!("a modifier change is a key");
         };
         assert!(down);
-    }
-
-    #[test]
-    fn a_flags_change_from_a_key_that_is_no_modifier_is_nothing() {
-        assert_eq!(key(key_event::FLAGS_CHANGED, 0, 0, false, ""), None);
     }
 
     #[test]

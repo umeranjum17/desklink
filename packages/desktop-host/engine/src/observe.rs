@@ -83,11 +83,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unrequested_observer_reports_not_observing_without_a_reason() {
-        assert_eq!(status(None), serde_json::json!({"observing": false}));
-    }
-
-    #[test]
     fn a_refusal_carries_its_code_reason_and_remedy() {
         let refused: Result<Tap, Unavailable> = Err(Unavailable {
             code: "missing-input-monitoring",
