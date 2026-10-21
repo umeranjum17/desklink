@@ -212,6 +212,7 @@ export class EngineClient {
             ...(request.agentIndicator === true ? { agent_indicator: true } : {}),
             ...(request.localFrames === false ? { local_frames: false } : {}),
             ...(request.audio === true ? { audio: true } : {}),
+            ...(request.observeInput === true ? { observe_input: true } : {}),
         }, timeoutMs);
     }
 

@@ -621,6 +621,62 @@ options are `malformed`.
 and typed `session.cursor` events through `onEvent`/`drainEvents`. The client
 capture request also accepts `cursor`, and AXI accepts `start --cursor hidden`.
 
+## Observing the desktop's own input
+
+Linux emits only `session.cursor` (above); it has no click or key observation.
+`session.input` is a different thing: the control message a consumer sends back
+for a consumer-fed source. So `session.open` accepts an opt-in
+`observe_input: true`, and a session that observes raises one shared event for
+pointer buttons and keys, in the vocabulary of the control channel's `pointer`
+and `key` messages:
+
+```jsonc
+{"event":"session.input.observed","params":{"sessionId":"…","timestamp_us":123456,
+  "input":{"kind":"pointer","phase":"down","x":1400,"y":20,"button":1}}}
+{"event":"session.input.observed","params":{"sessionId":"…","timestamp_us":123900,
+  "input":{"kind":"key","name":"Enter","down":true,"modifiers":["Shift"]}}}
+{"event":"session.input.observed","params":{"sessionId":"…","timestamp_us":124000,
+  "input":{"kind":"key","character":"h","down":true,"modifiers":[]}}}
+```
+
+- `timestamp_us` is the same monotonic engine-process clock as `session.cursor`.
+- `x`/`y` are `geometry.source` pixels. A button on another display is not reported.
+- `button` is 1 left, 2 middle, 3 right, 4+ others.
+- A key has `name` (`Enter`, `Tab`, `ArrowLeft`, `F5`, a modifier such as
+  `Shift`, …) when it is not text, and `character` when it is a single printable
+  character. A key with neither is `name:"Unidentified"`. `modifiers` (`Control`,
+  `Alt`, `Shift`, `Meta`) is the state after the event. Auto-repeat downs are
+  dropped. The names are the ones the control channel's `key` message accepts.
+- Pointer position is reported through the existing `session.cursor`, including
+  an initial sample when observation starts.
+
+The reply to `session.open` always carries `inputObservation`:
+`{"observing":false}` (not requested), `{"observing":true,"mechanism":"cgeventtap"}`,
+or `{"observing":false,"code":"…","reason":"…","remedy":"…"}`. Observation never
+fails the open, and while it is unavailable nothing is delivered: no fake or zero
+events. Codes: `missing-input-monitoring`, `display-unavailable`,
+`event-tap-failed`, `unsupported-source` (consumer-fed sources have no desktop),
+`unsupported-platform` (Linux and Windows in this build). `capabilities` advertises
+`input.observe: {"mechanism":"cgeventtap","grant":"granted"|"missing-input-monitoring","unavailable_reason":null|{reason,remedy}}`
+on macOS.
+
+**macOS grant.** The tap is a passive listen-only `CGEventTap`: it cannot change
+or swallow an event. It needs **Input Monitoring** only (not Accessibility, which
+is for posting events). In System Settings › Privacy & Security › Input
+Monitoring, turn on **DesklinkHost**, the signed app that is the
+TCC-responsible process (a bare CLI or Node bridge makes the grant belong to
+Node or Terminal instead). `desklink-host setup-input` raises the prompt. After
+a first grant, reconnect: a tap created before the grant stays dead.
+Secure Input (a focused password field) hides keys from every tap; the engine
+reports nothing for them.
+
+**Privacy.** This reports every key typed in every application. It is opt-in per
+session and local only: the WebSocket bridge never forwards
+`session.input.observed` to remote controllers.
+
+`@desklink/host` exposes it as `openSession({observeInput:true})`, the typed
+`session.input.observed` event (`ObservedInput`) and `OpenedSession.inputObservation`.
+
 ## Point on the host desktop
 
 A local consumer can guide the person without taking control of their pointer

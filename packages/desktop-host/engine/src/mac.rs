@@ -39,6 +39,8 @@ unsafe extern "C" {
     pub(crate) fn CGPreflightScreenCaptureAccess() -> bool;
     pub(crate) fn CGPreflightPostEventAccess() -> bool;
     pub(crate) fn CGRequestPostEventAccess() -> bool;
+    pub(crate) fn CGPreflightListenEventAccess() -> bool;
+    pub(crate) fn CGRequestListenEventAccess() -> bool;
     fn CGGetActiveDisplayList(max: u32, displays: *mut DisplayId, count: *mut u32) -> i32;
     fn CGMainDisplayID() -> DisplayId;
     fn CGDisplayPixelsWide(display: DisplayId) -> usize;
@@ -712,6 +714,12 @@ pub fn run() -> i32 {
             } else {
                 let _ = crate::input::request_access();
                 println!("If the Accessibility alert did not open, allow {} in System Settings › Privacy & Security › Accessibility.", tcc_responsible_app_name());
+            }
+            if crate::input::observe_probe().is_ok() {
+                println!("Input Monitoring permission is already granted to {}.", tcc_responsible_app_name());
+            } else {
+                let _ = crate::input::request_observe_access();
+                println!("If the Input Monitoring alert did not open, allow {} in System Settings › Privacy & Security › Input Monitoring.", tcc_responsible_app_name());
             }
         }
         _ => println!("desklink-host {}\nUSAGE: desklink-host [serve|capabilities|capture-probe|encode-probe|setup-input|version]", env!("CARGO_PKG_VERSION")),

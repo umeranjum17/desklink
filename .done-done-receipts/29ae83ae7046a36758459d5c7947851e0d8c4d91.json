@@ -1,0 +1,58 @@
+{
+  "schema": 2,
+  "repo": "desklink",
+  "head": "29ae83ae7046a36758459d5c7947851e0d8c4d91",
+  "tree": "909b1028d6948f13125364d46cc7a2018fad4e4d",
+  "claim": "On a real Mac, an opted-in desktop session delivers the person's clicks and key presses as session.input.observed events (with button, key, modifiers) in source pixels.",
+  "result": "pass",
+  "at": "2026-10-21T06:43:07.751Z",
+  "files": [
+    {
+      "path": "<evidence root>/20261021T064253Z-29ae83ae-b16110/proof.json",
+      "sha256": "bc472a6fdf768fc9d099f1f8c4b3b996c63ff02772289cbdb28359280c06ecce"
+    },
+    {
+      "path": "<evidence root>/20261021T064253Z-29ae83ae-b16110/shot-click.png",
+      "sha256": "a711ca707c8e0b86070f235be2bda5187714de018b87ea7c968d3228a500dc42"
+    },
+    {
+      "path": "<evidence root>/20261021T064253Z-29ae83ae-b16110/shot-key.png",
+      "sha256": "877004e4282f15c995581c54c9f7991c66a8632c7db057ad489e7a74dd775fa6"
+    }
+  ],
+  "runs": [
+    {
+      "run_id": "20261021T064253Z-29ae83ae-b16110",
+      "journey": null,
+      "command": null
+    }
+  ],
+  "judge": {
+    "route": "claude-code",
+    "model": "claude-haiku-5-5",
+    "independence": "session-only",
+    "author": {
+      "agent": "claude",
+      "model": "claude-haiku-5-5"
+    },
+    "verdicts": [
+      {
+        "path": "<evidence root>/20261021T064253Z-29ae83ae-b16110/proof.json",
+        "sha256": "bc472a6fdf768fc9d099f1f8c4b3b996c63ff02772289cbdb28359280c06ecce",
+        "verdict": "pass",
+        "seen": "I read all 22 session.input.observed entries: 6 pointer events (buttons 1, 3, 2 with down/up at source x 1400 to 2200, y 20) and 16 key events (Shift, h, i, Control, c, F13, Enter, ArrowLeft, down/up), each carrying modifiers. Coordinates exceed the 1710-wide encoded frame, so they are source pixels. inputObservation shows mechanism cgeventtap with observing true, which is macOS-specific. The key entries use name/character rather than a literal 'key' field, a minor naming difference. The outcome names one result, so no parts."
+      },
+      {
+        "path": "<evidence root>/20261021T064253Z-29ae83ae-b16110/shot-click.png",
+        "sha256": "a711ca707c8e0b86070f235be2bda5187714de018b87ea7c968d3228a500dc42",
+        "verdict": "pass",
+        "seen": "The menu bar reads \"Simulator\" with a macOS clock, so this is a Mac screen. The visible text reads \"button 1 down at 1400,20\" and \"observed on the engine clock, source pixels = 2x frame pixels.\" That matches the outcome's button and source-pixel input reporting. The exact event name session.input.observed is not visible, so this is not fully confirmed."
+      },
+      {
+        "path": "<evidence root>/20261021T064253Z-29ae83ae-b16110/shot-key.png",
+        "sha256": "877004e4282f15c995581c54c9f7991c66a8632c7db057ad489e7a74dd775fa6",
+        "verdict": "pass"
+      }
+    ]
+  }
+}
