@@ -26,7 +26,7 @@ mod clipboard;
 mod clipboard;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod convert;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
 mod cursor;
 #[cfg(target_os = "linux")]
 mod encoder;
@@ -72,6 +72,8 @@ mod keymap;
 mod keymap;
 #[cfg(target_os = "macos")]
 mod mac;
+#[cfg(any(target_os = "linux", all(any(target_os = "macos", target_os = "windows"), desklink_vpx)))]
+mod observe;
 #[cfg(any(
     target_os = "linux",
     all(any(target_os = "macos", target_os = "windows"), desklink_vpx)
@@ -666,6 +668,13 @@ fn render_event(notice: session::Notice) -> Option<String> {
             "session.input",
             serde_json::json!({ "sessionId": session_id, "input": input }),
         ),
+        session::SessionEvent::Observed {
+            timestamp_us,
+            input,
+        } => (
+            "session.input.observed",
+            serde_json::json!({ "sessionId": session_id, "timestamp_us": timestamp_us, "input": input }),
+        ),
         session::SessionEvent::KeyframeRequest { generation } => (
             "session.keyframeRequest",
             serde_json::json!({ "sessionId": session_id, "generation": generation }),
@@ -752,6 +761,7 @@ async fn dispatch(
                 agent_indicator: params.agent_indicator,
                 local_frames: params.local_frames,
                 audio: params.audio,
+                observe_input: params.observe_input,
                 ice_servers: usable.0,
             };
             let session = session::Session::open(open, events.clone())
@@ -770,6 +780,7 @@ async fn dispatch(
                 "cursor": session.cursor_info(),
                 "agentIndicator": session.agent_indicator(),
                 "audio": session.audio_info(),
+                "inputObservation": session.observation_info(),
             });
             // URLs the WebRTC stack cannot dial were left out of the peer's
             // configuration; each skipped one is named once instead of

@@ -149,6 +149,11 @@ pub struct OpenParams {
     /// cannot be answered is refused.
     #[serde(default)]
     pub audio: bool,
+    /// Observe this computer's own pointer buttons, cursor and keys and raise
+    /// them as `session.input.observed` and `session.cursor`. Off unless asked:
+    /// it reports every key typed on the desktop, in every application.
+    #[serde(default)]
+    pub observe_input: bool,
 }
 
 fn default_local_frames() -> bool {
@@ -379,13 +384,37 @@ impl ControlMessage {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PointerPhase {
     Move,
     Down,
     Up,
     Cancel,
+}
+
+/// A pointer button or key the person pressed on the observed desktop. The
+/// vocabulary is the control channel's own (`pointer` and `key`), so a consumer
+/// reads what it sent and what it saw the same way. `x`/`y` are in the source's
+/// own pixels (`geometry.source`); `modifiers` is the modifier state after the
+/// event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ObservedInput {
+    Pointer {
+        phase: PointerPhase,
+        x: i64,
+        y: i64,
+        button: i64,
+    },
+    Key {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        character: Option<String>,
+        down: bool,
+        modifiers: Vec<String>,
+    },
 }
 
 /// Messages the engine sends back on the control channel.

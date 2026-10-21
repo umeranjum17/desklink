@@ -168,6 +168,11 @@ To verify a cue visually, capture through the granted identity itself:
 `screencapture` taken from an SSH shell is attributed to that shell's
 responsible app and comes back without app windows, so a cue that is on
 screen will not appear in it.
+Opting in to `observeInput` (pointer buttons, cursor and keys on the desktop,
+for recording what the person does) also needs **Input Monitoring** for
+DesklinkHost: System Settings › Privacy & Security › Input Monitoring. Without
+it the open reply says `inputObservation.code: "missing-input-monitoring"` and no
+events are sent. See the protocol's "Observing the desktop's own input".
 macOS currently uses a US ANSI virtual-key map for character chords (the
 current input layout is diagnostic); free-form text uses Unicode key events.
 

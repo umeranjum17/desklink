@@ -56,6 +56,15 @@ export interface EngineCapabilities {
         layout: string;
         unavailable_reason: { reason: string; remedy: string } | null;
         grant: string;
+        /**
+         * Whether the engine can listen to the desktop's own pointer and keys
+         * (`observeInput`). Absent where it cannot on this platform.
+         */
+        observe?: {
+            mechanism: string;
+            grant: 'granted' | 'missing-input-monitoring';
+            unavailable_reason: { reason: string; remedy: string } | null;
+        };
     };
     clipboard: { read: boolean; write: boolean; mime: string[]; maxBytes: number };
 }
@@ -83,6 +92,23 @@ export interface CursorInfo {
     /** Why a hidden session has no cursor positions (yet). */
     limitation?: string;
 }
+
+/**
+ * Whether a session is listening to the desktop's own input. When it is not,
+ * `code` says why and `remedy` what the owner can do; no events are delivered.
+ */
+export type InputObservation =
+    | { observing: true; mechanism: string }
+    | { observing: false; code?: string; reason?: string; remedy?: string };
+
+/**
+ * A pointer button or key pressed on the observed desktop, in the control
+ * channel's own vocabulary. `x`/`y` are in `geometry.source` pixels;
+ * `modifiers` is the modifier state after the event.
+ */
+export type ObservedInput =
+    | { kind: 'pointer'; phase: 'down' | 'up'; button: number; x: number; y: number }
+    | { kind: 'key'; name?: string; character?: string; down: boolean; modifiers: string[] };
 
 export interface AudioInfo {
     source: 'pipewire-monitor';
@@ -129,6 +155,13 @@ export interface OpenSessionRequest {
     localFrames?: boolean;
     /** Local system audio; default false, refuses rather than downgrading. */
     audio?: boolean;
+    /**
+     * Listen to the desktop's own pointer buttons, cursor and keys and raise
+     * `session.input.observed` and `session.cursor` (default false). It reports
+     * every key typed, in every application: ask only for a session the person
+     * knows is being recorded.
+     */
+    observeInput?: boolean;
 }
 
 export interface OpenedSession {
@@ -136,6 +169,7 @@ export interface OpenedSession {
     cursor?: CursorInfo;
     /** Null when this session did not request system audio. */
     audio?: AudioInfo | null;
+    inputObservation?: InputObservation;
     sessionId: string;
     generation: number;
     source: {
@@ -149,6 +183,7 @@ export interface OpenedSession {
 
 export type EngineEvent =
     | { event: 'session.cursor'; params: { sessionId: string; x: number; y: number; visible: boolean; timestamp_us: number; hotspot?: { x: number; y: number } } }
+    | { event: 'session.input.observed'; params: { sessionId: string; timestamp_us: number; input: ObservedInput } }
     | { event: 'session.description'; params: { sessionId: string; generation: number; description: { type: 'offer'; sdp: string }; geometry?: SurfaceGeometry } }
     | {
           event: 'session.candidate';

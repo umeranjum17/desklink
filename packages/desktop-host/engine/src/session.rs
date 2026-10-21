@@ -714,6 +714,8 @@ pub struct OpenRequest {
     pub local_frames: bool,
     /// Capture the desktop's own system audio for `session.audio`.
     pub audio: bool,
+    /// Listen to the desktop's own pointer buttons, cursor and keys.
+    pub observe_input: bool,
 }
 
 /// Events a session raises for its consumer.
@@ -754,6 +756,12 @@ pub enum SessionEvent {
     /// the consumer drives. The engine applied nothing locally.
     Input {
         input: serde_json::Value,
+    },
+    /// A pointer button or key the person pressed on the desktop, observed
+    /// rather than applied.
+    Observed {
+        timestamp_us: u64,
+        input: crate::protocol::ObservedInput,
     },
     /// The far end needs a fresh reference frame and only the consumer can make
     /// one: the encoder for this track is on its side. Raised by an RTCP PLI or
@@ -854,6 +862,9 @@ struct Inner {
     #[cfg(target_os = "linux")]
     audio: Mutex<Option<crate::audio::AudioCapture>>,
     cursor_info: serde_json::Value,
+    /// `session.open`'s `inputObservation` member, fixed when the session opened.
+    observation: serde_json::Value,
+    observer: Mutex<Option<crate::observe::Tap>>,
 }
 
 /// A source whose video arrives already encoded.
@@ -978,6 +989,7 @@ pub fn capabilities() -> serde_json::Value {
             }),
         ),
     };
+    let observe = crate::input::observe_probe();
     serde_json::json!({
         "protocol": crate::protocol::PROTOCOL_VERSION,
         "engine": format!("desklink-host/{}", env!("CARGO_PKG_VERSION")),
@@ -1009,6 +1021,16 @@ pub fn capabilities() -> serde_json::Value {
             "layout": keymap::LayoutNames::from_environment().identity(),
             "unavailable_reason": unavailable,
             "grant": input_grant,
+            // Listening to the person's own input is a separate grant from
+            // posting input: Input Monitoring, not Accessibility.
+            "observe": {
+                "mechanism": "cgeventtap",
+                "grant": if observe.is_ok() { "granted" } else { "missing-input-monitoring" },
+                "unavailable_reason": observe.as_ref().err().map(|error| serde_json::json!({
+                    "reason": error.reason,
+                    "remedy": error.remedy,
+                })),
+            },
         },
         "clipboard": { "read": true, "write": true, "mime": ["text/plain;charset=utf-8"],
             "maxBytes": clipboard::MAX_CLIPBOARD_BYTES },
@@ -1480,6 +1502,42 @@ impl Session {
             "origin": { "x": source.origin_x, "y": source.origin_y },
         });
 
+        // Observation is an addition to the stream, never a condition of it: a
+        // desktop that cannot be observed still streams, and the reply says why.
+        let observed = request.observe_input.then(|| {
+            let sink: crate::observe::Sink = {
+                let events = events.clone();
+                let id = id.clone();
+                Arc::new(move |observation| {
+                    let event = match observation {
+                        crate::observe::Observation::Input {
+                            timestamp_us,
+                            input,
+                        } => SessionEvent::Observed {
+                            timestamp_us,
+                            input,
+                        },
+                        crate::observe::Observation::Cursor(position) => {
+                            SessionEvent::Cursor { position }
+                        }
+                    };
+                    let _ = events.send(Notice {
+                        session_id: id.clone(),
+                        event,
+                    });
+                })
+            };
+            crate::observe::start(source.node_id, (source_w, source_h), sink)
+        });
+        if let Some(Err(error)) = &observed {
+            log::warn!(
+                "input observation unavailable: {} ({})",
+                error.reason,
+                error.code
+            );
+        }
+        let observation = crate::observe::status(observed.as_ref());
+
         let pipeline = Arc::new(AtomicBool::new(true));
         let inner = Arc::new(Inner {
             id,
@@ -1526,6 +1584,8 @@ impl Session {
             encoded: Mutex::new(None),
             local_frames: request.local_frames,
             cursor_info,
+            observation,
+            observer: Mutex::new(observed.and_then(Result::ok)),
         });
 
         inner.notify(SessionEvent::Description {
@@ -1641,6 +1701,13 @@ impl Session {
             })),
             local_frames: false,
             cursor_info: serde_json::json!({"mode":"unavailable", "positions":false}),
+            observation: serde_json::json!({
+                "observing": false,
+                "code": "unsupported-source",
+                "reason": "consumer-encoded video has no desktop of its own to observe",
+                "remedy": "observe the device where its pixels come from",
+            }),
+            observer: Mutex::new(None),
         });
         inner.notify(SessionEvent::State {
             capture: "consented",
@@ -1704,6 +1771,10 @@ impl Session {
 
     pub fn cursor_info(&self) -> &serde_json::Value {
         &self.inner.cursor_info
+    }
+
+    pub fn observation_info(&self) -> &serde_json::Value {
+        &self.inner.observation
     }
 
     pub fn geometry(&self) -> &serde_json::Value {
@@ -2176,6 +2247,8 @@ impl Inner {
         // handlers, and `shutdown` exits right after this. The encode thread
         // finds it gone and stops.
         drop(lock(&self.encoder).take());
+        // Stop listening to the person's keys the moment the session ends.
+        drop(lock(&self.observer).take());
         if let Ok(mut indicator) = self.indicator.lock() {
             indicator.take();
         }
@@ -3829,6 +3902,8 @@ mod tests {
             })),
             local_frames: false,
             cursor_info: serde_json::json!({"mode":"unavailable", "positions":false}),
+            observation: serde_json::json!({"observing": false}),
+            observer: Mutex::new(None),
         });
         spawn_peer_events(&inner, peer_events_rx);
         spawn_encoded(&inner, feed_rx);
@@ -4084,6 +4159,8 @@ mod tests {
             encoded: Mutex::new(None),
             local_frames: true,
             cursor_info: serde_json::json!({"mode":"embedded", "positions":false}),
+            observation: serde_json::json!({"observing": false}),
+            observer: Mutex::new(None),
         });
         (inner, recorded)
     }
@@ -4484,6 +4561,7 @@ mod tests {
             agent_indicator: false,
             local_frames: true,
             audio: false,
+            observe_input: false,
         }
     }
 

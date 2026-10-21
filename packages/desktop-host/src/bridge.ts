@@ -112,7 +112,8 @@ export class Bridge {
             onEvent: (event) => {
                 bridge?.rememberEvent(event);
                 options.engineOptions?.onEvent?.(event);
-                if (event.event === 'session.restoreToken' || event.event === 'session.frame.changed' || event.event === 'session.audio.changed') return;
+                // Local-only: a restore token is a credential, the others are this computer's own frames, audio and typing.
+                if (event.event === 'session.restoreToken' || event.event === 'session.frame.changed' || event.event === 'session.audio.changed' || event.event === 'session.input.observed') return;
                 const line = JSON.stringify(event);
                 for (const socket of sockets.clients) {
                     if (socket.readyState === socket.OPEN) socket.send(line);
