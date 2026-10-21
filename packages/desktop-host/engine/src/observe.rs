@@ -1,10 +1,7 @@
 //! Passive observation of the desktop's own pointer buttons, cursor and keys.
 //!
-//! The person at the computer is the one typing and clicking; the engine only
-//! listens. Everything arrives as the events `docs/PROTOCOL.md` describes
-//! (`session.input.observed`, `session.cursor`) in the source's own pixels and
-//! on the engine's monotonic clock. A platform that cannot observe says so with
-//! a typed reason and delivers nothing: there is no fake or zero event.
+//! The engine only listens; events are the ones `docs/PROTOCOL.md` describes. A
+//! platform that cannot observe says why with a typed reason and delivers nothing.
 
 use crate::protocol::{CursorPosition, ObservedInput};
 use std::sync::Arc;

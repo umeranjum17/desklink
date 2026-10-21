@@ -335,34 +335,18 @@ mod observer {
 
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
-        fn CGEventTapCreate(
-            tap: u32,
-            place: u32,
-            options: u32,
-            events_of_interest: u64,
-            callback: TapCallback,
-            user_info: *mut c_void,
-        ) -> CfTypeRef;
+        fn CGEventTapCreate(tap: u32, place: u32, options: u32, events_of_interest: u64, callback: TapCallback, user_info: *mut c_void) -> CfTypeRef;
         fn CGEventTapEnable(tap: CfTypeRef, enable: bool);
         fn CGEventCreate(source: SourceRef) -> EventRef;
         fn CGEventGetLocation(event: EventRef) -> Point;
         fn CGEventGetFlags(event: EventRef) -> u64;
         fn CGEventGetIntegerValueField(event: EventRef, field: u32) -> i64;
-        fn CGEventKeyboardGetUnicodeString(
-            event: EventRef,
-            max_length: usize,
-            actual_length: *mut usize,
-            buffer: *mut u16,
-        );
+        fn CGEventKeyboardGetUnicodeString(event: EventRef, max_length: usize, actual_length: *mut usize, buffer: *mut u16);
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
-        fn CFMachPortCreateRunLoopSource(
-            allocator: CfTypeRef,
-            port: CfTypeRef,
-            order: isize,
-        ) -> CfTypeRef;
+        fn CFMachPortCreateRunLoopSource(allocator: CfTypeRef, port: CfTypeRef, order: isize) -> CfTypeRef;
         fn CFMachPortInvalidate(port: CfTypeRef);
         fn CFRunLoopGetCurrent() -> CfTypeRef;
         fn CFRunLoopAddSource(run_loop: CfTypeRef, source: CfTypeRef, mode: CfTypeRef);
@@ -372,18 +356,9 @@ mod observer {
     }
 
     // CGEventType values this tap listens for.
-    const LEFT_DOWN: u32 = 1;
-    const LEFT_UP: u32 = 2;
-    const RIGHT_DOWN: u32 = 3;
-    const RIGHT_UP: u32 = 4;
-    const MOVED: u32 = 5;
-    const LEFT_DRAGGED: u32 = 6;
-    const RIGHT_DRAGGED: u32 = 7;
-    const KEY_DOWN: u32 = 10;
-    const KEY_UP: u32 = 11;
-    const FLAGS_CHANGED: u32 = 12;
-    const OTHER_DOWN: u32 = 25;
-    const OTHER_UP: u32 = 26;
+    const LEFT_DOWN: u32 = 1; const LEFT_UP: u32 = 2; const RIGHT_DOWN: u32 = 3; const RIGHT_UP: u32 = 4;
+    const MOVED: u32 = 5; const LEFT_DRAGGED: u32 = 6; const RIGHT_DRAGGED: u32 = 7; const KEY_DOWN: u32 = 10;
+    const KEY_UP: u32 = 11; const FLAGS_CHANGED: u32 = 12; const OTHER_DOWN: u32 = 25; const OTHER_UP: u32 = 26;
     const OTHER_DRAGGED: u32 = 27;
     // The system switches a tap off when its callback is slow or on its own
     // say-so; these arrive in its place.

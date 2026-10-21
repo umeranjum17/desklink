@@ -757,8 +757,7 @@ pub enum SessionEvent {
     Input {
         input: serde_json::Value,
     },
-    /// A pointer button or key the person pressed on the desktop, observed
-    /// rather than applied.
+    /// A pointer button or key the person pressed, observed rather than applied.
     Observed {
         timestamp_us: u64,
         input: crate::protocol::ObservedInput,
@@ -1021,15 +1020,10 @@ pub fn capabilities() -> serde_json::Value {
             "layout": keymap::LayoutNames::from_environment().identity(),
             "unavailable_reason": unavailable,
             "grant": input_grant,
-            // Listening to the person's own input is a separate grant from
-            // posting input: Input Monitoring, not Accessibility.
             "observe": {
                 "mechanism": "cgeventtap",
                 "grant": if observe.is_ok() { "granted" } else { "missing-input-monitoring" },
-                "unavailable_reason": observe.as_ref().err().map(|error| serde_json::json!({
-                    "reason": error.reason,
-                    "remedy": error.remedy,
-                })),
+                "unavailable_reason": observe.as_ref().err().map(|e| serde_json::json!({"reason": e.reason, "remedy": e.remedy})),
             },
         },
         "clipboard": { "read": true, "write": true, "mime": ["text/plain;charset=utf-8"],
@@ -1510,31 +1504,18 @@ impl Session {
                 let id = id.clone();
                 Arc::new(move |observation| {
                     let event = match observation {
-                        crate::observe::Observation::Input {
-                            timestamp_us,
-                            input,
-                        } => SessionEvent::Observed {
-                            timestamp_us,
-                            input,
-                        },
-                        crate::observe::Observation::Cursor(position) => {
-                            SessionEvent::Cursor { position }
+                        crate::observe::Observation::Input { timestamp_us, input } => {
+                            SessionEvent::Observed { timestamp_us, input }
                         }
+                        crate::observe::Observation::Cursor(position) => SessionEvent::Cursor { position },
                     };
-                    let _ = events.send(Notice {
-                        session_id: id.clone(),
-                        event,
-                    });
+                    let _ = events.send(Notice { session_id: id.clone(), event });
                 })
             };
             crate::observe::start(source.node_id, (source_w, source_h), sink)
         });
         if let Some(Err(error)) = &observed {
-            log::warn!(
-                "input observation unavailable: {} ({})",
-                error.reason,
-                error.code
-            );
+            log::warn!("input observation unavailable: {} ({})", error.reason, error.code);
         }
         let observation = crate::observe::status(observed.as_ref());
 
