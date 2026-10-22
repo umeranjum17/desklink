@@ -185,3 +185,8 @@ export async function stopOwnedXvfb(child) {
     unlinkSync(path);
   }
 }
+
+/** Masks bridge tokens before text lands in evidence: `?token=…` URLs and the bridge's `token  …` banner line. */
+export function scrubToken(text) {
+    return String(text).replace(/token=[^&\s"]+/g, '<token hidden>').replace(/^(token\s+)\S+/gm, '$1<hidden>');
+}
