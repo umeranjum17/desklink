@@ -1,16 +1,10 @@
 # Changelog
 
-## 0.5.9
+## Unreleased
+
+## 0.5.10
 
 Joint patch release; protocol version remains 3. All packages move together.
-
-### Fixed
-
-- A renegotiation offer can update the presented desktop geometry, including
-  the native surface's encoded dimensions, so a rotated desktop uses its new
-  size. Offers from older hosts without geometry keep the current size.
-
-## Unreleased
 
 ### Changed
 
@@ -39,6 +33,16 @@ Joint patch release; protocol version remains 3. All packages move together.
   relay's delivery jitter. A TCP path backs off only on a queue above 100 ms;
   UDP paths keep 25 ms. See
   [PROTOCOL.md](packages/desktop-host/docs/PROTOCOL.md#state).
+
+## 0.5.9
+
+Joint patch release; protocol version remains 3. All packages move together.
+
+### Fixed
+
+- A renegotiation offer can update the presented desktop geometry, including
+  the native surface's encoded dimensions, so a rotated desktop uses its new
+  size. Offers from older hosts without geometry keep the current size.
 
 ## 0.5.8
 
