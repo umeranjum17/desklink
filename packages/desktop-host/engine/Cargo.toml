@@ -53,6 +53,8 @@ wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # The Wayland stamp example's lab pointer; already in the tree through wl-clipboard-rs.
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# The portal test's stand-in portal service; already in the tree through ashpd.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = "0.61.2"

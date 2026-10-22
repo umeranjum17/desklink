@@ -20,6 +20,9 @@ Joint patch release; protocol version remains 3. All packages move together.
 
 ### Fixed
 
+- On Linux, a `source` error from a portal that exports no ScreenCast interface
+  now says so and names the fix: restart the `xdg-desktop-portal` user service
+  once the compositor's portal is running. The code is unchanged.
 - After a network stall long enough to fail a relay-only session
   (`session.tcpTransport`), the next session now dials its own engine port:
   `TcpTransport.open(port)` receives the loopback TCP port each connection is
