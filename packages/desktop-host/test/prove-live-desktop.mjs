@@ -146,7 +146,7 @@ finally {
     const portOpen = port && await new Promise(resolve => { const s = connect({ host: '127.0.0.1', port }); s.once('connect', () => { s.destroy(); resolve(true); }); s.once('error', () => resolve(false)); s.setTimeout(1000, () => { s.destroy(); resolve(true); }); });
     if (survivors.length || failures.length || portOpen || interrupted) result.outcome = 'FAIL';
     result.cleanup = { ownedPids: [...owned.keys()], survivors, failures, portOpen: Boolean(portOpen), interrupted };
-    for (const [name, log] of Object.entries(logs)) writeFileSync(join(out, `${name}.log`), log.replace(/token=[^&\s"]+/g, "token=REDACTED"));
+    for (const [name, log] of Object.entries(logs)) writeFileSync(join(out, `${name}.log`), log.replace(/token=[^&\s"]+/g, "token=<hidden>").replace(/^(token\s+)\S+/gm, "$1<hidden>"));
     writeFileSync(join(out, 'events.jsonl'), logs.fixture); rmSync(scratch, { recursive: true, force: true });
     writeFileSync(join(out, 'run.json'), JSON.stringify(result, null, 2) + '\n');
 }
