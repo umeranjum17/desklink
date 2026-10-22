@@ -15,7 +15,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
-import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from './lab-safety.mjs';
+import { assertNoAmbientDesktop, scrubToken, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from './lab-safety.mjs';
 
 assertNoAmbientDesktop();
 assert(process.platform === 'linux', 'this private-Xvfb proof requires Linux');
@@ -267,9 +267,8 @@ finally {
     const portOpen = port && await new Promise(r => { const s = connect({ host: '127.0.0.1', port }); s.once('connect', () => { s.destroy(); r(true); }); s.once('error', () => r(false)); s.setTimeout(1000, () => { s.destroy(); r(true); }); });
     if (survivors.length || failures.length || portOpen || interrupted) result.outcome = 'FAIL';
     result.cleanup = { ownedPids: [...owned.keys()], survivors, failures, portOpen: Boolean(portOpen), interrupted };
-    for (const [name, log] of Object.entries(logs)) writeFileSync(join(out, `phone-${name}.log`), log);
-    writeFileSync(join(out, 'phone-events.jsonl'), logs.fixture);
-    writeFileSync(join(out, 'phone.json'), JSON.stringify(result, null, 2) + '\n');
+    for (const [name, log] of Object.entries(logs)) if (name !== 'xvfb') writeFileSync(join(out, `phone-${name}.log`), scrubToken(log));
+    writeFileSync(join(out, 'phone.json'), scrubToken(JSON.stringify(result, null, 2)) + '\n');
     rmSync(scratch, { recursive: true, force: true });
 }
 assert.equal(result.outcome, 'PASS', `proof failed; inspect ${join(out, 'phone.json')}`);

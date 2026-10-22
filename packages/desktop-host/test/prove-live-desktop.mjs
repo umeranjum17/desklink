@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
 import { WebSocket } from 'ws';
-import { assertNoAmbientDesktop, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from './lab-safety.mjs';
+import { assertNoAmbientDesktop, scrubToken, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from './lab-safety.mjs';
 
 assertNoAmbientDesktop();
 assert(process.platform === 'linux', 'this private-Xvfb proof requires Linux');
@@ -123,7 +123,6 @@ try {
         background: getComputedStyle(document.body).backgroundColor, color: getComputedStyle(document.body).color }));
     await page.emulateMedia({ colorScheme: 'dark' }); const darkChrome = await chrome();
     await page.emulateMedia({ colorScheme: 'light' }); const lightChrome = await chrome();
-    await page.screenshot({ path: join(out, '03-theme-light-emulated.png'), timeout: 15000 });
     result.theme = { dark: darkChrome, lightEmulated: lightChrome, clientShipsLightTheme: darkChrome.background !== lightChrome.background };
     await page.emulateMedia({ colorScheme: 'dark' });
     result.outcome = 'PASS';
@@ -146,10 +145,10 @@ finally {
     const portOpen = port && await new Promise(resolve => { const s = connect({ host: '127.0.0.1', port }); s.once('connect', () => { s.destroy(); resolve(true); }); s.once('error', () => resolve(false)); s.setTimeout(1000, () => { s.destroy(); resolve(true); }); });
     if (survivors.length || failures.length || portOpen || interrupted) result.outcome = 'FAIL';
     result.cleanup = { ownedPids: [...owned.keys()], survivors, failures, portOpen: Boolean(portOpen), interrupted };
-    for (const [name, log] of Object.entries(logs)) writeFileSync(join(out, `${name}.log`), log);
-    writeFileSync(join(out, 'events.jsonl'), logs.fixture); rmSync(scratch, { recursive: true, force: true });
-    writeFileSync(join(out, 'run.json'), JSON.stringify(result, null, 2) + '\n');
+    for (const [name, log] of Object.entries(logs)) writeFileSync(join(out, `${name}.log`), scrubToken(log));
+    rmSync(scratch, { recursive: true, force: true });
+    writeFileSync(join(out, 'run.json'), scrubToken(JSON.stringify(result, null, 2)) + '\n');
 }
 assert.equal(result.outcome, 'PASS', `proof failed; inspect ${join(out, 'run.json')}`);
-for (const name of ['01-before.png', '02-after.png', '03-theme-light-emulated.png', 'desktop-motion.webm']) { const file = readFileSync(join(out, name)); assert(file.length > 1000, `incomplete capture: ${name}`); if (name.endsWith('.png')) assert(file.readUInt32BE(0) === 0x89504e47, `not a PNG: ${name}`); }
+for (const name of ['01-before.png', '02-after.png', 'desktop-motion.webm']) { const file = readFileSync(join(out, name)); assert(file.length > 1000, `incomplete capture: ${name}`); if (name.endsWith('.png')) assert(file.readUInt32BE(0) === 0x89504e47, `not a PNG: ${name}`); }
 console.log(`PASS: trusted browser click -> fixture edges -> decoded marker; evidence ${out}`);

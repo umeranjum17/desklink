@@ -570,6 +570,7 @@ dependencies = [
  "wl-clipboard-rs",
  "x11rb",
  "xkbcommon",
+ "zbus",
 ]
 
 [[package]]
