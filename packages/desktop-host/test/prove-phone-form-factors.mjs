@@ -267,7 +267,7 @@ finally {
     const portOpen = port && await new Promise(r => { const s = connect({ host: '127.0.0.1', port }); s.once('connect', () => { s.destroy(); r(true); }); s.once('error', () => r(false)); s.setTimeout(1000, () => { s.destroy(); r(true); }); });
     if (survivors.length || failures.length || portOpen || interrupted) result.outcome = 'FAIL';
     result.cleanup = { ownedPids: [...owned.keys()], survivors, failures, portOpen: Boolean(portOpen), interrupted };
-    for (const [name, log] of Object.entries(logs)) writeFileSync(join(out, `phone-${name}.log`), log.replace(/token=[^&\s"]+/g, "token=<hidden>").replace(/^(token\s+)\S+/gm, "$1<hidden>"));
+    for (const [name, log] of Object.entries(logs)) writeFileSync(join(out, `phone-${name}.log`), log.replace(/token=[^&\s"]+/g, "<token hidden>").replace(/^(token\s+)\S+/gm, "$1<hidden>"));
     writeFileSync(join(out, 'phone-events.jsonl'), logs.fixture);
     writeFileSync(join(out, 'phone.json'), JSON.stringify(result, null, 2) + '\n');
     rmSync(scratch, { recursive: true, force: true });
