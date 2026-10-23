@@ -179,6 +179,7 @@ forward has to follow it: `adb reverse tcp:<port> tcp:<port>` or
 - **One engine, three entry points** — browser reference client, React Native view, agent CLI.
 
 [Measured latency and the lab method](https://github.com/umeranjum17/desklink/pull/28) ·
+[Phone frame rate and latency](docs/phone-wifi-latency.md) ·
 [Capture, codecs and platform support](packages/desktop-host/README.md#what-it-does)
 
 ## Keep going
