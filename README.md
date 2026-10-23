@@ -190,6 +190,7 @@ forward has to follow it: `adb reverse tcp:<port> tcp:<port>` or
 | Let an agent see and control a desktop | [@desklink/axi](packages/axi) |
 | Understand the wire format | [Protocol](packages/desktop-host/docs/PROTOCOL.md) |
 | See what's changed | [Changelog](CHANGELOG.md) |
+| See where desklink is headed | [Vision](VISION.md) |
 | Report a problem or suggest an idea | [Issues](https://github.com/umeranjum17/desklink/issues) |
 
 ## Develop
