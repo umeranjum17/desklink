@@ -104,37 +104,7 @@ The one step no install does for you is [kernel input access](#kernel-input-acce
 and only the portal backend needs it.
 
 macOS arm64 (preview) also has a prebuilt engine. There is no prebuilt engine for other platforms. Another Linux (arm64, musl)
-can [build it from source](#building-from-source). Windows has a source-built transport preview for
-`x86_64-pc-windows-msvc`: static libvpx enables `serve` and consumer-fed H.264
-encoded sources. Native capture, input, clipboard and the agent indicator are
-unavailable. Native Windows desktop capture sessions are not supported yet. Node resolution
-is an opt-in preview for Windows 11 22H2+ x64: set `DESKLINK_WINDOWS=1` and
-point `DESKLINK_ENGINE` at a built `desklink-host.exe`. Windows platform packages
-are not published yet. Without static libvpx, the executable's `capabilities`
-command remains available, but CLI `capabilities` and `bridge` require `serve`.
-The Windows bridge defaults to `--source display` and handles Ctrl+Break;
-consumer-fed video requires `--source encoded`.
-A startup exit `0xC0000135` is reported as `missing-system-library` (a required
-DLL could not load); spawn failures are reported as `engine-spawn-failed` with
-the underlying error. Elevated windows and the secure desktop remain outside
-Windows control support.
-
-On Windows with Visual Studio Build Tools and PowerShell 7, build libvpx with
-`release/build-libvpx-win.ps1 -OutDir <new-build-directory>`, set
-`DESKLINK_VPX_STATIC_DIR` to its `prefix` directory and
-`RUSTFLAGS=-Ctarget-feature=+crt-static`, then run `cargo build --locked --target
-x86_64-pc-windows-msvc --manifest-path engine/Cargo.toml`. The build retains
-libvpx's licence and patent grant in `prefix/THIRD_PARTY_LICENSES.txt`.
-Without that prefix the compile seam still builds and refuses `serve`.
-Hosted Windows CI resolves the opt-in engine through the published Node API
-and completes a `serve` hello/capabilities handshake with clean shutdown; it
-also installs the packed packages into an empty project, checks the installed
-`@desklink/host` tree against its pack manifest, starts the engine from that
-install, and checks Chrome decode and input relay, and DLL
-dependencies. That install proof is installation and startup on a hosted
-machine: the engine still comes from a source build, because Windows platform
-packages are not published, and capture, input, encoding quality, mixed DPI, GPU
-encoding and elevation stay with the dedicated rig lanes.
+can [build it from source](#building-from-source).
 
 ### macOS (preview)
 
@@ -305,7 +275,7 @@ source-coordinate `x`, `y`, `visible`, the cursor image's `hotspot` where
 known, and monotonic `timestamp_us` (the same clock as local frame metadata).
 A compositor without that protocol still captures, cursor hidden, and says so
 in `cursor.limitation`. X11 reports positions even on still
-frames and already captures root pixels without a cursor. macOS, Windows, and consumer-encoded
+frames and already captures root pixels without a cursor. macOS and consumer-encoded
 sources return `cursor-unavailable` for hidden requests. Omitting the option
 preserves existing behavior. See [the cursor protocol](https://github.com/umeranjum17/desklink/blob/main/packages/desktop-host/docs/PROTOCOL.md#cursor-free-capture).
 
@@ -385,7 +355,7 @@ platform". Linux variants are published only after their own qualification; macO
 is published as a default-enabled preview, not as qualified desktop support.
 See [Install and run](#install-and-run) for current support. Another variant,
 such as Linux arm64, needs a real machine to run a real journey first. macOS
-and Windows are separate backends, not separate builds.
+is a separate backend, not a separate build.
 
 ### Building and packing a release
 
