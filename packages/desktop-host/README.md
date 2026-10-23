@@ -445,19 +445,19 @@ the current platform's host and engine tarballs into an empty project and checks
 
 Publishing is automatic. Merging a version bump to `main` runs
 `.github/workflows/release.yml`: the test, build, build-pack and per-OS engine
-jobs gate a publish job that releases every package whose exact version is not
-yet on npm, in dependency order — the engine platform packages first, then
-`@desklink/host` immediately after the engine packages it pins, then
-`@desklink/axi` gated on the host (not the reverse), then
+jobs gate a publish job (`release/publish-set.sh`) that releases every package
+whose exact version is not yet on npm, in dependency order — the engine
+platform packages first, then `@desklink/host`, then `@desklink/axi`, then
 `@desklink/react-native` — all with `--provenance`. A version lockstep check
 fails the workflow when `@desklink/host`, `@desklink/react-native` and
-`@desklink/axi` disagree, so a half-bump never reaches publish. One package's
-failure never stops the others, but the job ends red and every hold or failure
-names the package and version.
-A dependent waits for a just-published package within npm's own availability
-window, shared through `release/readback-budget.json` with the manual
-`release/publish.mjs` route, so a fresh release publishes in one run instead of
-holding each package until the next re-run.
+`@desklink/axi` disagree, so a half-bump never reaches publish. The publish job
+publishes nothing unless every tarball of the set is present and the registry
+answers for each package.
+Each package then waits until the registry serves the one before it, within a
+30-minute budget that covers npm's processing and CDN lag (shared through
+`release/readback-budget.json` with the manual `release/publish.mjs` route).
+The first failure stops the job with an error naming what is served and what
+is not, so a failed run leaves only a prefix of that order published.
 The workflow uses trusted publishing (OIDC) and no npm token. Re-runs skip
 versions already published.
 

@@ -35,7 +35,7 @@ const order = platforms.map(([platform, pinned]) => {
     return { spec: `${platform}@${version}`, tarball: join(out, `${platform.replace(/^@/, '').replace('/', '-')}-${version}.tgz`) };
 });
 order.push({ spec: `${name}@${version}`, tarball: host });
-for (const sibling of ['desktop-client', 'axi']) {
+for (const sibling of ['axi', 'desktop-client']) {
     const manifest = JSON.parse(readFileSync(resolve(packageRoot, '..', sibling, 'package.json'), 'utf8'));
     if (manifest.version !== version) throw new Error(`${manifest.name} is not version ${version}`);
     order.push({ spec: `${manifest.name}@${version}`, tarball: join(out, `${manifest.name.replace(/^@/, '').replace('/', '-')}-${version}.tgz`) });

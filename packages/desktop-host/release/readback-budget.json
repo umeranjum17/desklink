@@ -1,4 +1,4 @@
 {
-    "attempts": 60,
-    "intervalSeconds": 5
+    "attempts": 180,
+    "intervalSeconds": 10
 }

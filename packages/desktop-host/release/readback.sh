@@ -1,7 +1,10 @@
 # Read-back helpers shared by the release workflow and this package's manual
 # route. npm states a freshly published version "may take a few minutes to
 # become available", so a dependent waits that window before treating a version
-# as missing; a genuinely missing version still fails in bounded time.
+# as missing; a genuinely missing version still fails in bounded time. In the
+# 0.5.10 release the registry recorded the linux-x64-gnu engine 7m20s after its
+# publish returned, and the packument is then CDN-cached for up to 300s, so the
+# budget (30 minutes) is well past that ~12.5-minute worst case.
 #
 # The budget lives in readback-budget.json, the single source this file and
 # readback.mjs both read, so the workflow and release/publish.mjs cannot drift.
