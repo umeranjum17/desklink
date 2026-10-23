@@ -1,7 +1,7 @@
 // Runs only inside flow.mjs's verified, task-owned X server (DESKLINK_CARET_FLOW=1).
 // A native GTK entry: the text caret must not be read as a pipe right after typing.
 import { spawn } from 'node:child_process';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
 
@@ -25,6 +25,13 @@ export async function caretFlow({ run, env, verifyXvfb, remember }) {
     writeFileSync(join(evidence, 'native-entry-screen.txt'), out);
     await run('look', '--out', join(evidence, 'native-entry.png'));
     assert(rows(out).some(row => row[1] === 'Notes on remote desktops'), `caret read as text: ${out}`);
+    const version = JSON.parse(readFileSync(resolve('packages/axi/package.json'), 'utf8')).version;
+    writeFileSync(join(evidence, 'steps.json'), JSON.stringify({
+      target: { version: `desklink-axi ${version}` },
+      start: 'A native text entry in an empty private display',
+      steps: ['click the text entry', 'type "Notes on remote desktops" and wait for the screen to settle', 'read the whole screen'],
+      result: 'The screen read returns "Notes on remote desktops" with no caret read as a pipe',
+    }, null, 2) + '\n');
     await run('stop');
   } finally { app.kill('SIGTERM'); }
 }
