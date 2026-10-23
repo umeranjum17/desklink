@@ -203,27 +203,30 @@ static FT_Face point_font(FT_Library *library) {
     FcResult result;FcPattern *match=FcFontMatch(NULL,pattern,&result);FcPatternDestroy(pattern);
     FcChar8 *path=NULL;FT_Face face=NULL;
     if(match && FcPatternGetString(match,FC_FILE,0,&path)==FcResultMatch)
-        if(!FT_New_Face(*library,(const char *)path,0,&face))FT_Set_Pixel_Sizes(face,0,13);
+        if(!FT_New_Face(*library,(const char *)path,0,&face))FT_Set_Pixel_Sizes(face,0,26);
     if(match)FcPatternDestroy(match);
     return face;
 }
-static void draw_point(struct Overlay *o,struct Buffer *b,double x,double y,const char *label,FT_Face font,int visible) {
+// 72 logical px ring with a 1.2 s pulse wave growing out of it, and a 40px
+// badge with 26px text. Opaque pixels only, like the X11 cue.
+static void draw_point(struct Overlay *o,struct Buffer *b,double x,double y,const char *label,FT_Face font,int visible,double elapsed) {
     memset(b->pixels,0,b->length);if(!visible)return;
     int w=o->width,h=o->height;
-    for(int py=fmax(0,y-21);py<fmin(h,y+22);py++)for(int px=fmax(0,x-21);px<fmin(w,x+22);px++) {
+    double phase=fmod(elapsed,1.2)/1.2,wave=36+18*phase,wave_half=3-2*phase;
+    for(int py=fmax(0,y-56);py<fmin(h,y+57);py++)for(int px=fmax(0,x-56);px<fmin(w,x+57);px++) {
         double d=hypot(px-x,py-y);
-        if(fabs(d-18)<=2 || d<=3)b->pixels[(size_t)py*w+px]=0xff4c9ed0;
+        if(fabs(d-36)<=3 || d<=6 || fabs(d-wave)<=wave_half)b->pixels[(size_t)py*w+px]=0xff4c9ed0;
     }
     if(!*label)return;
-    int badge_w=16;
+    int badge_w=24;
     for(const char *p=label;*p;p++)if(!FT_Load_Char(font,(unsigned char)*p,FT_LOAD_DEFAULT))badge_w+=font->glyph->advance.x>>6;
-    badge_w=fmin(w,badge_w);int bx=fmax(0,fmin(x+30,w-badge_w)),by=fmax(0,fmin(y-14,h-28));
-    for(int py=by;py<fmin(h,by+28);py++)for(int px=bx;px<bx+badge_w;px++)b->pixels[(size_t)py*w+px]=0xff123047;
-    int pen=bx+8;
+    badge_w=fmin(w,badge_w);int bx=fmax(0,fmin(x+66,w-badge_w)),by=fmax(0,fmin(y-20,h-40));
+    for(int py=by;py<fmin(h,by+40);py++)for(int px=bx;px<bx+badge_w;px++)b->pixels[(size_t)py*w+px]=0xff123047;
+    int pen=bx+12;
     for(const char *p=label;*p;p++)if(!FT_Load_Char(font,(unsigned char)*p,FT_LOAD_RENDER)) {
         FT_GlyphSlot g=font->glyph;
         for(unsigned row=0;row<g->bitmap.rows;row++)for(unsigned col=0;col<g->bitmap.width;col++) {
-            int px=pen+g->bitmap_left+col,py=by+18-g->bitmap_top+row;
+            int px=pen+g->bitmap_left+col,py=by+28-g->bitmap_top+row;
             if(px<0||px>=w||py<0||py>=h)continue;
             unsigned a=g->bitmap.buffer[row*g->bitmap.pitch+col];
             unsigned r=(18*(255-a)+255*a)/255,green=(48*(255-a)+255*a)/255,blue=(71*(255-a)+255*a)/255;
@@ -314,7 +317,7 @@ static int overlay_main(int source_w,int source_h,int point_mode,int origin_know
                         unsigned timeout=0;int offset=0;
                         if(sscanf(pending,"P %lf %lf %u %n",&px,&py,&timeout,&offset)==3 && offset && timeout>=1 && timeout<=120000 && strlen(pending+offset)<=96) {
                             snprintf(label,sizeof(label),"%s",pending+offset);deadline=now()+timeout/1000.0;active=1;dirty=1;
-                            visible=locate(&o,px,py,&x,&y);
+                            visible=locate(&o,px,py,&x,&y);cue_started=now();
                         }
                     }
                     else if(kind=='S')ending=now();
@@ -336,11 +339,11 @@ static int overlay_main(int source_w,int source_h,int point_mode,int origin_know
                 used=0;
             }else if(used<sizeof(pending)-1)pending[used++]=bytes[i];
         }
-        if(point_mode && visible && now()>=deadline){visible=0;dirty=1;}
+        if(point_mode && visible){if(now()>=deadline)visible=0;dirty=1;}
         if(!active || (point_mode&&!dirty))continue;
         if(!point_mode){x+=(tx-x)*0.24;y+=(ty-y)*0.24;}
         for(int i=0;i<2;i++)if(!o.buffers[i].busy) {
-            if(point_mode)draw_point(&o,&o.buffers[i],x,y,label,font,visible);
+            if(point_mode)draw_point(&o,&o.buffers[i],x,y,label,font,visible,now()-cue_started);
             else draw(&o,&o.buffers[i],x,y,click,typed,ending,started,cue_started);
             dirty=0;
             o.buffers[i].busy=1;

@@ -163,6 +163,50 @@ int desklink_agent_overlay_main(const char *display_name) {
     return 0;
 }
 
+// The ring is 72 logical px across, a 6px band with a pulse wave that grows
+// out from it every PULSE_SECONDS, so the cue reads at a glance. The label is
+// the core "fixed" font drawn at 2x, because a core X server offers nothing larger.
+#define POINT_RING 36
+#define POINT_PULSE_SECONDS 1.2
+#define POINT_BADGE_H 40
+#define POINT_FRAME_SECONDS 0.033
+
+static void point_shape(Display *d, Window window, Pixmap mask, GC shape, int x, int y,
+    int badge_x, int badge_y, int badge_w, double elapsed) {
+    double phase = fmod(elapsed, POINT_PULSE_SECONDS) / POINT_PULSE_SECONDS;
+    int wave = POINT_RING + (int)lround(18*phase), wave_width = 6 - (int)lround(4*phase);
+    XSetForeground(d, shape, 0); XFillRectangle(d, mask, shape, 0, 0, 0xffff, 0xffff);
+    XSetForeground(d, shape, 1);
+    XSetLineAttributes(d, shape, 6, LineSolid, CapRound, JoinRound);
+    XDrawArc(d, mask, shape, x-POINT_RING, y-POINT_RING, 2*POINT_RING, 2*POINT_RING, 0, 360*64);
+    XFillArc(d, mask, shape, x-6, y-6, 12, 12, 0, 360*64);
+    XSetLineAttributes(d, shape, wave_width, LineSolid, CapRound, JoinRound);
+    XDrawArc(d, mask, shape, x-wave, y-wave, 2*wave, 2*wave, 0, 360*64);
+    if (badge_w) XFillRectangle(d, mask, shape, badge_x, badge_y, badge_w, POINT_BADGE_H);
+    XShapeCombineMask(d, window, ShapeBounding, 0, 0, mask, ShapeSet);
+}
+
+// Text is rasterised once at 1x and drawn as 2x2 blocks.
+static void point_text(Display *d, Window window, GC ink, XFontStruct *font, const char *label,
+    int len, int x, int y) {
+    int w = XTextWidth(font, label, len), h = font->ascent + font->descent;
+    Pixmap bits = XCreatePixmap(d, window, w, h, 1);
+    GC gc = XCreateGC(d, bits, 0, NULL);
+    XSetFont(d, gc, font->fid);
+    XSetForeground(d, gc, 0); XFillRectangle(d, bits, gc, 0, 0, w, h);
+    XSetForeground(d, gc, 1); XDrawString(d, bits, gc, 0, font->ascent, label, len);
+    XImage *image = XGetImage(d, bits, 0, 0, w, h, 1, ZPixmap);
+    XRectangle *blocks = malloc(sizeof(XRectangle) * (size_t)w * h);
+    int count = 0;
+    if (image && blocks)
+        for (int row = 0; row < h; row++) for (int col = 0; col < w; col++)
+            if (XGetPixel(image, col, row))
+                blocks[count++] = (XRectangle){(short)(x+2*col), (short)(y+2*row), 2, 2};
+    if (count) XFillRectangles(d, window, ink, blocks, count);
+    free(blocks); if (image) XDestroyImage(image);
+    XFreeGC(d, gc); XFreePixmap(d, bits);
+}
+
 // Point cues are independent of the real cursor. A shaped override-redirect
 // window works without a compositor; an empty input shape passes every event
 // through and mapping it never asks for keyboard focus. It intentionally appears
@@ -185,12 +229,11 @@ int desklink_point_overlay_main(const char *display_name) {
     Pixmap mask = XCreatePixmap(d, root, width, height, 1);
     GC shape = XCreateGC(d, mask, 0, NULL), ink = XCreateGC(d, window, 0, NULL);
     XFontStruct *font = XLoadQueryFont(d, "fixed");
-    if (font) XSetFont(d, ink, font->fid);
-    XSetLineAttributes(d, shape, 4, LineSolid, CapRound, JoinRound);
     fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL) | O_NONBLOCK);
     puts("READY"); fflush(stdout);
     char pending[512]; size_t used = 0;
-    double deadline = 0;
+    double deadline = 0, started = 0, drawn = 0;
+    int x = 0, y = 0, badge_x = 0, badge_y = 0, badge_w = 0;
     for (;;) {
         char bytes[512]; ssize_t n = read(STDIN_FILENO, bytes, sizeof(bytes));
         if (n == 0) break;
@@ -200,35 +243,41 @@ int desklink_point_overlay_main(const char *display_name) {
             double px, py; unsigned timeout; int offset = 0;
             if (sscanf(pending, "P %lf %lf %u %n", &px, &py, &timeout, &offset) != 3 || !offset) continue;
             const char *label = pending + offset;
-            int x = (int)px, y = (int)py, len = (int)strlen(label);
-            int badge_w = font ? XTextWidth(font, label, len) + 16 : len * 6 + 16;
+            int len = (int)strlen(label);
+            x = (int)px; y = (int)py;
+            int text_w = font ? 2*XTextWidth(font, label, len) : 12*len;
+            badge_w = len ? text_w + 24 : 0;
             if (badge_w > width) badge_w = width;
-            int badge_x = x + 30, badge_y = y - 14;
+            badge_x = x + POINT_RING + 30; badge_y = y - POINT_BADGE_H/2;
             if (badge_x + badge_w > width) badge_x = width - badge_w;
             if (badge_y < 0) badge_y = 0;
-            if (badge_y + 28 > height) badge_y = height - 28;
+            if (badge_y + POINT_BADGE_H > height) badge_y = height - POINT_BADGE_H;
             XUnmapWindow(d, window);
-            XSetForeground(d, shape, 0); XFillRectangle(d, mask, shape, 0, 0, width, height);
-            XSetForeground(d, shape, 1);
-            XDrawArc(d, mask, shape, x-18, y-18, 36, 36, 0, 360*64);
-            XFillArc(d, mask, shape, x-3, y-3, 6, 6, 0, 360*64);
-            if (len) XFillRectangle(d, mask, shape, badge_x, badge_y, badge_w, 28);
-            XShapeCombineMask(d, window, ShapeBounding, 0, 0, mask, ShapeSet);
+            started = now();
+            point_shape(d, window, mask, shape, x, y, badge_x, badge_y, badge_w, 0);
             XMapRaised(d, window);
             XClearWindow(d, window);
             if (len) {
                 XSetForeground(d, ink, 0x123047);
-                XFillRectangle(d, window, ink, badge_x, badge_y, badge_w, 28);
+                XFillRectangle(d, window, ink, badge_x, badge_y, badge_w, POINT_BADGE_H);
                 XSetForeground(d, ink, 0xffffff);
-                XDrawString(d, window, ink, badge_x+8, badge_y+18, label, len);
+                if (font) point_text(d, window, ink, font, label, len, badge_x+12,
+                    badge_y + (POINT_BADGE_H - 2*(font->ascent+font->descent))/2);
             }
             XSync(d, False);
-            deadline = now() + timeout/1000.0;
+            drawn = now();
+            deadline = drawn + timeout/1000.0;
         }
-        if (deadline && now() >= deadline) { XUnmapWindow(d, window); XFlush(d); deadline = 0; }
+        double t = now();
+        if (deadline && t >= deadline) { XUnmapWindow(d, window); XFlush(d); deadline = 0; }
+        else if (deadline && t - drawn >= POINT_FRAME_SECONDS) {
+            point_shape(d, window, mask, shape, x, y, badge_x, badge_y, badge_w, t - started);
+            XFlush(d); drawn = t;
+        }
         usleep(5000);
     }
     XDestroyWindow(d, window); XFreeGC(d, shape); XFreeGC(d, ink);
     XFreePixmap(d, mask); if (font) XFreeFont(d, font); XCloseDisplay(d);
     return 0;
 }
+
