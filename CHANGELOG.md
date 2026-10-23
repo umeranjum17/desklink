@@ -2,11 +2,20 @@
 
 ## Unreleased
 
+## 0.5.11
+
+Joint patch release; protocol version remains 3. All packages move together.
+
 ### Changed
 
 - The `session.point` cue reads at a glance: a 72 px ring with a pulse wave that
   grows out of it every 1.2 s, and a label at twice the size. The protocol is
   unchanged.
+
+### Fixed
+
+- Reading the screen right after typing no longer shows the text caret as a
+  pipe (`|`) in the text it returns.
 
 ## 0.5.10
 
