@@ -232,11 +232,13 @@ try:
             assert equal(baseline.crop((40, 40, 120, 120)), image.crop((40, 40, 120, 120))), "pointer moved"
         if stage == "after":
             assert image.getpixel((400, 300)) == (76, 158, 208), "center misplaced"
-            assert image.getpixel((418, 300)) == (76, 158, 208), "ring misplaced"
-            assert not equal(baseline.crop((430, 286, 480, 314)), image.crop((430, 286, 480, 314))), "label missing"
+            assert image.getpixel((436, 300)) == (76, 158, 208), "ring misplaced"
+            assert not equal(baseline.crop((470, 286, 520, 314)), image.crop((470, 286, 520, 314))), "label missing"
             shown = image
         elif stage == "invalid":
-            assert equal(shown, image), "invalid request changed cue"
+            # The pulse wave animates around the ring; the dot and label are static.
+            for box in [(385, 285, 415, 315), (466, 280, 700, 320)]:
+                assert equal(shown.crop(box), image.crop(box)), "invalid request changed cue"
         elif stage in ["expired", "cleared", "closed"]:
             assert equal(baseline, image), f"cue/pointer survived {stage}"
         elif stage == "replaced":
