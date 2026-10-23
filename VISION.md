@@ -48,9 +48,7 @@ in charge of who gets in, and when the session ends.
 These follow the current release plan; shipped work lands in the
 [changelog](CHANGELOG.md).
 
-1. **Windows desktop sessions.** Native capture, pointer and key input,
-   clipboard, and a signed package, each proven on a real Windows machine.
-2. **macOS out of preview.** The full session journey and a long soak pass on a
+1. **macOS out of preview.** The full session journey and a long soak pass on a
    real Mac, at the latency and fps target.
-3. **Physical iPhone and iPad.** A live desktop view on each device, then
+2. **Physical iPhone and iPad.** A live desktop view on each device, then
    phone-only and tablet-only control.
