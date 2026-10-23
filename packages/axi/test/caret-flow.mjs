@@ -26,7 +26,7 @@ export async function caretFlow({ run, env, verifyXvfb, remember }) {
     await run('look', '--out', join(evidence, 'native-entry.png'));
     assert(rows(out).some(row => row[1] === 'Notes on remote desktops'), `caret read as text: ${out}`);
     const version = JSON.parse(readFileSync(resolve('packages/axi/package.json'), 'utf8')).version;
-    writeFileSync(join(evidence, 'steps.json'), JSON.stringify({
+    writeFileSync(join(evidence, '..', 'steps.json'), JSON.stringify({
       target: { version: `desklink-axi ${version}` },
       start: 'A native text entry in an empty private display',
       steps: ['click the text entry', 'type "Notes on remote desktops" and wait for the screen to settle', 'read the whole screen'],
