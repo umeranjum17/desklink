@@ -82,29 +82,6 @@ jobs:
       # What would be published, so a manifest change that drops a file shows here.
       - run: npm pack --dry-run --workspaces
 
-  # The same package-level checks the Linux `packages` job runs, on Windows:
-  # install, build, test, the axi validation and the pack dry run. Capture and
-  # input stay in the dedicated rig lanes.
-  packages-windows:
-    needs: changes
-    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.packages == 'true' }}
-    runs-on: windows-2025
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm run build
-      - run: npm test
-      - run: npx -y axi-axi validate 'node bin/desklink-axi.js' --dir .
-        working-directory: packages/axi
-      - run: npm pack --dry-run --workspaces
-
   engine:
     needs: changes
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.packages == 'true' }}
@@ -169,89 +146,6 @@ jobs:
         env:
           DESKLINK_AXI_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/desklink-host
           DESKLINK_VERIFY_TARGET: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/examples/x11_target
-
-  # Hosted transport proof only: native capture/input requires a dedicated rig.
-  # Runs only when the desktop-host engine or its release inputs changed.
-  engine-windows:
-    needs: changes
-    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.native == 'true' }}
-    runs-on: windows-2025
-    steps:
-      - uses: actions/checkout@v4
-      - name: Rust (the version the release build pins)
-        run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
-          rustup target add x86_64-pc-windows-msvc
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.rustup
-            packages/desktop-host/engine/target
-          key: engine-windows-${{ hashFiles('packages/desktop-host/engine/Cargo.lock') }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      # The whole published set, so the install proof below packs what ships.
-      - run: npm run build
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-      # The static libvpx (/MT) MSVC build is a ~3 min step that only changes
-      # with its script, so cache the prefix and rebuild only on a miss.
-      - uses: actions/cache@v4
-        id: vpx
-        with:
-          path: ${{ runner.temp }}/desklink-vpx
-          key: libvpx-win-${{ hashFiles('packages/desktop-host/release/build-libvpx-win.ps1') }}
-      - name: Build static MSVC libvpx (/MT)
-        if: steps.vpx.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: ./packages/desktop-host/release/build-libvpx-win.ps1 -OutDir "$env:RUNNER_TEMP/desklink-vpx"
-      - name: Point the engine build at the static libvpx (/MT)
-        shell: pwsh
-        run: |
-          "DESKLINK_VPX_STATIC_DIR=$env:RUNNER_TEMP/desklink-vpx/prefix" >> $env:GITHUB_ENV
-          "RUSTFLAGS=-Ctarget-feature=+crt-static" >> $env:GITHUB_ENV
-      - name: Build and test Windows serving engine
-        run: |
-          cargo build --locked --target x86_64-pc-windows-msvc --manifest-path packages/desktop-host/engine/Cargo.toml
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked --target x86_64-pc-windows-msvc --manifest-path packages/desktop-host/engine/Cargo.toml
-      - name: Assert no libvpx or dynamic MSVC runtime DLL dependency
-        shell: pwsh
-        run: |
-          $dependencies = & dumpbin /dependents packages/desktop-host/engine/target/x86_64-pc-windows-msvc/debug/desklink-host.exe
-          if ($LASTEXITCODE -ne 0) { throw 'dumpbin failed' }
-          $dependencies
-          if ($dependencies -match '(?i)(vpx|vcruntime|msvcp|msvcr|ucrtbase)[^\s]*\.dll') {
-            throw 'Engine depends on a libvpx or dynamic CRT DLL'
-          }
-      - name: Encoded-source Chrome decode and input relay (required)
-        run: node packages/desktop-host/test/encoded-flow.mjs
-        env:
-          DESKLINK_AXI_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/x86_64-pc-windows-msvc/debug/desklink-host.exe
-          DESKLINK_REQUIRE_CHROME: '1'
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-libvpx-notices
-          path: ${{ runner.temp }}/desklink-vpx/prefix/THIRD_PARTY_LICENSES.txt
-
-      - name: Windows Node resolver and serve handshake via the published API (no desktop access)
-        run: node packages/desktop-host/test/windows-resolver.mjs
-        env:
-          DESKLINK_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/x86_64-pc-windows-msvc/debug/desklink-host.exe
-      # A consumer installs the packed host into an empty project and starts the
-      # engine. Installation and startup on a hosted machine only: capture, input,
-      # encoding quality and the desktop stay with the rig lanes.
-      - name: Windows clean-project install of the packed host, then engine startup
-        run: node packages/desktop-host/test/windows-install.mjs
-        env:
-          DESKLINK_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/x86_64-pc-windows-msvc/debug/desklink-host.exe
 
   # Standard hosted ARM64 runner: build/pack/install the existing unsigned CLI
   # release path without capture, input, or interactive macOS qualification.

@@ -41,8 +41,8 @@
  *
  *   ANDROID_SERIAL            device serial to drive (default the only device
  *                             `adb devices` reports)
- *   DESKLINK_LINK_TCP_OUT     where the captures and logs go (default
- *                             /home/umer/lab-tmp/dl-kit-link-tcp)
+ *   DESKLINK_LINK_TCP_OUT     where the captures and logs go (default a fresh
+ *                             directory under this lane's ~/lab-tmp root)
  *   DESKLINK_ANDROID_SKIP_BUILD  1 reuses the APK the last run built
  *   DESKLINK_METRO_PORT       host port for Metro (default 8081); the phone's
  *                             8081 is reversed to it
@@ -58,7 +58,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { createHash, randomBytes } from 'node:crypto';
 import { PNG } from 'pngjs';
 import {
-    assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb,
+    assertNoAmbientDesktop, claimPrivateDisplay, laneArtefactDir, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb,
 } from '../../desktop-host/test/lab-safety.mjs';
 import { captureClip, spawnAsync } from './clip-capture.mjs';
 import { startTcpRelay } from './tcp-relay.mjs';
@@ -66,7 +66,7 @@ import { startTcpRelay } from './tcp-relay.mjs';
 assertNoAmbientDesktop();
 assert(process.platform === 'linux', 'this private-Xvfb proof requires Linux');
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
-const out = resolve(process.env.DESKLINK_LINK_TCP_OUT ?? '/home/umer/lab-tmp/dl-kit-link-tcp');
+const out = resolve(process.env.DESKLINK_LINK_TCP_OUT ?? laneArtefactDir('link-tcp-flow'));
 mkdirSync(out, { recursive: true });
 // Per-run files, never appended across runs.
 for (const stale of ['reports.jsonl', 'relay.log', 'phone-tcp.txt', 'logcat-desklink.txt']) {

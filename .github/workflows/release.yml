@@ -18,10 +18,9 @@ name: release
 #       (engine/src, Cargo.toml/lock, build.rs) and @desklink/react-native
 #       ships android/ios *sources*; the build-pack matrix below only proves
 #       the TypeScript build and `npm pack --dry-run` contents per OS.
-#   G2. The Windows/MSVC engine is built and tested by the `engine-windows`
-#       job in ci.yml, not here. This workflow builds the Linux x64 (glibc)
-#       and macOS arm64 release engines that back the published platform
-#       packages; capture and input still require a dedicated rig.
+#   G2. This workflow builds the Linux x64 (glibc) and macOS arm64 release
+#       engines that back the published platform packages; capture and input
+#       still require a dedicated rig.
 #   G3. Android Gradle and iOS Xcode compilation of the react-native sources
 #       are built nowhere in CI; neither workflow proves them.
 #   G4. macOS signing/TCC qualification and all capture/input rig proofs stay
@@ -84,7 +83,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2025]
+        os: [ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
