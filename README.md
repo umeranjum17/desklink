@@ -59,11 +59,11 @@ and the [local protocol](packages/desktop-host/docs/PROTOCOL.md).
   </tr>
   <tr>
     <td width="50%" valign="top"><img src="docs/assets/readme/agent.webp" alt="A close-up of the real agent CLI: read Groceries as text, click the Bread item, then press End." width="480" /><br/><strong>With your agent</strong><br/>Read the screen as text. Ask for pixels when needed.</td>
-    <td width="50%" valign="top"><img src="docs/assets/readme/clipboard.webp" alt="A close-up of the Android emulator example app's key controls and Sent to desktop confirmation after copying demo text to the phone and back." width="480" /><br/><strong>Keys and clipboard, too</strong><br/>Use key controls. Copy text over and send it back.</td>
+    <td width="50%" valign="top"><img src="docs/assets/readme/clipboard.webp" alt="The browser client copies Book the cabin by the lake from the desktop note, then pastes Call Umer about the cabin back into it." width="480" /><br/><strong>Keys and clipboard, too</strong><br/>Copy text over and send it back, only when you ask.</td>
   </tr>
 </table>
 
-<sub>Real captures from the current build, on a private demo desktop and Android emulator. Seed notes only. The hero draws the viewer's mouse so you can follow along. The clients currently have dark controls, not separate light and dark themes.</sub>
+<sub>Real captures from the current build, on a private demo desktop and Android emulator. Seed notes only. The hero and the clipboard clip draw the viewer's mouse so you can follow along. The clients currently have dark controls, not separate light and dark themes.</sub>
 
 ## Try it
 
@@ -176,6 +176,11 @@ forward has to follow it: `adb reverse tcp:<port> tcp:<port>` or
 - **Touch becomes a pointer** — tap, drag, scroll and type on the same desktop.
 - **Clipboard by choice** — transfer text either way, only when you ask.
 - **Your app owns access** — bring your connection; close sessions when access ends.
+- **Share one window** — show a single window instead of the whole desktop; on Hyprland, taps land on that window.
+- **Survives a network change** — a phone that moves from Wi-Fi to mobile data keeps the same session.
+- **Works over your relay** — a phone with no direct route carries the session over your app's own link.
+- **System audio on Linux** — opt in to capture what the computer plays, for apps on that computer.
+- **Clicks and keys on a Mac** — macOS (preview) can report what the person does, for recording it.
 - **One engine, three entry points** — browser reference client, React Native view, agent CLI.
 
 [Measured latency and the lab method](https://github.com/umeranjum17/desklink/pull/28) ·
