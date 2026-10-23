@@ -14,6 +14,8 @@ journeys:
     command: env -u DISPLAY -u WAYLAND_DISPLAY node packages/desktop-client/test/link-drop-flow.mjs $DONE_DONE_EVIDENCE_ROOT/link-drop
   reattach-race:
     command: env -u DISPLAY -u WAYLAND_DISPLAY node packages/desktop-client/test/reattach-grace-race-flow.mjs $DONE_DONE_EVIDENCE_ROOT/reattach-race
+  caret:
+    command: env -u DISPLAY -u WAYLAND_DISPLAY DESKLINK_CARET_FLOW=1 DESKLINK_OCR_EVIDENCE=$DONE_DONE_EVIDENCE_ROOT/caret node packages/axi/test/flow.mjs
 # Conditional coverage (not default journeys): Mac-only iOS journeys run via
 # packages/desktop-client/test/ios-flow.mjs on the Mac's own simulator, with
 # DESKLINK_IOS_GLASS=1 DESKLINK_IOS_IPAD=1 for finger-on-glass; bridge-retention

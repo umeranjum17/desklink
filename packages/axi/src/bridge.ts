@@ -8,6 +8,7 @@ import { PeerConnection, type DataChannel } from 'node-datachannel';
 import { saveToken, takeToken, tokenPath } from './token.js';
 import { A11yClient, A11yError, axRefPattern, isActionable, type A11yNode } from './atspi.js';
 import { dedupeCandidates, drawMarks, estimateMarksCost, type MarkBox } from './marks.js';
+import { maskBlinkedCarets } from './caret.js';
 import { CursorEventBuffer, formatCursorSamples } from './cursor-events.js';
 
 export const socketPath = join(process.env.XDG_RUNTIME_DIR ?? join(tmpdir(), `desklink-axi-${process.getuid?.() ?? 'user'}`), 'desklink-axi', `${process.env.DESKLINK_AXI_SESSION ?? 'default'}.sock`);
@@ -161,6 +162,7 @@ export async function serve(args: string[]): Promise<void> {
     offerReady = true;
   }
   let baseline = 0;
+  let lastInputAt = 0;
   type Item = { ref: string; text: string; x: number; y: number; conf: number; line: string; words: {text:string;x:number;y:number;w:number;h:number}[] };
   let text: Item[] = []; 
   let regions: string[] = [];
@@ -252,6 +254,7 @@ export async function serve(args: string[]): Promise<void> {
     for (let i = 0; i < 100 && !open; i++) await new Promise(r => setTimeout(r, 50));
     if (!open || !channel) throw new Error('transport: control channel not connected');
     const seq = nextSeq++;
+    lastInputAt = Date.now();
     await new Promise<void>((resolve,reject) => {
       const timer = setTimeout(() => { pending.delete(seq); reject(new Error('transport: input acknowledgement timed out')); }, 3000);
       pending.set(seq,{resolve:()=>{clearTimeout(timer);resolve();},reject:error=>{clearTimeout(timer);reject(error);}});
@@ -522,7 +525,18 @@ export async function serve(args: string[]): Promise<void> {
     }
     const fields = args.includes('--fields') ? args[args.indexOf('--fields')+1]!.split(',') : ['ref','text','x','y'];
     if (fields.some(field=>!['ref','text','x','y','w','h','conf','line'].includes(field))) throw new Error('fields: valid fields are ref,text,x,y,w,h,conf,line');
-    const frame = await capture(pendingDamage ? waitSeen : baseline);
+    let frame = await capture(pendingDamage ? waitSeen : baseline);
+    // Right after input the caret is on screen; a blink toggles it within half a
+    // second. Read the frame that follows and paint out what blinked.
+    if ((command === 'screen' || command === 'home' || command === 'marks' || command === 'diff') && Date.now() - lastInputAt < 2500) {
+      const first = frame;
+      const next = await capture(first.seq, { after_seq: first.seq, timeout_ms: 1300 }).catch((error: unknown) => { if ((error as {code?:string}).code === 'frame-timeout') return undefined; throw error; });
+      if (next) {
+        maskBlinkedCarets(first.raw, next.raw, next.width, next.height);
+        next.damage = [...new Set([...first.damage, ...next.damage])];
+        frame = next;
+      }
+    }
     // A frame reply can already be older than the latest change notice. Its
     // stillness must not erase motion from a newer frame. Classify at capture
     // time too: synchronous OCR can outlast the motion freshness window.

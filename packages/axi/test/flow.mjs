@@ -248,6 +248,12 @@ try {
     await run('stop');
     console.log(`private XTEST=${!noXtest}: capture, indicator, independent clipboard and all input paths passed`);
   } else {
+  if (process.env.DESKLINK_CARET_FLOW === '1') {
+    const { caretFlow } = await import('./caret-flow.mjs');
+    await caretFlow({ run, env, verifyXvfb, remember });
+    await cleanup();
+    process.exit(0);
+  }
   if (ocrScale) {
     const { ocrFlow } = await import('./ocr-flow.mjs');
     await ocrFlow({ run, env, dir, scale: Number(ocrScale), verifyXvfb, remember });
