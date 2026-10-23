@@ -21,7 +21,10 @@ const shell = process.platform === 'win32' ? undefined : ['bash', '/bin/bash', '
     return !probe.error && probe.status === 0 && probe.stdout === 'ok';
 });
 if (shell === undefined) console.warn(`readback.sh tests skipped: no usable POSIX shell on ${process.platform}`);
-const shellIt = it.skipIf(shell === undefined);
+// A shell test spawns real processes for up to the whole poll budget with
+// `sleep` stubbed out, so its wall time scales with CPU load, not with any real
+// wait; the bound only catches a hang.
+const shellIt = (name: string, fn: () => void) => it.skipIf(shell === undefined)(name, fn, 60_000);
 
 // A registry we control for the shell path: a real `npm` executable on PATH
 // that logs every `view` call and answers per STUB_MODE, so registry_state and
@@ -35,7 +38,7 @@ mkdir -p "$work/bin"
 cat > "$work/bin/npm" <<'NPM'
 #!/usr/bin/env bash
 if [ "$1" = view ]; then
-    n=0; [ -f "$COUNT" ] && n="$(cat "$COUNT")"; n=$((n + 1)); echo "$n" > "$COUNT"
+    n=0; [ -f "$COUNT" ] && n="$(<"$COUNT")"; n=$((n + 1)); echo "$n" > "$COUNT"
     case "\${STUB_MODE}" in
         slow) [ "$n" -le "\${SLOW_AFTER:-0}" ] && { echo "npm ERR! code E404" >&2; exit 1; } ;;
         missing) echo "npm ERR! code E404" >&2; exit 1 ;;
@@ -147,13 +150,12 @@ const fileOf = (spec: string) => `${spec.slice(1, spec.lastIndexOf('@')).replace
 
 const STUB_NPM = `#!/usr/bin/env bash
 reg="$STUB_REGISTRY"; echo "$*" >> "$reg/log"
-key() { printf '%s' "$1" | tr '/@' '__'; }
 case "$1" in
 view)
     [ "$2" = "\${STUB_ERROR:-}" ] && { echo "npm ERR! code ENOTFOUND registry unreachable" >&2; exit 1; }
-    k="$reg/$(key "$2")"
+    k="$reg/\${2//[\\/@]/_}"
     if [ -f "$k" ]; then
-        left="$(cat "$k")"
+        left="$(<"$k")"
         [ "$left" -le 0 ] && { echo "\${2##*@}"; exit 0; }
         echo $((left - 1)) > "$k"
     fi
@@ -162,7 +164,7 @@ publish)
     spec="$(tar -xzOf "$2" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d).on("end",()=>{const m=JSON.parse(s);process.stdout.write(m.name+"@"+m.version)})')"
     [ "$spec" = "\${STUB_PUBLISH_FAIL:-}" ] && { echo "npm ERR! code E403" >&2; exit 1; }
     lag=0; [ "$spec" = "\${STUB_LAG_SPEC:-}" ] && lag="$STUB_LAG"
-    echo "$lag" > "$reg/$(key "$spec")"; echo "+ $spec" ;;
+    echo "$lag" > "$reg/\${spec//[\\/@]/_}"; echo "+ $spec" ;;
 esac
 `;
 

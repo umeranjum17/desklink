@@ -23,7 +23,7 @@ registry_state() {
     local out
     if out="$(npm view "$1" version 2>&1)"; then
         echo published
-    elif grep -q E404 <<<"$out"; then
+    elif [[ $out == *E404* ]]; then
         echo missing
     else
         echo "::error::npm registry check for $1 failed (registry, auth or network), not a missing version:" >&2
