@@ -368,6 +368,16 @@ try {
     assert.equal(result.status,0,result.stderr);
     return { state:JSON.parse(result.stdout), raw:readFileSync(rootPath) };
   };
+  // The pulse wave animates between radius 36 and 54 around the cue, so
+  // comparisons ignore that band; the ring, dot and label are static.
+  const still = (raw, cx, cy) => {
+    const out = Buffer.from(raw);
+    for (let y = cy-60; y <= cy+60; y++) for (let x = cx-60; x <= cx+60; x++) {
+      const d = Math.hypot(x-cx,y-cy);
+      if (d > 38 && d < 60) out.fill(0, (y*1280+x)*4, (y*1280+x)*4+4);
+    }
+    return out;
+  };
   // Capture is asynchronous: a newer sequence can still describe an intermediate
   // cue. Establish the expected pixels before using its sequence as a baseline.
   const capturedPixels = async (expected, afterSeq) => {
@@ -375,13 +385,13 @@ try {
     let frame;
     do {
       frame = await client.request('session.frame', {
-        session_id:session.sessionId, path, after_seq:afterSeq, still_ms:100,
+        session_id:session.sessionId, path, after_seq:afterSeq,
         timeout_ms:Math.max(0, Math.ceil(deadline-performance.now())),
       });
-      if (readFileSync(path).equals(expected)) return frame;
+      if (still(readFileSync(path),400,300).equals(still(expected,400,300))) return frame;
       afterSeq = frame.seq;
     } while (performance.now() < deadline);
-    assert.deepEqual(readFileSync(path),expected,'capture must reach the expected desktop pixels');
+    assert.deepEqual(still(readFileSync(path),400,300),still(expected,400,300),'capture must reach the expected desktop pixels');
     return frame;
   };
   const savePointShot = async (raw, name) => {
@@ -401,20 +411,22 @@ try {
   const pointed = await desktop();
   assert.deepEqual(pointed.state,beforePoint.state,'point must not move the pointer or change focus');
   assert.deepEqual([...pointed.raw.subarray((300*1280+400)*4,(300*1280+400)*4+3)],[0xd0,0x9e,0x4c],'ring center is at requested desktop coordinates');
-  assert.deepEqual([...pointed.raw.subarray((300*1280+418)*4,(300*1280+418)*4+3)],[0xd0,0x9e,0x4c],'ring edge is 18 pixels from center');
+  assert.deepEqual([...pointed.raw.subarray((300*1280+436)*4,(300*1280+436)*4+3)],[0xd0,0x9e,0x4c],'ring edge is 36 pixels from center');
   assert.notDeepEqual(pointed.raw,beforePoint.raw);
   await savePointShot(pointed.raw,'after');
-  const withPoint = await client.request('session.frame',{session_id:session.sessionId,path,after_seq:changed.seq,still_ms:100,timeout_ms:2000});
-  assert.deepEqual(readFileSync(path),pointed.raw,'the cue is intentionally included in captured frames');
+  // Two later frames show the pulse wave at other points of its 1.2 s cycle.
+  for (const name of ['after-b','after-c']) { await new Promise(r=>setTimeout(r,350)); await savePointShot((await desktop()).raw,name); }
+  const withPoint = await client.request('session.frame',{session_id:session.sessionId,path,after_seq:changed.seq,timeout_ms:2000});
+  assert.deepEqual(still(readFileSync(path),400,300),still(pointed.raw,400,300),'the cue is intentionally included in captured frames');
   await assert.rejects(client.point(session.sessionId,{x:1280,y:300}),{code:'coordinates'});
   await assert.rejects(client.point(session.sessionId,{x:400,y:300,label:'invalid\nlabel'}),{code:'malformed'});
   await assert.rejects(client.point(session.sessionId,{x:400,y:300,timeoutMs:120001}),{code:'malformed'});
   await assert.rejects(client.request('session.point',{session_id:session.sessionId,clear:true,x:4}),{code:'malformed'});
-  assert.deepEqual((await desktop()).raw,pointed.raw,'invalid calls preserve the existing marker');
+  assert.deepEqual(still((await desktop()).raw,400,300),still(pointed.raw,400,300),'invalid calls preserve the existing marker');
   await client.point(session.sessionId,{x:700,y:500,timeoutMs:150});
   await new Promise(r=>setTimeout(r,50));
   const replaced = await desktop();
-  assert.notDeepEqual(replaced.raw,pointed.raw,'new points replace old points');
+  assert.notDeepEqual(still(replaced.raw,700,500),still(pointed.raw,700,500),'new points replace old points');
   assert.deepEqual(replaced.state,beforePoint.state);
   await new Promise(r=>setTimeout(r,250));
   assert.deepEqual((await desktop()).raw,beforePoint.raw,'timeout removes the cue');
@@ -465,13 +477,17 @@ try {
   const clicked = await run('click','100,100');
   assert.match(clicked,/input: applied/, events);
   assert.match(await run('wait','change','--timeout','5000'),/wait: change met/);
-  assert.match(await run('diff'),/changed: [1-9]/, events);
+  // The pulse wave keeps the region around the cue animating, and diff reports
+  // that region as animating instead of changed.
+  assert.match(await run('diff'),/changed: [1-9]|animating\[[1-9]/, events);
   assert.match(events, /"kind":"button".*"phase":"up"/, 'the click reached the app beneath the indicator');
+  assert.match(await run('point','--clear'),/point: cleared/);
+  await new Promise(r=>setTimeout(r,200));
+  // With the cue gone nothing animates, so the click's change is a region.
+  assert.match(await run('diff'),/changed: [1-9]/, events);
   const looked = await run('look','@r1'); assert.match(looked,/image: .*\.png/);
   const imagePath = /image: (.*\.png)/.exec(looked)?.[1];
   assert(imagePath && readFileSync(imagePath).subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])));
-  assert.match(await run('point','--clear'),/point: cleared/);
-  await new Promise(r=>setTimeout(r,200));
   await verifyXvfb();
   const unchanged = spawn(process.execPath,[cli,'click','100,100'],{env});
   let noChange = ''; for await (const part of unchanged.stdout) noChange += part;

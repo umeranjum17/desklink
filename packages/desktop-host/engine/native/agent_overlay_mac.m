@@ -9,8 +9,8 @@
     NSPoint target, cursor;
     CFTimeInterval clickAt, typeAt, endingAt;
     BOOL positioned;
-    BOOL pointMode, pointVisible;
-    CFTimeInterval pointDeadline;
+    BOOL pointMode, pointVisible, pointDrawnHidden;
+    CFTimeInterval pointDeadline, pointStarted;
     NSString *pointLabel;
 }
 - (void)event:(char)kind x:(double)x y:(double)y;
@@ -24,7 +24,7 @@
 - (void)enablePointMode { pointMode = YES; }
 - (void)pointX:(double)x y:(double)y timeout:(unsigned)timeout label:(NSString *)label {
     cursor = NSMakePoint(x, self.bounds.size.height-y);
-    pointLabel = label; pointVisible = YES;
+    pointLabel = label; pointVisible = YES; pointStarted = CACurrentMediaTime();
     pointDeadline = CACurrentMediaTime() + timeout/1000.0;
     [self setNeedsDisplay:YES];
 }
@@ -43,7 +43,9 @@
 - (void)end { if (pointMode) { [NSApp terminate:nil]; return; } endingAt = CACurrentMediaTime(); }
 - (void)tick {
     if (pointMode) {
-        if (pointVisible && CACurrentMediaTime() >= pointDeadline) { pointVisible = NO; [self setNeedsDisplay:YES]; }
+        if (pointVisible && CACurrentMediaTime() >= pointDeadline) pointVisible = NO;
+        if (pointVisible || !pointDrawnHidden) [self setNeedsDisplay:YES];
+        pointDrawnHidden = !pointVisible;
         return;
     }
     if (endingAt && CACurrentMediaTime() - endingAt > 0.7) { [NSApp terminate:nil]; return; }
@@ -56,17 +58,22 @@
     if (pointMode) {
         if (!pointVisible) return;
         [[NSColor colorWithCalibratedRed:0.30 green:0.62 blue:0.82 alpha:1] set];
-        NSBezierPath *ring = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(cursor.x-18, cursor.y-18, 36, 36)];
-        ring.lineWidth = 4; [ring stroke];
-        [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(cursor.x-3,cursor.y-3,6,6)] fill];
+        // 72pt ring with a 1.2s pulse wave growing out of it.
+        NSBezierPath *ring = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(cursor.x-36, cursor.y-36, 72, 72)];
+        ring.lineWidth = 6; [ring stroke];
+        [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(cursor.x-6,cursor.y-6,12,12)] fill];
+        double phase = fmod(CACurrentMediaTime() - pointStarted, 1.2) / 1.2, wave = 36 + 18*phase;
+        [[NSColor colorWithCalibratedRed:0.30 green:0.62 blue:0.82 alpha:1-phase] set];
+        NSBezierPath *pulse = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(cursor.x-wave, cursor.y-wave, 2*wave, 2*wave)];
+        pulse.lineWidth = 6 - 4*phase; [pulse stroke];
         if (pointLabel.length) {
-            NSDictionary *style = @{NSFontAttributeName: [NSFont systemFontOfSize:13], NSForegroundColorAttributeName: NSColor.whiteColor};
+            NSDictionary *style = @{NSFontAttributeName: [NSFont boldSystemFontOfSize:26], NSForegroundColorAttributeName: NSColor.whiteColor};
             NSSize size = [pointLabel sizeWithAttributes:style];
-            CGFloat x = fmax(0, fmin(cursor.x+30, self.bounds.size.width-size.width-16));
-            CGFloat y = fmax(0, fmin(cursor.y-14, self.bounds.size.height-28));
+            CGFloat x = fmax(0, fmin(cursor.x+66, self.bounds.size.width-size.width-24));
+            CGFloat y = fmax(0, fmin(cursor.y-20, self.bounds.size.height-40));
             [[NSColor colorWithCalibratedRed:0.07 green:0.19 blue:0.28 alpha:1] set];
-            [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(x,y,size.width+16,28) xRadius:4 yRadius:4] fill];
-            [pointLabel drawAtPoint:NSMakePoint(x+8,y+6) withAttributes:style];
+            [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(x,y,size.width+24,40) xRadius:6 yRadius:6] fill];
+            [pointLabel drawAtPoint:NSMakePoint(x+12,y+(40-size.height)/2) withAttributes:style];
         }
         return;
     }
