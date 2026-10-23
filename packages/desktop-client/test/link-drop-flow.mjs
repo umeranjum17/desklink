@@ -68,6 +68,7 @@ import {
     trackOwnedXvfb,
     verifyOwnedXvfb,
 } from '../../desktop-host/test/lab-safety.mjs';
+import { recordSteps } from '../../desktop-host/test/step-record.mjs';
 
 assertNoAmbientDesktop();
 const worktree = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -874,6 +875,19 @@ async function main() {
         receipt.video = videos.map((name) => join('video', name));
         writeFileSync(join(evidence, 'receipt.json'), JSON.stringify(receipt, null, 2));
         writeFileSync(join(evidence, 'fixture-events.jsonl'), fixtureEvents().map((event) => JSON.stringify(event)).join('\n'));
+        const at = Object.fromEntries(receipt.stages.map((stage) => [stage.stage, stage]));
+        recordSteps(evidence, {
+            start: 'a private lab desktop (a fixture app with a moving marker) shown live in the desklink client, over a network link this run can slow down and cut',
+            steps: [
+                `Watch the live desktop picture (${at.live.frameRatePerSecond} frames a second).`,
+                `Cut only the picture's network path: the picture stops and the client stops calling it live (after ${at['media-frozen'].frozenAfterMs} ms), while a pointer still reaches the desktop.`,
+                `Restore the picture's path: frames move again ${at['media-restored'].firstFrameAfterRestoreMs} ms later, on the same session.`,
+                `Slow the link down (each packet held ${at.throttled.shape.delayMs} ms): the desktop is still shown, at ${at.throttled.frameRatePerSecond} frames a second.`,
+                `Cut the whole link: the client notices in ${at.dropped.noticedMs} ms and shows it is reconnecting, holding the last picture.`,
+                `Bring the link back after ${at.recovered.outageMs} ms: the desktop is live again ${at.recovered.firstFrameAfterRestoreMs} ms later on the same session (${at.recovered.sessionOpens} open), the marker moves again, and a pointer lands on the desktop at 900,600.`,
+            ],
+            result: 'When the network drops mid-session, the client shows it is reconnecting with the last picture held, then the live desktop comes back on the same session and a click lands on the desktop again.',
+        });
         console.log(`PASS: throttle, cut and restore on a userspace-shaped link; evidence ${evidence}`);
         console.log(`LINK-RESULT ${JSON.stringify({
             stages: receipt.stages.map(({ stage, frameRatePerSecond, datagramsDelayed, noticedMs, datagramsForwardedDuringCut, statusAtEndOfCut, firstFrameAfterRestoreMs, status }) => ({ stage, frameRatePerSecond, datagramsDelayed, noticedMs, datagramsForwardedDuringCut, statusAtEndOfCut, firstFrameAfterRestoreMs, status })),

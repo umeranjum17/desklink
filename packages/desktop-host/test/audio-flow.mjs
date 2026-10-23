@@ -11,6 +11,7 @@ import { EngineClient } from '../dist/engineProcess.js';
 import { Bridge, BRIDGE_PATH } from '../dist/index.js';
 import { WebSocket } from 'ws';
 import { assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from './lab-safety.mjs';
+import { recordSteps } from './step-record.mjs';
 assertNoAmbientDesktop();
 assert.equal(process.platform, 'linux');
 assert(process.argv[2], 'supply a fresh evidence directory');
@@ -276,4 +277,17 @@ if (process.env.DESKLINK_AUDIO_CONTROLLED_ERROR !== '1') {
     const teardown = JSON.parse(readFileSync(join(output, 'controlled-error/teardown.json')));
     assert.deepEqual(teardown.errors, []); assert.equal(teardown.labRemoved, true);
     console.log('PASS: controlled-error teardown after real engine audio open');
+    const { noPlay, signal, avDeltaUs } = JSON.parse(readFileSync(join(output, 'result.json'), 'utf8'));
+    const hz = signal.windows.map(w => Math.round(w.hz));
+    recordSteps(output, {
+        start: 'a private lab desktop with its own private audio server (PipeWire) and one output device, shared by the desklink host with system audio on',
+        steps: [
+            `Open a desklink session with system audio: it reports 48 kHz stereo s16le from the desktop's audio monitor.`,
+            `Before anything plays, the session's system audio is silence (RMS ${Math.round(noPlay.rms)}).`,
+            `Play a 3 s clip on the desktop (1 kHz, 1 s silence, 440 Hz): the session's system audio carries it, measured at ${hz[0]} Hz, silence, ${hz[2]} Hz.`,
+            `The first audio and the first picture are ${Math.round(avDeltaUs / 1000)} ms apart on the engine clock (bound 200 ms), with no audio bytes dropped.`,
+            'A remote client asking the host to write audio to a file is refused, and a video-only session refuses audio.',
+        ],
+        result: "A user's session carries the desktop's system audio: silence while nothing plays, then the played tones at their own frequencies, in step with the picture.",
+    });
 }

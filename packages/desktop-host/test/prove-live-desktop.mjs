@@ -12,6 +12,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
 import { WebSocket } from 'ws';
 import { assertNoAmbientDesktop, scrubToken, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from './lab-safety.mjs';
+import { recordSteps } from './step-record.mjs';
 
 assertNoAmbientDesktop();
 assert(process.platform === 'linux', 'this private-Xvfb proof requires Linux');
@@ -151,4 +152,15 @@ finally {
 }
 assert.equal(result.outcome, 'PASS', `proof failed; inspect ${join(out, 'run.json')}`);
 for (const name of ['01-before.png', '02-after.png', 'desktop-motion.webm']) { const file = readFileSync(join(out, name)); assert(file.length > 1000, `incomplete capture: ${name}`); if (name.endsWith('.png')) assert(file.readUInt32BE(0) === 0x89504e47, `not a PNG: ${name}`); }
+const press = JSON.parse(readFileSync(join(out, 'fixture.log'), 'utf8').split('\n').find(l => l.includes('"phase":"down"')));
+recordSteps(out, {
+    start: 'a private lab desktop (1280x720) running a fixture app that paints four colour bands with a ruler, shared by the desklink host',
+    steps: [
+        `Open the desklink desktop client in a ${result.target.viewport.width}x${result.target.viewport.height} browser window; it shows "${result.target.status}" and the live desktop picture.`,
+        'Click the live desktop picture a quarter of the way in (a real, trusted pointer down and up).',
+        `The click lands on the desktop: the fixture app gets button 1 down and up at desktop point ${press.x},${press.y} and paints a black marker there.`,
+        'The black marker comes back in the live picture in the desktop client.',
+    ],
+    result: 'In the desktop client a user sees the live desktop picture, and their click lands on the desktop: its black marker comes back in the picture.',
+});
 console.log(`PASS: trusted browser click -> fixture edges -> decoded marker; evidence ${out}`);

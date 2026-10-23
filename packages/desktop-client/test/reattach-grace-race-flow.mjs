@@ -33,6 +33,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { recordSteps } from '../../desktop-host/test/step-record.mjs';
 
 const worktree = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const SRC = join(worktree, 'packages/desktop-client/src');
@@ -420,6 +421,16 @@ async function main() {
         const result = { status: 'pass', chrome, geometry, protection, race, afterRelease, afterEvent, outage, second };
         writeFileSync(join(scratch, 'race-result.json'), JSON.stringify(result, null, 2) + '\n');
         console.log('RACE-RESULT ' + JSON.stringify(result));
+        recordSteps(scratch, {
+            start: 'a live desktop picture in the desklink client over a real WebRTC connection, with the desktop held still',
+            steps: [
+                `While the picture moves, a short reconnect wait spends no ICE restart (${protection.restarts} restarts).`,
+                `Cut the connection while the picture is still: the client asks for an ICE restart ${afterRelease} ms after its reconnect wait ends and ${afterEvent} ms after the disconnect.`,
+                `Cut the network path for ${outage.pathAt - outage.cutAt} ms: the client stops calling the picture live, and the picture is live again ${outage.recoveredAt - outage.pathAt} ms after the path returns, on the same session, and stays live with no restart, close or reopen.`,
+                `Cut the path a second time: the picture is live again ${second.recoveredAt - second.pathAt} ms after the path returns, on the same session.`,
+            ],
+            result: 'After a network outage the client brings the live desktop picture back on the same session within 2 s of the path returning, and keeps it live.',
+        });
     } finally {
         await context.close();
         await vite.close();

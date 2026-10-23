@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
 import { assertNoAmbientDesktop, scrubToken, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from './lab-safety.mjs';
+import { recordSteps } from './step-record.mjs';
 
 assertNoAmbientDesktop();
 assert(process.platform === 'linux', 'this private-Xvfb proof requires Linux');
@@ -61,6 +62,8 @@ let xvfb, bridge, target, context, page, server, port;
 // surface binding — the same two calls DesktopView.web.tsx makes — in a plain
 // box sized like a phone screen. RN's View is a stub, exactly as in the RN web
 // build, so what is on screen is the client's own picture, pointer and gestures.
+// A caption strip above the stage (never over the picture) states the form
+// factor and the measured picture size, so each capture says what it shows.
 const DRIVER_TS = `
 import React from 'react';
 import TestRenderer from 'react-test-renderer';
@@ -118,8 +121,10 @@ function Harness() {
 TestRenderer.create(React.createElement(Harness));
 `;
 const INDEX_HTML = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>desklink phone client</title>
-<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}#stage{position:fixed;inset:0}</style>
-<div id="stage"></div><script type="module" src="./driver.ts"></script>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}
+#lab{position:fixed;top:0;left:0;right:0;height:56px;box-sizing:border-box;padding:4px 8px;overflow:hidden;
+background:#1c1d21;color:#e8e8e8;font:12px/16px system-ui,sans-serif}#stage{position:fixed;top:56px;left:0;right:0;bottom:0}</style>
+<div id="lab">Phone</div><div id="stage"></div><script type="module" src="./driver.ts"></script>
 `;
 
 try {
@@ -193,6 +198,7 @@ export default { root: PAGE, logLevel: 'warn', define: { global: 'globalThis' },
         args: ['--autoplay-policy=no-user-gesture-required', '--disable-backgrounding-occluded-windows'] });
     rememberTree(process.pid); page = context.pages()[0]; page.setDefaultTimeout(20000);
     result.browserVersion = context.browser()?.version();
+    const caption = text => page.evaluate(t => { document.getElementById('lab').textContent = t; }, text);
     await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
     await page.waitForFunction(() => window.__probe?.status === 'live', null, { timeout: 60000 });
     await page.waitForFunction(() => (window.__probe?.frames ?? 0) > 3, null, { timeout: 60000 });
@@ -214,6 +220,7 @@ export default { root: PAGE, logLevel: 'warn', define: { global: 'globalThis' },
     const landscapeScale = Math.min(landscape.stage.width / 1280, landscape.stage.height / 720);
     assert(Math.abs(landscape.picture.width - 1280 * landscapeScale) <= 2 && Math.abs(landscape.picture.height - 720 * landscapeScale) <= 2,
         `landscape picture is not the whole desktop fitted: ${JSON.stringify(landscape.picture)}`);
+    await caption(`Phone, landscape (${LANDSCAPE.width}×${LANDSCAPE.height}): the whole 1280×720 desktop is shown, fitted to the screen height (${Math.round(landscape.picture.width)}×${Math.round(landscape.picture.height)} px), with black bars at the sides.`);
     await page.screenshot({ path: join(out, 'phone-landscape.png') });
 
     // ---- portrait: fit width, letterbox the tall axis -----------------------
@@ -224,24 +231,28 @@ export default { root: PAGE, logLevel: 'warn', define: { global: 'globalThis' },
     const portrait = await box(); result.formFactors.portrait = portrait;
     assert(Math.abs(portrait.picture.width - PORTRAIT.width) <= 2, `portrait picture does not fill the width: ${JSON.stringify(portrait.picture)}`);
     assert(portrait.picture.height < PORTRAIT.height, 'portrait picture is not letterboxed vertically');
+    await caption(`Phone, portrait (${PORTRAIT.width}×${PORTRAIT.height}): the whole desktop is shown, fitted to the screen width (${Math.round(portrait.picture.width)}×${Math.round(portrait.picture.height)} px), with black bars above and below.`);
     await page.screenshot({ path: join(out, 'phone-portrait.png') });
 
     // ---- motion: a tap, a pinch-zoom in and back out, and a pan ------------
     const fitWidth = portrait.picture.width;
-    const point = { x: Math.round(PORTRAIT.width / 2), y: Math.round(PORTRAIT.height / 2) };
+    const point = { x: Math.round(portrait.picture.x + portrait.picture.width / 2), y: Math.round(portrait.picture.y + portrait.picture.height / 2) };
     await page.touchscreen.tap(point.x, point.y);
     await waitFor(() => logs.fixture.includes('"phase":"up"'), 'phone tap on the desktop');
     const tapEdges = logs.fixture.split('\n').filter(l => l.startsWith('{')).map(l => JSON.parse(l))
         .filter(e => e.kind === 'button' && e.button === 1 && e.phase === 'down');
     assert(tapEdges.length > 0, 'the phone tap never reached the desktop as button 1');
     result.tapDesktopPoint = { x: tapEdges[0].x, y: tapEdges[0].y };
-    await sleep(300);
+    await sleep(500);
+    await caption(`Phone, portrait: a tap on the middle of the picture landed on the desktop at point ${result.tapDesktopPoint.x},${result.tapDesktopPoint.y}: the desktop app logged button 1 down and up there.`);
+    await page.screenshot({ path: join(out, 'phone-tap.png') });
     await page.keyboard.down('Control');
     for (const delta of [-120, -120, -120, 120, 120]) { await page.mouse.move(point.x, point.y); await page.mouse.wheel(0, delta); await sleep(120); }
     await page.keyboard.up('Control');
     await sleep(300);
     const zoomed = await box(); result.formFactors.pinchZoom = { fitWidth, zoomedWidth: zoomed.picture.width };
     assert(zoomed.picture.width > fitWidth + 20, `pinch did not zoom the picture in: ${fitWidth} -> ${zoomed.picture.width}`);
+    await caption(`Phone, portrait, after pinch-zoom in: the desktop picture is now ${Math.round(zoomed.picture.width)} px wide, up from ${Math.round(fitWidth)} px before the pinch.`);
     await page.screenshot({ path: join(out, 'phone-zoom.png') });
     await sleep(500);
     result.outcome = 'PASS';
@@ -272,9 +283,20 @@ finally {
     rmSync(scratch, { recursive: true, force: true });
 }
 assert.equal(result.outcome, 'PASS', `proof failed; inspect ${join(out, 'phone.json')}`);
-for (const name of ['phone-portrait.png', 'phone-landscape.png', 'phone-zoom.png', 'phone-motion.webm']) {
+for (const name of ['phone-portrait.png', 'phone-landscape.png', 'phone-tap.png', 'phone-zoom.png', 'phone-motion.webm']) {
     const file = readFileSync(join(out, name));
     assert(file.length > 1000, `incomplete capture: ${name}`);
     if (name.endsWith('.png')) assert(file.readUInt32BE(0) === 0x89504e47, `not a PNG: ${name}`);
 }
+const { landscape, portrait, pinchZoom } = result.formFactors;
+recordSteps(out, {
+    start: 'a private lab desktop (1280x720) running the colour-band fixture app, opened in the desklink phone client',
+    steps: [
+        `Hold the phone in landscape (844x390): the whole desktop picture fits the screen, ${Math.round(landscape.picture.width)}x${Math.round(landscape.picture.height)} px.`,
+        `Turn the phone to portrait (390x844): the desktop picture fits the screen width, ${Math.round(portrait.picture.width)} px wide.`,
+        `Tap the middle of the picture: the tap lands on the desktop as button 1 at desktop point ${result.tapDesktopPoint.x},${result.tapDesktopPoint.y}, and the fixture paints its black marker there.`,
+        `Pinch-zoom in: the desktop picture grows from ${Math.round(pinchZoom.fitWidth)} px to ${Math.round(pinchZoom.zoomedWidth)} px wide.`,
+    ],
+    result: 'On a phone a user sees the live desktop picture fitted in landscape and portrait, their tap lands on the desktop, and pinch-zoom makes the picture larger.',
+});
 console.log(`PASS: phone client fitted portrait/landscape, tap -> fixture button, pinch zoom recorded; evidence ${out}`);
