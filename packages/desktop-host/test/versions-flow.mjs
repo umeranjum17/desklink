@@ -85,7 +85,14 @@ try {
             await chrome('resize', String(width), String(height));
             const label = await chrome('eval', 'document.querySelector("#versions").textContent');
             assert(label.includes(expected), `wrong footer: ${label}`);
-            // Dimensions/readyState alone can precede painted video after navigation or resize.
+            // Wait for the same real presentation callback in both installations, not a sleep.
+            const presentation = await chrome('eval', `async () => {
+                const video = document.querySelector('#video');
+                const frame = await new Promise(resolve => video.requestVideoFrameCallback((_now, metadata) => resolve(metadata)));
+                return { frames: frame.presentedFrames, width: frame.width, height: frame.height,
+                    hidden: document.hidden, rect: video.getBoundingClientRect().toJSON(), display: getComputedStyle(video).display };
+            }`);
+            writeFileSync(join(out, `${dev ? 'dev-mismatch' : 'matching'}-${width}-presentation.log`), presentation);
             await wait(async () => (await chrome('eval', `async () => {
                 const video = document.querySelector('#video');
                 const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
