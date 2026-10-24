@@ -27,5 +27,5 @@ export const homeCommand: CommandModule = {
 };
 
 export function rootHelp(): string {
-  return rootHelpText();
+  return rootHelpText().replace('desklink-axi:', `desklink-axi ${version}:`);
 }

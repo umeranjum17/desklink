@@ -1,5 +1,6 @@
 /** Public API of the desktop client package. Import this, not internals. */
 export * from './protocol';
+export { CLIENT_VERSION } from './version';
 /**
  * The platform module is deliberately not re-exported here.
  *

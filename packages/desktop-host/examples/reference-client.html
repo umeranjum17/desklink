@@ -37,6 +37,7 @@
     justify-content: center; padding: 24px; text-align: center; color: #9aa0a6; }
   #tools { flex: none; display: flex; gap: 6px; justify-content: center; padding: 8px;
     background: #17191d; border-top: 1px solid #2a2d33; }
+  footer { flex: none; padding: 4px 12px; text-align: center; font-size: 12px; color: #b8bec8; }
   #remote-keyboard { position: absolute; width: 1px; height: 1px; opacity: .01; border: 0; }
 </style>
 </head>
@@ -56,8 +57,17 @@
   <button id="copy" hidden>Copy from desktop</button>
   <button id="paste" hidden>Paste to desktop</button>
 </nav>
+<footer id="versions" aria-label="Software versions"></footer>
 
 <script type="module">
+const clientVersion = __DESKLINK_CLIENT_VERSION__;
+const versions = document.getElementById('versions');
+function showVersions(engine) {
+  const hostVersion = typeof engine === 'string' ? engine.replace(/^desklink-host\//, '') : null;
+  versions.textContent = `Client ${clientVersion} · Host ${hostVersion ?? 'unknown'}`
+    + (hostVersion && hostVersion !== clientVersion ? ' · Version mismatch' : '');
+}
+showVersions();
 const params = new URLSearchParams(location.search);
 const token = params.get('token') ?? '';
 const socketUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/desktop?token=${encodeURIComponent(token)}`;
@@ -267,6 +277,7 @@ async function start() {
   say('Connecting…');
   try {
     const capabilities = await request('capabilities');
+    showVersions(capabilities.engine);
     const clipboardAvailable = capabilities.clipboard?.read === true && capabilities.clipboard?.write === true;
     const controlAvailable = capabilities.input?.pointer === true && capabilities.input?.keyboard === true;
     // The bridge token is the pairing: a paired session has view, input and clipboard.
