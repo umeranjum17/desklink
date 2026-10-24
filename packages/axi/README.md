@@ -20,6 +20,8 @@ Install from npm; the badge above tracks the registry version:
 npm install -g @desklink/axi
 ```
 
+`desklink-axi --version` and the `--help` header show the installed version, including any dev/pre-release suffix.
+
 Or build from the repository root with `npm install && npm run build`.
 Delete copied `*.tsbuildinfo` before rebuilding a moved worktree.
 The engine is resolved by `@desklink/host`; see its [installation guide](https://github.com/umeranjum17/desklink/blob/main/packages/desktop-host/README.md#install-and-run)

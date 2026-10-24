@@ -56,7 +56,9 @@ export const BRIDGE_PATH = '/desktop';
  */
 function examplePage(): string {
     const here = dirname(fileURLToPath(import.meta.url));
-    return readFileSync(join(here, '..', 'examples', 'reference-client.html'), 'utf8');
+    const { version } = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8')) as { version: string };
+    return readFileSync(join(here, '..', 'examples', 'reference-client.html'), 'utf8')
+        .replace('__DESKLINK_CLIENT_VERSION__', JSON.stringify(version).replaceAll('<', '\\u003c'));
 }
 
 export class Bridge {

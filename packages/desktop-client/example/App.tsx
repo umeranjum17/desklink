@@ -20,6 +20,7 @@ import { Linking, Platform, Pressable, ScrollView, Settings, StatusBar, StyleShe
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
     ClipboardConfirmation,
+    CLIENT_VERSION,
     DesktopView,
     ModifierKeys,
     isLoopbackTcpCandidate,
@@ -234,6 +235,7 @@ function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, relayOnly
     // camera cutout and home indicator, so none of them covers the desktop's corner.
     const insets = useSafeAreaInsets();
     const signaling = React.useRef<ReturnType<typeof bridgeSignaling> | null>(null);
+    const [hostVersion, setHostVersion] = React.useState<string | null>(null);
     // A relay journey carries the desktop over the app's own link: the
     // transport below, through the journey's relay URL. Anywhere else the
     // session keeps its forward-based loopback route.
@@ -321,7 +323,10 @@ function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, relayOnly
                 droppedNonRelayOut.current += 1;
                 return null;
             } : undefined);
+            setHostVersion(null);
             await signaling.current.open;
+            const capabilities = await signaling.current.request<{ engine?: string }>('capabilities');
+            setHostVersion(capabilities.engine?.replace(/^desklink-host\//, '') ?? null);
             return {
                 signaling: signaling.current,
                 session: relay ? { tcpTransport: relay } : {
@@ -455,6 +460,10 @@ function ConnectedDesktop({ url, report, cover, keyboardFit, tcpRelay, relayOnly
                 <Text testID="desklink-status" style={styles.status}>
                     {statusText(desktop.snapshot)}
                 </Text>
+                <Text testID="desklink-versions" style={styles.versions}>
+                    Client {CLIENT_VERSION} · Host {hostVersion ?? 'unknown'}
+                    {hostVersion && hostVersion !== CLIENT_VERSION ? ' · Version mismatch' : ''}
+                </Text>
             </View>
             <ModifierKeys modifiers={desktop.modifiers} onTap={desktop.tapModifier} style={styles.row} grow={tallDeck} />
             <View style={[styles.keys, sideways && styles.keysRow]}>
@@ -548,6 +557,7 @@ const styles = StyleSheet.create({
     deckTall: { flex: 1 },
     bar: { marginHorizontal: 16, marginBottom: 8, minHeight: 24, alignItems: 'center' },
     status: { color: '#fff', fontSize: 15, textAlign: 'center' },
+    versions: { color: '#c9ccd3', fontSize: 12, textAlign: 'center' },
     confirmation: { minHeight: 48, justifyContent: 'center' },
     copyErrorScroll: { maxHeight: 120, flexGrow: 0 },
     copyError: { marginHorizontal: 16, marginVertical: 8, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12, backgroundColor: '#521b24' },

@@ -60,6 +60,8 @@ changes, and trackpad presses reach the desktop as touches.
 
 ## Use
 
+`CLIENT_VERSION` exports this installed package's version (including dev/pre-release suffixes). `DesktopView` owns no status chrome; the example app's existing status area shows `Client <version> · Host <version>` from the host's capabilities, with a mismatch hint.
+
 ```tsx
 import { DesktopView, useDesktopSession } from '@desklink/react-native';
 import * as Clipboard from 'expo-clipboard';
