@@ -85,6 +85,15 @@ try {
             await chrome('resize', String(width), String(height));
             const label = await chrome('eval', 'document.querySelector("#versions").textContent');
             assert(label.includes(expected), `wrong footer: ${label}`);
+            // Dimensions/readyState alone can precede painted video after navigation or resize.
+            await wait(async () => (await chrome('eval', `async () => {
+                const video = document.querySelector('#video');
+                const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
+                const context = canvas.getContext('2d'); context.drawImage(video, 0, 0, 1, 1);
+                const lit = context.getImageData(0, 0, 1, 1).data.slice(0, 3).some(value => value > 60);
+                await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame);
+                return lit;
+            }`)).includes('true'), 'decoded fixture pixels are not visible');
             const file = `${dev ? 'dev-mismatch' : 'matching'}-${width}.png`;
             await chrome('screenshot', join(out, file));
             rows.push({ file, expected });
