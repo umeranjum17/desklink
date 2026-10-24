@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.5.12
+
+Joint patch release; protocol version remains 3. All packages move together.
+
+### Added
+
+- You can now see which version is running on every surface. The CLI and the
+  host engine print their version, and the CLI help header carries it.
+- The browser client footer shows `Client <version> · Host <version>`. A dev
+  build shows its dev suffix, and a client and host on different versions show
+  a "Version mismatch" hint.
+- `@desklink/react-native` exports `CLIENT_VERSION`, the version of the
+  installed client package, and the example app shows it next to the host's.
+
 ## 0.5.11
 
 Joint patch release; protocol version remains 3. All packages move together.
