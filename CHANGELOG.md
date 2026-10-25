@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.5.13
+
+Joint patch release; protocol version remains 3. All packages move together.
+No product code changed: this release carries the package metadata and the
+README that were merged after 0.5.12.
+
+### Changed
+
+- The npm pages of `@desklink/host`, `@desklink/react-native` and
+  `@desklink/axi` now carry a description, keywords and a homepage, so a search
+  result, a shared link or a first install says what each package does and
+  where it comes from.
+- The repository README was rewritten for a first-time visitor: what desklink
+  is, a real capture of the browser client driving a desktop, a quick start you
+  can run as one command, measured proof with its method and limits, and the
+  known limits near the top.
+
 ## 0.5.12
 
 Joint patch release; protocol version remains 3. All packages move together.
