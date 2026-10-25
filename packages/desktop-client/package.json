@@ -7,7 +7,7 @@
       "url": "https://github.com/umeranjum17/desklink.git",
       "directory": "packages/desktop-client"
     },
-    "description": "Render and drive a desktop session from a React Native app",
+    "description": "React Native view that renders and drives a live desklink desktop session",
     "main": "index.ts",
     "types": "index.ts",
     "exports": {
@@ -44,5 +44,16 @@
         "test:reconnect": "node test/reconnect-flow.mjs",
         "test:ios": "node test/ios-flow.mjs",
         "test:reattach-race": "node test/reattach-grace-race-flow.mjs"
-    }
+    },
+    "homepage": "https://github.com/umeranjum17/desklink#readme",
+    "keywords": [
+        "desktop",
+        "remote-desktop",
+        "webrtc",
+        "react-native",
+        "expo",
+        "ios",
+        "android",
+        "desklink"
+    ]
 }

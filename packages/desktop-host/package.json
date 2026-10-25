@@ -7,7 +7,7 @@
       "url": "https://github.com/umeranjum17/desklink.git",
       "directory": "packages/desktop-host"
     },
-    "description": "Per-user, on-demand desktop capture, encode and input engine with a versioned local control protocol",
+    "description": "Per-user desktop capture, encode and input engine for a remote desktop inside your own app, with a versioned local control protocol",
     "type": "module",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
@@ -36,5 +36,20 @@
     },
     "dependencies": {
         "ws": "8.21.3"
-    }
+    },
+    "homepage": "https://github.com/umeranjum17/desklink#readme",
+    "keywords": [
+        "desktop",
+        "remote-desktop",
+        "screen-capture",
+        "webrtc",
+        "vp9",
+        "h264",
+        "input",
+        "clipboard",
+        "x11",
+        "wayland",
+        "macos",
+        "desklink"
+    ]
 }

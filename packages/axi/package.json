@@ -1,7 +1,7 @@
 {
   "name": "@desklink/axi",
   "version": "0.5.12",
-  "description": "Agent-facing desktop control CLI",
+  "description": "Agent-facing CLI that reads and drives a desklink desktop",
   "type": "module",
   "bin": {
     "desklink-axi": "bin/desklink-axi.js"
@@ -39,5 +39,15 @@
     "type": "git",
     "url": "https://github.com/umeranjum17/desklink.git",
     "directory": "packages/axi"
-  }
+  },
+  "homepage": "https://github.com/umeranjum17/desklink#readme",
+  "keywords": [
+    "desktop",
+    "remote-desktop",
+    "agent",
+    "cli",
+    "automation",
+    "accessibility",
+    "desklink"
+  ]
 }

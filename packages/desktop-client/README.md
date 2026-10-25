@@ -396,7 +396,7 @@ The web binding never carries it — a browser cannot dial a JS socket.
 The one thing the app must supply. It carries the engine's local protocol over
 whatever authenticated channel the app already has.
 
-See the [BYOKit integration guidance](https://github.com/umeranjum17/desklink/blob/main/README.md#why-desklink-exists)
+See the [BYOKit integration guidance](https://github.com/umeranjum17/desklink/blob/main/README.md#why-desklink)
 for the application's pairing, identity and signaling transport.
 
 ```ts
@@ -435,7 +435,7 @@ What the consuming app — not this package — must get right before review.
   `NSBonjourServices` is only needed if the app adds its own Bonjour
   discovery — desklink discovers no hosts. Relay-only sessions never prompt.
   For app-supplied routes, see the
-  [BYOKit integration guidance](https://github.com/umeranjum17/desklink/blob/main/README.md#why-desklink-exists).
+  [BYOKit integration guidance](https://github.com/umeranjum17/desklink/blob/main/README.md#why-desklink).
   See [TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy).
 - **Export compliance.** The viewer's DTLS-SRTP comes from libwebrtc bundled
   with `react-native-webrtc`, not from the OS, so the app must check the

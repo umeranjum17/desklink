@@ -83,7 +83,7 @@ local gestures into that session's input".
 
 | Need | Integration owner or consumer reference |
 |---|---|
-| Authenticated request channel, identity, pairing, relay and reachable addresses | The consuming app's kits; see the [BYOKit integration guidance](../../../README.md#why-desklink-exists) |
+| Authenticated request channel, identity, pairing, relay and reachable addresses | The consuming app's kits; see the [BYOKit integration guidance](../../../README.md#why-desklink) |
 | A reference for a "live surface inside a conversation" | `apps/mobile/sources/desktop` |
 | Flow-test style for the packages | `apps/mobile/sources/catalog/application/sessionSync.integration.spec.ts` |
 
