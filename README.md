@@ -8,13 +8,13 @@
 
 <p align="center"><strong>A live, clickable desktop inside the app you already have.</strong></p>
 
-<p align="center">Permissively licensed remote-desktop engine packages for apps that already know who their users are: the picture, clicks, keys and clipboard, and nothing else.</p>
+<p align="center">For developers adding a remote desktop to their own app: the picture, clicks, keys and clipboard. Nothing else.</p>
 
 <p align="center">
   <picture>
     <source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/assets/readme/hero-phone-dark.webp" />
     <source media="(max-width: 600px)" srcset="docs/assets/readme/hero-phone-light.webp" />
-    <img src="docs/assets/readme/hero.webp" alt="The desklink browser client on a private demo desktop: a line is typed into the open note through the browser, and the footer reads Client 0.5.12 · Host 0.5.12." width="880" />
+    <img src="docs/assets/readme/hero.webp" alt="A short loop from the desklink browser client on a private demo desktop: a click places the caret in the open note, Paste to desktop sends this computer's clipboard over, and the line Call Umer about the cabin appears in the note. The footer reads Client 0.5.12 · Host 0.5.12." width="880" />
   </picture>
 </p>
 
@@ -86,8 +86,8 @@ own, and keeps the last word on who gets in.
 </table>
 
 All four are real captures from the demo lab, with seed notes on a private
-desktop and an Android emulator. The hero above is 0.5.12 driving that desktop
-through the browser client.
+desktop and an Android emulator. The loop above is 0.5.12 driving that desktop
+through the browser client: a click, then a paste from this computer's clipboard.
 
 - **Live, readable video** — sharp still text, smooth motion, and pinch to zoom on a phone.
 - **Touch becomes a pointer** — tap, drag, scroll and type on the same desktop.
