@@ -1,6 +1,6 @@
 {
   "name": "@desklink/axi",
-  "version": "0.5.12",
+  "version": "0.5.13",
   "description": "Agent-facing CLI that reads and drives a desklink desktop",
   "type": "module",
   "bin": {
@@ -29,7 +29,7 @@
     "typescript": "5.9.3"
   },
   "dependencies": {
-    "@desklink/host": "0.5.12",
+    "@desklink/host": "0.5.13",
     "node-datachannel": "0.33.4",
     "playwright-core": "1.62.1",
     "pngjs": "7.0.0"
