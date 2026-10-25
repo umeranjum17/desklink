@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.5.14
+
+Joint patch release; protocol version remains 3. All packages move together.
+No product code changed: this release carries the README corrections merged
+since 0.5.13.
+
+### Changed
+
+- The README shows complete browser and phone captures, with the desktop
+  fitted inside each client instead of cropped or squeezed into unreadable tiles.
+- The agent example is a readable transcript rather than a clipped screenshot.
+- The proof table has three narrow columns, and the package and further-reading
+  sections use lists, so they stay useful on a phone-sized page.
+
 ## 0.5.13
 
 Joint patch release; protocol version remains 3. All packages move together.
