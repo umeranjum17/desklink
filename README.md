@@ -139,7 +139,7 @@ Everything else here is a run you can repeat:
 
 - **A click, round trip, with no display needed:** `node packages/desktop-host/test/encoded-flow.mjs` feeds a real Annex-B stream into the engine, decodes it in Chrome through the browser client, and checks that the click comes back as input.
 - **A live desktop in a private lab:** the [done-done journeys](.done-done.yaml) open a desktop, click into it and check the picture that comes back.
-- **Published packages:** [@desklink/host](https://www.npmjs.com/package/@desklink/host), [@desklink/react-native](https://www.npmjs.com/package/@desklink/react-native) and [@desklink/axi](https://www.npmjs.com/package/@desklink/axi) release together, currently 0.5.13 on protocol 3.
+- **Published packages:** [@desklink/host](https://www.npmjs.com/package/@desklink/host), [@desklink/react-native](https://www.npmjs.com/package/@desklink/react-native) and [@desklink/axi](https://www.npmjs.com/package/@desklink/axi) release together; see the [changelog](CHANGELOG.md) for release versions and the [protocol reference](packages/desktop-host/docs/PROTOCOL.md) for the wire contract.
 
 ## Known limits
 
