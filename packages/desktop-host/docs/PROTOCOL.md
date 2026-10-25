@@ -1097,7 +1097,7 @@ anything to show.
   bridge socket) is paired; pairing, identity and revocation are the consumer's.
   Revocation must end both live sessions and future access. There is no second
   account, token or pairing ceremony. For consumer integration, see the
-  [BYOKit guidance](../../../README.md#why-desklink-exists).
+  [BYOKit guidance](../../../README.md#why-desklink).
 - It does not open ports, register a service, install udev rules, join groups or
   raise capabilities. Kernel input access is a separate, explicit, guided step
   (`desklink-host setup-input` reports what is missing; it does not change it).

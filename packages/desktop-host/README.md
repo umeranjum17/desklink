@@ -285,7 +285,7 @@ engine trusts the consumer's pairing. A paired consumer gets all available
 view, input and clipboard access; missing input or clipboard backends fail per
 action.
 For the application's pairing, identity and signaling transport, see the
-[BYOKit integration guidance](https://github.com/umeranjum17/desklink/blob/main/README.md#why-desklink-exists).
+[BYOKit integration guidance](https://github.com/umeranjum17/desklink/blob/main/README.md#why-desklink).
 
 ### If you have no channel of your own
 
