@@ -32,7 +32,8 @@
 On a Linux x64 X11 desktop, with Node.js 22+:
 
 ```sh
-npx @desklink/host bridge --source x11
+npx @desklink/host bridge \
+  --source x11
 ```
 
 Keep that terminal open. It prints an `open` link; open it in a browser on the
@@ -46,11 +47,7 @@ To put the view in a phone app, follow [put the desktop in a phone app](docs/qui
 <details>
 <summary>Not starting? Check what this computer can share</summary>
 
-```sh
-npx @desklink/host capabilities
-```
-
-It prints the capture backends, input injection, clipboard and audio options this
+Run `npx @desklink/host capabilities`. It prints the capture backends, input injection, clipboard and audio options this
 machine reports right now, so a missing portal, `uinput` permission or X display
 shows up before a session is opened. The [host setup guide](packages/desktop-host/README.md#install-and-run)
 covers what each one needs.
@@ -74,20 +71,44 @@ own, and keeps the last word on who gets in.
 
 ## What you get
 
-<table>
-  <tr>
-    <td width="50%" valign="top"><img src="docs/assets/readme/browser.webp" alt="Browser reference client with the Reading list open on a private demo desktop." width="480" /><br/><strong>In your browser</strong><br/>Click, type and scroll. No client build needed.</td>
-    <td width="50%" valign="top"><img src="docs/assets/readme/phone.webp" alt="React Native example app on a landscape Android emulator: a tap selects Groceries, with touch pointer and key controls visible." width="480" /><br/><strong>In your phone app</strong><br/>The React Native view, on an Android emulator.</td>
-  </tr>
-  <tr>
-    <td width="50%" valign="top"><img src="docs/assets/readme/agent.webp" alt="A close-up of the real agent CLI: read Groceries as text, click the Bread item, then press End." width="480" /><br/><strong>With your agent</strong><br/>Read the screen as text. Ask for pixels when needed.</td>
-    <td width="50%" valign="top"><img src="docs/assets/readme/clipboard.webp" alt="The browser client copies Book the cabin by the lake from the desktop note, then pastes Call Umer about the cabin back into it." width="480" /><br/><strong>Keys and clipboard, too</strong><br/>Copy text over and send it back, only when you ask.</td>
-  </tr>
-</table>
+<p align="center">
+  <img src="docs/assets/readme/browser.webp" alt="The browser reference client with the Reading list note open on a private demo desktop; the client's own header and clipboard toolbar are visible above and below the picture." width="880" />
+</p>
 
-All four are real captures from the demo lab, with seed notes on a private
-desktop and an Android emulator. The loop above is 0.5.12 driving that desktop
-through the browser client: a click, then a paste from this computer's clipboard.
+**In your browser.** Click, type and scroll the live desktop. No client build needed.
+
+<p align="center">
+  <img src="docs/assets/readme/phone.webp" alt="The demo desktop in the React Native example app on an Android emulator: the whole Notes window with the Groceries note open, its sidebar, toolbar and status line, and the demo notes readable at full size." width="880" />
+</p>
+
+**In your phone app.** The same desktop through `@desklink/react-native`, on an Android emulator.
+The phone's own key and clipboard rows sit under the picture; this is the picture above them.
+
+**With your agent.** `desklink-axi` answers with text, refs and coordinates rather than
+screenshots, so a turn costs text tokens. One real session, with the Groceries note open:
+it reads the screen, then clicks the Bread line by its ref. The frame-statistics line and
+the rows between the first and the last three are left out.
+
+```sh
+$ desklink-axi screen
+text[19 of 19]{ref,text,x,y}:
+  "@7.1","All notes",127,106
+  ...
+  "@7.13","- Oat milk",400,245
+  "@7.14","- Lemons",400,268
+  "@7.15","- Bread",400,291
+help[1]:
+  desklink-axi click @7.<n>
+$ desklink-axi click @7.15
+input: applied
+```
+
+**Keys and clipboard, too.** Typing goes through the view, and text moves between the
+phone and the desktop only when your app asks. The loop at the top of this page is one
+round trip: a line copied on this computer, pasted into the desktop's note.
+
+Both stills are real captures from the demo lab, with seed notes on a private desktop and
+an Android emulator.
 
 - **Live, readable video** — sharp still text, smooth motion, and pinch to zoom on a phone.
 - **Touch becomes a pointer** — tap, drag, scroll and type on the same desktop.
@@ -99,12 +120,15 @@ through the browser client: a click, then a paste from this computer's clipboard
 ## Proof
 
 Measured on a physical phone against a 1920×1080 desktop, one quiet host, the
-release engine and the example app from this repository:
+release engine and the example app from this repository. Keys and swipes were sent
+from the phone to that desktop. fps is the median of one-second windows, with the
+fifth percentile in brackets; latency is excess over the fastest frame in the same
+run, at the median and at the 95th percentile.
 
-| Scenario | fps (median of 1 s windows) | fps p05 | Excess latency p50 | p95 |
-| --- | :-: | :-: | :-: | :-: |
-| typing, keys sent to the desktop | **59.9** | 59.0 | **47 ms** | 66 ms |
-| scrolling, swipes sent to the desktop | **59.8** | 59.3 | **38 ms** | 58 ms |
+| Scenario | fps, median (p05) | p50, ms | p95, ms |
+| --- | :-: | :-: | :-: |
+| typing | **59.9** (59.0) | **47** | 66 |
+| scrolling | **59.8** (59.3) | **38** | 58 |
 
 Read these as written: the transport was **USB**, not Wi-Fi, and the latency is
 **excess over the fastest frame in the same run**, so the absolute floor is at
@@ -115,7 +139,7 @@ Everything else here is a run you can repeat:
 
 - **A click, round trip, with no display needed:** `node packages/desktop-host/test/encoded-flow.mjs` feeds a real Annex-B stream into the engine, decodes it in Chrome through the browser client, and checks that the click comes back as input.
 - **A live desktop in a private lab:** the [done-done journeys](.done-done.yaml) open a desktop, click into it and check the picture that comes back.
-- **Published packages:** [@desklink/host](https://www.npmjs.com/package/@desklink/host), [@desklink/react-native](https://www.npmjs.com/package/@desklink/react-native) and [@desklink/axi](https://www.npmjs.com/package/@desklink/axi) release together, currently 0.5.12 on protocol 3.
+- **Published packages:** [@desklink/host](https://www.npmjs.com/package/@desklink/host), [@desklink/react-native](https://www.npmjs.com/package/@desklink/react-native) and [@desklink/axi](https://www.npmjs.com/package/@desklink/axi) release together, currently 0.5.13 on protocol 3.
 
 ## Known limits
 
@@ -130,11 +154,14 @@ Everything else here is a run you can repeat:
 
 ## Packages
 
-| Package | What it is | Install |
-| --- | --- | --- |
-| [@desklink/host](packages/desktop-host) | The engine and its CLI: capture, encode, input, clipboard, a local protocol, and a bridge that prints a browser link | `npm i @desklink/host` |
-| [@desklink/react-native](packages/desktop-client) | The view for Android, iOS and web apps, with gestures, keyboard, clipboard and the signaling interface | `npx expo install @desklink/react-native` |
-| [@desklink/axi](packages/axi) | An agent-facing CLI: read the screen as text or pixels, then click and type | `npm i @desklink/axi` |
+- **[@desklink/host](packages/desktop-host)**: the engine and its CLI, with capture, encode,
+  input, clipboard, a local protocol, and a bridge that prints a browser link.
+  `npm i @desklink/host`
+- **[@desklink/react-native](packages/desktop-client)**: the view for Android, iOS and web apps,
+  with gestures, keyboard, clipboard and the signaling interface.
+  `npx expo install @desklink/react-native`
+- **[@desklink/axi](packages/axi)**: an agent-facing CLI that reads the screen as text or pixels,
+  then clicks and types. `npm i @desklink/axi`
 
 <details>
 <summary>How it fits your app's connection</summary>
@@ -161,16 +188,14 @@ and the [local protocol](packages/desktop-host/docs/PROTOCOL.md).
 
 ## More
 
-| I want to… | Start here |
-| --- | --- |
-| Run or embed the desktop engine | [@desklink/host](packages/desktop-host) |
-| Add a view to an Android, iOS or web app | [@desklink/react-native](packages/desktop-client) |
-| Let an agent see and control a desktop | [@desklink/axi](packages/axi) |
-| Understand the wire format | [Protocol](packages/desktop-host/docs/PROTOCOL.md) |
-| Read the measured phone numbers | [Phone latency and frame rate](docs/phone-wifi-latency.md) |
-| See what's changed | [Changelog](CHANGELOG.md) |
-| See where desklink is headed | [Vision](VISION.md) |
-| Report a problem or suggest an idea | [Issues](https://github.com/umeranjum17/desklink/issues) |
+- Run or embed the desktop engine: [@desklink/host](packages/desktop-host)
+- Add a view to an Android, iOS or web app: [@desklink/react-native](packages/desktop-client)
+- Let an agent see and control a desktop: [@desklink/axi](packages/axi)
+- Understand the wire format: [Protocol](packages/desktop-host/docs/PROTOCOL.md)
+- Read the measured phone numbers: [Phone latency and frame rate](docs/phone-wifi-latency.md)
+- See what's changed: [Changelog](CHANGELOG.md)
+- See where desklink is headed: [Vision](VISION.md)
+- Report a problem or suggest an idea: [Issues](https://github.com/umeranjum17/desklink/issues)
 
 ## Develop
 
@@ -184,13 +209,8 @@ npm test
 npm run test:engine
 ```
 
-Before opening a PR, repeat the tests your change adds or edits:
-
-```sh
-scripts/repeat-changed-tests.sh
-```
-
-On Linux, it compares against `origin/main` and finds changed engine `#[test]`
+Before opening a PR, run `scripts/repeat-changed-tests.sh` to repeat the tests your change
+adds or edits. On Linux, it compares against `origin/main` and finds changed engine `#[test]`
 functions plus changed vitest test files. It runs each of them with half the
 repeats pinned to one busy core, prints one line per test, and exits non-zero
 on any failure. Engine tests default to 1000 repeats because their timing flakes
@@ -206,7 +226,9 @@ unknown session-tagged PID. Compile checks need no desktop. On Linux, prove
 refusal and owned teardown with:
 
 ```sh
-env -u DISPLAY -u WAYLAND_DISPLAY npm run test:lab-safety
+env -u DISPLAY \
+  -u WAYLAND_DISPLAY \
+  npm run test:lab-safety
 ```
 
 See the [done-done journeys](.done-done.yaml),
