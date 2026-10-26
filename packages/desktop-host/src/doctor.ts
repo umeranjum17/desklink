@@ -10,6 +10,7 @@ import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { missingSystemLibrary } from './engineProcess.js';
 import { enginePackageRoot, explainMissingEngine, resolveEngine, type ResolvedEngine } from './resolveEngine.js';
 
 type Status = 'PASS' | 'FAIL' | 'N/A';
@@ -65,6 +66,7 @@ const X11_FIX = 'Debian/Ubuntu: `sudo apt install xserver-xorg-core`; Fedora: `s
 const WAYLAND_FIX = 'Debian/Ubuntu: `sudo apt install pipewire xdg-desktop-portal xdg-desktop-portal-gnome` (KDE: xdg-desktop-portal-kde); Fedora: `sudo dnf install pipewire xdg-desktop-portal xdg-desktop-portal-gnome`.';
 const INPUT_FIX = 'Wayland Debian/Ubuntu: `sudo apt install xdg-desktop-portal xdg-desktop-portal-gnome`; Fedora: `sudo dnf install xdg-desktop-portal xdg-desktop-portal-gnome`; then run `desklink-host setup-input` once for /dev/uinput.';
 const ENCODER_FIX = 'Debian/Ubuntu: `sudo apt install mesa-va-drivers intel-media-va-driver`; Fedora: `sudo dnf install mesa-va-drivers intel-media-driver` (the engine also fetches Cisco openh264 once on first use when online).';
+const LIBRARY_FIX = 'Debian/Ubuntu: `sudo apt install libpipewire-0.3-0 libxkbcommon0 libevdev2 libstdc++6 libxcursor1 libx11-6 libxext6 libwayland-client0 libfontconfig1 libfreetype6`; Fedora: `sudo dnf install pipewire-libs libxkbcommon libevdev libstdc++ libXcursor libX11 libXext libwayland-client fontconfig freetype`. A complete desktop install usually has these already.';
 const UPDATE_FIX = 'Debian/Ubuntu: `npm install @desklink/host@latest`; Fedora: the same command.';
 const PROBE_FIX = `install the engine first — ${ENGINE_FIX}`;
 
@@ -120,8 +122,17 @@ function nodeMeets(current: string, requirement: string): boolean {
     return true;
 }
 
+function librariesCheck(resolved: ResolvedEngine | null, version: { code: number | null; stderr: string }): Check {
+    if (resolved === null) return na('libraries', 'needs an engine binary; see the engine line');
+    const missing = missingSystemLibrary(version.stderr);
+    if (missing !== null) return fail('libraries', `cannot load ${missing}`, LIBRARY_FIX);
+    if (version.code === 0) return pass('libraries', "the engine starts with this machine's system libraries");
+    return fail('libraries', `the engine did not run: ${firstLine(version.stderr) || `exit ${version.code ?? 'unexpectedly'}`}`, UPDATE_FIX);
+}
+
 function x11Check(x11: X11Report | undefined, session: 'x11' | 'wayland' | 'none', probeError: string | null, probeFix: string): Check {
     if (session === 'wayland') return na('x11', 'Wayland session; the portal is the capture path');
+    if (session === 'none') return fail('x11', 'no X11 or Wayland session (DISPLAY and WAYLAND_DISPLAY are unset)', X11_FIX);
     if (x11 === undefined) return fail('x11', `not checked: ${probeError ?? 'the engine reported no X11 result'}`, probeFix);
     if (!x11.connected) return fail('x11', `cannot open ${x11.display ?? process.env.DISPLAY ?? 'the display'}: ${x11.error ?? 'unknown error'}`, X11_FIX);
     const missing = [!x11.shm && 'XShm', !x11.damage && 'XDamage'].filter((value) => value !== false);
@@ -167,9 +178,9 @@ function encoderCheck(report: DiagnoseReport | null, probeError: string | null, 
     return pass('encoder', `${report.encoder.name}${report.encoder.hardware ? ' (hardware)' : ''}; VP9 software is always available`);
 }
 
-function versionCheck(packageVersion: string | null, engineVersion: string | null, reason: string | null): Check {
+function versionCheck(packageVersion: string | null, engineVersion: string | null, reason: string | null, fix: string): Check {
     if (packageVersion === null) return fail('versions', 'cannot read @desklink/host package.json', UPDATE_FIX);
-    if (engineVersion === null) return fail('versions', `@desklink/host ${packageVersion}; engine version unavailable (${reason ?? 'no answer'})`, UPDATE_FIX);
+    if (engineVersion === null) return fail('versions', `@desklink/host ${packageVersion}; engine version unavailable (${reason ?? 'no answer'})`, fix);
     return pass('versions', `@desklink/host ${packageVersion} · engine ${engineVersion}`);
 }
 
@@ -198,12 +209,14 @@ export async function runDoctor(): Promise<number> {
     let diagnose: DiagnoseReport | null = null;
     let engineVersion: string | null = null;
     let probeError: string | null = null;
+    let versionResult: { code: number | null; stdout: string; stderr: string } = { code: null, stdout: '', stderr: '' };
 
     if (resolved !== null) {
-        const [versionResult, diagnoseResult] = await Promise.all([
+        const [version, diagnoseResult] = await Promise.all([
             runEngine(resolved.command, ['version']),
             runEngine(resolved.command, ['diagnose']),
         ]);
+        versionResult = version;
         if (versionResult.code === 0) engineVersion = versionResult.stdout.trim() || null;
         if (diagnoseResult.code === 0) {
             try {
@@ -217,6 +230,8 @@ export async function runDoctor(): Promise<number> {
         if (engineVersion === null && typeof diagnose?.version === 'string') engineVersion = diagnose.version;
     }
 
+    checks.push(librariesCheck(resolved, versionResult));
+
     const session: 'x11' | 'wayland' | 'none' = diagnose?.session
         ?? (process.env.WAYLAND_DISPLAY !== undefined && process.env.WAYLAND_DISPLAY !== ''
             ? 'wayland'
@@ -224,12 +239,13 @@ export async function runDoctor(): Promise<number> {
                 ? 'x11'
                 : 'none');
 
-    const probeFix = resolved === null ? PROBE_FIX : UPDATE_FIX;
-    checks.push(x11Check(diagnose?.x11, session, probeError, probeFix));
-    checks.push(waylandCheck(diagnose?.wayland, session, probeError, probeFix));
+    const missingLibrary = missingSystemLibrary(versionResult.stderr);
+    const probeFix = resolved === null ? PROBE_FIX : missingLibrary !== null ? LIBRARY_FIX : UPDATE_FIX;
+    checks.push(x11Check(diagnose?.x11 ?? undefined, session, probeError, probeFix));
+    checks.push(waylandCheck(diagnose?.wayland ?? undefined, session, probeError, probeFix));
     checks.push(inputCheck(diagnose, session, probeError, probeFix));
     checks.push(encoderCheck(diagnose, probeError, probeFix));
-    checks.push(versionCheck(packageVersion, engineVersion, resolved === null ? 'no engine binary' : probeError));
+    checks.push(versionCheck(packageVersion, engineVersion, resolved === null ? 'no engine binary' : probeError, probeFix));
 
     for (const check of checks) {
         console.log(`${check.status.padEnd(4)}  ${check.name.padEnd(8)}  ${check.detail}`);

@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -68,11 +68,13 @@ function isolatedEnv(extra = {}) {
     };
 }
 
-function doctor(extra = {}) {
+function doctor(extra = {}, unset = []) {
+    const env = isolatedEnv(extra);
+    for (const name of unset) delete env[name];
     const result = spawnSync(process.execPath, [cli, 'doctor'], {
         encoding: 'utf8',
         timeout: 90_000,
-        env: isolatedEnv(extra),
+        env,
     });
     return { code: result.status, stdout: result.stdout, stderr: result.stderr };
 }
@@ -95,9 +97,10 @@ try {
     const healthy = doctor({ DESKLINK_ENGINE: engine });
     assert.equal(healthy.code, 0, `healthy doctor failed:\n${healthy.stdout}\n${healthy.stderr}`);
     const lines = checkLines(healthy.stdout);
-    assert.equal(lines.length, 7, `expected seven requirement lines:\n${healthy.stdout}`);
+    assert.equal(lines.length, 8, `expected eight requirement lines:\n${healthy.stdout}`);
     assert.match(healthy.stdout, /^PASS  engine\b/m);
     assert.match(healthy.stdout, /^PASS  node\b/m);
+    assert.match(healthy.stdout, /^PASS  libraries\s+the engine starts with this machine's system libraries$/m);
     assert.match(healthy.stdout, new RegExp(`^PASS  x11\\s+${escapeRegExp(display)} 1280x720, XShm \\+ XDamage$`, 'm'));
     assert.match(healthy.stdout, /^N\/A   wayland\b/m);
     assert.match(healthy.stdout, new RegExp(`^PASS  input\\s+XTest on ${escapeRegExp(display)}$`, 'm'));
@@ -111,6 +114,7 @@ try {
     assert.equal(broken.code, 1, `hidden engine should fail:\n${broken.stdout}`);
     assert.match(broken.stdout, /^FAIL {2}engine\s+The desktop engine is not at the configured path \(.+hidden\/desklink-host\)\.$/m);
     assert.match(broken.stdout, /fix\s+Debian\/Ubuntu: `npm install @desklink\/host-linux-x64-gnu`.*Fedora:/m);
+    assert.match(broken.stdout, /^N\/A {3}libraries\s+needs an engine binary/m);
     assert.match(broken.stdout, /^FAIL {2}versions\s+@desklink\/host .+ engine version unavailable/m);
 
     // The Wayland branch is a separate set of checks: with a session name but
@@ -119,9 +123,36 @@ try {
     const noPortal = doctor({ DESKLINK_ENGINE: engine, DISPLAY: '', WAYLAND_DISPLAY: 'wayland-0' });
     assert.equal(noPortal.code, 1, `missing portal should fail:\n${noPortal.stdout}`);
     assert.match(noPortal.stdout, /^N\/A {3}x11\b/m);
+    assert.match(noPortal.stdout, /^PASS  libraries\b/m);
     assert.match(noPortal.stdout, /^FAIL {2}wayland\s+missing xdg-desktop-portal ScreenCast/m);
     assert.match(noPortal.stdout, /^FAIL {2}input\s+missing portal RemoteDesktop/m);
     assert.match(noPortal.stdout, /fix\s+Debian\/Ubuntu: `sudo apt install .*xdg-desktop-portal.*`.*Fedora: `sudo dnf install .*xdg-desktop-portal/m);
+
+    // A machine with the engine and its libraries but no desktop session is a
+    // supported answer: two FAIL lines with the desktop fix, no crash.
+    const noDisplay = doctor({ DESKLINK_ENGINE: engine }, ['DISPLAY', 'WAYLAND_DISPLAY']);
+    assert.equal(noDisplay.code, 1, `no display should fail cleanly:\n${noDisplay.stdout}\n${noDisplay.stderr}`);
+    assert.equal(noDisplay.stderr.trim(), '', `doctor crashed without a display:\n${noDisplay.stderr}`);
+    assert.match(noDisplay.stdout, /^FAIL {2}x11\s+no X11 or Wayland session \(DISPLAY and WAYLAND_DISPLAY are unset\)$/m);
+    assert.match(noDisplay.stdout, /^FAIL {2}input\s+no X11 or Wayland session to inject into$/m);
+    assert.match(noDisplay.stdout, /^PASS {2}libraries\b/m);
+    assert.match(noDisplay.stdout, /^PASS {2}encoder\b/m);
+    assert.match(noDisplay.stdout, /^PASS {2}versions\b/m);
+
+    // The linker's own missing-library message is what a bare Linux machine
+    // sees first; doctor must name the library and the packages that carry it,
+    // not send the person to reinstall the npm package.
+    const fakeEngine = join(dir, 'fake-engine', 'desklink-host');
+    mkdirSync(dirname(fakeEngine), { recursive: true });
+    writeFileSync(fakeEngine, '#!/bin/sh\necho "desklink-host: error while loading shared libraries: libX11.so.6: cannot open shared object file: No such file or directory" >&2\nexit 127\n');
+    chmodSync(fakeEngine, 0o755);
+    const missingLibrary = doctor({ DESKLINK_ENGINE: fakeEngine }, ['DISPLAY', 'WAYLAND_DISPLAY']);
+    assert.equal(missingLibrary.code, 1, `missing library should fail:\n${missingLibrary.stdout}`);
+    assert.match(missingLibrary.stdout, /^FAIL {2}libraries\s+cannot load libX11\.so\.6$/m);
+    assert.match(missingLibrary.stdout, /fix\s+Debian\/Ubuntu: `sudo apt install .*libx11-6.*`.*Fedora: `sudo dnf install .*libX11/m);
+    assert.match(missingLibrary.stdout, /^FAIL {2}versions\s+@desklink\/host .*engine version unavailable/m);
+    assert.doesNotMatch(missingLibrary.stdout, /npm install @desklink\/host@latest/);
+    assert.match(missingLibrary.stdout.split('\n').filter((line) => /^ {6}fix/.test(line)).join('\n'), /sudo apt install .*libx11-6/);
 
     console.log(JSON.stringify({
         doctor: 'passed',
@@ -129,6 +160,8 @@ try {
         healthy: lines,
         hidden_engine: checkLines(broken.stdout),
         no_portal: checkLines(noPortal.stdout),
+        no_display: checkLines(noDisplay.stdout),
+        missing_library: checkLines(missingLibrary.stdout),
     }, null, 2));
 } finally {
     if (xvfb !== null) await stopOwnedXvfb(xvfb);
