@@ -25,6 +25,7 @@
   <a href="https://github.com/umeranjum17/desklink/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/umeranjum17/desklink/ci.yml?style=flat&branch=main" /></a>
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-666?style=flat" /></a>
   <img alt="Linux, macOS preview" src="https://img.shields.io/badge/Linux%20%C2%B7%20macOS%20(preview)-111?style=flat" />
+  <a href="https://x.com/umership"><img alt="X @umership" src="https://img.shields.io/badge/X-%40umership-111?style=flat" /></a>
 </p>
 
 ## Quick start
