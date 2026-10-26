@@ -592,6 +592,152 @@ fn capture_probe(seconds: u64) -> Result<Value, String> {
     )
 }
 
+/// One real ScreenCaptureKit screenshot of a screen-point rectangle, converted
+/// to packed BGRA with its row stride. `capture-probe --frame/--record` uses it
+/// to keep a real desktop view for proof; it is not a render.
+fn capture_rect_bgra(area: CGRect) -> Result<(Vec<u8>, usize, usize, usize), String> {
+    use block2::RcBlock;
+    use objc2_core_foundation::{
+        CGPoint as NativePoint, CGRect as NativeRect, CGSize as NativeSize,
+    };
+    use objc2_screen_capture_kit::SCScreenshotManager;
+
+    let rect = NativeRect {
+        origin: NativePoint {
+            x: area.origin.x,
+            y: area.origin.y,
+        },
+        size: NativeSize {
+            width: area.size.width,
+            height: area.size.height,
+        },
+    };
+    let ready = Arc::new((
+        Mutex::new(None::<Result<(Vec<u8>, usize, usize, usize), String>>),
+        Condvar::new(),
+    ));
+    let callback_state = ready.clone();
+    let callback = RcBlock::new(
+        move |image: *mut objc2_core_graphics::CGImage, error: *mut objc2_foundation::NSError| {
+            let frame = if !error.is_null() || image.is_null() {
+                Err(String::from(
+                    "ScreenCaptureKit returned an error or no image",
+                ))
+            } else {
+                let image = unsafe { &*image };
+                let width = objc2_core_graphics::CGImage::width(Some(image));
+                let height = objc2_core_graphics::CGImage::height(Some(image));
+                let mut length = 0usize;
+                let mut stride = 0usize;
+                let pointer = unsafe {
+                    desklink_image_bgra(
+                        image as *const _ as *const c_void,
+                        &mut length,
+                        &mut stride,
+                    )
+                };
+                if pointer.is_null() || width == 0 || height == 0 {
+                    Err(String::from(
+                        "ScreenCaptureKit image could not be converted to BGRA",
+                    ))
+                } else {
+                    let pixels = unsafe { std::slice::from_raw_parts(pointer, length) }.to_vec();
+                    unsafe { libc::free(pointer.cast()) };
+                    Ok((pixels, width, height, stride))
+                }
+            };
+            let (lock, wake) = &*callback_state;
+            if let Ok(mut result) = lock.lock() {
+                *result = Some(frame);
+                wake.notify_one();
+            }
+        },
+    );
+    unsafe {
+        SCScreenshotManager::captureImageInRect_completionHandler(rect, Some(&callback));
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (lock, wake) = &*ready;
+    let mut result = lock
+        .lock()
+        .map_err(|_| String::from("capture lock poisoned"))?;
+    while result.is_none() && Instant::now() < deadline {
+        let (next, _) = wake
+            .wait_timeout(result, deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| String::from("capture wait failed"))?;
+        result = next;
+    }
+    result
+        .take()
+        .unwrap_or_else(|| Err(String::from("ScreenCaptureKit timed out")))
+}
+
+/// Write one real desktop frame, or a short real desktop sequence, to raw BGRA
+/// files. The proof harness turns these into stills and recordings; no pixels
+/// are ever rendered by the engine itself.
+fn capture_rects(
+    seconds: u64,
+    frame_path: Option<String>,
+    record_dir: Option<String>,
+    fps: u64,
+    area: Option<CGRect>,
+) -> Result<Value, String> {
+    let area = area.unwrap_or_else(|| unsafe { CGDisplayBounds(CGMainDisplayID()) });
+    let rect = serde_json::json!({
+        "x": area.origin.x, "y": area.origin.y,
+        "width": area.size.width, "height": area.size.height
+    });
+    let mut written = Vec::new();
+    let mut dimensions = None;
+    if let Some(path) = frame_path {
+        let (pixels, width, height, stride) = capture_rect_bgra(area)?;
+        std::fs::write(&path, &pixels)
+            .map_err(|error| format!("could not write {path}: {error}"))?;
+        dimensions = Some((width, height));
+        written.push(serde_json::json!({
+            "kind": "frame", "path": path, "width": width, "height": height,
+            "stride": stride, "format": "bgra"
+        }));
+    }
+    if let Some(dir) = record_dir {
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("could not create {dir}: {error}"))?;
+        let fps = fps.clamp(1, 30);
+        let count = seconds.saturating_mul(fps).max(1);
+        for index in 0..count {
+            let (pixels, width, height, stride) = capture_rect_bgra(area)?;
+            dimensions = Some((width, height));
+            let path = std::path::Path::new(&dir).join(format!("frame-{index:04}.bgra"));
+            std::fs::write(&path, &pixels)
+                .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+            if index == 0 {
+                written.push(serde_json::json!({
+                    "kind": "record", "dir": dir, "width": width, "height": height,
+                    "stride": stride, "format": "bgra", "fps": fps, "frames": count
+                }));
+            }
+            std::thread::sleep(Duration::from_millis(1000 / fps));
+        }
+        let manifest = serde_json::json!({
+            "format": "bgra", "fps": fps, "frames": count,
+            "width": dimensions.map(|d| d.0), "height": dimensions.map(|d| d.1),
+            "rect": rect
+        });
+        std::fs::write(
+            std::path::Path::new(&dir).join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .map_err(|error| format!("could not write manifest: {error}"))?;
+    }
+    Ok(serde_json::json!({
+        "source": {
+            "kind": "screencapturekit", "rect": rect.clone(),
+            "width": dimensions.map(|d| d.0), "height": dimensions.map(|d| d.1)
+        },
+        "written": written
+    }))
+}
+
 pub fn run() -> i32 {
     let mut args = std::env::args().skip(1);
     let command = args.next().unwrap_or_else(|| "help".into());
@@ -600,6 +746,7 @@ pub fn run() -> i32 {
         "serve"
             | "capabilities"
             | "capture-probe"
+            | "warp-pointer"
             | "indicator-demo"
             | "axi-record"
             | "setup-input"
@@ -668,6 +815,46 @@ pub fn run() -> i32 {
             let Some(path) = args.next() else { eprintln!("axi-record requires an output path"); return 2; };
             if let Err(error) = record_agent_overlay(&path) { eprintln!("axi-record: {error}"); return 1; }
         }
+        "warp-pointer" => {
+            let x = args.next().and_then(|value| value.parse::<i64>().ok());
+            let y = args.next().and_then(|value| value.parse::<i64>().ok());
+            let display = args
+                .next()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or_else(|| unsafe { CGMainDisplayID() });
+            let (Some(x), Some(y)) = (x, y) else {
+                eprintln!("usage: desklink-host warp-pointer <source x> <source y> [display]");
+                return 2;
+            };
+            let mode = unsafe { CGDisplayCopyDisplayMode(display) };
+            let (width, height) = if mode.is_null() {
+                (
+                    unsafe { CGDisplayPixelsWide(display) },
+                    unsafe { CGDisplayPixelsHigh(display) },
+                )
+            } else {
+                let pixels = unsafe {
+                    (
+                        CGDisplayModeGetPixelWidth(mode),
+                        CGDisplayModeGetPixelHeight(mode),
+                    )
+                };
+                unsafe { CGDisplayModeRelease(mode) };
+                pixels
+            };
+            let (width, height) = (width as i32, height as i32);
+            match crate::input::InputDevices::create_for_display(width, height, display) {
+                Ok(mut devices) => {
+                    devices.move_absolute(x, y);
+                    std::thread::sleep(Duration::from_millis(200));
+                    println!("{}", json!({"warped": true, "x": x, "y": y, "display": display}));
+                }
+                Err(error) => {
+                    eprintln!("warp-pointer: {error}");
+                    return 1;
+                }
+            }
+        }
         #[cfg(all(desklink_vpx, not(desklink_macos_cli)))]
         "indicator-demo" => {
             let display = args.next().and_then(|value| value.parse().ok()).unwrap_or(0);
@@ -679,15 +866,51 @@ pub fn run() -> i32 {
         "capture-probe" => {
             let mut seconds = 3;
             let mut output_path = None;
+            let mut frame_path = None;
+            let mut record_dir = None;
+            let mut fps = 10;
+            let mut area = None;
             while let Some(argument) = args.next() {
-                if argument == "--out" {
-                    output_path = args.next();
-                } else if let Ok(value) = argument.parse() {
-                    seconds = value;
+                match argument.as_str() {
+                    "--out" => output_path = args.next(),
+                    "--frame" => frame_path = args.next(),
+                    "--record" => record_dir = args.next(),
+                    "--fps" => {
+                        fps = args.next().and_then(|value| value.parse().ok()).unwrap_or(10);
+                    }
+                    "--rect" => {
+                        let parts: Vec<f64> = args
+                            .next()
+                            .unwrap_or_default()
+                            .split(',')
+                            .filter_map(|value| value.trim().parse().ok())
+                            .collect();
+                        if parts.len() == 4 {
+                            area = Some(CGRect {
+                                origin: CGPoint {
+                                    x: parts[0],
+                                    y: parts[1],
+                                },
+                                size: CGSize {
+                                    width: parts[2],
+                                    height: parts[3],
+                                },
+                            });
+                        }
+                    }
+                    other => {
+                        if let Ok(value) = other.parse() {
+                            seconds = value;
+                        }
+                    }
                 }
             }
             let result = if unsafe { CGPreflightScreenCaptureAccess() } {
-                capture_probe(seconds)
+                if frame_path.is_some() || record_dir.is_some() {
+                    capture_rects(seconds, frame_path, record_dir, fps, area)
+                } else {
+                    capture_probe(seconds)
+                }
             } else {
                 request_screen_capture_content().and_then(|_| Err(format!("capture-permission: allow {} in System Settings › Privacy & Security › Screen & System Audio Recording, then reconnect", tcc_responsible_app_name())))
             };
@@ -722,7 +945,7 @@ pub fn run() -> i32 {
                 println!("If the Input Monitoring alert did not open, allow {} in System Settings › Privacy & Security › Input Monitoring.", tcc_responsible_app_name());
             }
         }
-        _ => println!("desklink-host {}\nUSAGE: desklink-host [serve|capabilities|capture-probe|encode-probe|setup-input|version]", env!("CARGO_PKG_VERSION")),
+        _ => println!("desklink-host {}\nUSAGE: desklink-host [serve|capabilities|capture-probe|warp-pointer|encode-probe|setup-input|version]", env!("CARGO_PKG_VERSION")),
     }
     0
 }
