@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 """Prove both macOS cues on a real desktop capture, over an owned fixture.
 
-Run only on the private Mac lab:
+Run only on the private Mac lab with `DESKLINK_MAC_LAB=1`, `DESKLINK_MAC_ENGINE`
+pointing at the signed app and `DESKLINK_MAC_EVIDENCE_DIR` at a fresh directory.
 
-    DESKLINK_MAC_LAB=1 \
-    DESKLINK_MAC_ENGINE=$HOME/fm-desklink-ios/dl-point-cue-mac-capture/DesklinkHost.app/Contents/MacOS/desklink-host \
-    DESKLINK_MAC_EVIDENCE_DIR=$HOME/fm-desklink-ios/dl-point-cue-mac-capture/evidence \
-    python3 packages/desktop-host/engine/test/point-mac-flow.py
+The fixture is a borderless, nonactivating panel that this script owns. It covers
+the cue area so no personal window can enter a capture, and sits above ordinary
+app windows but below the cue overlays. Every capture is clipped to the fixture.
+The script never clicks or answers a system consent sheet.
 
-The fixture is a borderless, nonactivating panel that this script owns. It
-covers the cue area so no personal window can enter a capture, and it is above
-ordinary app windows but below the cue overlays. Every capture is clipped to
-the fixture. The script never clicks or answers a system consent sheet.
-
-The point cue (`session.point`) must appear in both the real screen capture and
-the engine's `session.frame`. The agent input indicator starts at the current
-pointer (placed through the engine's own Accessibility grant), must appear in
-the real screen capture, and must be absent from `session.frame` because the
-engine's ScreenCaptureKit filter excludes the indicator helper.
+`session.point` must appear in both the real screen capture and the engine's
+`session.frame`. The agent input indicator starts at the current pointer (placed
+through the engine's own Accessibility grant), must appear on the real screen,
+and must be absent from `session.frame` because the engine's ScreenCaptureKit
+filter excludes the indicator helper.
 """
 
 import json
@@ -46,19 +42,7 @@ def fail(message):
 
 
 def fixture_main(argv):
-    from AppKit import (
-        NSApplication,
-        NSApplicationActivationPolicyAccessory,
-        NSBackingStoreBuffered,
-        NSColor,
-        NSFloatingWindowLevel,
-        NSPanel,
-        NSScreen,
-        NSWindowCollectionBehaviorCanJoinAllSpaces,
-        NSWindowCollectionBehaviorStationary,
-        NSWindowStyleMaskBorderless,
-        NSWindowStyleMaskNonactivatingPanel,
-    )
+    from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSBackingStoreBuffered, NSColor, NSFloatingWindowLevel, NSPanel, NSScreen, NSWindowCollectionBehaviorCanJoinAllSpaces, NSWindowCollectionBehaviorStationary, NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel)
 
     x, y, width, height = (float(value) for value in argv)
     app = NSApplication.sharedApplication()
@@ -76,12 +60,8 @@ def fixture_main(argv):
         NSWindowCollectionBehaviorCanJoinAllSpaces
         | NSWindowCollectionBehaviorStationary
     )
-    panel.setFloatingPanel_(True)
-    panel.setBecomesKeyOnlyIfNeeded_(True)
-    panel.setHidesOnDeactivate_(False)
-    panel.setOpaque_(True)
-    panel.setHasShadow_(False)
-    panel.setIgnoresMouseEvents_(False)
+    panel.setFloatingPanel_(True); panel.setBecomesKeyOnlyIfNeeded_(True); panel.setHidesOnDeactivate_(False)
+    panel.setOpaque_(True); panel.setHasShadow_(False); panel.setIgnoresMouseEvents_(False)
     panel.setBackgroundColor_(
         NSColor.colorWithCalibratedRed_green_blue_alpha_(*FIXTURE_COLOR, 1.0)
     )
@@ -145,7 +125,6 @@ def on_screen_windows():
         windows.append(
             {
                 "owner": window.get("kCGWindowOwnerName"),
-                "layer": window.get("kCGWindowLayer"),
                 "bounds": (
                     bounds["X"],
                     bounds["Y"],
@@ -182,26 +161,15 @@ def assert_crop_safe(rects, crop, label):
 NOTIFICATION_WINDOWS = []
 
 
-def run_capture_probe(engine, args, timeout=60):
-    result = subprocess.run(
-        [engine, "capture-probe", *args],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+def external_frame(engine, rect, path):
+    args = ["--rect", ",".join(str(int(value)) for value in rect), "--frame", str(path)]
+    result = subprocess.run([engine, "capture-probe", *args], capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
         fail(f"capture-probe {args} failed: {result.stderr.strip()}")
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError as error:
         fail(f"capture-probe {args} did not print JSON: {error}: {result.stdout!r}")
-
-
-def external_frame(engine, rect, path):
-    return run_capture_probe(
-        engine,
-        ["--rect", ",".join(str(int(value)) for value in rect), "--frame", str(path)],
-    )
 
 
 def warp_pointer(engine, point, display_id, scale, origin):
@@ -229,20 +197,9 @@ class Engine:
     def __init__(self, binary, log_path):
         self.binary = binary
         self.log = open(log_path, "w")
-        self.process = subprocess.Popen(
-            [binary, "serve"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=self.log,
-            text=True,
-            bufsize=1,
-        )
-        self.queue = queue.Queue()
-        self.next_id = 0
-        self.latest = None
-        self.events = []
-        self.reader = threading.Thread(target=self._read, daemon=True)
-        self.reader.start()
+        self.process = subprocess.Popen([binary, "serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, text=True, bufsize=1)
+        self.queue = queue.Queue(); self.next_id = 0; self.latest = None; self.events = []
+        self.reader = threading.Thread(target=self._read, daemon=True); self.reader.start()
 
     def _read(self):
         for line in self.process.stdout:
@@ -415,25 +372,28 @@ def expect_absent(source, width, height, stride, predicate, label):
     return count
 
 
+def capture_state(engine_binary, session, label, crop, region, source_path, engine_path, absent=False):
+    for attempt in range(6):
+        screen, sw, sh, stride, engine = check_crop(
+            FIXTURE, crop, label, engine_binary, session, source_path, engine_path,
+            region[2], region[3], region)
+        try:
+            screen_count, screen_box = wait_blue(screen, sw, sh, stride, cue_pixel, f"{label} screen")
+            if absent:
+                engine_count = expect_absent(engine, region[2], region[3], region[2] * 4, cue_pixel, f"{label} engine")
+                return screen, sw, sh, stride, engine, screen_count, screen_box, engine_count, None
+            engine_count, engine_box = wait_blue(engine, region[2], region[3], region[2] * 4, cue_pixel, f"{label} engine")
+            return screen, sw, sh, stride, engine, screen_count, screen_box, engine_count, engine_box
+        except SystemExit:
+            if attempt == 5:
+                raise
+            time.sleep(0.4)
+
+
 def record_external(engine, rect, directory, seconds, fps):
     directory.mkdir(parents=True, exist_ok=True)
-    process = subprocess.Popen(
-        [
-            engine,
-            "capture-probe",
-            str(seconds),
-            "--rect",
-            ",".join(str(int(value)) for value in rect),
-            "--record",
-            str(directory),
-            "--fps",
-            str(fps),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    return process
+    args = [engine, "capture-probe", str(seconds), "--rect", ",".join(str(int(value)) for value in rect), "--record", str(directory), "--fps", str(fps)]
+    return subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
 def convert_external_frames(directory, ppm_directory):
@@ -499,7 +459,6 @@ def main():
     if not Path(engine).is_file():
         fail(f"engine not found: {engine}")
     evidence.mkdir(parents=True, exist_ok=True)
-
     signing = subprocess.run(
         ["codesign", "-dr", "-", engine], capture_output=True, text=True
     )
@@ -507,16 +466,11 @@ def main():
     if 'identifier "dev.desklink.host"' not in requirement:
         fail(f"the engine is not the lab-signed DesklinkHost: {requirement}")
 
-    fixture = None
-    display = None
-    scale = None
-    origin = None
+    fixture = display = scale = origin = engine_process = None
     pointer_before = pointer_location()
-    engine_process = None
     try:
         fixture = start_fixture(FIXTURE, evidence / "fixture.log")
         time.sleep(0.6)
-
         windows = on_screen_windows()
         notifications = [
             window["bounds"]
@@ -549,12 +503,8 @@ def main():
                 "Accessibility is not granted; the proof needs the engine's own "
                 "pointer placement"
             )
-        display = next(
-            item for item in capabilities["capture"]["displays"] if item.get("main")
-        )
-        points = display["points"]
-        scale = display["scale"]
-
+        display = next(item for item in capabilities["capture"]["displays"] if item.get("main"))
+        points = display["points"]; scale = display["scale"]
         if (
             points["width"] < FIXTURE[0] + FIXTURE[2]
             or points["height"] < FIXTURE[1] + FIXTURE[3]
@@ -564,9 +514,7 @@ def main():
         pointer_actual = warp_pointer(engine, INDICATOR_POINT, display["id"], scale, origin)
 
         engine_process = Engine(engine, evidence / "engine.log")
-        engine_process.request(
-            "hello", {"protocol": 3, "client": "point-mac-flow"}, 20
-        )
+        engine_process.request("hello", {"protocol": 3, "client": "point-mac-flow"}, 20)
         opened = engine_process.request(
             "session.open",
             {
@@ -594,9 +542,7 @@ def main():
                 round(crop[3] * point_scale_y),
             ]
 
-        ring_region = engine_region(RING_CROP)
-        indicator_region = engine_region(INDICATOR_CROP)
-
+        ring_region = engine_region(RING_CROP); indicator_region = engine_region(INDICATOR_CROP)
         engine_process.request(
             "session.frame",
             {
@@ -623,34 +569,9 @@ def main():
         if point.get("shown") is not True:
             fail(f"session.point was refused: {point}")
         time.sleep(0.8)
-
-        count, box = 0, None
-        for attempt in range(6):
-            point_screen, screen_w, screen_h, screen_stride, point_engine = check_crop(
-                FIXTURE,
-                RING_CROP,
-                "point",
-                engine,
-                engine_process,
-                evidence / "point-screen.bgra",
-                evidence / "point-engine.bgrx",
-                ring_region[2],
-                ring_region[3],
-                ring_region,
-            )
-            try:
-                count, box = wait_blue(
-                    point_screen, screen_w, screen_h, screen_stride, cue_pixel, "point screen"
-                )
-                engine_count, engine_box = wait_blue(
-                    point_engine, ring_region[2], ring_region[3], ring_region[2] * 4, cue_pixel, "point engine"
-                )
-                break
-            except SystemExit:
-                if attempt == 5:
-                    raise
-                time.sleep(0.4)
-
+        point_screen, screen_w, screen_h, screen_stride, point_engine, count, box, engine_count, engine_box = capture_state(
+            engine, engine_process, "point", RING_CROP, ring_region,
+            evidence / "point-screen.bgra", evidence / "point-engine.bgrx")
         write_ppm(evidence / "point-screen.ppm", point_screen, screen_w, screen_h, screen_stride)
         write_ppm(
             evidence / "point-engine.ppm",
@@ -659,47 +580,13 @@ def main():
             ring_region[3],
             ring_region[2] * 4,
         )
-
         engine_process.request(
             "session.point", {"session_id": engine_process.session_id, "clear": True}, 20
         )
         time.sleep(0.8)
-
-        for attempt in range(6):
-            indicator_screen, screen_w, screen_h, screen_stride, indicator_engine = check_crop(
-                FIXTURE,
-                INDICATOR_CROP,
-                "indicator",
-                engine,
-                engine_process,
-                evidence / "indicator-screen.bgra",
-                evidence / "indicator-engine.bgrx",
-                indicator_region[2],
-                indicator_region[3],
-                indicator_region,
-            )
-            try:
-                indicator_count, indicator_box = wait_blue(
-                    indicator_screen,
-                    screen_w,
-                    screen_h,
-                    screen_stride,
-                    cue_pixel,
-                    "indicator screen",
-                )
-                absent = expect_absent(
-                    indicator_engine,
-                    indicator_region[2],
-                    indicator_region[3],
-                    indicator_region[2] * 4,
-                    cue_pixel,
-                    "indicator engine",
-                )
-                break
-            except SystemExit:
-                if attempt == 5:
-                    raise
-                time.sleep(0.4)
+        indicator_screen, screen_w, screen_h, screen_stride, indicator_engine, indicator_count, indicator_box, absent, _ = capture_state(
+            engine, engine_process, "indicator", INDICATOR_CROP, indicator_region,
+            evidence / "indicator-screen.bgra", evidence / "indicator-engine.bgrx", absent=True)
         write_ppm(
             evidence / "indicator-screen.ppm",
             indicator_screen,
@@ -714,7 +601,6 @@ def main():
             indicator_region[3],
             indicator_region[2] * 4,
         )
-
         fps = 8
         seconds = 2
 
@@ -818,34 +704,15 @@ def main():
             "screen_pixels": indicator_count,
             "screen_box": indicator_box,
             "engine_pixels": absent,
-            "note": (
-                "The engine frame keeps the normal macOS pointer (ScreenCaptureKit "
-                "showsCursor is on); the agent indicator is the blue arrow and "
-                "halo, and those are absent."
-            ),
+            "note": "The engine frame keeps the normal macOS pointer (ScreenCaptureKit showsCursor is on); the agent indicator is the blue arrow and halo, and those are absent.",
         },
-        "recordings": {
-            "fps": fps,
-            "seconds": seconds,
-            "point_frames": point_frames,
-            "indicator_frames": indicator_frames,
-        },
+        "recordings": {"fps": fps, "seconds": seconds, "point_frames": point_frames, "indicator_frames": indicator_frames},
         "consent": {
-            "text": CONSENT_TEXT,
-            "buttons": ["Allow", "Open System Settings"],
-            "answered": False,
-            "observed": (
-                "Two stacked copies were on the live desktop; the proof did not "
-                "click either one or change Screen & System Audio Recording."
-            ),
+            "text": CONSENT_TEXT, "buttons": ["Allow", "Open System Settings"], "answered": False,
+            "observed": "Two stacked copies were on the live desktop; the proof did not click either one or change Screen & System Audio Recording.",
             "notification_center_windows": notifications,
         },
-        "assertions": {
-            "point_in_screen": True,
-            "point_in_engine_frame": True,
-            "indicator_in_screen": True,
-            "indicator_absent_from_engine_frame": True,
-        },
+        "assertions": {"point_in_screen": True, "point_in_engine_frame": True, "indicator_in_screen": True, "indicator_absent_from_engine_frame": True},
     }
     (evidence / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"PASS point-mac-flow: {evidence}")
