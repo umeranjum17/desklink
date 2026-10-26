@@ -47,6 +47,8 @@
  *     [--background light|dark] [--scale 2]
  *   node packages/desktop-host/test/portal-g2g-flow.mjs --hyprland-input-proof
  *     [--hyprland-config lua|legacy] [--scale 2]
+ *   node packages/desktop-host/test/portal-g2g-flow.mjs --wayland-qual
+ *     (DESKLINK_QUAL_EVIDENCE_DIR names an absolute directory)
  *
  * `--input-proof` shares one window, then the output, through
  * xdg-desktop-portal-wlr and taps each over the control channel: the window's
@@ -72,7 +74,14 @@
  * helper onto it (respawned with the landed origin through the point
  * helper's output selection, edge glow with it); a tap on the helper's own
  * output reuses it, and closing the session reaps every helper.
- * `DESKLINK_CUE_EVIDENCE_DIR` keeps those captures. Hyprland 0.56's headless backend has
+ * `DESKLINK_CUE_EVIDENCE_DIR` keeps those captures.
+ *
+ * `--wayland-qual` proves a live monitor share, pointer input on a full-output
+ * window share, the agent cue on the lab output but not in the shared stream,
+ * and a side-by-side mp4, then records the layer-shell probe with and without
+ * layer-shell. `DESKLINK_QUAL_EVIDENCE_DIR` keeps the stills and recording.
+ *
+ * Hyprland 0.56's headless backend has
  * no allocator of its own, so `DESKLINK_PORTAL_AQUAMARINE` names a directory
  * holding an aquamarine of the same version built with one lab patch: in
  * `src/backend/Headless.cpp`, `drmFD()` and `drmRenderNodeFD()` return a node
@@ -113,6 +122,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
+import net from 'node:net';
 import {
     chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync,
     openSync, realpathSync, rmSync, statSync, writeFileSync,
@@ -263,6 +273,11 @@ async function cage(dir) {
                     }
                     return { status: 0, out: JSON.stringify(pids), err: '' };
                 }
+                // The real helper's layer-shell discovery against this cage.
+                if (args[0] === 'probe') {
+                    const ran = spawnSync(config.engine, ['point-layer-shell-probe'], { env: client, encoding: 'utf8' });
+                    return { status: ran.status, out: ran.stdout.trim(), err: ran.stderr.trim() };
+                }
                 const ran = hyprctl(args);
                 return { status: ran.status, out: ran.stdout, err: ran.stderr };
             });
@@ -270,9 +285,12 @@ async function cage(dir) {
             writeFileSync(join(dir, 'hypr-result'), JSON.stringify(results));
         }, 20);
     }
-    // The Hyprland proof's windows: one to share, two that look alike.
+    // One window to share, two that look alike; the qualification proof shares
+    // one full-output window to compare the cue with the client at once.
     const stamps = hyprland
-        ? [['Umer notes', '480x300', ['--cursor-fixture', '--pointer-log', join(dir, 'pointer.log')]], ['Umer twin', '320x200', []], ['Umer twin', '320x200', []]]
+        ? (config.qual
+            ? [['Umer notes', `${config.width}x${config.height}`, ['--cursor-fixture', '--pointer-log', join(dir, 'pointer.log'), '--background', 'dark']]]
+            : [['Umer notes', '480x300', ['--cursor-fixture', '--pointer-log', join(dir, 'pointer.log')]], ['Umer twin', '320x200', []], ['Umer twin', '320x200', []]])
             .map(([title, size, extra]) => ['--title', title, '--window', size, ...extra])
         : [config.cursorProof ? ['--cursor-fixture', '--pointer-log', join(dir, 'pointer.log'), '--background', config.background] : []];
     for (const extra of stamps) {
@@ -364,9 +382,15 @@ async function main() {
     const freezeAfter = Number(option('freeze-after', '2'));
     const inputProof = process.argv.includes('--input-proof');
     const hyprlandProof = process.argv.includes('--hyprland-input-proof');
+    const qualProof = process.argv.includes('--wayland-qual');
+    const qualEvidence = process.env.DESKLINK_QUAL_EVIDENCE_DIR;
+    if (qualProof && !qualEvidence) {
+        console.error('--wayland-qual writes its evidence: set DESKLINK_QUAL_EVIDENCE_DIR');
+        process.exit(2);
+    }
     const hyprlandConfig = option('hyprland-config', 'lua');
     assert(['lua', 'legacy'].includes(hyprlandConfig), '--hyprland-config is lua or legacy');
-    const scenarios = (process.argv.includes('--cursor-proof') || inputProof || hyprlandProof ? 'still' : option('scenario', 'typing,scroll')).split(',');
+    const scenarios = (process.argv.includes('--cursor-proof') || inputProof || hyprlandProof || qualProof ? 'still' : option('scenario', 'typing,scroll')).split(',');
     const gate = process.argv.includes('--gate');
     assert(width > 0 && height > 0 && maxFps > 0 && seconds > 0, 'bad --size, --fps or --seconds');
     assert(Number.isInteger(freezeAfter) && freezeAfter > 0, 'bad --freeze-after');
@@ -394,16 +418,17 @@ async function main() {
     const chrome = firstFile([process.env.DESKLINK_CHROME]) ?? ['google-chrome-stable', 'google-chrome', 'chromium'].map(which).find(Boolean) ?? null;
     const missing = [
         ['unshare', which('unshare')], ['dbus-daemon', which('dbus-daemon')], ['busctl', which('busctl')],
-        ['pipewire', which('pipewire')], ['wireplumber', which('wireplumber')], ['sway', hyprlandProof || sway],
+        ['pipewire', which('pipewire')], ['wireplumber', which('wireplumber')], ['sway', hyprlandProof || qualProof || sway],
         ['xdg-desktop-portal', portal], ['xdg-desktop-portal-hyprland', xdph], ['chrome', chrome],
+        ...(qualProof ? [['ffmpeg', which('ffmpeg')]] : []),
     ].filter(([, found]) => !found).map(([name]) => name);
     const xdpw = inputProof ? firstFile([process.env.DESKLINK_PORTAL_XDPW, ...PORTAL_DIRS.map((d) => `${d}/xdg-desktop-portal-wlr`)]) : null;
     const wlrPortal = xdpw && firstFile([join(dirname(xdpw), '../share/xdg-desktop-portal/portals/wlr.portal'), '/usr/share/xdg-desktop-portal/portals/wlr.portal']);
     if (inputProof && !wlrPortal) missing.push('xdg-desktop-portal-wlr (set DESKLINK_PORTAL_XDPW)');
     if (inputProof && !(process.env.DESKLINK_PORTAL_SWAYMSG || which('swaymsg'))) missing.push('swaymsg');
-    const hyprland = hyprlandProof ? process.env.DESKLINK_PORTAL_HYPRLAND || which('Hyprland') : null;
+    const hyprland = hyprlandProof || qualProof ? process.env.DESKLINK_PORTAL_HYPRLAND || which('Hyprland') : null;
     const aquamarine = process.env.DESKLINK_PORTAL_AQUAMARINE;
-    if (hyprlandProof) {
+    if (hyprlandProof || qualProof) {
         if (!hyprland || !which('hyprctl')) missing.push('Hyprland and hyprctl');
         if (!aquamarine || !readdirSafe(aquamarine).some((n) => n.startsWith('libaquamarine.so'))) missing.push('the lab aquamarine (set DESKLINK_PORTAL_AQUAMARINE)');
     }
@@ -435,6 +460,7 @@ async function main() {
             engine, stamp, sway, portal, xdph, portalFile, xdpw, wlrPortal, inputProof, chrome, hyprland, hyprlandConfig, aquamarine, renderNode, width, height, maxFps, seconds, scenario, freezeAfter,
             embeddedControl: process.argv.includes('--embedded-control'),
             cursorProof: process.argv.includes('--cursor-proof'), background: option('background', 'light'), scale: Number(option('scale', '1')), swaymsg: process.env.DESKLINK_PORTAL_SWAYMSG || which('swaymsg'),
+            qualProof, evidence: qualEvidence,
         });
         const after = loadavg()[0];
         result.load = {
@@ -445,7 +471,7 @@ async function main() {
             console.error(`FAIL ${scenario}: load ${result.load.before}/${result.load.after} is over ${limit}`);
             failed = true;
         }
-        if (process.argv.includes('--cursor-proof') || inputProof || hyprlandProof) continue;
+        if (process.argv.includes('--cursor-proof') || inputProof || hyprlandProof || qualProof) continue;
         const measured = result.g2g_ms.n > 0 && Number.isFinite(result.g2g_ms.p50);
         if (gate && scenario === 'typing' && !(measured && result.presented_fps >= 50 && result.g2g_ms.p50 <= 50)) {
             console.error(`FAIL typing: ${result.presented_fps} fps presented, p50 ${result.g2g_ms.p50} ms over ${result.g2g_ms.n} decoded stamps`);
@@ -527,6 +553,7 @@ async function measure(run) {
         });
         const engine = new Engine(child, lines);
         await engine.request('hello', { protocol: 3 });
+        if (run.qualProof) return { ...await qualProofFlow(engine, dir, run), isolation: first.isolation };
         if (run.cursorProof) return {...await cursorProof(engine, dir, run), isolation:first.isolation};
         if (run.inputProof) return { ...await inputProof(engine, dir, run), isolation: first.isolation };
         if (run.hyprland) return { ...await hyprlandInputProof(engine, dir, run), isolation: first.isolation };
@@ -619,6 +646,7 @@ function writeCage(dir, run) {
         scenario: run.scenario, engine: realpathSync(run.engine), stamp: realpathSync(run.stamp), sway: run.sway,
         portal: run.portal, xdph: run.xdph, xdpw: run.inputProof ? run.xdpw : null,
         hyprland: run.hyprland, aquamarine: run.aquamarine, renderNode: run.renderNode,
+        qual: run.qualProof, width: run.width, height: run.height,
         hyprlandConfig: run.hyprlandConfig === 'lua' ? 'hyprland.lua' : 'hyprland.conf', cursorProof: run.cursorProof, background: run.background, swaymsg: run.swaymsg,
         ambient: ambient.filter((path) => path && existsSync(path)).map((path) => {
             const { dev, ino } = statSync(path);
@@ -646,12 +674,12 @@ function writeCage(dir, run) {
     writeFileSync(join(dir, 'hyprland.conf'), [
         `monitor = HEADLESS-1, ${modeW}x${modeH}@60, 0x0, ${run.scale}`,
         'animations {\n  enabled = false\n}',
-        'misc {\n  disable_hyprland_logo = true\n  disable_splash_rendering = true\n}',
+        'misc {\n  disable_hyprland_logo = true\n  disable_splash_rendering = true\n  disable_watchdog_warning = true\n}',
         '',
     ].join('\n'));
     writeFileSync(join(dir, 'hyprland.lua'), [
         `hl.monitor({ output = "HEADLESS-1", mode = "${modeW}x${modeH}@60", position = "0x0", scale = ${run.scale} })`,
-        'hl.config({ animations = { enabled = false }, misc = { disable_hyprland_logo = true, disable_splash_rendering = true } })',
+        'hl.config({ animations = { enabled = false }, misc = { disable_hyprland_logo = true, disable_splash_rendering = true, disable_watchdog_warning = true } })',
         '',
     ].join('\n'));
     // The consent step, answered by the lab: share the one headless output,
@@ -740,6 +768,8 @@ const PAGE = `(() => {
     document.body.appendChild(video);
     const canvas = document.createElement('canvas');
     const context = canvas.getContext('2d', { willReadFrequently: true });
+    const shot = document.createElement('canvas');
+    const shotContext = shot.getContext('2d');
     const state = { frames: 0, measuring: false, sourceWidth: 0, times: [], g2g: [], undecoded: 0 };
     let pending = [];
     let channel = null;
@@ -777,6 +807,13 @@ const PAGE = `(() => {
     window.__g2g = {
         get frames() { return state.frames; },
         get channelOpen() { return channel?.readyState === 'open'; },
+        // The picture the client actually decoded, for a same-moment still.
+        snapshot() {
+            if (video.videoWidth === 0) return null;
+            shot.width = video.videoWidth; shot.height = video.videoHeight;
+            shotContext.drawImage(video, 0, 0);
+            return shot.toDataURL('image/png');
+        },
         async control(message) {
             channel.send(JSON.stringify(message));
             for (let i = 0; i < 100; i++) {
@@ -1060,6 +1097,248 @@ function answerOffers(engine, browser) {
         await browser.until('window.__g2g.channelOpen', 30_000, `the ${share} share's control channel`);
         return opened;
     };
+}
+
+/** Count pixels near one colour in a square around `center`. */
+function nearColor(png, center, [r, g, b], tolerance, radius = 0) {
+    let count = 0;
+    const left = Math.max(0, center.x - radius), right = Math.min(png.width, center.x + radius);
+    const top = Math.max(0, center.y - radius), bottom = Math.min(png.height, center.y + radius);
+    for (let y = top; y < bottom; y++) for (let x = left; x < right; x++) {
+        const i = (y * png.width + x) * 4;
+        if (Math.abs(png.data[i] - r) <= tolerance && Math.abs(png.data[i + 1] - g) <= tolerance && Math.abs(png.data[i + 2] - b) <= tolerance) count++;
+    }
+    return count;
+}
+
+/** The box of one colour's pixels, or null; the search skips an edge band. */
+function colorBox(png, [r, g, b], tolerance = 20, margin = 0) {
+    let box = null;
+    for (let y = margin; y < png.height - margin; y++) for (let x = margin; x < png.width - margin; x++) {
+        const i = (y * png.width + x) * 4;
+        if (Math.abs(png.data[i] - r) > tolerance || Math.abs(png.data[i + 1] - g) > tolerance || Math.abs(png.data[i + 2] - b) > tolerance) continue;
+        box = box ? { left: Math.min(box.left, x), top: Math.min(box.top, y), right: Math.max(box.right, x), bottom: Math.max(box.bottom, y) }
+            : { left: x, top: y, right: x, bottom: y };
+    }
+    return box;
+}
+
+/** Live portal picture, input landing, cue on screen but not in the stream, one recording, and the layer-shell probe. */
+async function qualProofFlow(engine, dir, run) {
+    const evidence = resolve(run.evidence);
+    assert(evidence.startsWith('/'), 'DESKLINK_QUAL_EVIDENCE_DIR must be absolute');
+    mkdirSync(evidence, { recursive: true });
+    const frames = join(evidence, '.frames');
+    rmSync(frames, { recursive: true, force: true });
+    for (const kind of ['screen', 'client']) mkdirSync(join(frames, kind), { recursive: true });
+    const { PNG } = await import('pngjs');
+    const cageRun = async (...commands) => {
+        const result = join(dir, 'hypr-result');
+        rmSync(result, { force: true });
+        writeFileSync(join(dir, 'hypr-command'), JSON.stringify(commands));
+        for (let i = 0; i < 300 && !existsSync(result); i++) await sleep(20);
+        assert(existsSync(result), 'the cage did not run the Hyprland commands');
+        return JSON.parse(readFileSync(result, 'utf8'));
+    };
+    const hypr = async (...commands) => (await cageRun(...commands)).map((entry, i) => {
+        assert.equal(entry.status, 0, `hyprctl ${commands[i].join(' ')}: ${entry.err}`);
+        return entry.out;
+    });
+    const clients = async () => JSON.parse((await hypr(['-j', 'clients']))[0]);
+    const titled = async (title) => (await clients()).filter((client) => client.title === title);
+    const cursor = async () => JSON.parse((await hypr(['-j', 'cursorpos']))[0]);
+    const lua = run.hyprlandConfig === 'lua';
+    const dispatch = async (legacy, luaForm) => {
+        const [said] = await hypr(lua ? ['dispatch', luaForm] : ['dispatch', ...legacy]);
+        assert.match(said.trim(), /^ok/, `dispatch ${lua ? luaForm : legacy.join(' ')}: ${said}`);
+    };
+    const moveWindow = (address, x, y) => dispatch(['movewindowpixel', `exact ${x} ${y},address:${address}`],
+        `hl.dsp.window.move({ x = ${x}, y = ${y}, window = "address:${address}" })`);
+    const pointerLog = () => {
+        const lines = existsSync(join(dir, 'pointer.log')) ? readFileSync(join(dir, 'pointer.log'), 'utf8').trim().split('\n').filter(Boolean) : [];
+        return lines.length ? JSON.parse(lines.at(-1)) : null;
+    };
+    const capture = async (name) => {
+        const path = join(evidence, name);
+        await hypr(['grim', '-o', 'HEADLESS-1', path]);
+        return PNG.sync.read(readFileSync(path));
+    };
+    const browser = await startChrome(run.chrome);
+    let seq = 0;
+    const control = (message) => browser.evaluate(`window.__g2g.control(${JSON.stringify({ ...message, seq: ++seq })})`);
+    const openShare = answerOffers(engine, browser);
+    const share = async (name) => {
+        writeFileSync(join(dir, 'share'), name);
+        const opened = await openShare(name, run);
+        await browser.until('window.__g2g.frames > 0', 30_000, `a first frame of ${name}`);
+        await sleep(500);
+        return opened;
+    };
+    const still = async (name) => {
+        const data = await browser.evaluate('window.__g2g.snapshot()');
+        assert(typeof data === 'string' && data.startsWith('data:image/png'), 'the client has no decoded picture');
+        const bytes = Buffer.from(data.split(',')[1], 'base64');
+        writeFileSync(join(evidence, name), bytes);
+        return PNG.sync.read(bytes);
+    };
+    try {
+        await browser.evaluate(PAGE);
+        // 1. The portal screen share gives the client a live picture; keep it.
+        const monitor = await share('Monitor');
+        const monitorStill = await still('monitor-client-still.png');
+        await capture('monitor-lab-output.png');
+        await engine.request('session.close', { session_id: monitor.sessionId });
+        await sleep(300);
+
+        // 2. A full-output window share: input lands on the fixture through
+        // the engine's Hyprland path, and its own pointer log confirms it.
+        const notes = await share('Umer notes');
+        assert.equal(notes.source.kind, 'Window', 'the lab did not share a window');
+        const [window] = await titled('Umer notes');
+        assert(window, 'the fixture window is missing');
+        await moveWindow(window.address, 0, 0);
+        const encoded = notes.geometry.encoded, source = notes.geometry.source;
+        const tap = async (fx, fy) => {
+            const x = Math.floor(fx * encoded.width), y = Math.floor(fy * encoded.height);
+            const reply = await control({ kind: 'pointer', phase: 'move', x, y, button: 1 });
+            await sleep(250);
+            const [now] = await titled('Umer notes');
+            const local = {
+                x: Math.floor(x * source.width / encoded.width) * now.size[0] / source.width,
+                y: Math.floor(y * source.height / encoded.height) * now.size[1] / source.height,
+            };
+            const expected = { x: Math.floor(now.at[0] + local.x), y: Math.floor(now.at[1] + local.y) };
+            const cursorpos = await cursor(), window_saw = pointerLog();
+            assert.equal(reply?.kind, 'ack', `input was refused: ${JSON.stringify(reply)}`);
+            assert(Math.abs(cursorpos.x - expected.x) <= 1 && Math.abs(cursorpos.y - expected.y) <= 1,
+                `the pointer did not land on the window point: ${JSON.stringify({ expected, cursorpos })}`);
+            assert(window_saw && Math.abs(window_saw.x - local.x) <= 1 && Math.abs(window_saw.y - local.y) <= 1,
+                `the fixture did not receive the pointer: ${JSON.stringify({ local, window_saw })}`);
+            return { tap: { x, y }, expected, local, cursorpos, window_saw, reply };
+        };
+        const landing = await tap(0.3, 0.62);
+        await sleep(700);
+        // Same moment: the desktop capture (cue drawn) and the shared stream.
+        const screen = await capture('agent-cue-on-screen.png');
+        const frame = await engine.request('session.frame', { session_id: notes.sessionId, path: join(dir, 'agent-cue-capture.raw') });
+        const client = await still('agent-cue-client-still.png');
+        const raw = readFileSync(join(dir, 'agent-cue-capture.raw'));
+        const captured = new PNG({ width: frame.width, height: frame.height });
+        for (let i = 0; i < frame.width * frame.height; i++) {
+            captured.data[i * 4] = raw[i * 4 + 2];
+            captured.data[i * 4 + 1] = raw[i * 4 + 1];
+            captured.data[i * 4 + 2] = raw[i * 4];
+            captured.data[i * 4 + 3] = 255;
+        }
+        writeFileSync(join(evidence, 'agent-cue-not-in-capture.png'), PNG.sync.write(captured));
+        rmSync(join(dir, 'agent-cue-capture.raw'), { force: true });
+        const rim = colorBox(screen, [0x12, 0x30, 0x47], 6, 10);
+        assert(rim, 'the agent cue is not drawn on the lab output');
+        const drawn = { x: (rim.left + rim.right) / 2, y: rim.top + 30 };
+        assert(Math.abs(drawn.x - landing.expected.x) <= 2 && Math.abs(drawn.y - landing.expected.y) <= 2,
+            `the agent cue is not where the input landed: ${JSON.stringify({ expected: landing.expected, drawn })}`);
+        const onScreen = nearColor(screen, drawn, [0x29, 0x99, 0xff], 20, 60);
+        assert(onScreen > 0, 'the agent cue ring is not on the lab output');
+        const localRing = {
+            x: Math.floor(landing.local.x * frame.width / source.width),
+            y: Math.floor(landing.local.y * frame.height / source.height),
+        };
+        const inFrame = nearColor(captured, localRing, [0x29, 0x99, 0xff], 20, 90);
+        const clientScale = client.width / source.width;
+        const inClient = nearColor(client, { x: Math.floor(landing.local.x * clientScale), y: Math.floor(landing.local.y * clientScale) }, [0x29, 0x99, 0xff], 60, 90);
+        assert.equal(inFrame, 0, 'the agent cue was captured into the shared window stream');
+        assert.equal(inClient, 0, 'the agent cue reached the client picture');
+
+        // 3. One recording: the lab output and the client picture side by side
+        // while three more taps land and the cue on screen moves.
+        const ticks = 48;
+        const taps = new Map([[6, [0.3, 0.35]], [20, [0.7, 0.6]], [34, [0.45, 0.5]]]);
+        for (let i = 0; i < ticks; i++) {
+            if (taps.has(i)) await tap(...taps.get(i));
+            await hypr(['grim', '-o', 'HEADLESS-1', join(frames, 'screen', `${String(i).padStart(3, '0')}.png`)]);
+            const data = await browser.evaluate('window.__g2g.snapshot()');
+            assert(typeof data === 'string' && data.startsWith('data:image/png'), 'the client picture stopped during the recording');
+            writeFileSync(join(frames, 'client', `${String(i).padStart(3, '0')}.png`), Buffer.from(data.split(',')[1], 'base64'));
+            await sleep(120);
+        }
+        const font = firstFile(['/usr/share/fonts/noto/NotoSans-Regular.ttf', '/usr/share/fonts/TTF/DejaVuSans.ttf']);
+        assert(font, 'no font to label the recording');
+        const recording = join(evidence, 'wayland-portal-cue.mp4');
+        const filter = `[0:v]scale=-2:540,pad=iw:ih+44:0:44:color=0x101418,drawtext=fontfile=${font}:text='Lab desktop with the agent cue':x=16:y=12:fontsize=20:fontcolor=white[a];`
+            + `[1:v]scale=-2:540,pad=iw:ih+44:0:44:color=0x101418,drawtext=fontfile=${font}:text='Client shared picture stays clean':x=16:y=12:fontsize=20:fontcolor=white[b];[a][b]hstack=inputs=2[v]`;
+        const composed = spawnSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error',
+            '-framerate', '8', '-i', join(frames, 'screen', '%03d.png'),
+            '-framerate', '8', '-i', join(frames, 'client', '%03d.png'),
+            '-filter_complex', filter, '-map', '[v]', '-c:v', 'libx264', '-preset', 'veryfast',
+            '-pix_fmt', 'yuv420p', '-movflags', '+faststart', recording], { encoding: 'utf8' });
+        assert.equal(composed.status, 0, `ffmpeg: ${composed.stderr}`);
+        await engine.request('session.close', { session_id: notes.sessionId });
+
+        // 4. Layer-shell discovery: this compositor offers it; a private
+        // Wayland server without it makes the helper say so, not stay silent.
+        const onCompositor = (await cageRun(['probe']))[0];
+        const withoutLayerShell = await noLayerShellProbe(run.engine, dir);
+        assert.equal(onCompositor.status, 0, JSON.stringify(onCompositor));
+        assert.equal(onCompositor.out, 'READY');
+        assert.equal(withoutLayerShell.status, 2, JSON.stringify(withoutLayerShell));
+        assert.match(withoutLayerShell.out, /layer_shell_unavailable/);
+        writeFileSync(join(evidence, 'layer-shell-probe.json'), JSON.stringify({ compositor: onCompositor, no_layer_shell: withoutLayerShell }, null, 1));
+
+        rmSync(frames, { recursive: true, force: true });
+        return {
+            source: 'portal', compositor: 'hyprland', config: run.hyprlandConfig,
+            monitor: { still: monitorStill.width + 'x' + monitorStill.height },
+            input: landing,
+            cue: { drawn, on_screen: onScreen, captured_pixels: inFrame, client_pixels: inClient },
+            recording: basename(recording), probe: { compositor: onCompositor.out, no_layer_shell: withoutLayerShell.out },
+        };
+    } finally {
+        await browser.close();
+        rmSync(frames, { recursive: true, force: true });
+    }
+}
+
+/** Run the real helper's probe against a private Wayland registry with no layer-shell. */
+function noLayerShellProbe(binary, dir) {
+    const socket = join(dir, 'no-layer-shell.sock');
+    rmSync(socket, { force: true });
+    const server = net.createServer((connection) => {
+        let buffered = Buffer.alloc(0);
+        connection.on('data', (chunk) => {
+            buffered = Buffer.concat([buffered, chunk]);
+            while (buffered.length >= 8) {
+                const object = buffered.readUInt32LE(0);
+                const sizeOpcode = buffered.readUInt32LE(4);
+                const size = sizeOpcode >>> 16, opcode = sizeOpcode & 0xffff;
+                if (size < 8 || buffered.length < size) break;
+                const body = buffered.subarray(8, size);
+                buffered = buffered.subarray(size);
+                if (object === 1 && opcode === 0 && body.length >= 4) {
+                    const reply = Buffer.alloc(12);
+                    reply.writeUInt32LE(body.readUInt32LE(0), 0);
+                    reply.writeUInt32LE(12 << 16, 4);
+                    reply.writeUInt32LE(1, 8);
+                    connection.write(reply);
+                }
+            }
+        });
+    });
+    return new Promise((done) => {
+        server.listen(socket, async () => {
+            const env = { ...process.env, WAYLAND_DISPLAY: socket, XDG_RUNTIME_DIR: dir };
+            delete env.DISPLAY;
+            const child = spawn(binary, ['point-layer-shell-probe'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+            let out = '', err = '';
+            child.stdout.on('data', (chunk) => { out += chunk; });
+            child.stderr.on('data', (chunk) => { err += chunk; });
+            const timeout = setTimeout(() => child.kill('SIGKILL'), 15_000);
+            const status = await new Promise((exit) => child.once('exit', exit));
+            clearTimeout(timeout);
+            server.close();
+            rmSync(socket, { force: true });
+            done({ status, out: out.trim(), err: err.trim() });
+        });
+    });
 }
 
 // On Hyprland a shared window's taps land on the window: the engine finds it
