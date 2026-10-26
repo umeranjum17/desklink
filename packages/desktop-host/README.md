@@ -84,7 +84,11 @@ See the [changelog](https://github.com/umeranjum17/desklink/blob/main/CHANGELOG.
 npm install @desklink/host
 npx desklink-host path            # the engine this install will run
 npx desklink-host capabilities    # what this machine can do right now
+npx desklink-host doctor          # check every Linux requirement before a session
 ```
+
+`doctor` prints one PASS/FAIL line per requirement with the exact free package
+command for each failure, and exits nonzero when one is missing. It starts no session.
 
 On **Linux x64 with glibc 2.36 or newer** — Debian 12, Ubuntu 24.04, Fedora 37
 or later, Arch — that is the whole install. npm also installs the optional

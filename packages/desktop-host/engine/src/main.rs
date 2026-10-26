@@ -26,6 +26,8 @@ mod clipboard;
 mod clipboard;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod convert;
+#[cfg(target_os = "linux")]
+mod diagnose;
 #[cfg(any(target_os = "linux", all(target_os = "macos", desklink_vpx)))]
 mod cursor;
 #[cfg(target_os = "linux")]
@@ -245,6 +247,8 @@ fn main() {
             );
             0
         }
+        #[cfg(target_os = "linux")]
+        "diagnose" => report(runtime.block_on(diagnose::run())),
         "serve" => report(runtime.block_on(serve())),
         "keep" => keeper::command(&args[1..]),
         "capture-probe" => report(runtime.block_on(probe(
@@ -293,6 +297,7 @@ USAGE:
                                  keep one private X screen: kiosk geometry, focus,
                                  and a JSON-lines window report on stdout
   desklink-host capabilities     print what this machine can do right now
+  desklink-host diagnose         print the non-prompting checks behind `desklink-host doctor`
   desklink-host capture-probe [seconds] [display]
                                  capture frames and report the stream; with a
                                  display argument it reads that X display's root
