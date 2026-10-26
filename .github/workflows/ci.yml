@@ -131,6 +131,11 @@ jobs:
       - run: node packages/desktop-host/test/capabilities-audio.mjs
         env:
           DESKLINK_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/desklink-host
+      # `doctor` on a private Xvfb: healthy requirements PASS/N/A, then the
+      # exact FAIL text and fix for a hidden engine and a portal-less Wayland.
+      - run: node packages/desktop-host/test/doctor-flow.mjs
+        env:
+          DESKLINK_ENGINE: ${{ github.workspace }}/packages/desktop-host/engine/target/debug/desklink-host
       # The client hook's P3a baseline roam (12s same-address outage) on an
       # owned Xvfb, reusing the engine build above. Report-only
       # (continue-on-error): CI runners are small and contended, so its timing

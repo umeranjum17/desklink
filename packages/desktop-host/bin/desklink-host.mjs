@@ -2,14 +2,16 @@
 /**
  * CLI for the desktop host engine package.
  *
- * `path` and `capabilities` work without starting a session, so a consumer can
- * tell the user what is wrong before a desktop is opened rather than after.
+ * `path`, `doctor` and `capabilities` work without starting a session, so a
+ * consumer can tell the user what is wrong before a desktop is opened rather
+ * than after.
  * Everything else is forwarded to the engine binary, so the CLI cannot drift
  * from the process protocol it documents.
  */
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { Bridge } from '../dist/bridge.js';
+import { runDoctor } from '../dist/doctor.js';
 import { EngineClient, windowsEngineStartupError } from '../dist/engineProcess.js';
 import { explainMissingEngine, resolveEngine } from '../dist/resolveEngine.js';
 
@@ -21,12 +23,13 @@ async function main() {
 
 USAGE:
   desklink-host path                  print the engine binary this package would run
+  desklink-host doctor                check every Linux requirement and print the fix for each failure
   desklink-host capabilities          print what this machine can do right now
   desklink-host bridge [--listen H:P] [--token T] [--source portal|x11|display] [--display :0] [--display-id ID] [--reattach-ms MS]
                                       re-serve the engine's protocol over a WebSocket and
                                       print the URL to open; no signaling of your own needed
                                       retain detached sessions for 30000 ms; --reattach-ms 0 closes immediately
-  desklink-host <engine command> ...  run the engine directly (serve, keep, capture-probe, setup-input, version)
+  desklink-host <engine command> ...  run the engine directly (serve, keep, capture-probe, setup-input, diagnose, version)
 
 Set DESKLINK_ENGINE to use an engine built somewhere else (MUXR_DESKLINK_ENGINE still works as a deprecated fallback).`);
         return 0;
@@ -39,6 +42,9 @@ Set DESKLINK_ENGINE to use an engine built somewhere else (MUXR_DESKLINK_ENGINE 
         }
         console.log(resolved.command);
         return 0;
+    }
+    if (command === 'doctor') {
+        return await runDoctor();
     }
     if (command === 'bridge') {
         const resolved = resolveEngine();
