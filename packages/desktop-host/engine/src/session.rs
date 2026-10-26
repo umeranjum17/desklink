@@ -208,9 +208,9 @@ unsafe extern "C" {
 }
 
 /// The X11 agent cue is a real window, so root grabs contain it. Restore
-/// exactly the pixels the announced cues cover (one pixel wider for edge
-/// rounding) from the last clean frame; everything else, including what lies
-/// inside the halo, stays live.
+/// the pixels the announced cues cover (with a small margin for edge rounding)
+/// from the last clean frame; everything else, including what lies inside the
+/// halo, stays live.
 #[cfg(target_os = "linux")]
 struct CueMask {
     cues: crate::indicator::Cues,
@@ -230,18 +230,18 @@ impl CueMask {
             .unwrap_or_default()
     }
 
-    /// `before` is the snapshot taken when the grab started: with the states
-    /// announced by the time it returned, it covers whatever the grab saw.
+    /// `announced` is the snapshot taken after the grab: the helper announces
+    /// every state before drawing it, so this covers whatever the grab saw.
     fn apply(
         &mut self,
         raw: &mut [u8],
         width: usize,
         height: usize,
-        mut cues: Vec<crate::indicator::Cue>,
+        mut announced: Vec<crate::indicator::Cue>,
     ) {
-        cues.extend(self.snapshot());
+        announced.extend(self.snapshot());
         if let Some(clean) = self.clean.as_ref().filter(|clean| clean.len() == raw.len()) {
-            for cue in cues {
+            for cue in &announced {
                 let side = cue.size as usize + 2;
                 let mut covered = vec![false; side * side];
                 for row in 0..cue.size as usize {
@@ -260,16 +260,26 @@ impl CueMask {
                         } != 0;
                     }
                 }
-                for row in 0..side {
-                    for col in 0..side {
-                        let near =
-                            |r: usize, c: usize| r < side && c < side && covered[r * side + c];
-                        if !(near(row, col)
-                            || near(row.wrapping_sub(1), col)
-                            || near(row + 1, col)
-                            || near(row, col.wrapping_sub(1))
-                            || near(row, col + 1))
-                        {
+                // Restore the cue's pixels and one pixel around them. The
+                // shaped window's edge rounds differently from the coverage
+                // test; the margin keeps its anti-aliased edge out of the
+                // picture without covering live pixels inside the halo.
+                let margin = 1isize;
+                for row in -margin..side as isize + margin {
+                    for col in -margin..side as isize + margin {
+                        let near = |r: isize, c: isize| {
+                            (-margin..=margin).any(|dr| {
+                                (-margin..=margin).any(|dc| {
+                                    let (rr, cc) = (r + dr, c + dc);
+                                    rr >= 0
+                                        && cc >= 0
+                                        && rr < side as isize
+                                        && cc < side as isize
+                                        && covered[rr as usize * side + cc as usize]
+                                })
+                            })
+                        };
+                        if !near(row, col) {
                             continue;
                         }
                         let (x, y) = (cue.x - 1 + col as i64, cue.y - 1 + row as i64);
@@ -282,7 +292,29 @@ impl CueMask {
                 }
             }
         }
-        self.clean = Some(raw.to_vec());
+        // Keep the pre-cue baseline inside each cue's bounding box. Restoring
+        // only the announced shape can leave an anti-aliased edge pixel in the
+        // frame; if that pixel became the baseline, every later cue over it
+        // would restore the old cue instead of the desktop. Outside the boxes
+        // the grab is live and becomes the next baseline.
+        self.clean = Some(match self.clean.take() {
+            Some(old) if old.len() == raw.len() && !announced.is_empty() => {
+                let mut next = raw.to_vec();
+                for cue in &announced {
+                    let x0 = (cue.x - 4).max(0) as usize;
+                    let y0 = (cue.y - 4).max(0) as usize;
+                    let x1 = ((cue.x + cue.size + 4).max(0) as usize).min(width);
+                    let y1 = ((cue.y + cue.size + 4).max(0) as usize).min(height);
+                    for y in y0..y1 {
+                        let start = (y * width + x0) * 4;
+                        let end = (y * width + x1) * 4;
+                        next[start..end].copy_from_slice(&old[start..end]);
+                    }
+                }
+                next
+            }
+            _ => raw.to_vec(),
+        });
     }
 }
 
@@ -371,11 +403,17 @@ fn select_x11(
                     let grabbed = Instant::now();
                     #[cfg(target_os = "linux")]
                     let frame = {
-                        let before = mask.as_ref().map(CueMask::snapshot);
                         let mut desktop = lock(&desktop);
                         desktop.capture_raw().and_then(|mut raw| {
-                            if let (Some(mask), Some(before)) = (mask.as_mut(), before) {
-                                mask.apply(&mut raw, width as usize, height as usize, before);
+                            if let Some(mask) = mask.as_mut() {
+                                // The helper announces each cue before it draws
+                                // it, so reading the feed after the grab covers
+                                // every state the grab could have seen. Reading
+                                // it before the grab would miss a cue drawn
+                                // during the grab and bake it into the clean
+                                // baseline.
+                                let after = mask.snapshot();
+                                mask.apply(&mut raw, width as usize, height as usize, after);
                             }
                             Ok((desktop.convert(&raw, max_width, max_height)?, raw))
                         })

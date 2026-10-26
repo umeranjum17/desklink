@@ -132,11 +132,23 @@ fn main() -> Result<()> {
     let graphics = connection.generate_id()?;
     connection.create_gc(graphics, window, &CreateGCAux::new())?;
 
+    let args: Vec<String> = std::env::args().collect();
+    // `--paint-text` draws the keys this window receives, so a capture shows the
+    // typed text arriving rather than only the event log recording it. The
+    // default fixture stays silent: its pattern is read by pixel, not by font.
+    let paint_text = args.iter().any(|arg| arg == "--paint-text");
+    if paint_text {
+        let font = connection.generate_id()?;
+        connection.open_font(font, b"fixed")?;
+        connection.change_gc(graphics, &x11rb::protocol::xproto::ChangeGCAux::new().font(font))?;
+    }
+
     // A pattern that cannot be confused with a desktop: four coloured bands, a
     // grid, and the coordinates written into the top-left corner as a ladder of
     // ticks every 100 pixels so a capture can be read without any font.
     let mut marker = None;
-    paint(&connection, window, graphics, marker)?;
+    let mut typed = String::new();
+    paint(&connection, window, graphics, marker, &typed, paint_text)?;
     connection.flush()?;
 
     // Put the pointer inside the window so key events have an obvious target on
@@ -153,12 +165,10 @@ fn main() -> Result<()> {
     )?;
     connection.flush()?;
 
-    let args: Vec<String> = std::env::args().collect();
     let record_text = args
         .iter()
         .position(|arg| arg == "--record-text")
         .and_then(|i| args.get(i + 1));
-    let mut typed = String::new();
     let animate = args.iter().any(|arg| arg == "--animate");
     let moving = std::env::args().any(|arg| arg == "--move");
     // `--corner <file>`: on each animation tick, paint the far-corner cell in
@@ -196,7 +206,7 @@ fn main() -> Result<()> {
         while let Some(current) = event {
             match current {
                 Event::Expose(_) => {
-                    paint(&connection, window, graphics, marker)?;
+                    paint(&connection, window, graphics, marker, &typed, paint_text)?;
                     corner_colour = None;
                     connection.flush()?;
                 }
@@ -228,7 +238,7 @@ fn main() -> Result<()> {
                     // the captured picture as well as in this log.
                     if release.detail == 1 {
                         marker = Some((release.event_x, release.event_y));
-                        paint(&connection, window, graphics, marker)?;
+                        paint(&connection, window, graphics, marker, &typed, paint_text)?;
                         corner_colour = None;
                     }
                     emit(
@@ -266,6 +276,10 @@ fn main() -> Result<()> {
                         if (32..=126).contains(&symbol) {
                             typed.push(char::from_u32(symbol).unwrap());
                             std::fs::write(path, &typed)?;
+                            if paint_text {
+                                paint(&connection, window, graphics, marker, &typed, paint_text)?;
+                                connection.flush()?;
+                            }
                         }
                     }
                     if press.detail == 9 {
@@ -373,6 +387,8 @@ fn paint(
     window: u32,
     graphics: u32,
     marker: Option<(i16, i16)>,
+    typed: &str,
+    paint_text: bool,
 ) -> Result<()> {
     let bands: [(u32, u16, u16); 4] = [
         (0x00d04040, 0, HEIGHT / 4),
@@ -420,6 +436,14 @@ fn paint(
         });
     }
     connection.poly_fill_rectangle(window, graphics, &ticks)?;
+    if paint_text && !typed.is_empty() {
+        connection.change_gc(
+            graphics,
+            &x11rb::protocol::xproto::ChangeGCAux::new().foreground(0x00ffffff),
+        )?;
+        // On the red band, clear of the ruler ticks and the click marker.
+        connection.image_text8(window, graphics, 50, 160, typed.as_bytes())?;
+    }
     if let Some((x, y)) = marker {
         connection.change_gc(
             graphics,
