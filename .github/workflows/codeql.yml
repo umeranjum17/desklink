@@ -11,16 +11,44 @@ permissions:
   contents: read
   security-events: write
 
-# One run per workflow+ref. A new push to a pull request cancels the superseded
-# run so runners are not spent on stale heads; runs on main (pushes and the
-# weekly schedule) are never cancelled.
+# One run per pull request. A new push cancels the superseded run so runners
+# are not spent on stale heads; runs on main (pushes and the weekly schedule)
+# are never cancelled. The PR number is stable across pushes, and only
+# pull_request events cancel.
 concurrency:
-  group: codeql-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: codeql-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # A docs-only or otherwise unrelated change cannot affect what CodeQL scans,
+  # so the three-language matrix is skipped. This job always runs instead, so a
+  # skipped analysis still reports rather than leaving the PR waiting.
+  changes:
+    name: classify
+    runs-on: ubuntu-24.04
+    outputs:
+      heavy: ${{ steps.filter.outputs.heavy }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Classify the changed files
+        id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            # Not a pull request (main push or the weekly schedule): always run.
+            echo 'heavy=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin \
+            "+refs/heads/$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
+          git diff --no-renames --name-only "origin/$GITHUB_BASE_REF" HEAD > "$RUNNER_TEMP/changed-files.txt"
+          bash .github/workflows/classify-changes.sh heavy < "$RUNNER_TEMP/changed-files.txt" >> "$GITHUB_OUTPUT"
+
   analyze:
     name: Analyze (${{ matrix.language }})
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.heavy == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
