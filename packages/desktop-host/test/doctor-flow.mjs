@@ -81,6 +81,10 @@ function checkLines(text) {
     return text.split('\n').filter((line) => /^(PASS|FAIL|N\/A)\s/.test(line));
 }
 
+function escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 try {
     spawnSync('xauth', ['-f', authority, 'add', display, '.', randomBytes(16).toString('hex')]);
     xvfb = spawn('Xvfb', [display, '-auth', authority, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], { stdio: 'ignore' });
@@ -94,11 +98,11 @@ try {
     assert.equal(lines.length, 7, `expected seven requirement lines:\n${healthy.stdout}`);
     assert.match(healthy.stdout, /^PASS  engine\b/m);
     assert.match(healthy.stdout, /^PASS  node\b/m);
-    assert.match(healthy.stdout, new RegExp(`^PASS  x11\\s+${display} 1280x720, XShm \\+ XDamage$`, 'm'));
+    assert.match(healthy.stdout, new RegExp(`^PASS  x11\\s+${escapeRegExp(display)} 1280x720, XShm \\+ XDamage$`, 'm'));
     assert.match(healthy.stdout, /^N\/A   wayland\b/m);
-    assert.match(healthy.stdout, new RegExp(`^PASS  input\\s+XTest on ${display}$`, 'm'));
+    assert.match(healthy.stdout, new RegExp(`^PASS  input\\s+XTest on ${escapeRegExp(display)}$`, 'm'));
     assert.match(healthy.stdout, /^PASS  encoder\b/m);
-    assert.match(healthy.stdout, new RegExp(`^PASS  versions\\s+@desklink/host ${packageVersion.replace(/\./g, '\\.')} · engine \\d+\\.\\d+\\.\\d+$`, 'm'));
+    assert.match(healthy.stdout, new RegExp(`^PASS  versions\\s+@desklink/host ${escapeRegExp(packageVersion)} · engine \\d+\\.\\d+\\.\\d+$`, 'm'));
 
     // The engine is the requirement a hidden binary breaks first; its line must
     // carry the resolver's own explanation and an install command for both
