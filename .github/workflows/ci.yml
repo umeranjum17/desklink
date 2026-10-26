@@ -8,11 +8,11 @@ permissions:
   contents: read
   pull-requests: read
 
-# One run per workflow+ref. A new push to a pull request cancels the superseded
-# run so runners are not spent on stale heads; pushes to main are never
-# cancelled.
+# One run per pull request. A new push cancels the superseded run so runners
+# are not spent on stale heads; pushes to main are never cancelled. The PR
+# number is stable across pushes, and only pull_request events cancel.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -21,10 +21,13 @@ jobs:
   # touch. Always runs, so this context reports on every PR. `packages` covers
   # every JS/TS workspace input; `native` covers the desktop-host engine and its
   # release seams. A workflow edit is in both, so CI changes still exercise CI.
-  # Markdown is docs in either set (`every`: a file must match both lines),
-  # except SKILL.md, which the axi validation checks. The skipped jobs still
-  # report, so they can be required checks; never put paths-ignore on this
-  # workflow, or a required check never reports and the PR waits forever.
+  # Plain git, no third-party classifier: the PR merge commit is the base tip
+  # plus the PR's changes, so a diff against the freshly fetched base branch is
+  # exactly the changed-file set. Markdown is docs and is skipped, except
+  # SKILL.md, which the axi validation checks. The skipped jobs still report,
+  # so they can be required checks; never put paths-ignore on this workflow, or
+  # a required check never reports and the PR waits forever. Keep the file sets
+  # in classify-changes.sh in sync with the job comments below.
   changes:
     runs-on: ubuntu-24.04
     outputs:
@@ -32,17 +35,21 @@ jobs:
       native: ${{ steps.filter.outputs.native }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - name: Classify the changed files
         id: filter
-        with:
-          predicate-quantifier: every
-          filters: |
-            packages:
-              - '{.github/**,package.json,package-lock.json,tsconfig.base.json,vitest.config.ts,packages/**}'
-              - '!**/!(SKILL).md'
-            native:
-              - '{.github/**,package.json,package-lock.json,packages/desktop-host/**}'
-              - '!**/!(SKILL).md'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            # Not a pull request (a push to main): every job runs.
+            printf 'packages=true\nnative=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin \
+            "+refs/heads/$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
+          git diff --no-renames --name-only "origin/$GITHUB_BASE_REF" HEAD > "$RUNNER_TEMP/changed-files.txt"
+          bash .github/workflows/classify-changes.sh packages < "$RUNNER_TEMP/changed-files.txt" >> "$GITHUB_OUTPUT"
+          bash .github/workflows/classify-changes.sh native < "$RUNNER_TEMP/changed-files.txt" >> "$GITHUB_OUTPUT"
 
   # Runs when any JS/TS workspace input changed. Skipped on a docs-only or
   # native-only change.
