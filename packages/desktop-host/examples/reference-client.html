@@ -223,13 +223,26 @@ const named = {
   Delete: 'Delete', Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown',
   Control: 'Control', Shift: 'Shift', Alt: 'Alt', Meta: 'Meta',
 };
+// A shortcut (Control or Meta plus one character) is a key with its modifiers,
+// not text: typed text is applied without them, so select-all, copy and paste
+// would otherwise arrive as plain letters.
+function chord(event, down) {
+  if (composing || !(event.ctrlKey || event.metaKey) || event.key.length !== 1) return false;
+  event.preventDefault();
+  const modifiers = [['ctrlKey', 'Control'], ['altKey', 'Alt'], ['shiftKey', 'Shift'], ['metaKey', 'Meta']]
+    .filter(([flag]) => event[flag]).map(([, name]) => name);
+  control({ kind: 'key', character: event.key, down, modifiers });
+  return true;
+}
 keyboard.addEventListener('keydown', (event) => {
+  if (chord(event, true)) return;
   const name = named[event.key];
   if (composing || name === undefined) return;
   event.preventDefault();
   control({ kind: 'key', name, down: true });
 });
 keyboard.addEventListener('keyup', (event) => {
+  if (chord(event, false)) return;
   const name = named[event.key];
   if (composing || name === undefined) return;
   event.preventDefault();

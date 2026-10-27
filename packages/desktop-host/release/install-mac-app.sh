@@ -7,6 +7,12 @@ if [[ $# != 2 && $# != 3 ]]; then
 fi
 engine=$1 app=$2
 [[ $(uname -s) == Darwin && -f $engine && $app == /* && $app == *.app ]] || { echo 'requires macOS, an engine, and an absolute .app path' >&2; exit 2; }
+# The packed release CLI (DESKLINK_MACOS_CLI) embeds no bundle identity, on purpose: it inherits its launcher's
+# grants. Wrapped in this app it would still be refused Screen Recording and Accessibility, whatever the signature.
+if ! otool -l "$engine" | grep __info_plist >/dev/null; then
+  echo "$engine has no embedded Info.plist, so DesklinkHost.app could not hold grants. Build the engine with 'cargo build --release --manifest-path engine/Cargo.toml' (not DESKLINK_MACOS_CLI)." >&2
+  exit 2
+fi
 keychain="$HOME/Library/Keychains/login.keychain-db"
 identity=$(security find-identity -v -p codesigning "$keychain" | awk '/"(Developer ID Application|Apple Development): / { print $2; exit }')
 if [[ -z $identity ]]; then
