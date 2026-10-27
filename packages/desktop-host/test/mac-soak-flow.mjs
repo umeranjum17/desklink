@@ -25,6 +25,8 @@
  * Flags (defaults): --out <dir> (required) --minutes 60 --interval-s 60 --gap-ms 150
  *   --sleep-s 30 (least time asleep) --offline-s 5 (client offline before reconnect)
  *   --tail-s 20 (measured seconds after wake and after reconnect) --max-fps 60
+ *   --sleep display|system (display: `pmset displaysleepnow`, woken with `caffeinate -u`, needs
+ *   nothing; system: `pmset sleepnow`, which this harness cannot undo unattended) and, for system,
  *   --wake pmset|manual (pmset: `sudo -n pmset schedule wake`, needs passwordless sudo;
  *   manual: someone wakes the Mac within 15 minutes)
  *   --dry-run [--fail-at soak|sleep|reconnect]: the same run against a fake Mac on a
@@ -65,7 +67,7 @@ export function parseArgs(args) {
         flags.set(name, bare ? true : args[++i]);
         assert(bare || flags.get(name) !== undefined, `--${name} needs a value`);
     }
-    const known = ['out', 'minutes', 'interval-s', 'gap-ms', 'sleep-s', 'offline-s', 'tail-s', 'max-fps', 'wake', 'dry-run', 'fail-at'];
+    const known = ['out', 'minutes', 'interval-s', 'gap-ms', 'sleep-s', 'offline-s', 'tail-s', 'max-fps', 'sleep', 'wake', 'dry-run', 'fail-at'];
     for (const name of flags.keys()) assert(known.includes(name), `unknown flag --${name}`);
     const number = (name, fallback, min) => {
         const value = Number(flags.get(name) ?? fallback);
@@ -82,10 +84,12 @@ export function parseArgs(args) {
         offlineS: number('offline-s', 5, 1),
         tailS: number('tail-s', 20, 5),
         maxFps: number('max-fps', 60, 1),
+        sleep: flags.get('sleep') ?? 'display',
         wake: flags.get('wake') ?? 'pmset',
         failAt: flags.get('fail-at') ?? null,
     };
     assert(plan.out !== undefined, '--out <directory> is required');
+    assert(['display', 'system'].includes(plan.sleep), '--sleep must be display or system');
     assert(['pmset', 'manual'].includes(plan.wake), '--wake must be pmset or manual');
     assert(plan.failAt === null || (plan.dryRun && ['soak', 'sleep', 'reconnect'].includes(plan.failAt)), '--fail-at is soak|sleep|reconnect and only with --dry-run');
     return plan;
@@ -280,7 +284,7 @@ class FakeLab {
         this.clock += (plan.sleepS + 15) * 1000;
         this.keepAwake = true;
         this.deadUntil = this.clock + 3000;
-        return { requested_at: requested, asleep_ms: this.clock - requested, wake: plan.wake };
+        return { requested_at: requested, asleep_ms: this.clock - requested, kind: plan.sleep };
     }
     async clipStart() {}
     async clipStop(path) { return { path, note: 'dry run: no clip' }; }
@@ -345,7 +349,7 @@ class MacLab {
         assert.equal(capabilities.capture?.grant, 'granted', 'Screen Recording is not granted to the engine');
         assert.equal(capabilities.input?.grant, 'granted', 'Accessibility is not granted to the engine');
         this.display = capabilities.capture.displays.find((d) => d.main);
-        if (plan.wake === 'pmset') run('sudo', ['-n', 'true']);
+        if (plan.sleep === 'system' && plan.wake === 'pmset') run('sudo', ['-n', 'true']);
         mkdirSync(plan.out, { recursive: true });
         this.sleepBefore = this.sleepSettingsNow();
         this.keepAwake();
@@ -435,8 +439,19 @@ class MacLab {
     }
 
     /** Sleep the Mac now and return when it is awake again; time asleep is the wall-clock jump. */
-    async sleepWake({ sleepS, wake }) {
+    async sleepWake({ sleepS, wake, sleep: kind }) {
         const requested = Date.now();
+        if (kind === 'display') {
+            const state = () => run('pmset', ['-g', 'powerstate', 'IODisplayWrangler']).trim();
+            const before = state();
+            run('pmset', ['displaysleepnow']);
+            await sleep(2000);
+            const during = state();
+            await sleep(sleepS * 1000);
+            run('caffeinate', ['-u', '-t', '5']);
+            await sleep(2000);
+            return { requested_at: requested, woke_at: Date.now(), asleep_ms: Date.now() - requested, kind, display_state: { before, during, after: state() }, system_sleep: 'not exercised: needs a human to wake the Mac' };
+        }
         let scheduled = null;
         if (wake === 'pmset') {
             scheduled = pmsetDate(new Date(requested + (sleepS + 15) * 1000));
