@@ -23,7 +23,10 @@ export function diagnose(timeline) {
     const probes = (timeline.probes ?? []).filter((p) => p.engine !== undefined || p.error !== undefined);
     if (wakes.length === 0 || probes.length === 0) return { verdicts: ['no probes after a wake: nothing to diagnose'], rows: [] };
     const rows = [];
-    const verdicts = wakes.map((wake, n) => {
+    // A session the engine ended (lease, transport, error) is dead whatever the display did: say so first.
+    const revoked = probes.flatMap((p) => p.events ?? []).filter((e) => e.name === 'session.revoked')
+        .map((e) => `session revoked (${e.detail?.code}: ${e.detail?.reason}) ${Math.round((e.at - wakes[0].at) / 1000)} s from the first wake`);
+    const verdicts = revoked.concat(wakes.map((wake, n) => {
         const end = timeline.events.find((e) => e.name === 'sleep-requested' && e.at > wake.at)?.at ?? Infinity;
         const own = probes.filter((p) => p.at > wake.at && p.at < end && p.engine !== undefined);
         probes.filter((p) => p.at >= wake.at - 6000 && p.at < end).forEach((p) => rows.push({
@@ -44,7 +47,7 @@ export function diagnose(timeline) {
             ? `every counter moved over the ${span} s after it`
             : `${stuck[0]} did not advance over the ${span} s after it`
               + (stuck === STAGES[0] ? '' : ` although ${STAGES[STAGES.indexOf(stuck) - 1][0]} did`));
-    });
+    }));
     return { verdicts, rows };
 }
 

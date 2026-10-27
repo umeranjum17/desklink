@@ -29,6 +29,8 @@
  *   nothing; system: `pmset sleepnow`, which this harness cannot undo unattended) and, for system,
  *   --wake pmset|manual (pmset: `sudo -n pmset schedule wake`, needs passwordless sudo;
  *   manual: someone wakes the Mac within 15 minutes)
+ *   --ttl-s <n> (minutes*60 + 1800) the session lease the run asks for; the engine's own default of 3600 ends
+ *   the session an hour in, which an hour-long soak would mistake for a failure after the first sleep
  *   --more-sleeps-s 5,12,45: after the first wake's tail, sleep and wake the display again for each
  *   of these many seconds, probing throughout (`mac-soak-wake-report.mjs` judges every wake)
  *   --dry-run [--fail-at soak|sleep|reconnect]: the same run against a fake Mac on a
@@ -69,7 +71,7 @@ export function parseArgs(args) {
         flags.set(name, bare ? true : args[++i]);
         assert(bare || flags.get(name) !== undefined, `--${name} needs a value`);
     }
-    const known = ['out', 'minutes', 'interval-s', 'gap-ms', 'sleep-s', 'offline-s', 'tail-s', 'max-fps', 'sleep', 'wake', 'dry-run', 'fail-at', 'more-sleeps-s'];
+    const known = ['out', 'minutes', 'interval-s', 'gap-ms', 'sleep-s', 'offline-s', 'tail-s', 'max-fps', 'sleep', 'wake', 'dry-run', 'fail-at', 'more-sleeps-s', 'ttl-s'];
     for (const name of flags.keys()) assert(known.includes(name), `unknown flag --${name}`);
     const number = (name, fallback, min) => {
         const value = Number(flags.get(name) ?? fallback);
@@ -86,12 +88,16 @@ export function parseArgs(args) {
         offlineS: number('offline-s', 5, 1),
         tailS: number('tail-s', 20, 5),
         maxFps: number('max-fps', 60, 1),
+        ttlS: flags.get('ttl-s') === undefined ? undefined : number('ttl-s', 0, 10),
         moreSleepsS: (flags.get('more-sleeps-s') ?? '').split(',').filter(Boolean).map(Number),
         sleep: flags.get('sleep') ?? 'display',
         wake: flags.get('wake') ?? 'pmset',
         failAt: flags.get('fail-at') ?? null,
     };
     assert(plan.out !== undefined, '--out <directory> is required');
+    // The session lease (default 3600 s) ends the session, whatever the Mac is doing; a soak of an hour or
+    // more must outlive it, or the end of the run measures the lease and not the sleep.
+    plan.ttlS ??= plan.minutes * 60 + 1800;
     assert(plan.moreSleepsS.every((n) => Number.isFinite(n) && n >= 1), '--more-sleeps-s is a comma list of seconds >= 1');
     assert(['display', 'system'].includes(plan.sleep), '--sleep must be display or system');
     assert(['pmset', 'manual'].includes(plan.wake), '--wake must be pmset or manual');
@@ -162,6 +168,7 @@ export async function runSoak(lab, plan, timeline, save) {
     try {
         await lab.prepare();
         event('session-open', await lab.connect());
+        lab.probeStart(timeline.probes);
         enter('soak');
         const start = lab.now();
         for (let n = 0; n < plan.minutes; n += 1) {
@@ -174,7 +181,7 @@ export async function runSoak(lab, plan, timeline, save) {
 
         enter('sleep', true);
         event('sleep-requested');
-        lab.probeStart(timeline.probes);
+        lab.probeMs = 2000;
         const slept = await lab.sleepWake(plan);
         event('woke', slept);
         enter('wake-gap', true);
@@ -429,7 +436,7 @@ class MacLab {
         this.cleanup.add('remove Chrome profile', () => rmSync(profile, { recursive: true, force: true }));
         const [fx, fy, fw, fh] = this.fixture;
         const page = `${vite.resolvedUrls.local[0]}packages/desktop-host/test/mac-soak-flow.html?control=${encodeURIComponent(`ws://127.0.0.1:${ctl.address().port}`)}`
-            + `&echo=${fx + fw / 2},${fy},${fw / 2},${fh}&fixture=${this.fixture}&points=${points.width},${points.height}&maxFps=${plan.maxFps}`;
+            + `&ttl=${plan.ttlS}&echo=${fx + fw / 2},${fy},${fw / 2},${fh}&fixture=${this.fixture}&points=${points.width},${points.height}&maxFps=${plan.maxFps}`;
         this.spawnOwned('close Chrome', this.chrome, ['--headless=new', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
             '--autoplay-policy=no-user-gesture-required', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', page]);
         await Promise.race([ready, sleep(30_000).then(() => { throw new Error('the Chrome client never connected to the driver'); })]);
@@ -447,14 +454,15 @@ class MacLab {
     disconnect() { return this.call('disconnect'); }
     frames() { return this.call('frames'); }
     metrics() { return this.call('metrics'); }
-    /** Look at every boundary every 2 s until `probeStop`: the evidence of which side is stuck. */
+    /** Look at every boundary until `probeStop` (every 10 s, every 2 s once `probeMs` is lowered for the sleep): the evidence of which side is stuck. */
     probeStart(into) {
+        this.probeMs = 10_000;
         this.probing = (async () => {
             this.probeOn = true;
             while (this.probeOn) {
                 const sample = await this.call('probe', {}, 5000).catch((error) => ({ at: Date.now(), error: error.message }));
                 into.push(sample);
-                await sleep(2000);
+                await sleep(this.probeMs);
             }
         })();
     }
