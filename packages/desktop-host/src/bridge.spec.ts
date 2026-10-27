@@ -310,6 +310,34 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
         expect(seen).toEqual([{ source: { kind: 'x11', display: ':99' }, localFrames: false }]);
     }, 20_000);
 
+    it('lets a client choose which display a display bridge shares, and nothing else', async () => {
+        const directory = mkdtempSync(join(tmpdir(), 'desklink-bridge-'));
+        const script = join(directory, 'engine.cjs');
+        writeFileSync(
+            script,
+            STUB.replace("if (request.method === 'session.open') {", "if (request.method === 'session.open') {\n    out({ event: 'seen', params: { source: request.params.source ?? null, stray: 'display_id' in request.params } });"),
+        );
+        const bridge = await Bridge.start({
+            listen: '127.0.0.1:0', token: 't', engineCommand: process.execPath, engineArgs: [script],
+            source: { kind: 'display' }, serveExample: false,
+        });
+        bridges.push(bridge);
+        const socket = await connect(bridge.port, 'token=t');
+        const seen: unknown[] = [];
+        socket.on('message', (raw) => {
+            const message = JSON.parse(String(raw)) as { event?: string; params?: unknown };
+            if (message.event === 'seen') seen.push(message.params);
+        });
+        await requestOn(socket, 1, 'session.open', { display_id: 7 });
+        await requestOn(socket, 2, 'session.open', { display_id: -1 });
+        await requestOn(socket, 3, 'session.open');
+        expect(seen).toEqual([
+            { source: { kind: 'display', display_id: 7 }, stray: false },
+            { source: { kind: 'display' }, stray: false },
+            { source: { kind: 'display' }, stray: false },
+        ]);
+    }, 20_000);
+
     it('closes a late open when its requesting socket disconnects', async () => {
         const directory = mkdtempSync(join(tmpdir(), 'desklink-bridge-'));
         const script = join(directory, 'engine.cjs');

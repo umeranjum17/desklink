@@ -171,12 +171,17 @@ export class Bridge {
             }
             // Nothing past the socket can read local frames, so the engine keeps
             // them only for a host that listens to its events.
+            // The one thing a client may choose is which of the host's displays
+            // to share, and only when this bridge is bound to display capture.
+            const { display_id: chosen, ...rest } = (request.params ?? {}) as Record<string, unknown>;
+            const source = method === 'session.open' && this.defaultSource?.kind === 'display' && Number.isSafeInteger(chosen) && (chosen as number) >= 0 && (chosen as number) <= 0xffff_ffff
+                ? { kind: 'display' as const, display_id: chosen as number }
+                : this.defaultSource;
+            if (source?.kind === 'display' && source.display_id !== undefined && method === 'session.open') {
+                console.error(`bridge: session.open display_id=${source.display_id}`);
+            }
             const params = method === 'session.open'
-                ? {
-                    ...(request.params ?? {}),
-                    ...(this.defaultSource !== undefined ? { source: this.defaultSource } : {}),
-                    local_frames: this.localFrames,
-                }
+                ? { ...rest, ...(source !== undefined ? { source } : {}), local_frames: this.localFrames }
                 : request.params;
             void this.engine
                 .request<Record<string, unknown>>(method, params)

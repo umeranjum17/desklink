@@ -29,7 +29,9 @@
     text-overflow: ellipsis; white-space: nowrap; }
   button { font: inherit; color: inherit; background: #23262c; border: 1px solid #3a3f47;
     border-radius: 9px; min-height: 38px; padding: 6px 12px; }
-  button:disabled { opacity: .45; }
+  button:disabled, select:disabled { opacity: .45; }
+  select { font: inherit; color: inherit; background: #23262c; border: 1px solid #3a3f47;
+    border-radius: 9px; min-height: 38px; padding: 6px 12px; max-width: 100%; }
   #stage { position: relative; flex: 1; min-height: 0; overflow: hidden;
     display: flex; align-items: center; justify-content: center; background: #000; }
   video { display: none; max-width: 100%; max-height: 100%; touch-action: none; }
@@ -53,6 +55,7 @@
   <textarea id="remote-keyboard" aria-label="Remote keyboard"></textarea>
 </div>
 <nav id="tools">
+  <select id="display" aria-label="Display to share" hidden></select>
   <button id="keyboard">Keyboard</button>
   <button id="copy" hidden>Copy from desktop</button>
   <button id="paste" hidden>Paste to desktop</button>
@@ -80,6 +83,9 @@ const keyboard = document.getElementById('remote-keyboard');
 const keyboardButton = document.getElementById('keyboard');
 const copy = document.getElementById('copy');
 const paste = document.getElementById('paste');
+const picker = document.getElementById('display');
+// Chosen display, kept across reconnects. Null means the host's own default.
+let chosenDisplay = null;
 
 let socket = null;
 let peer = null;
@@ -270,6 +276,7 @@ async function start() {
   if (opening) return;
   opening = true;
   reconnect.disabled = true;
+  picker.disabled = true;
   copy.hidden = true;
   paste.hidden = true;
   video.srcObject = null;
@@ -281,7 +288,18 @@ async function start() {
     const clipboardAvailable = capabilities.clipboard?.read === true && capabilities.clipboard?.write === true;
     const controlAvailable = capabilities.input?.pointer === true && capabilities.input?.keyboard === true;
     // The bridge token is the pairing: a paired session has view, input and clipboard.
-    const session = await request('session.open', {});
+    // Only a host that lists more than one display offers a choice; with one
+    // (or no list) nothing changes and no display_id is sent.
+    const displays = capabilities.capture?.displays ?? [];
+    picker.hidden = displays.length < 2;
+    if (displays.length < 2) chosenDisplay = null;
+    else {
+      picker.replaceChildren(...displays.map((d, i) => new Option(
+        `Display ${i + 1} · ${d.width}×${d.height}${d.main ? ' · main' : ''}`, d.id)));
+      if (!displays.some((d) => d.id === chosenDisplay)) chosenDisplay = (displays.find((d) => d.main) ?? displays[0]).id;
+      picker.value = String(chosenDisplay);
+    }
+    const session = await request('session.open', chosenDisplay === null ? {} : { display_id: chosenDisplay });
     currentSessionId = session.sessionId;
     keyboard.disabled = !controlAvailable;
     keyboardButton.disabled = !controlAvailable;
@@ -360,12 +378,14 @@ async function start() {
       description: { type: 'answer', sdp: answer.sdp },
     });
     reconnect.disabled = false;
+    picker.disabled = false;
     void pc;
   } catch (error) {
     show(`Could not open the desktop. ${error instanceof Error ? error.message : error}`);
     say('Failed');
     teardown();
     reconnect.disabled = false;
+    picker.disabled = false;
   } finally {
     opening = false;
   }
@@ -451,6 +471,10 @@ function connectSocket() {
   };
 }
 
+picker.addEventListener('change', () => {
+  chosenDisplay = Number(picker.value);
+  reconnect.click();
+});
 reconnect.addEventListener('click', () => {
   attempts += 1;
   teardown();
