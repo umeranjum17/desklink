@@ -43,7 +43,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -170,6 +170,7 @@ export async function runSoak(lab, plan, timeline, save) {
 
         enter('sleep', true);
         event('sleep-requested');
+        lab.probeStart(timeline.probes);
         const slept = await lab.sleepWake(plan);
         event('woke', slept);
         enter('wake-gap', true);
@@ -182,6 +183,7 @@ export async function runSoak(lab, plan, timeline, save) {
         enter('after-wake');
         for (let i = 0; i < 3; i += 1) await type(1000 + i);
         await hold(plan.tailS * 1000);
+        await lab.probeStop();
 
         await lab.clipStart();
         await hold(2000);
@@ -288,6 +290,8 @@ class FakeLab {
         this.deadUntil = this.clock + 3000;
         return { requested_at: requested, asleep_ms: this.clock - requested, kind: plan.sleep };
     }
+    probeStart() {}
+    async probeStop() {}
     async clipStart() {}
     async clipStop(path) { return { path, note: 'dry run: no clip' }; }
     sleepSettingsNow() { return this.snapshot(); }
@@ -316,12 +320,15 @@ class MacLab {
     now() { return Date.now(); }
     wait(ms) { return sleep(ms); }
     sleepSettingsNow() { return `${run('pmset', ['-g', 'custom'])}\n${run('pmset', ['-g', 'sched'])}`; }
-    spawnOwned(step, command, args, options = {}) {
+    spawnOwned(step, command, args, { log, ...options } = {}) {
         const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], ...options });
         child.stdout.resume();
         child.stderr.setEncoding('utf8');
         child.recent = '';
-        child.stderr.on('data', (chunk) => { child.recent = (child.recent + chunk).slice(-600); });
+        child.stderr.on('data', (chunk) => {
+            child.recent = (child.recent + chunk).slice(-600);
+            if (log !== undefined) appendFileSync(log, chunk);
+        });
         this.cleanup.add(step, async () => {
             if (child.exitCode !== null) return;
             child.kill('SIGTERM');
@@ -396,7 +403,8 @@ class MacLab {
         const token = randomBytes(24).toString('base64url');
         const bridge = this.spawnOwned('stop bridge', process.execPath, [join(repo, 'packages/desktop-host/bin/desklink-host.mjs'),
             'bridge', '--listen', `127.0.0.1:${port}`, '--token', token, '--source', 'display', '--display-id', String(this.display.id)],
-        { env: { ...process.env, DESKLINK_ENGINE: this.engine } });
+        // The engine's stderr is what says why a capture stopped; keep all of it.
+        { env: { ...process.env, DESKLINK_ENGINE: this.engine }, log: join(plan.out, 'engine.log') });
         this.bridgeUrl = `ws://127.0.0.1:${port}/desktop?token=${encodeURIComponent(token)}`;
         for (let tries = 0; ; tries += 1) {
             assert(bridge.exitCode === null && tries < 100, `bridge did not start: ${bridge.recent}`);
@@ -427,6 +435,21 @@ class MacLab {
     disconnect() { return this.call('disconnect'); }
     frames() { return this.call('frames'); }
     metrics() { return this.call('metrics'); }
+    /** Look at every boundary every 2 s until `probeStop`: the evidence of which side is stuck. */
+    probeStart(into) {
+        this.probing = (async () => {
+            this.probeOn = true;
+            while (this.probeOn) {
+                const sample = await this.call('probe', {}, 5000).catch((error) => ({ at: Date.now(), error: error.message }));
+                into.push(sample);
+                await sleep(2000);
+            }
+        })();
+    }
+    async probeStop() {
+        this.probeOn = false;
+        await this.probing;
+    }
     clipStart() { return this.call('clip_start'); }
     async clipStop(path) {
         writeFileSync(path, Buffer.from(await this.call('clip_stop', {}, 120_000), 'base64'));
@@ -489,7 +512,7 @@ export async function main(argv) {
         command: `node packages/desktop-host/test/mac-soak-flow.mjs ${argv.join(' ')}`,
         plan: { ...plan, out: undefined },
         started_at: lab.now(), finished_at: null, ok: false, failure: null,
-        host: null, phases: [], events: [], markers: [], latency: [], metrics: [], frames: [], recovery: {}, clip: null,
+        host: null, phases: [], events: [], markers: [], latency: [], metrics: [], probes: [], frames: [], recovery: {}, clip: null,
         summary: null, fps_windows: [], cleanup: [], sleep_settings: null,
     };
     const save = () => {

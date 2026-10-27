@@ -61,6 +61,8 @@ clip.width = 640;
 clip.height = Math.round((640 * fh) / fw);
 const clipContext = clip.getContext('2d');
 let recorder = null;
+let log = [];           // bridge and client events with their wall-clock time, drained by `probe`
+const note = (source, name, detail) => log.push({ at: Date.now(), source, name, detail });
 
 function request(method, params) {
     const id = ++nextId;
@@ -84,11 +86,15 @@ nativeDesklink.addListener('onSessionEvent', async (event) => {
         }).catch(() => undefined);
     } else if (event.name === 'presented') {
         state.presented = true;
+        note('client', 'presented');
     } else if (event.name === 'control') {
         const reply = JSON.parse(String(event.payload.message ?? '{}'));
         if (reply.kind === 'rejected') state.rejection = `${reply.code}: ${reply.message}`;
     } else if (event.name === 'failure') {
         state.failure = event.payload;
+        note('client', 'failure', event.payload);
+    } else if (event.name === 'ice') {
+        note('client', 'ice', event.payload);
     }
 });
 
@@ -104,6 +110,8 @@ function onMessage(message) {
         nativeDesklink.setRemoteDescription(state.localId, 'offer', payload.params.description.sdp);
     } else if (payload.event === 'session.candidate') {
         nativeDesklink.addRemoteCandidate(state.localId, payload.params.candidate, payload.params.sdpMid ?? null, payload.params.sdpMLineIndex ?? null);
+    } else {
+        note('engine', payload.event, payload.params);
     }
 }
 
@@ -196,6 +204,25 @@ const commands = {
     },
     metrics() {
         return request('session.metrics', { session_id: state.sessionId });
+    },
+    /** One look at every boundary: the engine's counters, the client's receive stats, and what happened since the last look. */
+    async probe() {
+        const out = { at: Date.now(), visibility: document.visibilityState, events: log, engine: null, client: null };
+        log = [];
+        const quick = (promise) => Promise.race([promise, sleep(1500).then(() => ({ timeout: true }))]);
+        out.engine = await quick(request('session.metrics', { session_id: state.sessionId }).catch((e) => ({ error: String(e.message ?? e) })));
+        const pc = window.__pcs.at(-1);
+        if (pc) {
+            const inbound = {};
+            const stats = await quick(pc.getStats());
+            if (!stats.timeout) {
+                stats.forEach((r) => {
+                    if (r.type === 'inbound-rtp' && r.kind === 'video') Object.assign(inbound, { framesReceived: r.framesReceived, framesDecoded: r.framesDecoded, bytesReceived: r.bytesReceived, packetsReceived: r.packetsReceived, packetsLost: r.packetsLost, keyFramesDecoded: r.keyFramesDecoded, pliCount: r.pliCount });
+                });
+            }
+            out.client = { connection: pc.connectionState, ice: pc.iceConnectionState, signaling: pc.signalingState, inbound };
+        }
+        return out;
     },
     clip_start() {
         recorder = new MediaRecorder(clip.captureStream(30), { mimeType: 'video/webm', videoBitsPerSecond: 1_500_000 });
