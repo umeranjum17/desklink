@@ -118,7 +118,10 @@ extern "C" void *dl_mac_stream_start(uint32_t display_id, size_t width, size_t h
         config.width = width;
         config.height = height;
         config.pixelFormat = kCVPixelFormatType_32BGRA;
-        config.minimumFrameInterval = CMTimeMake(1, fps ? fps : 30);
+        // Asking for exactly 1/fps makes ScreenCaptureKit drop any refresh that lands a hair early and hold the rest to its
+        // own timer, a few ms late (a 60 Hz display delivered 52-58 fps). 90% of the interval lets every refresh through;
+        // the encoder cadence still caps the stream at `fps`.
+        config.minimumFrameInterval = CMTimeMake(9, (fps ? fps : 30) * 10);
         config.queueDepth = 3;
         config.showsCursor = YES;
         config.capturesAudio = NO;
