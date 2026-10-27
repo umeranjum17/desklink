@@ -56,6 +56,8 @@ mod hyprland;
 mod indicator;
 #[cfg(target_os = "linux")]
 mod input;
+#[cfg(target_os = "linux")]
+mod input_portal;
 #[cfg(target_os = "macos")]
 #[path = "input_mac.rs"]
 mod input;

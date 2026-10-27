@@ -187,7 +187,9 @@ video itself (see *Encoded sources*): a consumer reads it rather than inferring
 support from the engine's version string.
 
 `input.mechanism` names the build's portal input path, `inputtino/uinput`,
-where the engine creates its own virtual devices. A session opened against an X
+where the engine creates its own virtual devices, or `portal-remotedesktop` when
+the session portal advertises a keyboard (keys only, no `/dev/uinput`; `pointer`
+and `wheel` are then `false`). A session opened against an X
 display applies input through XTest instead, where the X server applies the
 events and nothing the engine does can reach another session's keyboard.
 `input.layout` is the keymap the engine compiled for typing, taken from the
