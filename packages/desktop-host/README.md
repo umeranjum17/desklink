@@ -118,7 +118,8 @@ that asks), Quartz pointer/keyboard events, and
 plain-text NSPasteboard operations. `capabilities` is non-prompting; `session.open`
 requests Screen Recording and, for input, Accessibility consent when needed.
 For persistent grants, install the signed `DesklinkHost.app` at one fixed path.
-Build the engine on the Mac, then run
+Build the engine on the Mac with `cargo build --release` (the packed release CLI, built with
+`DESKLINK_MACOS_CLI`, has no bundle identity and the installer refuses it), then run
 `release/install-mac-app.sh <engine> <absolute path to DesklinkHost.app> [existing signing PEM]`
 from this package. It prefers a usable Developer ID Application or Apple
 Development identity in the login keychain; otherwise it imports the supplied
