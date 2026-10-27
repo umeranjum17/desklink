@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The window the macOS soak types into and watches.
 
-Started by `mac-soak-flow.mjs` on the private Mac lab: `mac-soak-fixture.py X Y W H LOG`
+Started by `mac-soak-flow.mjs` on the private Mac lab: `mac-soak-fixture.py X Y W H LOG FOCUS_LOG`
 (points, display origin top-left). It is a borderless window this script owns, in two
 halves: the left cell flips black/white 60 times a second, so capture keeps running at
 its full frame rate while nothing else on the desktop moves; the right cell flips on
@@ -46,9 +46,9 @@ def cell(frame):
 
 
 def main(argv):
-    global LOG
+    global LOG, FOCUS_LOG
     x, y, width, height = (float(value) for value in argv[:4])
-    LOG = argv[4]
+    LOG, FOCUS_LOG = argv[4:6]
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
     cocoa_y = NSScreen.mainScreen().frame().size.height - y - height
@@ -74,6 +74,12 @@ def main(argv):
         app.activateIgnoringOtherApps_(True)
         window.makeKeyAndOrderFront_(None)
 
+    def sample_focus(_timer):
+        current = (bool(app.isActive()), bool(window.isKeyWindow()))
+        with open(FOCUS_LOG, "a") as log:
+            log.write(f"{int(time.time() * 1000)} active={int(current[0])} key={int(current[1])}\n")
+
+    NSTimer.scheduledTimerWithTimeInterval_repeats_block_(0.5, True, sample_focus)
     NSTimer.scheduledTimerWithTimeInterval_repeats_block_(1 / 60, True, tick)
     NSWorkspace.sharedWorkspace().notificationCenter().addObserverForName_object_queue_usingBlock_(
         NSWorkspaceDidWakeNotification, None, None, focus)
@@ -84,6 +90,7 @@ def main(argv):
 
 
 LOG = None
+FOCUS_LOG = None
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
