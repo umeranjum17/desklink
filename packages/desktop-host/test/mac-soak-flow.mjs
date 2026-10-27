@@ -31,6 +31,8 @@
  *   manual: someone wakes the Mac within 15 minutes)
  *   --ttl-s <n> (minutes*60 + 1800) the session lease the run asks for; the engine's own default of 3600 ends
  *   the session an hour in, which an hour-long soak would mistake for a failure after the first sleep
+ *   --client raw|hook (raw): raw drives the web binding directly; hook mounts the real `useDesktopSession`
+ *   hook (the one an app ships), so a lease that runs out is answered by the hook's own reopen
  *   --more-sleeps-s 5,12,45: after the first wake's tail, sleep and wake the display again for each
  *   of these many seconds, probing throughout (`mac-soak-wake-report.mjs` judges every wake)
  *   --dry-run [--fail-at soak|sleep|reconnect]: the same run against a fake Mac on a
@@ -71,7 +73,7 @@ export function parseArgs(args) {
         flags.set(name, bare ? true : args[++i]);
         assert(bare || flags.get(name) !== undefined, `--${name} needs a value`);
     }
-    const known = ['out', 'minutes', 'interval-s', 'gap-ms', 'sleep-s', 'offline-s', 'tail-s', 'max-fps', 'sleep', 'wake', 'dry-run', 'fail-at', 'more-sleeps-s', 'ttl-s'];
+    const known = ['out', 'minutes', 'interval-s', 'gap-ms', 'sleep-s', 'offline-s', 'tail-s', 'max-fps', 'sleep', 'wake', 'dry-run', 'fail-at', 'more-sleeps-s', 'ttl-s', 'client'];
     for (const name of flags.keys()) assert(known.includes(name), `unknown flag --${name}`);
     const number = (name, fallback, min) => {
         const value = Number(flags.get(name) ?? fallback);
@@ -90,6 +92,7 @@ export function parseArgs(args) {
         maxFps: number('max-fps', 60, 1),
         ttlS: flags.get('ttl-s') === undefined ? undefined : number('ttl-s', 0, 10),
         moreSleepsS: (flags.get('more-sleeps-s') ?? '').split(',').filter(Boolean).map(Number),
+        client: flags.get('client') ?? 'raw',
         sleep: flags.get('sleep') ?? 'display',
         wake: flags.get('wake') ?? 'pmset',
         failAt: flags.get('fail-at') ?? null,
@@ -99,6 +102,7 @@ export function parseArgs(args) {
     // more must outlive it, or the end of the run measures the lease and not the sleep.
     plan.ttlS ??= plan.minutes * 60 + 1800;
     assert(plan.moreSleepsS.every((n) => Number.isFinite(n) && n >= 1), '--more-sleeps-s is a comma list of seconds >= 1');
+    assert(['raw', 'hook'].includes(plan.client), '--client must be raw or hook');
     assert(['display', 'system'].includes(plan.sleep), '--sleep must be display or system');
     assert(['pmset', 'manual'].includes(plan.wake), '--wake must be pmset or manual');
     assert(plan.failAt === null || (plan.dryRun && ['soak', 'sleep', 'reconnect'].includes(plan.failAt)), '--fail-at is soak|sleep|reconnect and only with --dry-run');
@@ -397,7 +401,13 @@ class MacLab {
         });
 
         const { createServer: createVite } = await import('vite');
-        const vite = await createVite({ root: repo, configFile: false, logLevel: 'error', server: { host: '127.0.0.1', port: 0 } });
+        const vite = await createVite({
+            root: repo, configFile: false, logLevel: 'error', server: { host: '127.0.0.1', port: 0 },
+            // The hook client imports the React Native module graph: its `./native` is the web binding here.
+            define: { global: 'globalThis' },
+            resolve: { alias: [{ find: 'react-native', replacement: join(here, 'mac-soak-rn-stub.js') }] },
+            plugins: [{ name: 'native-shim', enforce: 'pre', resolveId: (source, importer) => (source === './native' && importer?.startsWith(join(repo, 'packages/desktop-client/src')) ? join(repo, 'packages/desktop-client/src/native.web.ts') : null) }],
+        });
         await vite.listen();
         this.cleanup.add('stop dev server', () => vite.close());
 
@@ -436,7 +446,7 @@ class MacLab {
         this.cleanup.add('remove Chrome profile', () => rmSync(profile, { recursive: true, force: true }));
         const [fx, fy, fw, fh] = this.fixture;
         const page = `${vite.resolvedUrls.local[0]}packages/desktop-host/test/mac-soak-flow.html?control=${encodeURIComponent(`ws://127.0.0.1:${ctl.address().port}`)}`
-            + `&ttl=${plan.ttlS}&echo=${fx + fw / 2},${fy},${fw / 2},${fh}&fixture=${this.fixture}&points=${points.width},${points.height}&maxFps=${plan.maxFps}`;
+            + `&ttl=${plan.ttlS}&echo=${fx + fw / 2},${fy},${fw / 2},${fh}&fixture=${this.fixture}&points=${points.width},${points.height}&maxFps=${plan.maxFps}&client=${plan.client}`;
         this.spawnOwned('close Chrome', this.chrome, ['--headless=new', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
             '--autoplay-policy=no-user-gesture-required', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', page]);
         await Promise.race([ready, sleep(30_000).then(() => { throw new Error('the Chrome client never connected to the driver'); })]);

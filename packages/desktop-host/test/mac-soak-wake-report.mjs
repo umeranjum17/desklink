@@ -41,7 +41,9 @@ export function diagnose(timeline) {
         const asleep = Math.round((wake.asleep_ms ?? 0) / 1000);
         if (own.length < 2) return `wake ${n + 1} (asleep ${asleep} s): fewer than two probes after it`;
         const [first, last] = [own[0], own.at(-1)];
-        const stuck = STAGES.find(([, read]) => (read(last) ?? 0) <= (read(first) ?? 0));
+        // A reopened session (the lease ran out, say) starts its counters again: a drop is progress, not a stall.
+        const moved = (read) => own.some((p, i) => i > 0 && (read(p) ?? 0) !== (read(own[i - 1]) ?? 0));
+        const stuck = STAGES.find(([, read]) => !moved(read));
         const span = Math.round((last.at - first.at) / 1000);
         return `wake ${n + 1} (asleep ${asleep} s): ` + (stuck === undefined
             ? `every counter moved over the ${span} s after it`
