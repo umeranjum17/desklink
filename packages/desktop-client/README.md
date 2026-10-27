@@ -420,7 +420,8 @@ indefinitely. An adapter may emit
 `{ kind: 'carrier-closed' }` once to notify subscribers of that loss, and may
 offer `close()`, which the package calls on a carrier it has given up on. This is
 not the native peer's `closed` event or an engine revocation. Preserve the
-engine's `session.revoked` code: `transport` indicates path loss; other codes
+engine's `session.revoked` code: `transport` indicates path loss and `lease` an
+expired grant (the hook reopens at once with fresh authority for both); other codes
 (or no code) are final. The demo adapter bounds connection setup to five seconds
 and closes its socket and pending queue when disposed.
 

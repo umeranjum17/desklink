@@ -29,6 +29,12 @@
  *   nothing; system: `pmset sleepnow`, which this harness cannot undo unattended) and, for system,
  *   --wake pmset|manual (pmset: `sudo -n pmset schedule wake`, needs passwordless sudo;
  *   manual: someone wakes the Mac within 15 minutes)
+ *   --ttl-s <n> (minutes*60 + 1800) the session lease the run asks for; the engine's own default of 3600 ends
+ *   the session an hour in, which an hour-long soak would mistake for a failure after the first sleep
+ *   --client raw|hook (raw): raw drives the web binding directly; hook mounts the real `useDesktopSession`
+ *   hook (the one an app ships), so a lease that runs out is answered by the hook's own reopen
+ *   --more-sleeps-s 5,12,45: after the first wake's tail, sleep and wake the display again for each
+ *   of these many seconds, probing throughout (`mac-soak-wake-report.mjs` judges every wake)
  *   --dry-run [--fail-at soak|sleep|reconnect]: the same run against a fake Mac on a
  *   virtual clock; touches nothing.
  *
@@ -43,7 +49,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -67,7 +73,7 @@ export function parseArgs(args) {
         flags.set(name, bare ? true : args[++i]);
         assert(bare || flags.get(name) !== undefined, `--${name} needs a value`);
     }
-    const known = ['out', 'minutes', 'interval-s', 'gap-ms', 'sleep-s', 'offline-s', 'tail-s', 'max-fps', 'sleep', 'wake', 'dry-run', 'fail-at'];
+    const known = ['out', 'minutes', 'interval-s', 'gap-ms', 'sleep-s', 'offline-s', 'tail-s', 'max-fps', 'sleep', 'wake', 'dry-run', 'fail-at', 'more-sleeps-s', 'ttl-s', 'client'];
     for (const name of flags.keys()) assert(known.includes(name), `unknown flag --${name}`);
     const number = (name, fallback, min) => {
         const value = Number(flags.get(name) ?? fallback);
@@ -84,11 +90,19 @@ export function parseArgs(args) {
         offlineS: number('offline-s', 5, 1),
         tailS: number('tail-s', 20, 5),
         maxFps: number('max-fps', 60, 1),
+        ttlS: flags.get('ttl-s') === undefined ? undefined : number('ttl-s', 0, 10),
+        moreSleepsS: (flags.get('more-sleeps-s') ?? '').split(',').filter(Boolean).map(Number),
+        client: flags.get('client') ?? 'raw',
         sleep: flags.get('sleep') ?? 'display',
         wake: flags.get('wake') ?? 'pmset',
         failAt: flags.get('fail-at') ?? null,
     };
     assert(plan.out !== undefined, '--out <directory> is required');
+    // The session lease (default 3600 s) ends the session, whatever the Mac is doing; a soak of an hour or
+    // more must outlive it, or the end of the run measures the lease and not the sleep.
+    plan.ttlS ??= plan.minutes * 60 + 1800;
+    assert(plan.moreSleepsS.every((n) => Number.isFinite(n) && n >= 1), '--more-sleeps-s is a comma list of seconds >= 1');
+    assert(['raw', 'hook'].includes(plan.client), '--client must be raw or hook');
     assert(['display', 'system'].includes(plan.sleep), '--sleep must be display or system');
     assert(['pmset', 'manual'].includes(plan.wake), '--wake must be pmset or manual');
     assert(plan.failAt === null || (plan.dryRun && ['soak', 'sleep', 'reconnect'].includes(plan.failAt)), '--fail-at is soak|sleep|reconnect and only with --dry-run');
@@ -158,6 +172,7 @@ export async function runSoak(lab, plan, timeline, save) {
     try {
         await lab.prepare();
         event('session-open', await lab.connect());
+        lab.probeStart(timeline.probes);
         enter('soak');
         const start = lab.now();
         for (let n = 0; n < plan.minutes; n += 1) {
@@ -170,6 +185,7 @@ export async function runSoak(lab, plan, timeline, save) {
 
         enter('sleep', true);
         event('sleep-requested');
+        lab.probeMs = 2000;
         const slept = await lab.sleepWake(plan);
         event('woke', slept);
         enter('wake-gap', true);
@@ -182,6 +198,15 @@ export async function runSoak(lab, plan, timeline, save) {
         enter('after-wake');
         for (let i = 0; i < 3; i += 1) await type(1000 + i);
         await hold(plan.tailS * 1000);
+        for (const [i, seconds] of plan.moreSleepsS.entries()) {
+            enter(`sleep-${i + 2}`, true);
+            event('sleep-requested');
+            event('woke', await lab.sleepWake({ ...plan, sleepS: seconds }));
+            enter(`after-wake-${i + 2}`);
+            await type(3000 + i);
+            await hold(plan.tailS * 1000);
+        }
+        await lab.probeStop();
 
         await lab.clipStart();
         await hold(2000);
@@ -288,6 +313,8 @@ class FakeLab {
         this.deadUntil = this.clock + 3000;
         return { requested_at: requested, asleep_ms: this.clock - requested, kind: plan.sleep };
     }
+    probeStart() {}
+    async probeStop() {}
     async clipStart() {}
     async clipStop(path) { return { path, note: 'dry run: no clip' }; }
     sleepSettingsNow() { return this.snapshot(); }
@@ -316,12 +343,15 @@ class MacLab {
     now() { return Date.now(); }
     wait(ms) { return sleep(ms); }
     sleepSettingsNow() { return `${run('pmset', ['-g', 'custom'])}\n${run('pmset', ['-g', 'sched'])}`; }
-    spawnOwned(step, command, args, options = {}) {
+    spawnOwned(step, command, args, { log, ...options } = {}) {
         const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], ...options });
         child.stdout.resume();
         child.stderr.setEncoding('utf8');
         child.recent = '';
-        child.stderr.on('data', (chunk) => { child.recent = (child.recent + chunk).slice(-600); });
+        child.stderr.on('data', (chunk) => {
+            child.recent = (child.recent + chunk).slice(-600);
+            if (log !== undefined) appendFileSync(log, chunk);
+        });
         this.cleanup.add(step, async () => {
             if (child.exitCode !== null) return;
             child.kill('SIGTERM');
@@ -371,7 +401,13 @@ class MacLab {
         });
 
         const { createServer: createVite } = await import('vite');
-        const vite = await createVite({ root: repo, configFile: false, logLevel: 'error', server: { host: '127.0.0.1', port: 0 } });
+        const vite = await createVite({
+            root: repo, configFile: false, logLevel: 'error', server: { host: '127.0.0.1', port: 0 },
+            // The hook client imports the React Native module graph: its `./native` is the web binding here.
+            define: { global: 'globalThis' },
+            resolve: { alias: [{ find: 'react-native', replacement: join(here, 'mac-soak-rn-stub.js') }] },
+            plugins: [{ name: 'native-shim', enforce: 'pre', resolveId: (source, importer) => (source === './native' && importer?.startsWith(join(repo, 'packages/desktop-client/src')) ? join(repo, 'packages/desktop-client/src/native.web.ts') : null) }],
+        });
         await vite.listen();
         this.cleanup.add('stop dev server', () => vite.close());
 
@@ -396,7 +432,8 @@ class MacLab {
         const token = randomBytes(24).toString('base64url');
         const bridge = this.spawnOwned('stop bridge', process.execPath, [join(repo, 'packages/desktop-host/bin/desklink-host.mjs'),
             'bridge', '--listen', `127.0.0.1:${port}`, '--token', token, '--source', 'display', '--display-id', String(this.display.id)],
-        { env: { ...process.env, DESKLINK_ENGINE: this.engine } });
+        // The engine's stderr is what says why a capture stopped; keep all of it.
+        { env: { ...process.env, DESKLINK_ENGINE: this.engine }, log: join(plan.out, 'engine.log') });
         this.bridgeUrl = `ws://127.0.0.1:${port}/desktop?token=${encodeURIComponent(token)}`;
         for (let tries = 0; ; tries += 1) {
             assert(bridge.exitCode === null && tries < 100, `bridge did not start: ${bridge.recent}`);
@@ -409,7 +446,7 @@ class MacLab {
         this.cleanup.add('remove Chrome profile', () => rmSync(profile, { recursive: true, force: true }));
         const [fx, fy, fw, fh] = this.fixture;
         const page = `${vite.resolvedUrls.local[0]}packages/desktop-host/test/mac-soak-flow.html?control=${encodeURIComponent(`ws://127.0.0.1:${ctl.address().port}`)}`
-            + `&echo=${fx + fw / 2},${fy},${fw / 2},${fh}&fixture=${this.fixture}&points=${points.width},${points.height}&maxFps=${plan.maxFps}`;
+            + `&ttl=${plan.ttlS}&echo=${fx + fw / 2},${fy},${fw / 2},${fh}&fixture=${this.fixture}&points=${points.width},${points.height}&maxFps=${plan.maxFps}&client=${plan.client}`;
         this.spawnOwned('close Chrome', this.chrome, ['--headless=new', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
             '--autoplay-policy=no-user-gesture-required', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', page]);
         await Promise.race([ready, sleep(30_000).then(() => { throw new Error('the Chrome client never connected to the driver'); })]);
@@ -427,6 +464,22 @@ class MacLab {
     disconnect() { return this.call('disconnect'); }
     frames() { return this.call('frames'); }
     metrics() { return this.call('metrics'); }
+    /** Look at every boundary until `probeStop` (every 10 s, every 2 s once `probeMs` is lowered for the sleep): the evidence of which side is stuck. */
+    probeStart(into) {
+        this.probeMs = 10_000;
+        this.probing = (async () => {
+            this.probeOn = true;
+            while (this.probeOn) {
+                const sample = await this.call('probe', {}, 5000).catch((error) => ({ at: Date.now(), error: error.message }));
+                into.push(sample);
+                await sleep(this.probeMs);
+            }
+        })();
+    }
+    async probeStop() {
+        this.probeOn = false;
+        await this.probing;
+    }
     clipStart() { return this.call('clip_start'); }
     async clipStop(path) {
         writeFileSync(path, Buffer.from(await this.call('clip_stop', {}, 120_000), 'base64'));
@@ -489,7 +542,7 @@ export async function main(argv) {
         command: `node packages/desktop-host/test/mac-soak-flow.mjs ${argv.join(' ')}`,
         plan: { ...plan, out: undefined },
         started_at: lab.now(), finished_at: null, ok: false, failure: null,
-        host: null, phases: [], events: [], markers: [], latency: [], metrics: [], frames: [], recovery: {}, clip: null,
+        host: null, phases: [], events: [], markers: [], latency: [], metrics: [], probes: [], frames: [], recovery: {}, clip: null,
         summary: null, fps_windows: [], cleanup: [], sleep_settings: null,
     };
     const save = () => {

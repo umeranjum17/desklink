@@ -15,6 +15,9 @@
     - echo: a key goes out on the control channel, and the time to the first
       presented frame in which the fixture's echo cell has flipped is the
       keystroke latency.
+  `client=hook` swaps the raw binding for the real `useDesktopSession` hook (react-test-renderer,
+  the way `reconnect-flow.mjs` drives it), so what a reopen after a lease costs is measured on the
+  client an app ships; `localId()` and `state.sessionId` then follow the hook's current session.
   The echo cell is read from the decoded video at the rectangle the driver passes
   in desktop points (`echo=x,y,w,h`) scaled by `geometry.encoded` over `points=W,H`.
 -->
@@ -61,6 +64,12 @@ clip.width = 640;
 clip.height = Math.round((640 * fh) / fw);
 const clipContext = clip.getContext('2d');
 let recorder = null;
+const hookMode = query.get('client') === 'hook';
+let hook = null;        // hook mode: { session: the hook's latest return value }
+const signalHandlers = new Set();
+const localId = () => (hookMode ? hook?.session?.nativeId ?? null : state.localId);
+let log = [];           // bridge and client events with their wall-clock time, drained by `probe`
+const note = (source, name, detail) => log.push({ at: Date.now(), source, name, detail });
 
 function request(method, params) {
     const id = ++nextId;
@@ -72,7 +81,8 @@ function request(method, params) {
 }
 
 nativeDesklink.addListener('onSessionEvent', async (event) => {
-    if (event.sessionId !== state.localId) return;
+    if (event.sessionId !== localId()) return;
+    if (hookMode && (event.name === 'answer' || event.name === 'candidate')) return; // the hook signals its own
     if (event.name === 'answer') {
         await request('session.description', { session_id: state.sessionId, description: { type: 'answer', sdp: String(event.payload.sdp ?? '') } });
     } else if (event.name === 'candidate') {
@@ -84,11 +94,15 @@ nativeDesklink.addListener('onSessionEvent', async (event) => {
         }).catch(() => undefined);
     } else if (event.name === 'presented') {
         state.presented = true;
+        note('client', 'presented');
     } else if (event.name === 'control') {
         const reply = JSON.parse(String(event.payload.message ?? '{}'));
         if (reply.kind === 'rejected') state.rejection = `${reply.code}: ${reply.message}`;
     } else if (event.name === 'failure') {
         state.failure = event.payload;
+        note('client', 'failure', event.payload);
+    } else if (event.name === 'ice') {
+        note('client', 'ice', event.payload);
     }
 });
 
@@ -100,11 +114,67 @@ function onMessage(message) {
         pending.delete(payload.id);
         if (payload.error) waiting.reject(new Error(`${payload.error.code}: ${payload.error.message}`));
         else waiting.resolve(payload.result);
+    } else if (hookMode) {
+        const p = payload.params ?? {};
+        const translated = {
+            'session.description': { kind: 'description', description: { type: p.description?.type, sdp: p.description?.sdp }, geometry: p.geometry, sessionId: p.sessionId },
+            'session.candidate': { kind: 'candidate', candidate: { candidate: p.candidate, sdpMid: p.sdpMid ?? null, sdpMLineIndex: p.sdpMLineIndex ?? null }, sessionId: p.sessionId },
+            'session.state': { kind: 'state', capture: p.capture, transport: p.transport, firstFrame: p.firstFrame, sessionId: p.sessionId },
+            'session.restoreToken': { kind: 'restoreToken', token: p.token, sessionId: p.sessionId },
+            'session.revoked': { kind: 'revoked', reason: p.reason, code: p.code, sessionId: p.sessionId },
+        }[payload.event];
+        if (translated !== undefined) signalHandlers.forEach((handler) => handler(translated));
+        if (payload.event !== 'session.description' && payload.event !== 'session.candidate') note('engine', payload.event, payload.params);
     } else if (payload.event === 'session.description') {
         nativeDesklink.setRemoteDescription(state.localId, 'offer', payload.params.description.sdp);
     } else if (payload.event === 'session.candidate') {
         nativeDesklink.addRemoteCandidate(state.localId, payload.params.candidate, payload.params.sdpMid ?? null, payload.params.sdpMLineIndex ?? null);
+    } else {
+        note('engine', payload.event, payload.params);
     }
+}
+
+/** Hook mode: mount the app's session hook once; its `authorize` answers with this page's one bridge socket. */
+async function mountHook() {
+    const [{ default: React }, { default: TestRenderer }, { useDesktopSession }] = await Promise.all([
+        import('react'), import('react-test-renderer'), import('/packages/desktop-client/src/useDesktopSession.ts'),
+    ]);
+    const signaling = {
+        request: (method, params) => request(method, params).then((value) => {
+            if (method === 'session.open' && typeof value?.sessionId === 'string') Object.assign(state, { sessionId: value.sessionId, geometry: value.geometry });
+            return value;
+        }),
+        subscribe: (handler) => { signalHandlers.add(handler); return () => signalHandlers.delete(handler); },
+    };
+    hook = { session: null, status: 'idle', failure: null, opens: 0 };
+    function Harness() {
+        const session = useDesktopSession({
+            authorize: async () => {
+                hook.opens += 1;
+                note('client', 'authorize', { opens: hook.opens });
+                return { signaling, session: { maxWidth: 1920, maxHeight: 1200, maxFps: Number(query.get('maxFps')), ttlSeconds: Number(query.get('ttl')) } };
+            },
+            onStateChange: (snapshot) => {
+                hook.status = snapshot.status;
+                hook.failure = snapshot.failure?.code ?? null;
+                note('client', 'status', { status: snapshot.status, failure: hook.failure });
+            },
+            onError: (failure) => note('client', 'error', { code: failure.code, message: String(failure.message).slice(0, 120) }),
+        });
+        hook.session = session;
+        React.useEffect(() => {
+            const id = session.nativeId;
+            if (id == null) return;
+            nativeDesklink.setInputEnabled(id, true);
+            attachSurface(id, document.getElementById('surface'));
+            const video = document.querySelector('#surface video');
+            watch(video);
+            video?.play?.().catch(() => undefined);
+        }, [session.nativeId]);
+        return null;
+    }
+    TestRenderer.create(React.createElement(Harness));
+    while (hook.session === null) await sleep(20); // the first render lands after create() returns
 }
 
 /** Per presented frame: count it, read the echo cell, feed the clip canvas. */
@@ -144,8 +214,10 @@ function echo(text) {
         const timer = setTimeout(() => { waiter = null; resolve(null); }, 5000);
         waiter = { level, sentAt, resolve: (ms) => { clearTimeout(timer); resolve(ms); } };
         const character = text;
-        nativeDesklink.sendControl(state.localId, JSON.stringify({ kind: 'key', character, modifiers: [], down: true }));
-        nativeDesklink.sendControl(state.localId, JSON.stringify({ kind: 'key', character, modifiers: [], down: false }));
+        const id = localId(); // null while the hook is between sessions: the key is lost and its echo times out
+        if (id === null) return;
+        nativeDesklink.sendControl(id, JSON.stringify({ kind: 'key', character, modifiers: [], down: true }));
+        nativeDesklink.sendControl(id, JSON.stringify({ kind: 'key', character, modifiers: [], down: false }));
     });
 }
 
@@ -157,25 +229,31 @@ const commands = {
         socket = new WebSocket(engine);
         socket.addEventListener('message', onMessage);
         await new Promise((resolve, reject) => { socket.addEventListener('open', resolve, { once: true }); socket.addEventListener('error', () => reject(new Error('bridge socket failed')), { once: true }); });
-        state.localId = nativeDesklink.createSession('[]');
-        if (state.localId === null) throw new Error('the web session could not be created');
-        const opened = await request('session.open', { max_fps: Number(query.get('maxFps')) });
-        Object.assign(state, { sessionId: opened.sessionId, geometry: opened.geometry });
-        nativeDesklink.setInputEnabled(state.localId, true);
-        attachSurface(state.localId, document.getElementById('surface'));
-        const video = document.querySelector('#surface video');
-        watch(video);
-        video?.play?.().catch(() => undefined);
+        if (hookMode) {
+            if (hook === null) await mountHook();
+            await hook.session.connect();
+        } else {
+            state.localId = nativeDesklink.createSession('[]');
+            if (state.localId === null) throw new Error('the web session could not be created');
+            const opened = await request('session.open', { max_fps: Number(query.get('maxFps')), ttl_seconds: Number(query.get('ttl')) });
+            Object.assign(state, { sessionId: opened.sessionId, geometry: opened.geometry });
+            nativeDesklink.setInputEnabled(state.localId, true);
+            attachSurface(state.localId, document.getElementById('surface'));
+            const video = document.querySelector('#surface video');
+            watch(video);
+            video?.play?.().catch(() => undefined);
+        }
         while (!(state.presented && level !== null)) {
-            if (state.failure) throw new Error(`session failed: ${JSON.stringify(state.failure)}`);
+            if (hookMode ? hook.status === 'failed' || hook.status === 'ended' : state.failure) throw new Error(`session failed: ${JSON.stringify(hookMode ? { status: hook.status, failure: hook.failure } : state.failure)}`);
             if (performance.now() - started > 30_000) throw new Error('no picture within 30 s of opening the session');
             await sleep(50);
         }
-        return { first_frame_ms: Math.round(performance.now() - started), geometry: opened.geometry };
+        return { first_frame_ms: Math.round(performance.now() - started), geometry: state.geometry };
     },
     /** Drop the connection without telling the engine: a lost client, not a clean close. */
-    disconnect() {
-        nativeDesklink.closeSession(state.localId);
+    async disconnect() {
+        if (hookMode) await hook.session.close();
+        else nativeDesklink.closeSession(state.localId);
         socket?.close();
         socket = null;
         state.presented = false;
@@ -196,6 +274,25 @@ const commands = {
     },
     metrics() {
         return request('session.metrics', { session_id: state.sessionId });
+    },
+    /** One look at every boundary: the engine's counters, the client's receive stats, and what happened since the last look. */
+    async probe() {
+        const out = { at: Date.now(), visibility: document.visibilityState, events: log, engine: null, client: null };
+        log = [];
+        const quick = (promise) => Promise.race([promise, sleep(1500).then(() => ({ timeout: true }))]);
+        out.engine = await quick(request('session.metrics', { session_id: state.sessionId }).catch((e) => ({ error: String(e.message ?? e) })));
+        const pc = window.__pcs.at(-1);
+        if (pc) {
+            const inbound = {};
+            const stats = await quick(pc.getStats());
+            if (!stats.timeout) {
+                stats.forEach((r) => {
+                    if (r.type === 'inbound-rtp' && r.kind === 'video') Object.assign(inbound, { framesReceived: r.framesReceived, framesDecoded: r.framesDecoded, bytesReceived: r.bytesReceived, packetsReceived: r.packetsReceived, packetsLost: r.packetsLost, keyFramesDecoded: r.keyFramesDecoded, pliCount: r.pliCount });
+                });
+            }
+            out.client = { connection: pc.connectionState, ice: pc.iceConnectionState, signaling: pc.signalingState, inbound };
+        }
+        return out;
     },
     clip_start() {
         recorder = new MediaRecorder(clip.captureStream(30), { mimeType: 'video/webm', videoBitsPerSecond: 1_500_000 });
