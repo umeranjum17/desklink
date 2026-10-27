@@ -161,6 +161,7 @@ const commands = {
         if (state.localId === null) throw new Error('the web session could not be created');
         const opened = await request('session.open', { max_fps: Number(query.get('maxFps')) });
         Object.assign(state, { sessionId: opened.sessionId, geometry: opened.geometry });
+        nativeDesklink.setInputEnabled(state.localId, true);
         attachSurface(state.localId, document.getElementById('surface'));
         const video = document.querySelector('#surface video');
         watch(video);

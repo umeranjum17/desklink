@@ -32,7 +32,7 @@
  *   --dry-run [--fail-at soak|sleep|reconnect]: the same run against a fake Mac on a
  *   virtual clock; touches nothing.
  *
- * Needs: macOS, `npm ci` in this checkout, python3 with pyobjc, Chrome (DESKLINK_CHROME
+ * Needs: macOS, `npm ci` in this checkout, python3 with pyobjc (DESKLINK_PYTHON, e.g. /usr/bin/python3), Chrome (DESKLINK_CHROME
  * or the default app path), the lab-signed engine with Screen Recording and
  * Accessibility granted, and the Mac set to not ask for a password on wake.
  *
@@ -146,6 +146,8 @@ export async function runSoak(lab, plan, timeline, save) {
         const at = lab.now();
         const typed = await lab.type(text, plan.gapMs);
         timeline.markers.push({ n, text, at, phase: current(), typed_ok: typed.typed_ok, rejection: typed.rejection ?? null });
+        // The first marker proves the path; an hour of lost keystrokes proves nothing.
+        if (n === 0 && !typed.typed_ok) throw new Error(`the first marker did not reach the fixture (rejection: ${typed.rejection ?? 'none'})`);
         typed.echo_ms.forEach((ms, i) => timeline.latency.push({ at: at + i * 1, ms, phase: current(), marker: n }));
         await drain();
         save();
@@ -360,7 +362,7 @@ class MacLab {
         const keys = join(plan.out, 'fixture-keys.log');
         writeFileSync(keys, '');
         this.keysLog = keys;
-        const fixture = this.spawnOwned('close fixture', 'python3', [join(here, 'mac-soak-fixture.py'), ...this.fixture.map(String), keys]);
+        const fixture = this.spawnOwned('close fixture', process.env.DESKLINK_PYTHON ?? 'python3', [join(here, 'mac-soak-fixture.py'), ...this.fixture.map(String), keys]);
         await new Promise((ready, fail) => {
             fixture.stdout.setEncoding('utf8');
             fixture.stdout.on('data', (chunk) => { if (chunk.includes('READY')) ready(); });
@@ -442,7 +444,8 @@ class MacLab {
     async sleepWake({ sleepS, wake, sleep: kind }) {
         const requested = Date.now();
         if (kind === 'display') {
-            const state = () => run('pmset', ['-g', 'powerstate', 'IODisplayWrangler']).trim();
+            // The power log says when the display went off and on; the live power state is not readable here.
+            const state = () => run('sh', ['-c', "pmset -g log | grep -E 'Display is turned (on|off)' | tail -n 2"]).trim();
             const before = state();
             run('pmset', ['displaysleepnow']);
             await sleep(2000);
