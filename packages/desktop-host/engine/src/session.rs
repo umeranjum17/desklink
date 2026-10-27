@@ -960,6 +960,13 @@ fn wayland_clipboard_available() -> bool {
 /// What the engine can actually do on this machine right now.
 #[cfg(target_os = "linux")]
 pub fn capabilities() -> serde_json::Value {
+    capabilities_with(crate::input::probe())
+}
+
+/// [`capabilities`] given the `uinput` probe's answer, so the choice between
+/// `uinput` and the portal keyboard is testable on a host of either kind.
+#[cfg(target_os = "linux")]
+pub fn capabilities_with(uinput: Result<(), crate::input::InputUnavailable>) -> serde_json::Value {
     let session_kind = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         "wayland"
     } else if std::env::var_os("DISPLAY").is_some() {
@@ -974,9 +981,10 @@ pub fn capabilities() -> serde_json::Value {
     // Asked, not taken: the probe connects to this session's PipeWire, reads the
     // registry and leaves. No portal, no prompt, no capture.
     let audio = crate::audio::probe();
-    // Reads one portal property; a session on X11 types through XTest instead.
-    let portal_keys = x11.is_null() && crate::input_portal::advertised_blocking();
-    let (input, grant_state, unavailable) = match crate::input::probe() {
+    // Fallback only: reads one portal property when uinput cannot be created.
+    let portal_keys =
+        uinput.is_err() && x11.is_null() && crate::input_portal::advertised_blocking();
+    let (input, grant_state, unavailable) = match uinput {
         Ok(()) => (serde_json::json!(true), "granted", serde_json::Value::Null),
         Err(unavailable) => (
             serde_json::json!(false),
@@ -1489,19 +1497,18 @@ impl Session {
                 .input_available()
                 .then(|| Applier::X11(desktop.clone())),
             None => {
-                // The portal's keyboard when it offers one: no host-wide
-                // device. Otherwise, and on any refusal, uinput as before.
+                // uinput as before; only when it cannot be created, the
+                // portal's keyboard (keys only, no host-wide device).
                 #[cfg(target_os = "linux")]
-                let portal_keys = crate::input_portal::open()
-                    .await
-                    .map_err(|error| log::info!("portal keyboard not used: {error:#}"))
-                    .ok();
-                #[cfg(target_os = "linux")]
-                let applier = match portal_keys {
-                    Some(keys) => Some(Applier::PortalKeys(keys)),
-                    None => InputDevices::create(source_w as i32, source_h as i32)
+                let applier = match InputDevices::create(source_w as i32, source_h as i32) {
+                    Ok(devices) => Some(Applier::Uinput(devices)),
+                    Err(error) => crate::input_portal::open()
+                        .await
+                        .map_err(|portal| {
+                            log::info!("no input: uinput: {error:#}; portal keyboard: {portal:#}")
+                        })
                         .ok()
-                        .map(Applier::Uinput),
+                        .map(Applier::PortalKeys),
                 };
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 let applier = InputDevices::create_for_display(

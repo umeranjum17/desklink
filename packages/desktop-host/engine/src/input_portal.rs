@@ -280,11 +280,19 @@ mod tests {
             .block_on(scenario());
     }
 
-    /// What the capabilities report selects, as `desklink-host capabilities` prints it.
+    /// What the capabilities report selects on a host without `/dev/uinput` access.
     async fn mechanism() -> String {
-        let input = crate::session::capabilities()["input"].clone();
+        let no_uinput = crate::input::InputUnavailable {
+            reason: "no /dev/uinput".into(),
+            remedy: String::new(),
+        };
+        report(Err(no_uinput))["mechanism"].to_string()
+    }
+
+    fn report(uinput: Result<(), crate::input::InputUnavailable>) -> serde_json::Value {
+        let input = crate::session::capabilities_with(uinput)["input"].clone();
         println!("capabilities input: {input}");
-        input["mechanism"].to_string()
+        input
     }
 
     /// Keys sent through the adapter reach the portal in order, and dropping
@@ -300,6 +308,10 @@ mod tests {
 
         devices.store(1, Ordering::SeqCst);
         assert!(advertised().await);
+        // Where uinput works too, it stays the path and the pointer keeps working.
+        let both = report(Ok(()));
+        assert_eq!(both["mechanism"], "inputtino/uinput");
+        assert_eq!((&both["pointer"], &both["wheel"], &both["keyboard"]), (&true.into(), &true.into(), &true.into()));
         assert_eq!(mechanism().await, "\"portal-remotedesktop\"");
         let keys = open().await.expect("keyboard session");
         // No host-wide virtual device while the portal carries the keys.
