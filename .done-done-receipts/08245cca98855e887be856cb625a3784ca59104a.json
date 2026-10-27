@@ -1,0 +1,65 @@
+{
+  "schema": 2,
+  "repo": "desklink",
+  "head": "08245cca98855e887be856cb625a3784ca59104a",
+  "tree": "8cb6fe040b5b55f1fce3fd5c57a76756fc63e155",
+  "claim": "a maintainer can run one command on the lab Mac to soak a session for an hour through a display sleep and a client reconnect, and get a JSON timeline of fps and keystroke latency plus a reconnect clip; the run records that the picture and typing did not come back after the display wake until the client reconnected",
+  "result": "pass",
+  "at": "2026-10-27T02:20:41.502Z",
+  "files": [
+    {
+      "path": "<evidence root>/20261027T021940Z-08245cca-29de57/summary.txt",
+      "sha256": "629643faf032f47aa270c0c998d55d0c896423a52accd1a63bf9e3acc6d4bdb6"
+    },
+    {
+      "path": "<evidence root>/20261027T021940Z-08245cca-29de57/hour.log",
+      "sha256": "3b2c69117b4949241bcc37703f6e04676e023af49fe31611e8566b34cca39392"
+    }
+  ],
+  "runs": [
+    {
+      "run_id": "20261027T021940Z-08245cca-29de57",
+      "commit": "08245cca98855e887be856cb625a3784ca59104a",
+      "journey": null,
+      "command": "node <task folder>/seal-mac-soak.mjs <task folder>/mac-hour",
+      "tool": "0.6.18",
+      "steps": {
+        "target": {
+          "version": "desklink 0.5.14 engine at 08245cc on a MacBook Air (macOS 15.7.4, arm64)"
+        },
+        "start": "the lab Mac with a signed desklink-host, a headless Chrome client on the same Mac and an owned fixture window",
+        "steps": [
+          "Opened a session through the bridge; the client showed the fixture (left cell pulsing, right cell flipping on keys)",
+          "Typed a marker every minute for one hour (60 markers, 240 keys), sampling frames and key-to-picture latency: timeline.json, summary.txt",
+          "Slept the display and woke it; the picture did not return and 3 markers (15 keys) never reached the Mac: timeline.json phase after-wake",
+          "Killed the client connection without telling the engine; reconnect-before-kill.png is the live fixture just before",
+          "Reconnected: reconnect-picture-back.png is the fixture back on screen after the reconnect; reconnect.webm is the clip across it"
+        ],
+        "result": "The hour held 56 fps median and 49.8 ms median keystroke latency; after a display sleep and wake there was 0 fps and 15 of 15 keys lost until the client reconnected, then 55 fps and 61 ms median. System sleep was not exercised."
+      }
+    }
+  ],
+  "judge": {
+    "route": "claude-code",
+    "model": "claude-haiku-5-5",
+    "independence": "session-only",
+    "author": {
+      "agent": "claude",
+      "model": "claude-haiku-5-5"
+    },
+    "verdicts": [
+      {
+        "path": "<evidence root>/20261027T021940Z-08245cca-29de57/summary.txt",
+        "sha256": "629643faf032f47aa270c0c998d55d0c896423a52accd1a63bf9e3acc6d4bdb6",
+        "verdict": "pass",
+        "seen": "I read all three phase lines plus the recovery and cleanup lines. ok=true, markers=66. The after-wake phase before reconnect shows fps median 0 over 100 windows and 15 keys lost with null latency. After reconnect, fps median is 55 and first echo is 82 ms. Cleanup is 7/7 and power settings are restored. This matches the outcome that picture and typing did not return after wake until the client reconnected."
+      },
+      {
+        "path": "<evidence root>/20261027T021940Z-08245cca-29de57/hour.log",
+        "sha256": "3b2c69117b4949241bcc37703f6e04676e023af49fe31611e8566b34cca39392",
+        "verdict": "pass",
+        "seen": "I read the whole JSON object. ok is true and failure is null. The after-wake phase shows fps windows 100, median 0, and latency samples 0 with lost 15. The recovery block shows wake_first_frame_ms 60230, which the summary notes means none arrived within the 60000 ms wait. Reconnect_first_frame_ms is 2315. Events run sleep-requested, woke, client-killed, reconnected. All 7 cleanup steps are ok and sleep_settings_restored is true. A timeline path is given, but no reconnect clip appears in this text, so the clip part is not shown here."
+      }
+    ]
+  }
+}
