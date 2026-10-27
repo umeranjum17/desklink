@@ -29,6 +29,8 @@
  *   nothing; system: `pmset sleepnow`, which this harness cannot undo unattended) and, for system,
  *   --wake pmset|manual (pmset: `sudo -n pmset schedule wake`, needs passwordless sudo;
  *   manual: someone wakes the Mac within 15 minutes)
+ *   --more-sleeps-s 5,12,45: after the first wake's tail, sleep and wake the display again for each
+ *   of these many seconds, probing throughout (`mac-soak-wake-report.mjs` judges every wake)
  *   --dry-run [--fail-at soak|sleep|reconnect]: the same run against a fake Mac on a
  *   virtual clock; touches nothing.
  *
@@ -67,7 +69,7 @@ export function parseArgs(args) {
         flags.set(name, bare ? true : args[++i]);
         assert(bare || flags.get(name) !== undefined, `--${name} needs a value`);
     }
-    const known = ['out', 'minutes', 'interval-s', 'gap-ms', 'sleep-s', 'offline-s', 'tail-s', 'max-fps', 'sleep', 'wake', 'dry-run', 'fail-at'];
+    const known = ['out', 'minutes', 'interval-s', 'gap-ms', 'sleep-s', 'offline-s', 'tail-s', 'max-fps', 'sleep', 'wake', 'dry-run', 'fail-at', 'more-sleeps-s'];
     for (const name of flags.keys()) assert(known.includes(name), `unknown flag --${name}`);
     const number = (name, fallback, min) => {
         const value = Number(flags.get(name) ?? fallback);
@@ -84,11 +86,13 @@ export function parseArgs(args) {
         offlineS: number('offline-s', 5, 1),
         tailS: number('tail-s', 20, 5),
         maxFps: number('max-fps', 60, 1),
+        moreSleepsS: (flags.get('more-sleeps-s') ?? '').split(',').filter(Boolean).map(Number),
         sleep: flags.get('sleep') ?? 'display',
         wake: flags.get('wake') ?? 'pmset',
         failAt: flags.get('fail-at') ?? null,
     };
     assert(plan.out !== undefined, '--out <directory> is required');
+    assert(plan.moreSleepsS.every((n) => Number.isFinite(n) && n >= 1), '--more-sleeps-s is a comma list of seconds >= 1');
     assert(['display', 'system'].includes(plan.sleep), '--sleep must be display or system');
     assert(['pmset', 'manual'].includes(plan.wake), '--wake must be pmset or manual');
     assert(plan.failAt === null || (plan.dryRun && ['soak', 'sleep', 'reconnect'].includes(plan.failAt)), '--fail-at is soak|sleep|reconnect and only with --dry-run');
@@ -183,6 +187,14 @@ export async function runSoak(lab, plan, timeline, save) {
         enter('after-wake');
         for (let i = 0; i < 3; i += 1) await type(1000 + i);
         await hold(plan.tailS * 1000);
+        for (const [i, seconds] of plan.moreSleepsS.entries()) {
+            enter(`sleep-${i + 2}`, true);
+            event('sleep-requested');
+            event('woke', await lab.sleepWake({ ...plan, sleepS: seconds }));
+            enter(`after-wake-${i + 2}`);
+            await type(3000 + i);
+            await hold(plan.tailS * 1000);
+        }
         await lab.probeStop();
 
         await lab.clipStart();
