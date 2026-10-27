@@ -25,6 +25,8 @@
  * Flags (defaults): --out <dir> (required) --minutes 60 --interval-s 60 --gap-ms 150
  *   --sleep-s 30 (least time asleep) --offline-s 5 (client offline before reconnect)
  *   --tail-s 20 (measured seconds after wake and after reconnect) --max-fps 60
+ *   --metrics-s N: also sample the engine's counters every N seconds into `metric_series`, to see
+ *   which stage (capture, encode, send) a stalled second belongs to (default off).
  *   --sleep display|system (display: `pmset displaysleepnow`, woken with `caffeinate -u`, needs
  *   nothing; system: `pmset sleepnow`, which this harness cannot undo unattended) and, for system,
  *   --wake pmset|manual (pmset: `sudo -n pmset schedule wake`, needs passwordless sudo;
@@ -45,7 +47,6 @@ import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
-import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -63,11 +64,11 @@ export function parseArgs(args) {
     for (let i = 0; i < args.length; i += 1) {
         assert(args[i].startsWith('--'), `unexpected argument ${args[i]}`);
         const name = args[i].slice(2);
-        const bare = name === 'dry-run';
+        const bare = name === 'dry-run' || name === 'capture-only';
         flags.set(name, bare ? true : args[++i]);
         assert(bare || flags.get(name) !== undefined, `--${name} needs a value`);
     }
-    const known = ['out', 'minutes', 'interval-s', 'gap-ms', 'sleep-s', 'offline-s', 'tail-s', 'max-fps', 'sleep', 'wake', 'dry-run', 'fail-at'];
+    const known = ['out', 'minutes', 'interval-s', 'gap-ms', 'sleep-s', 'offline-s', 'tail-s', 'max-fps', 'sleep', 'wake', 'dry-run', 'fail-at', 'capture-only', 'metrics-s'];
     for (const name of flags.keys()) assert(known.includes(name), `unknown flag --${name}`);
     const number = (name, fallback, min) => {
         const value = Number(flags.get(name) ?? fallback);
@@ -76,6 +77,7 @@ export function parseArgs(args) {
     };
     const plan = {
         dryRun: flags.get('dry-run') === true,
+        captureOnly: flags.get('capture-only') === true,
         out: flags.get('out') === undefined ? undefined : resolve(flags.get('out')),
         minutes: number('minutes', 60, 1),
         intervalS: number('interval-s', 60, 5),
@@ -84,6 +86,7 @@ export function parseArgs(args) {
         offlineS: number('offline-s', 5, 1),
         tailS: number('tail-s', 20, 5),
         maxFps: number('max-fps', 60, 1),
+        metricsS: number('metrics-s', 0, 0),
         sleep: flags.get('sleep') ?? 'display',
         wake: flags.get('wake') ?? 'pmset',
         failAt: flags.get('fail-at') ?? null,
@@ -137,15 +140,16 @@ export async function runSoak(lab, plan, timeline, save) {
     const hold = async (ms) => {
         const end = lab.now() + ms;
         while (lab.now() < end) {
-            await lab.wait(Math.min(5000, end - lab.now()));
+            await lab.wait(Math.min(plan.metricsS ? plan.metricsS * 1000 : 5000, end - lab.now()));
             await drain();
+            if (plan.metricsS) timeline.metric_series.push({ at: lab.now(), ...(await lab.metrics()) });
         }
     };
     const type = async (n) => {
         const text = markerText(n);
         const at = lab.now();
         const typed = await lab.type(text, plan.gapMs);
-        timeline.markers.push({ n, text, at, phase: current(), typed_ok: typed.typed_ok, rejection: typed.rejection ?? null });
+        timeline.markers.push({ n, text, at, phase: current(), typed_ok: typed.typed_ok, rejection: typed.rejection ?? null, control_channel: typed.control_channel, input_enabled: typed.input_enabled, control_replies: typed.control_replies, input_applied: typed.input_applied, input_rejected: typed.input_rejected, fixture_focus: typed.fixture_focus });
         // The first marker proves the path; an hour of lost keystrokes proves nothing.
         if (n === 0 && !typed.typed_ok) throw new Error(`the first marker did not reach the fixture (rejection: ${typed.rejection ?? 'none'})`);
         typed.echo_ms.forEach((ms, i) => timeline.latency.push({ at: at + i * 1, ms, phase: current(), marker: n }));
@@ -166,6 +170,13 @@ export async function runSoak(lab, plan, timeline, save) {
             await type(n);
             if (n % 10 === 0) timeline.metrics.push({ at: lab.now(), ...(await lab.metrics()) });
             await hold(Math.max(0, tick + plan.intervalS * 1000 - lab.now()));
+        }
+
+        if (plan.captureOnly) {
+            enter('capture-only');
+            await hold(plan.tailS * 1000);
+            timeline.live_screen = await lab.screenshot(join(plan.out, 'live-session.png'));
+            return;
         }
 
         enter('sleep', true);
@@ -288,6 +299,7 @@ class FakeLab {
         this.deadUntil = this.clock + 3000;
         return { requested_at: requested, asleep_ms: this.clock - requested, kind: plan.sleep };
     }
+    async screenshot() { return { note: 'dry run: no image captured' }; }
     async clipStart() {}
     async clipStop(path) { return { path, note: 'dry run: no clip' }; }
     sleepSettingsNow() { return this.snapshot(); }
@@ -360,9 +372,12 @@ class MacLab {
         this.fixture = [120, 120, 480, 240];
         assert(points.width >= 600 && points.height >= 360, 'the display is smaller than the soak fixture');
         const keys = join(plan.out, 'fixture-keys.log');
+        const focus = join(plan.out, 'fixture-focus.log');
         writeFileSync(keys, '');
+        writeFileSync(focus, '');
         this.keysLog = keys;
-        const fixture = this.spawnOwned('close fixture', process.env.DESKLINK_PYTHON ?? 'python3', [join(here, 'mac-soak-fixture.py'), ...this.fixture.map(String), keys]);
+        this.focusLog = focus;
+        const fixture = this.spawnOwned('close fixture', process.env.DESKLINK_PYTHON ?? 'python3', [join(here, 'mac-soak-fixture.py'), ...this.fixture.map(String), keys, focus]);
         await new Promise((ready, fail) => {
             fixture.stdout.setEncoding('utf8');
             fixture.stdout.on('data', (chunk) => { if (chunk.includes('READY')) ready(); });
@@ -405,7 +420,7 @@ class MacLab {
             await sleep(150);
         }
 
-        const profile = mkdtempSync(join(tmpdir(), 'desklink-soak-chrome-'));
+        const profile = mkdtempSync(join(plan.out, 'chrome-profile-'));
         this.cleanup.add('remove Chrome profile', () => rmSync(profile, { recursive: true, force: true }));
         const [fx, fy, fw, fh] = this.fixture;
         const page = `${vite.resolvedUrls.local[0]}packages/desktop-host/test/mac-soak-flow.html?control=${encodeURIComponent(`ws://127.0.0.1:${ctl.address().port}`)}`
@@ -427,17 +442,29 @@ class MacLab {
     disconnect() { return this.call('disconnect'); }
     frames() { return this.call('frames'); }
     metrics() { return this.call('metrics'); }
+    async screenshot(path) {
+        writeFileSync(path, Buffer.from(await this.call('screenshot'), 'base64'));
+        return { path, captured_at: Date.now(), source: 'decoded WebRTC video frame' };
+    }
     clipStart() { return this.call('clip_start'); }
     async clipStop(path) {
         writeFileSync(path, Buffer.from(await this.call('clip_stop', {}, 120_000), 'base64'));
         return { path, note: 'the fixture only, as the client presented it' };
     }
     async type(text, gapMs) {
+        const focus = readFileSync(this.focusLog, 'utf8').trim().split('\n').filter(Boolean).at(-1) ?? null;
+        const match = focus?.match(/^(\d+) active=(\d) key=(\d)$/);
+        const focusAge = match ? Date.now() - Number(match[1]) : Infinity;
+        if (!match || focusAge < 0 || focusAge > 1500 || match[2] !== '1' || match[3] !== '1') {
+            return { typed_ok: false, echo_ms: [], rejection: `fixture is not the active key window: ${focus ?? 'no focus sample'}`, fixture_focus: focus };
+        }
         const before = readFileSync(this.keysLog, 'utf8').split('\n').filter(Boolean).length;
         const result = await this.call('type', { text, gap_ms: gapMs }, 30_000);
         await sleep(200);
-        const typed = readFileSync(this.keysLog, 'utf8').split('\n').filter(Boolean).slice(before).map((line) => line.slice(line.indexOf(' ') + 1)).join('');
-        return { typed_ok: typed === text, echo_ms: result.echo_ms, rejection: result.rejection };
+        const typedText = readFileSync(this.keysLog, 'utf8').split('\n').filter(Boolean).slice(before).map((line) => line.slice(line.indexOf(' ') + 1)).join('');
+        const metrics = await this.metrics();
+        const focusAfter = readFileSync(this.focusLog, 'utf8').trim().split('\n').filter(Boolean).at(-1) ?? null;
+        return { typed_ok: typedText === text, echo_ms: result.echo_ms, rejection: result.rejection, control_channel: result.control_channel, input_enabled: result.input_enabled, control_replies: result.control_replies, input_applied: metrics.input_applied, input_rejected: metrics.input_rejected, fixture_focus: focusAfter };
     }
 
     /** Sleep the Mac now and return when it is awake again; time asleep is the wall-clock jump. */
@@ -489,7 +516,7 @@ export async function main(argv) {
         command: `node packages/desktop-host/test/mac-soak-flow.mjs ${argv.join(' ')}`,
         plan: { ...plan, out: undefined },
         started_at: lab.now(), finished_at: null, ok: false, failure: null,
-        host: null, phases: [], events: [], markers: [], latency: [], metrics: [], frames: [], recovery: {}, clip: null,
+        host: null, phases: [], events: [], markers: [], latency: [], metrics: [], metric_series: [], frames: [], recovery: {}, clip: null,
         summary: null, fps_windows: [], cleanup: [], sleep_settings: null,
     };
     const save = () => {

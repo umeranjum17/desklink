@@ -27,9 +27,11 @@
 <div id="surface"></div>
 <script>
 window.__pcs = [];
+window.__controlChannel = null;
 const RealRTCPeerConnection = window.RTCPeerConnection;
 window.RTCPeerConnection = function (...args) {
     const pc = new RealRTCPeerConnection(...args);
+    pc.addEventListener('datachannel', (event) => { window.__controlChannel = event.channel; });
     window.__pcs.push(pc);
     return pc;
 };
@@ -48,7 +50,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let socket = null;
 let nextId = 0;
 const pending = new Map();
-const state = { localId: null, sessionId: null, geometry: null, presented: false, failure: null, rejection: null };
+const state = { localId: null, sessionId: null, geometry: null, presented: false, inputEnabled: false, failure: null, rejection: null, replies: [] };
 let frames = [];        // wall-clock ms of every presented frame, drained by the driver
 let level = null;       // is the echo cell lit in the latest frame
 let waiter = null;      // { level, sentAt, resolve } while a key waits for its echo
@@ -86,6 +88,7 @@ nativeDesklink.addListener('onSessionEvent', async (event) => {
         state.presented = true;
     } else if (event.name === 'control') {
         const reply = JSON.parse(String(event.payload.message ?? '{}'));
+        state.replies.push(reply);
         if (reply.kind === 'rejected') state.rejection = `${reply.code}: ${reply.message}`;
     } else if (event.name === 'failure') {
         state.failure = event.payload;
@@ -152,7 +155,8 @@ function echo(text) {
 const commands = {
     async connect({ engine }) {
         const started = performance.now();
-        Object.assign(state, { sessionId: null, presented: false, failure: null, rejection: null });
+        window.__controlChannel = null;
+        Object.assign(state, { sessionId: null, presented: false, inputEnabled: false, failure: null, rejection: null, replies: [] });
         level = null;
         socket = new WebSocket(engine);
         socket.addEventListener('message', onMessage);
@@ -161,17 +165,17 @@ const commands = {
         if (state.localId === null) throw new Error('the web session could not be created');
         const opened = await request('session.open', { max_fps: Number(query.get('maxFps')) });
         Object.assign(state, { sessionId: opened.sessionId, geometry: opened.geometry });
-        nativeDesklink.setInputEnabled(state.localId, true);
+        state.inputEnabled = nativeDesklink.setInputEnabled(state.localId, true);
         attachSurface(state.localId, document.getElementById('surface'));
         const video = document.querySelector('#surface video');
         watch(video);
         video?.play?.().catch(() => undefined);
-        while (!(state.presented && level !== null)) {
+        while (!(state.presented && level !== null && window.__controlChannel?.readyState === 'open')) {
             if (state.failure) throw new Error(`session failed: ${JSON.stringify(state.failure)}`);
             if (performance.now() - started > 30_000) throw new Error('no picture within 30 s of opening the session');
             await sleep(50);
         }
-        return { first_frame_ms: Math.round(performance.now() - started), geometry: opened.geometry };
+        return { first_frame_ms: Math.round(performance.now() - started), geometry: opened.geometry, control_channel: window.__controlChannel?.readyState, input_enabled: state.inputEnabled };
     },
     /** Drop the connection without telling the engine: a lost client, not a clean close. */
     disconnect() {
@@ -187,7 +191,7 @@ const commands = {
             out.push(await echo(character));
             await sleep(gap_ms);
         }
-        return { echo_ms: out, rejection: state.rejection };
+        return { echo_ms: out, rejection: state.rejection, control_channel: window.__controlChannel?.readyState, input_enabled: state.inputEnabled, control_replies: state.replies };
     },
     frames() {
         const out = frames;
@@ -196,6 +200,16 @@ const commands = {
     },
     metrics() {
         return request('session.metrics', { session_id: state.sessionId });
+    },
+    screenshot() {
+        const video = document.querySelector('#surface video');
+        if (!video || video.readyState < 2 || !video.videoWidth) throw new Error('live video frame unavailable');
+        const scale = video.videoWidth / pointsW;
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(fw * scale);
+        canvas.height = Math.round(fh * scale);
+        canvas.getContext('2d').drawImage(video, fx * scale, fy * scale, fw * scale, fh * scale, 0, 0, canvas.width, canvas.height);
+        return canvas.toDataURL('image/png').split(',')[1];
     },
     clip_start() {
         recorder = new MediaRecorder(clip.captureStream(30), { mimeType: 'video/webm', videoBitsPerSecond: 1_500_000 });
