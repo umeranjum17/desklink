@@ -38,6 +38,27 @@ export function fpsSummary(windows) {
     };
 }
 
+/**
+ * Gaps in a frame stream: the time between consecutive presented frames (ms, ascending timestamps).
+ * Reports p50/p95/max, how many gaps exceed `overMs`, and the `keep` longest of those with where they
+ * fell (`at` = the timestamp of the frame that ended the gap), so a stall is placed, not just counted.
+ */
+export function frameGaps(timesMs, { overMs = 100, keep = 20 } = {}) {
+    const gaps = [];
+    for (let i = 1; i < timesMs.length; i += 1) gaps.push({ at: timesMs[i], ms: timesMs[i] - timesMs[i - 1] });
+    const sorted = gaps.map((g) => g.ms).sort((a, b) => a - b);
+    const over = gaps.filter((g) => g.ms > overMs);
+    return {
+        frames: timesMs.length,
+        p50_ms: percentile(sorted, 50),
+        p95_ms: percentile(sorted, 95),
+        max_ms: sorted.at(-1) ?? null,
+        over_ms: overMs,
+        over_count: over.length,
+        longest: over.sort((a, b) => b.ms - a.ms).slice(0, keep).sort((a, b) => a.at - b.at),
+    };
+}
+
 /** Latency summary of echo samples (ms, `null` = no echo within the deadline). */
 export function latencySummary(samples) {
     const sorted = sortedNumbers(samples.map((s) => s.ms));

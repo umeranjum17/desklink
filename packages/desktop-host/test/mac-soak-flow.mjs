@@ -52,7 +52,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 
-import { fpsSummary, fpsWindows, latencySummary, round1 } from './mac-soak-stats.mjs';
+import { fpsSummary, fpsWindows, frameGaps, latencySummary, round1 } from './mac-soak-stats.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '../../..');
@@ -236,6 +236,8 @@ export function summarise(timeline) {
         summary[name] = {
             fps: { windows: fps.windows, median: round1(fps.median), p05: round1(fps.p05), worst: fps.worst },
             latency_ms: { samples: latency.samples, lost: latency.lost, p50: round1(latency.p50), p95: round1(latency.p95), worst: round1(latency.worst) },
+            // Gaps between presented frames, kept per phase because the stall hunt needs the stall's place in time.
+            frame_gaps: frameGaps(timeline.frames.filter((f) => f.phase === name).map((f) => f.t)),
         };
     }
     return { summary, fps_windows: windows.map(({ at, fps, phase, gap }) => ({ at, fps, phase, gap })) };

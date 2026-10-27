@@ -73,6 +73,7 @@ import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:net';
 import { WebSocket } from 'ws';
 
+import { frameGaps } from './mac-soak-stats.mjs';
 import { assertNoAmbientDesktop, claimPrivateDisplay, trackOwnedXvfb, verifyOwnedXvfb, stopOwnedXvfb } from './lab-safety.mjs';
 
 assertNoAmbientDesktop();
@@ -614,6 +615,13 @@ async function runScenario(scenario, vite) {
             presented_fps: Math.round((result.frames / elapsed) * 10) / 10,
             frame_interval_p95_ms: percentile(intervals, 95),
             frame_interval_max_ms: intervals.length > 0 ? intervals[intervals.length - 1] : null,
+            // Gaps in the received frame stream, placed in time (`at` is seconds into the run): the Mac
+            // stall hunt compares this line with the same measure on the Mac (mac-soak-flow.mjs).
+            frame_gaps: (() => {
+                let t = 0;
+                const gaps = frameGaps([0, ...result.intervals.map((ms) => (t += ms))]);
+                return { ...gaps, longest: gaps.longest.map((g) => ({ at_s: Math.round(g.at) / 1000, ms: g.ms })) };
+            })(),
             g2g_ms: {
                 startup_samples_included: initial.startupSamples,
                 first_observed_frame_ms: result.g2g[0] ?? null,
