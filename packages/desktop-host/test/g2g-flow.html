@@ -58,6 +58,8 @@ const state = {
     presentedAt: [],
     /** One row per second of the receiver's own loss and recovery counters. */
     rtp: [],
+    /** Callback times of presented frames, for frame gaps (`intervals` follows expectedDisplayTime). */
+    callbacks: [],
     frames: 0,
     rejection: null,
     /** The desktop width the stamp covers, so blocks scale to the video. */
@@ -150,6 +152,7 @@ function countFrames() {
         state.presentedAt.push(presented);
         if (lastPresentation !== 0) state.intervals.push(presented - lastPresentation);
         lastPresentation = presented;
+        state.callbacks.push(Math.round(performance.timeOrigin + _now));
         const stamp = readStamp(video);
         if (stamp === null) {
             state.discarded += 1;

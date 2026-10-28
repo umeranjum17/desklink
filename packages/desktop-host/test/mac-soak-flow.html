@@ -115,8 +115,9 @@ function watch(video) {
     if (watched.has(video) || typeof video.requestVideoFrameCallback !== 'function') return;
     watched.add(video);
     const step = (_now, metadata) => {
-        const at = metadata.expectedDisplayTime ?? performance.now();
-        frames.push(wall(at));
+        // The callback's own time: `expectedDisplayTime` is a prediction that jumps (even backwards) when
+        // frames come a second apart, which is exactly the stretch a stall hunt looks at.
+        frames.push(wall(_now));
         const g = state.geometry?.encoded;
         if (g && video.videoWidth) {
             const k = g.width / pointsW;
