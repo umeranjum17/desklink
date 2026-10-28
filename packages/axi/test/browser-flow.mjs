@@ -115,6 +115,15 @@ const indexOfUrl = async (urlPart) => {
   assert(position !== undefined, `tab matching ${urlPart} missing:\n${tabs}`);
   return position;
 };
+  // Before any browser is attached: a remote endpoint is refused, and the
+  // browser commands name the missing attach instead of guessing a browser.
+  const remote = await run('browser', 'attach', '--cdp', '10.1.2.3:9222');
+  assert.equal(remote.code, 2, remote.out);
+  assert.match(remote.out, /loopback/);
+  const unattached = await run('browser', 'tabs');
+  assert.equal(unattached.code, 1, unattached.out);
+  assert.match(unattached.out, /no-browser:/);
+
   // Launch through the adapter itself: loopback-only port, task-owned profile.
   // CI runners disable chromium's sandbox namespaces, so drop the sandbox there.
   const launched = await ok('browser', 'launch', '--profile', profile, ...(process.env.CI ? ['--arg=--no-sandbox'] : []));

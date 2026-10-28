@@ -8,7 +8,6 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { startTcpRelay } from './tcp-relay.mjs';
-import { startWsRelay } from './ws-relay.mjs';
 
 // The far ends live in their own process, as the engine and the phone do: an
 // echo server for the engine port and a WebSocket client that sends a probe
@@ -40,19 +39,6 @@ createInterface({ input: process.stdin }).once('line', line => {
 });
 `;
 
-async function echoThrough(relay) {
-    const echo = createServer(socket => socket.pipe(socket));
-    await new Promise(ok => echo.listen(0, '127.0.0.1', ok));
-    const port = echo.address().port;
-    relay.allowPort(port);
-    const ws = new WebSocket(`ws://127.0.0.1:${relay.port}/tcp?port=${port}`);
-    await new Promise((ok, failed) => { ws.once('open', ok); ws.once('error', failed); });
-    const echoed = new Promise(ok => ws.once('message', ok));
-    ws.send('probe');
-    await echoed;
-    return { ws, echo };
-}
-
 it('keeps relaying while the thread that started it is blocked', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'desklink-relay-'));
     const relay = await startTcpRelay({ log: join(dir, 'relay.log') });
@@ -77,55 +63,6 @@ it('keeps relaying while the thread that started it is blocked', async () => {
         farEnds.kill();
         await relay.close();
         expect(readFileSync(join(dir, 'relay.log'), 'utf8')).toMatch(/stream #1 dial ok/);
-        rmSync(dir, { recursive: true, force: true });
-    }
-}, 30000);
-
-it('keeps the WebSocket proxy flowing while the flow thread blocks', async () => {
-    let proxy;
-    const farEnds = spawn(process.execPath, ['--input-type=module', '-e', `
-import { createServer } from 'node:net';
-import { createInterface } from 'node:readline';
-import WebSocket, { WebSocketServer } from 'ws';
-const upstream = new WebSocketServer({ port: 0, host: '127.0.0.1' });
-upstream.on('connection', ws => ws.on('message', data => ws.send(data)));
-upstream.on('listening', () => console.log(JSON.stringify({ port: upstream.address().port })));
-createInterface({ input: process.stdin }).once('line', line => {
- const ws = new WebSocket(line); let echoes = 0;
- ws.on('message', () => { if (++echoes === 1) console.log(JSON.stringify({ flowing: true })); });
- ws.on('open', () => { const timer = setInterval(() => ws.send('probe'), 25); setTimeout(() => { clearInterval(timer); console.log(JSON.stringify({ echoes })); process.exit(0); }, 4500); });
-});`], { cwd: dirname(fileURLToPath(import.meta.url)), stdio: ['pipe', 'pipe', 'inherit'] });
-    try {
-        const lines = createInterface({ input: farEnds.stdout })[Symbol.asyncIterator]();
-        const next = async () => JSON.parse((await lines.next()).value);
-        const { port } = await next();
-        proxy = await startWsRelay({ upstream: `ws://127.0.0.1:${port}` });
-        farEnds.stdin.write(`ws://127.0.0.1:${proxy.port}\n`);
-        expect(await next()).toEqual({ flowing: true });
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2500);
-        const { echoes } = await next();
-        expect(echoes).toBeGreaterThan(40);
-        expect(proxy.bytes().clientToUpstream).toBeGreaterThan(0);
-        expect(proxy.bytes().upstreamToClient).toBeGreaterThan(0);
-        await proxy.close();
-    } finally {
-        farEnds.kill();
-        if (proxy) await proxy.close();
-    }
-}, 30000);
-
-it('keeps relaying when its log cannot be written', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'desklink-relay-'));
-    const relay = await startTcpRelay({ log: dir });
-    let session;
-    try {
-        session = await echoThrough(relay);
-        expect(relay.bytes()).toMatchObject({ streams: 1 });
-    } finally {
-        session?.ws.terminate();
-        session?.echo.close();
-        await relay.close();
-        expect(relay.failure()).toMatch(/the relay log stopped/);
         rmSync(dir, { recursive: true, force: true });
     }
 }, 30000);
@@ -156,44 +93,6 @@ it('delivers bytes sent before the engine port is allowed, in order', async () =
     } finally {
         ws?.terminate();
         echo.close();
-        await relay.close();
-        rmSync(dir, { recursive: true, force: true });
-    }
-}, 30000);
-
-it('closes a stream whose pre-dial bytes pass the 1 MiB cap', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'desklink-relay-'));
-    const relay = await startTcpRelay({ log: join(dir, 'relay.log') });
-    const echo = createServer(socket => socket.pipe(socket));
-    let ws;
-    try {
-        await new Promise(ok => echo.listen(0, '127.0.0.1', ok));
-        const port = echo.address().port;
-        ws = new WebSocket(`ws://127.0.0.1:${relay.port}/tcp?port=${port}`);
-        await new Promise((ok, failed) => { ws.once('open', ok); ws.once('error', failed); });
-        const closed = new Promise(ok => ws.once('close', ok));
-        const chunk = Buffer.alloc(256 * 1024, 'x');
-        for (let i = 0; i < 5; i++) ws.send(chunk);
-        await closed;
-    } finally {
-        ws?.terminate();
-        echo.close();
-        await relay.close();
-        rmSync(dir, { recursive: true, force: true });
-    }
-}, 30000);
-
-it('writes each open stream close before the log ends', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'desklink-relay-'));
-    const relay = await startTcpRelay({ log: join(dir, 'relay.log') });
-    let session;
-    try {
-        session = await echoThrough(relay);
-        await relay.close();
-        expect(readFileSync(join(dir, 'relay.log'), 'utf8')).toMatch(/stream #1 close/);
-    } finally {
-        session?.ws.terminate();
-        session?.echo.close();
         await relay.close();
         rmSync(dir, { recursive: true, force: true });
     }

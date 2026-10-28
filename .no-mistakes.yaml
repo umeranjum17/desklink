@@ -17,6 +17,9 @@ test:
         tsconfig.base.json or vitest.config.ts change counts as every package)
       - packages/desktop-host/engine/ changed: `npm run test:engine`
       - docs-only (Markdown other than SKILL.md): no package tests
+    Those suites hold integration and end-to-end journey tests only (real
+    processes, sockets, peers or an owned lab); run them as they are and do
+    not add unit, snapshot or mock-heavy tests to them.
     Name the tests you ran and the tests you skipped, with the reason.
 
     This step never starts an Android emulator, iOS simulator or
