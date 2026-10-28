@@ -44,7 +44,6 @@
  */
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
@@ -309,13 +308,14 @@ class FakeLab {
 
 // ---- the real Mac ----------------------------------------------------------
 
-function freePort() {
+function assertPortFree(port) {
     return new Promise((resolvePort, reject) => {
         const server = createServer();
         server.once('error', reject);
-        server.listen(0, '127.0.0.1', () => { const { port } = server.address(); server.close(() => resolvePort(port)); });
+        server.listen(port, '127.0.0.1', () => server.close(resolvePort));
     });
 }
+
 const pad = (n) => String(n).padStart(2, '0');
 const pmsetDate = (d) => `${pad(d.getMonth() + 1)}/${pad(d.getDate())}/${String(d.getFullYear()).slice(2)} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 // The command is a name in this table, never a value that came from the environment or the machine; the
@@ -415,8 +415,9 @@ class MacLab {
             });
         }));
 
-        const port = await freePort();
-        const token = randomBytes(24).toString('base64url');
+        const port = 18765;
+        await assertPortFree(port);
+        const token = 'desklink-mac-soak-lab';
         const bridge = this.spawnOwned('stop bridge', process.execPath, [join(repo, 'packages/desktop-host/bin/desklink-host.mjs'),
             'bridge', '--listen', `127.0.0.1:${port}`, '--token', token, '--source', 'display', '--display-id', String(this.display.id)],
         { env: { ...process.env, DESKLINK_ENGINE: this.engine } });
@@ -446,7 +447,7 @@ class MacLab {
             sleep(timeoutMs).then(() => { if (this.calls.delete(id)) reject(new Error(`${cmd} timed out after ${timeoutMs} ms`)); });
         });
     }
-    connect() { return this.call('connect', { engine: this.bridgeUrl }, 60_000); }
+    connect() { return this.call('connect', {}, 60_000); }
     disconnect() { return this.call('disconnect'); }
     frames() { return this.call('frames'); }
     metrics() { return this.call('metrics'); }
