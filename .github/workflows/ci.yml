@@ -3,6 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
@@ -29,6 +30,8 @@ jobs:
   # a required check never reports and the PR waits forever. Keep the file sets
   # in classify-changes.sh in sync with the job comments below.
   changes:
+    # Drafts do not run CI; ready_for_review starts it when the PR is marked ready.
+    if: ${{ github.event.pull_request.draft != true }}
     runs-on: ubuntu-24.04
     outputs:
       packages: ${{ steps.filter.outputs.packages }}

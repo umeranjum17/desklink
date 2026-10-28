@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   schedule:
     - cron: '17 6 * * 1'
 
@@ -25,6 +26,8 @@ jobs:
   # skipped analysis still reports rather than leaving the PR waiting.
   changes:
     name: classify
+    # Drafts do not run CI; ready_for_review starts it when the PR is marked ready.
+    if: ${{ github.event.pull_request.draft != true }}
     runs-on: ubuntu-24.04
     outputs:
       heavy: ${{ steps.filter.outputs.heavy }}
