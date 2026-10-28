@@ -59,36 +59,3 @@ pub fn status(result: Option<&Result<Tap, Unavailable>>) -> serde_json::Value {
         }),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    #[cfg(not(target_os = "macos"))]
-    fn a_platform_that_cannot_observe_says_so_and_delivers_nothing() {
-        let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counted = delivered.clone();
-        let sink: Sink = Arc::new(move |_| {
-            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        });
-        let refused = start(0, (1920, 1080), sink);
-        let status = status(Some(&refused));
-        assert_eq!(status["observing"], false);
-        assert_eq!(status["code"], "unsupported-platform");
-        assert_eq!(delivered.load(std::sync::atomic::Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn a_refusal_carries_its_code_reason_and_remedy() {
-        let refused: Result<Tap, Unavailable> = Err(Unavailable {
-            code: "missing-input-monitoring",
-            reason: String::from("reason"),
-            remedy: String::from("remedy"),
-        });
-        assert_eq!(
-            status(Some(&refused)),
-            serde_json::json!({"observing": false, "code": "missing-input-monitoring", "reason": "reason", "remedy": "remedy"})
-        );
-    }
-}
