@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+## 0.5.15
+
+Joint patch release; protocol version remains 3. All packages move together.
+
+### Added
+
+- `desklink-host doctor` prints one PASS/FAIL line for the engine, Node, X11
+  capture, Wayland portal, input, encoder and both versions, and names the
+  Debian/Ubuntu and Fedora package that fixes each failure. It opens no session
+  and shows no share prompt.
+
+### Changed
+
+- On macOS, capture delivers every refresh of a 60 Hz display. It asked
+  ScreenCaptureKit for a frame interval of exactly 1/fps, which dropped refreshes
+  that landed a hair early and delivered 52-58 fps; it now asks for 90% of the
+  interval, and the encoder still holds the stream to the requested fps. Measured
+  on a 1080p Mac: 60 fps on animated content, keystroke to picture p50 38 ms.
+- The `lease` code of `session.revoked` now tells a client to open a new session
+  with fresh authority at once, instead of ending (`PROTOCOL.md`).
+- On a bare Linux machine, the engine's start-up error and `doctor` name the
+  system libraries that are missing.
+
+### Fixed
+
+- A session whose lease runs out reopens by itself. `useDesktopSession` ended
+  the session on a `lease` revocation, so a viewer saw a dead picture once the
+  grant (3600 s by default) expired; it now reopens through the app's
+  `authorize()` as it does after a transport loss, and the picture and typing
+  return without a manual reconnect.
+- Shortcuts typed in the reference client (Control and Meta chords such as
+  Cmd+A, Cmd+C and Cmd+V) reach the desktop as chords rather than plain
+  letters, so copy and paste can be driven.
+- `install-mac-app.sh` refuses an engine built with `DESKLINK_MACOS_CLI`. That
+  engine has no embedded Info.plist, so it cannot hold the app's privacy grants.
+- On X11, the agent cue stays out of captured frames: a cue drawn while a grab
+  is in flight is masked, and an anti-aliased edge pixel can no longer seed a
+  ghost cue.
+
 ## 0.5.14
 
 Joint patch release; protocol version remains 3. All packages move together.

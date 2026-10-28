@@ -501,6 +501,14 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
         return true;
     }, [refuse]);
 
+    /** A lease that ran out ended the grant, not the desktop: ask the app for fresh authority at once. */
+    const leaseEnded = useCallback((reason: string) => {
+        // Both the signaling event and the control channel report it; one reopen answers both.
+        if (statusRef.current === 'failed' || statusRef.current === 'reconnecting') return;
+        attempts.current = 0;
+        reopenAtOnce.current = transportFailed(reason);
+    }, [transportFailed]);
+
     const cancelRestart = useCallback(() => {
         if (restartTimer.current !== null) clearTimeout(restartTimer.current);
         restartTimer.current = null;
@@ -1074,13 +1082,17 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                     transportFailed(event.reason);
                     return;
                 }
+                if (event.code === 'lease') {
+                    leaseEnded(event.reason);
+                    return;
+                }
                 void teardown(event.reason, false);
                 update({ status: 'ended', failure: { code: 'revoked', message: event.reason } });
                 return;
             default:
                 return;
         }
-    }, [carrierLost, onTransportState, teardown, transportFailed, update]);
+    }, [carrierLost, leaseEnded, onTransportState, teardown, transportFailed, update]);
 
     /** Open a session on `given`, a carrier the dial loop just authorized, or on a fresh authorization. */
     const establish = useCallback(async (given?: { signaling: Signaling; session: SessionOpenRequest }) => {
@@ -1416,6 +1428,10 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
                                 transportFailed(reply.reason);
                                 return;
                             }
+                            if (reply.code === 'lease') {
+                                leaseEnded(reply.reason);
+                                return;
+                            }
                             void teardown(reply.reason, false);
                             update({ status: 'ended', failure: { code: 'revoked', message: reply.reason } });
                             return;
@@ -1461,7 +1477,7 @@ export function useDesktopSession(options: DesktopSessionOptions): DesktopSessio
             dropped = true;
             subscription?.remove();
         };
-    }, [transportFailed, onTransportState, cancelRestart, spendRestartAttempt, notePing, teardown, update, pressKey, typeText, armMedia, carrierFailed]);
+    }, [transportFailed, leaseEnded, onTransportState, cancelRestart, spendRestartAttempt, notePing, teardown, update, pressKey, typeText, armMedia, carrierFailed]);
 
     const copyRemoteToLocal = useCallback(async (writeLocal: (text: string) => Promise<void>) => {
         if (!inputEnabled.current) throw new Error('Desktop control is off.');

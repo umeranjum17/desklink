@@ -11,7 +11,7 @@
 // client cannot hear it — and requires a reopen back to live. The browser
 // peer's own 'failed' is withheld from the hook there, as a resumed iOS peer
 // may never send one, so the revocation alone must drive the reopen. Last, a session
-// opened with a short lease must end when the lease expires, and stay ended.
+// opened with a short lease must reopen with fresh authority when the lease expires, back to a live picture and working control.
 // Everything it starts is task-owned and reaped by recorded PID.
 // Needs a built engine: set DESKLINK_AXI_ENGINE to its binary path, or use
 // packages/desktop-host/engine/target/debug/desklink-host in this worktree.
@@ -555,7 +555,8 @@ export default { root: PAGE, logLevel: 'warn',
     // recover is recorded as a measured failure and the run continues.
     // SIGCONT is guaranteed so one failure cannot wedge the rest.
     const results = [];
-    for (const seconds of [5, 25, 45]) {
+    // DESKLINK_RECONNECT_BLOCKS=5 runs only the 5 s outage, to reach the scenarios after the outage blocks quickly.
+    for (const seconds of (process.env.DESKLINK_RECONNECT_BLOCKS ?? '5,25,45').split(',').map(Number)) {
         if (results.length > 0) {
             // Let the previous recovery converge (escalation, if any) so each
             // block starts from a settled session.
@@ -642,24 +643,26 @@ export default { root: PAGE, logLevel: 'warn',
     console.log(`SUSPEND-RESULT ${JSON.stringify(suspended)}`);
     await evaluate(cdp, 'window.__silencePeerFailure = false');
 
-    // ---- pairing revocation still ends -----------------------------------
-    // A session opened with an 8 s lease: its expiry is the grant ending, not
-    // an outage, so the session ends and nothing reopens it.
+    // ---- the lease ends: ask for fresh authority ---------------------------
+    // A session opened with an 8 s lease. Its expiry ends the grant, not the
+    // desktop, so the hook asks the app for new authority at once and the
+    // picture and control come back without anyone reconnecting. (The first
+    // lease is 8 s; the session that replaces it asks for a long one.)
     await evaluate(cdp, 'window.__ttlSeconds = 8; true');
     await evaluate(cdp, 'window.__session.close("lease check").then(() => true)');
     await pollProbe(cdp, 5000, (p) => p.status === 'ended');
     await evaluate(cdp, 'window.__session.connect().then(() => true)');
     const leased = await pollProbe(cdp, 30000, (p) => p.status === 'live');
+    await evaluate(cdp, 'window.__ttlSeconds = 600; true');
     const leasedAt = Date.now();
-    const expired = await pollProbe(cdp, 20000, (p) => p.status === 'ended');
-    log(`lease: ended ${Date.now() - leasedAt}ms after live, failure=${expired.failure}`);
-    assert.equal(expired.failure, 'revoked');
-    assert(expired.sig.some(([, s]) => s === 'got-session.revoked:lease'), 'the engine did not revoke the lease with code lease');
-    await sleep(12000);
-    const stayed = await evaluate(cdp, 'window.__probe');
-    assert.equal(stayed.status, 'ended', `a lease revocation was reopened: ${stayed.status}`);
-    assert.equal(stayed.opens, leased.opens, `a lease revocation reopened the session (opens ${leased.opens} -> ${stayed.opens})`);
-    console.log(`LEASE-RESULT ${JSON.stringify({ status: stayed.status, failure: stayed.failure, opens: stayed.opens })}`);
+    const lapsed = await pollProbe(cdp, 20000, (p) => p.sig.some(([, s]) => s === 'got-session.revoked:lease'));
+    log(`lease: revoked ${Date.now() - leasedAt}ms after live`);
+    assert(lapsed.sig.some(([, s]) => s === 'got-session.revoked:lease'), 'the engine did not revoke the lease with code lease');
+    const renewed = await pollProbe(cdp, 15000, (p) => p.opens > leased.opens && p.status === 'live' && p.frames > leased.frames);
+    log(`lease: live again ${Date.now() - leasedAt}ms after the first live, opens ${leased.opens} -> ${renewed.opens}`);
+    assert(!renewed.log.some(([at, s]) => at >= leasedAt && s === 'ended'), 'the lease expiry ended the session instead of reopening it');
+    assert(await expectPointerSoft(cdp, evaluate, baseEnv, 520, 360, 'after the lease', 15000), 'control dead after the lease reopen');
+    console.log(`LEASE-RESULT ${JSON.stringify({ status: renewed.status, opens: renewed.opens, statuses: renewed.log.filter(([at]) => at >= leasedAt).map(([, s]) => s) })}`);
     await cleanup();
     log('done, cleaned up');
 } catch (error) {

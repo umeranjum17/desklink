@@ -480,7 +480,7 @@ The session ended on the engine's side; there is nothing further to drain.
 | `code` | Meaning | A client should |
 |---|---|---|
 | `transport` | The path to the client's peer was lost (ICE `failed`, or the track refused a frame) | open a new session with fresh authority; the desktop is still available |
-| `lease` | The session's `ttl_seconds` ran out | end; the grant is spent |
+| `lease` | The session's `ttl_seconds` ran out | open a new session with fresh authority at once; this grant is spent but the desktop is still available (`@desklink/react-native`'s hook does; a client that ignores the event just goes dead) |
 | `error` | The engine could not keep serving it, such as an encoder refusing a frame | end and report |
 
 A session the consumer closes or replaces (`session.close`, a new
