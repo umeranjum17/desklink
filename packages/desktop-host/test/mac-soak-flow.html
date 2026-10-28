@@ -45,7 +45,8 @@ const [ex, ey, ew, eh] = query.get('echo').split(',').map(Number);
 const [pointsW, pointsH] = query.get('points').split(',').map(Number);
 const [fx, fy, fw, fh] = query.get('fixture').split(',').map(Number);
 const wall = (t) => Math.round(performance.timeOrigin + t);
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Timer lengths are clamped to a finite 0..1 h, wherever the number came from.
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(Math.max(Number(ms) || 0, 0), 3_600_000)));
 
 let socket = null;
 let nextId = 0;
@@ -159,7 +160,10 @@ const commands = {
         window.__controlChannel = null;
         Object.assign(state, { sessionId: null, presented: false, inputEnabled: false, failure: null, rejection: null, replies: [] });
         level = null;
-        socket = new WebSocket(engine);
+        // The bridge is on this machine: anything but a ws:// loopback address with a port is refused.
+        const target = new URL(engine);
+        if (target.protocol !== 'ws:' || !['127.0.0.1', 'localhost'].includes(target.hostname) || target.port === '') throw new Error('the bridge URL must be ws://127.0.0.1:<port> or ws://localhost:<port>');
+        socket = new WebSocket(target.href);
         socket.addEventListener('message', onMessage);
         await new Promise((resolve, reject) => { socket.addEventListener('open', resolve, { once: true }); socket.addEventListener('error', () => reject(new Error('bridge socket failed')), { once: true }); });
         state.localId = nativeDesklink.createSession('[]');

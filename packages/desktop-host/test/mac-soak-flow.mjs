@@ -318,7 +318,13 @@ function freePort() {
 }
 const pad = (n) => String(n).padStart(2, '0');
 const pmsetDate = (d) => `${pad(d.getMonth() + 1)}/${pad(d.getDate())}/${String(d.getFullYear()).slice(2)} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-const run = (command, args, options = {}) => execFileSync(command, args, { encoding: 'utf8', timeout: 30_000, ...options });
+// The command is a name in this table, never a value that came from the environment or the machine; the
+// engine path (operator input) is an argument to `env`, not the command.
+const TOOLS = { pmset: '/usr/bin/pmset', sw_vers: '/usr/bin/sw_vers', codesign: '/usr/bin/codesign', sudo: '/usr/bin/sudo', sh: '/bin/sh', caffeinate: '/usr/bin/caffeinate', env: '/usr/bin/env' };
+const run = (tool, args, options = {}) => {
+    if (!Object.hasOwn(TOOLS, tool)) throw new Error(`run: unknown tool ${tool}`);
+    return execFileSync(TOOLS[tool], args, { encoding: 'utf8', timeout: 30_000, ...options });
+};
 
 class MacLab {
     constructor(plan, cleanup) {
@@ -361,7 +367,7 @@ class MacLab {
         assert(signing.includes('identifier "dev.desklink.host"'), `the engine is not the lab-signed DesklinkHost: ${signing}`);
         this.chrome = process.env.DESKLINK_CHROME ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
         assert(existsSync(this.chrome), `no Chrome at ${this.chrome}; set DESKLINK_CHROME`);
-        const capabilities = JSON.parse(run(this.engine, ['capabilities']));
+        const capabilities = JSON.parse(run('env', [this.engine, 'capabilities']));
         assert.equal(capabilities.capture?.grant, 'granted', 'Screen Recording is not granted to the engine');
         assert.equal(capabilities.input?.grant, 'granted', 'Accessibility is not granted to the engine');
         this.display = capabilities.capture.displays.find((d) => d.main);
