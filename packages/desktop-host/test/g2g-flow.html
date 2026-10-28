@@ -54,6 +54,8 @@ const state = {
     discarded: 0,
     /** Presentation timestamps in ms, for the frame-interval distribution. */
     intervals: [],
+    /** Callback times of presented frames, for frame gaps (`intervals` follows expectedDisplayTime). */
+    callbacks: [],
     frames: 0,
     rejection: null,
     /** The desktop width the stamp covers, so blocks scale to the video. */
@@ -145,6 +147,7 @@ function countFrames() {
         const presented = Math.round(performance.timeOrigin + (metadata.expectedDisplayTime ?? 0));
         if (lastPresentation !== 0) state.intervals.push(presented - lastPresentation);
         lastPresentation = presented;
+        state.callbacks.push(Math.round(performance.timeOrigin + _now));
         const stamp = readStamp(video);
         if (stamp === null) {
             state.discarded += 1;

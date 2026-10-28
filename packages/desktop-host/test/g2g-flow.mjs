@@ -11,7 +11,7 @@
  * Usage (from the repo root):
  *
  *   node packages/desktop-host/test/g2g-flow.mjs [--size 1920x1080] [--max-fps 60]
- *     [--seconds 15] [--scenarios typing,scroll,still] [--gate]
+ *     [--seconds 15] [--scenarios typing,scroll,still,idle] [--gate]
  *     [--baseline <file>] [--require-load-gate] [--netem '<netem args>'] [--codec vp9|h264]
  *     [--record-reference <webm> [--record-document <existing-document>]]
  *
@@ -22,7 +22,8 @@
  * it (`DESKLINK_H264_ENCODER` picks the engine's H.264 backend).
  *
  * Scenarios: `typing` (stamp only), `scroll` (full-screen motion) and `still`
- * (the stamp freezes 2 s after mapping, to check the refine pass still runs).
+ * (the stamp freezes 2 s after mapping, to check the refine pass still runs) and `idle`
+ * (the stamp repaints every 3 s, a source that changes less than once a second).
  *
  * `--netem` runs the lab over an emulated link, for example
  * `--netem 'delay 15ms loss 1% rate 15mbit'` (30 ms round trip): see below.
@@ -93,7 +94,7 @@ assert(Number.isInteger(maxFps) && maxFps > 0, '--max-fps must be a positive int
 const seconds = Number(flag('seconds', '15'));
 assert(Number.isInteger(seconds) && seconds >= 5, '--seconds must be at least 5');
 const scenarios = (flag('scenarios', 'typing,scroll,still') ?? '').split(',').filter(Boolean);
-assert(scenarios.length > 0 && scenarios.every((s) => ['typing', 'scroll', 'still'].includes(s)), '--scenarios must be typing,scroll,still');
+assert(scenarios.length > 0 && scenarios.every((s) => ['typing', 'scroll', 'still', 'idle'].includes(s)), '--scenarios must be typing,scroll,still,idle');
 const codec = flag('codec', 'vp9');
 assert(['vp9', 'h264'].includes(codec), '--codec must be vp9 or h264');
 const gate = args.includes('--gate');
@@ -429,7 +430,7 @@ async function startStamp(mode) {
         stdio: ['ignore', 'pipe', 'ignore'],
         env: {
             ...process.env, DISPLAY: display, XAUTHORITY: authority, WAYLAND_DISPLAY: '',
-            MODE: mode, RATE: '120', STILL_AFTER_MS: '2000', DESKLINK_G2G_SESSION: `g2g-${process.pid}`,
+            MODE: mode, RATE: '120', STILL_AFTER_MS: '2000', IDLE_MS: '3000', DESKLINK_G2G_SESSION: `g2g-${process.pid}`,
         },
     });
     remember(stamp.pid, stampBinary);
@@ -453,7 +454,7 @@ async function startStamp(mode) {
 }
 
 async function runScenario(scenario, vite) {
-    const mode = scenario === 'scroll' ? 'scroll' : scenario === 'still' ? 'still' : 'typing';
+    const mode = scenario === 'scroll' ? 'scroll' : scenario === 'still' || scenario === 'idle' ? scenario : 'typing';
     const loadBefore = load();
     // The bridge serves the engine's protocol; the engine child PID it records
     // is what lets this harness reap the engine even if the bridge dies first.
@@ -581,6 +582,7 @@ async function runScenario(scenario, vite) {
             g2g: window.__flow.state.g2g,
             discarded: window.__flow.state.discarded,
             intervals: window.__flow.state.intervals,
+            callbacks: window.__flow.state.callbacks,
             stats: await window.__flow.stats(),
             metrics: await window.__flow.metrics(window.__flow.state.sessionId),
             geometry: window.__flow.state.geometry,
@@ -618,9 +620,8 @@ async function runScenario(scenario, vite) {
             // Gaps in the received frame stream, placed in time (`at` is seconds into the run): the Mac
             // stall hunt compares this line with the same measure on the Mac (mac-soak-flow.mjs).
             frame_gaps: (() => {
-                let t = 0;
-                const gaps = frameGaps([0, ...result.intervals.map((ms) => (t += ms))]);
-                return { ...gaps, longest: gaps.longest.map((g) => ({ at_s: Math.round(g.at) / 1000, ms: g.ms })) };
+                const gaps = frameGaps(result.callbacks);
+                return { ...gaps, longest: gaps.longest.map((g) => ({ at_s: Math.round(g.at - result.callbacks[0]) / 1000, ms: g.ms })) };
             })(),
             g2g_ms: {
                 startup_samples_included: initial.startupSamples,
@@ -686,13 +687,13 @@ function checkGate(lines) {
     // and every one of them carries the frozen stamp, so its glass samples
     // only prove the path is live; rate and latency gates belong to typing
     // and scroll.
-    const minSamples = { typing: 10, scroll: 10, still: 1 };
+    const minSamples = { typing: 10, scroll: 10, still: 1, idle: 1 };
     for (const line of lines) {
         if (line.g2g_ms.n < (minSamples[line.scenario] ?? 10)) failures.push(`${line.scenario}: only ${line.g2g_ms.n} glass samples`);
         const total = line.g2g_ms.n + line.g2g_ms.discarded;
         // Still keepalives carry the frozen stamp, so late ones are stale by
         // design; the ratio gate only means something while the stamp moves.
-        if (line.scenario !== 'still' && total > 0 && line.g2g_ms.discarded / total >= 0.5) {
+        if (line.scenario !== 'still' && line.scenario !== 'idle' && total > 0 && line.g2g_ms.discarded / total >= 0.5) {
             failures.push(`${line.scenario}: ${line.g2g_ms.discarded}/${total} stamps unreadable`);
         }
         if (line.scenario === 'still' && !(line.engine.refined_frames >= 1)) {
