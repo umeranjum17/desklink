@@ -42,8 +42,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
       - '**/*.md'
+      - 'evidence/**'
   workflow_dispatch:
 
 permissions:
@@ -61,6 +63,8 @@ jobs:
   # workflow fails here when either fails; nothing builds or publishes.
   test:
     name: test (vitest)
+    # Drafts do not run CI; ready_for_review starts it when the PR is marked ready.
+    if: ${{ github.event.pull_request.draft != true }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
