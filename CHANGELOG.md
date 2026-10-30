@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.5.16
+
+Joint patch release; protocol version remains 3. All packages move together.
+
+### Added
+
+- Wayland keyboard input works through the portal's RemoteDesktop interface (#232).
+
+### Changed
+
+- CI skips draft pull requests and evidence-only release runs (#237).
+
+### Fixed
+
+- Keep journey-only tests; remove the redundant tests (#238).
+
 ## 0.5.15
 
 Joint patch release; protocol version remains 3. All packages move together.
