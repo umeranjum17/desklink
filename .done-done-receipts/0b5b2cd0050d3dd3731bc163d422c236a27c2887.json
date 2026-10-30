@@ -1,0 +1,74 @@
+{
+  "schema": 2,
+  "repo": "desklink",
+  "head": "0b5b2cd0050d3dd3731bc163d422c236a27c2887",
+  "tree": "129e07c1e6076b7c3c689ba0dfd2b884d5348e49",
+  "claim": "On Wayland, where /dev/uinput is unavailable and the session portal offers a RemoteDesktop keyboard, typing reaches the portal with no uinput device open; where uinput works nothing changes",
+  "result": "pass",
+  "at": "2026-10-27T00:17:49.020Z",
+  "files": [
+    {
+      "path": "<evidence root>/20261027T001726Z-0b5b2cd0-7ffaf0/capability-lines.png",
+      "sha256": "925c535a1d3d14d4897a57e51fb48bafefacfec85230dabda0aba28fccf7e6a5"
+    },
+    {
+      "path": "<evidence root>/20261027T001726Z-0b5b2cd0-7ffaf0/test-run.png",
+      "sha256": "76c5f3e29d68a86a69a47dbe98e5cd6e0514aacd2bfc6042a63746d27dd5ea84"
+    },
+    {
+      "path": "<evidence root>/20261027T001726Z-0b5b2cd0-7ffaf0/test.log",
+      "sha256": "193d76f08a864fd54b5060058eeda361abcf6b829abdc433111f4a8be3e74e89"
+    }
+  ],
+  "runs": [
+    {
+      "run_id": "20261027T001726Z-0b5b2cd0-7ffaf0",
+      "commit": "0b5b2cd0050d3dd3731bc163d422c236a27c2887",
+      "journey": "portal-keys",
+      "command": "env -u DISPLAY -u WAYLAND_DISPLAY bash packages/desktop-host/test/prove-portal-keys.sh",
+      "tool": "0.6.18",
+      "steps": {
+        "target": {
+          "version": "0.5.14"
+        },
+        "start": "a Wayland session whose portal offers a RemoteDesktop keyboard, on a private bus",
+        "steps": [
+          "the engine opens a keyboard-only RemoteDesktop portal session",
+          "the client's keys 35, 35, 30, 30 are sent through the engine",
+          "the mock portal receives them in order and the session closes on drop",
+          "capabilities report uinput when it works and the portal keyboard only when it does not"
+        ],
+        "result": "keys reach the portal with no uinput device open; pointer and wheel stay on uinput where it exists"
+      }
+    }
+  ],
+  "judge": {
+    "route": "claude-code",
+    "model": "claude-haiku-5-5",
+    "independence": "session-only",
+    "author": {
+      "agent": "claude",
+      "model": "claude-haiku-5-5"
+    },
+    "verdicts": [
+      {
+        "path": "<evidence root>/20261027T001726Z-0b5b2cd0-7ffaf0/capability-lines.png",
+        "sha256": "925c535a1d3d14d4897a57e51fb48bafefacfec85230dabda0aba28fccf7e6a5",
+        "verdict": "pass",
+        "seen": "Row 2 reads \"uinput missing: mechanism=portal-remotedesktop ... keyboard=True ... grant=portal\", which matches the Wayland case where the portal provides the keyboard. Row 1 reads \"uinput works: mechanism=inputtino/uinput ... keyboard=True ... grant=granted\", which matches the unchanged uinput case. The parenthetical under row 2 (\"no portal at all, real binary, private bus\") conflicts with the portal mechanism on that same row, and the screenshot does not show an open device, so some doubt remains."
+      },
+      {
+        "path": "<evidence root>/20261027T001726Z-0b5b2cd0-7ffaf0/test-run.png",
+        "sha256": "76c5f3e29d68a86a69a47dbe98e5cd6e0514aacd2bfc6042a63746d27dd5ea84",
+        "verdict": "pass",
+        "seen": "The output reads \"asserted: no /dev/uinput file descriptor open while the portal carried the keys\" and \"keys 35,35,30,30 reached the portal in order\". That matches the Wayland portal-keyboard part of the outcome. It shows nothing about the uinput-works case, so it covers only the first part."
+      },
+      {
+        "path": "<evidence root>/20261027T001726Z-0b5b2cd0-7ffaf0/test.log",
+        "sha256": "193d76f08a864fd54b5060058eeda361abcf6b829abdc433111f4a8be3e74e89",
+        "verdict": "pass",
+        "seen": "Read 3 capability entries and 2 test result blocks. Entry 3 shows grant \"portal\", mechanism \"portal-remotedesktop\", keyboard true, and the test keys_reach_the_portal_in_order_and_the_session_closes reports ok, which covers the Wayland portal keyboard part. Entry 2 shows grant \"granted\", mechanism \"inputtino/uinput\", keyboard true, pointer true, and no unavailable_reason, which covers the uinput-works part. Entry 1 (grant \"missing-device-access\", reason \"no /dev/uinput\") matches the outcome's unavailable-uinput condition and is not a contradiction. No failures appear in the output."
+      }
+    ]
+  }
+}

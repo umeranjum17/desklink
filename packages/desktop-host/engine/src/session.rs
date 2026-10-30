@@ -512,6 +512,9 @@ struct InputTarget {
 
 enum Applier {
     Uinput(InputDevices),
+    /// Keyboard only: the portal grants keys, not a pointer.
+    #[cfg(target_os = "linux")]
+    PortalKeys(crate::input_portal::PortalKeys),
     X11(Arc<Mutex<X11Desktop>>),
     #[cfg(test)]
     Recording(Arc<Mutex<Vec<(i16, bool)>>>),
@@ -524,6 +527,8 @@ impl InputTarget {
                 devices.move_absolute(x, y);
                 Ok(())
             }
+            #[cfg(target_os = "linux")]
+            Applier::PortalKeys(_) => anyhow::bail!(NO_PORTAL_POINTER),
             Applier::X11(desktop) => lock(desktop).move_pointer(x, y),
             #[cfg(test)]
             Applier::Recording(_) => Ok(()),
@@ -537,6 +542,8 @@ impl InputTarget {
                 devices.button(button, down);
                 Ok(())
             }
+            #[cfg(target_os = "linux")]
+            Applier::PortalKeys(_) => anyhow::bail!(NO_PORTAL_POINTER),
             Applier::X11(desktop) => lock(desktop).button(x11_button(button), down),
             #[cfg(test)]
             Applier::Recording(log) => {
@@ -554,6 +561,8 @@ impl InputTarget {
                 devices.scroll(dx, dy);
                 Ok(())
             }
+            #[cfg(target_os = "linux")]
+            Applier::PortalKeys(_) => anyhow::bail!(NO_PORTAL_POINTER),
             Applier::X11(desktop) => {
                 let (rest_x, rest_y) = (self.wheel_rest.0 + dx, self.wheel_rest.1 + dy);
                 let (whole_x, whole_y) = (rest_x.trunc(), rest_y.trunc());
@@ -577,6 +586,8 @@ impl InputTarget {
     fn key(&mut self, code: i16, down: bool) -> Result<()> {
         match &mut self.applier {
             Applier::Uinput(devices) => devices.key(code, down),
+            #[cfg(target_os = "linux")]
+            Applier::PortalKeys(keys) => keys.key(code, down),
             Applier::X11(desktop) => lock(desktop).key(code, down),
             #[cfg(test)]
             Applier::Recording(log) => {
@@ -675,6 +686,8 @@ impl InputTarget {
         for button in buttons {
             match &mut self.applier {
                 Applier::Uinput(devices) => devices.button(button, false),
+                #[cfg(target_os = "linux")]
+                Applier::PortalKeys(_) => {}
                 Applier::X11(desktop) => lock(desktop).button(x11_button(button), false)?,
                 #[cfg(test)]
                 Applier::Recording(log) => {
@@ -687,6 +700,8 @@ impl InputTarget {
         for code in keys {
             match &mut self.applier {
                 Applier::Uinput(devices) => devices.key(code, false)?,
+                #[cfg(target_os = "linux")]
+                Applier::PortalKeys(keys) => keys.key(code, false)?,
                 Applier::X11(desktop) => lock(desktop).key(code, false)?,
                 #[cfg(test)]
                 Applier::Recording(log) => {
@@ -699,6 +714,9 @@ impl InputTarget {
         Ok(())
     }
 }
+
+#[cfg(target_os = "linux")]
+const NO_PORTAL_POINTER: &str = "pointer input is unavailable: the portal grants the keyboard only";
 
 fn x11_button(button: Button) -> u8 {
     match button {
@@ -942,6 +960,13 @@ fn wayland_clipboard_available() -> bool {
 /// What the engine can actually do on this machine right now.
 #[cfg(target_os = "linux")]
 pub fn capabilities() -> serde_json::Value {
+    capabilities_with(crate::input::probe())
+}
+
+/// [`capabilities`] given the `uinput` probe's answer, so the choice between
+/// `uinput` and the portal keyboard is testable on a host of either kind.
+#[cfg(target_os = "linux")]
+pub fn capabilities_with(uinput: Result<(), crate::input::InputUnavailable>) -> serde_json::Value {
     let session_kind = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         "wayland"
     } else if std::env::var_os("DISPLAY").is_some() {
@@ -956,7 +981,10 @@ pub fn capabilities() -> serde_json::Value {
     // Asked, not taken: the probe connects to this session's PipeWire, reads the
     // registry and leaves. No portal, no prompt, no capture.
     let audio = crate::audio::probe();
-    let (input, grant_state, unavailable) = match crate::input::probe() {
+    // Fallback only: reads one portal property when uinput cannot be created.
+    let portal_keys =
+        uinput.is_err() && x11.is_null() && crate::input_portal::advertised_blocking();
+    let (input, grant_state, unavailable) = match uinput {
         Ok(()) => (serde_json::json!(true), "granted", serde_json::Value::Null),
         Err(unavailable) => (
             serde_json::json!(false),
@@ -989,14 +1017,14 @@ pub fn capabilities() -> serde_json::Value {
         },
         "encode": encode_capabilities(),
         "input": {
-            "mechanism": "inputtino/uinput",
-            "pointer": input,
-            "wheel": input,
-            "keyboard": input,
+            "mechanism": if portal_keys { "portal-remotedesktop" } else { "inputtino/uinput" },
+            "pointer": input == true && !portal_keys,
+            "wheel": input == true && !portal_keys,
+            "keyboard": input == true || portal_keys,
             "text": ["layout-reachable"],
             "layout": keymap::LayoutNames::from_environment().identity(),
-            "unavailable_reason": unavailable,
-            "grant": grant_state,
+            "unavailable_reason": if portal_keys { serde_json::Value::Null } else { unavailable },
+            "grant": if portal_keys { "portal" } else { grant_state },
         },
         "clipboard": { "read": clipboard, "write": clipboard && clipboard::writer_available(), "mime": ["text/plain;charset=utf-8"],
                        "maxBytes": clipboard::MAX_CLIPBOARD_BYTES },
@@ -1469,15 +1497,28 @@ impl Session {
                 .input_available()
                 .then(|| Applier::X11(desktop.clone())),
             None => {
+                // uinput as before; only when it cannot be created, the
+                // portal's keyboard (keys only, no host-wide device).
                 #[cfg(target_os = "linux")]
-                let devices = InputDevices::create(source_w as i32, source_h as i32);
+                let applier = match InputDevices::create(source_w as i32, source_h as i32) {
+                    Ok(devices) => Some(Applier::Uinput(devices)),
+                    Err(error) => crate::input_portal::open()
+                        .await
+                        .map_err(|portal| {
+                            log::info!("no input: uinput: {error:#}; portal keyboard: {portal:#}")
+                        })
+                        .ok()
+                        .map(Applier::PortalKeys),
+                };
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
-                let devices = InputDevices::create_for_display(
+                let applier = InputDevices::create_for_display(
                     source_w as i32,
                     source_h as i32,
                     source.node_id,
-                );
-                devices.ok().map(Applier::Uinput)
+                )
+                .ok()
+                .map(Applier::Uinput);
+                applier
             }
         };
         let input = applier.map(|applier| InputTarget {
