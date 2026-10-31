@@ -1659,6 +1659,9 @@ impl Session {
         });
 
         spawn_pipeline(&inner, peer, frame_rx, pipeline, max_fps, bitrate_kbps);
+        // Same counters, off the pipeline's thread: a smooth picture pays one
+        // line a second, and a picture that stops leaves the seconds around it.
+        crate::trace::spawn(inner.metrics.clone(), inner.pipeline.clone());
         spawn_peer_events(&inner, peer_events_rx);
         spawn_lease(&inner, request.ttl.unwrap_or(Duration::from_secs(3600)));
 
@@ -3478,6 +3481,7 @@ fn spawn_pipeline(
                     }
                 };
                 let took = started.elapsed();
+                crate::trace::note_encode(took);
                 if let Ok(mut m) = inner.metrics.lock() {
                     m.encoded_frames += 1;
                     m.encoded_bytes += packet.data.len() as u64;
