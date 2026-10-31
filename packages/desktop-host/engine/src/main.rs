@@ -100,6 +100,11 @@ mod protocol;
 mod session;
 #[cfg(all(any(target_os = "macos", target_os = "windows"), desklink_vpx))]
 mod session;
+#[cfg(any(
+    target_os = "linux",
+    all(any(target_os = "macos", target_os = "windows"), desklink_vpx)
+))]
+mod trace;
 #[cfg(target_os = "windows")]
 mod win;
 #[cfg(target_os = "linux")]

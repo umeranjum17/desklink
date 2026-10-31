@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- The engine writes a bounded local trace by default: one plain line a second
+  of the frame counters it already keeps, and around a stall (an encode call
+  over 500 ms, capture still taking frames a second after the last send, or a
+  process that stopped running) the 30 seconds before it, the counters during,
+  and where it ended. `DESKLINK_TRACE=off` silences it, `DESKLINK_TRACE_PATH`
+  names the file, and the one file stops at 2 MB. It writes no pixels, no
+  window content and nothing on the network, and it runs off the pipeline's
+  thread: an A/B run of the g2g harness measured no change in worst
+  presentation gap or frames per second.
+
 ## 0.5.16
 
 Joint patch release; protocol version remains 3. All packages move together.
