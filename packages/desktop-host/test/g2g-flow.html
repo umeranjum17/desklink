@@ -54,6 +54,10 @@ const state = {
     discarded: 0,
     /** Presentation timestamps in ms, for the frame-interval distribution. */
     intervals: [],
+    /** Every presentation time in ms, in arrival order, so a gap stays a gap. */
+    presentedAt: [],
+    /** One row per second of the receiver's own loss and recovery counters. */
+    rtp: [],
     frames: 0,
     rejection: null,
     /** The desktop width the stamp covers, so blocks scale to the video. */
@@ -143,6 +147,7 @@ function countFrames() {
         state.frames += lastPresentedFrames === null ? 1 : metadata.presentedFrames - lastPresentedFrames;
         lastPresentedFrames = metadata.presentedFrames;
         const presented = Math.round(performance.timeOrigin + (metadata.expectedDisplayTime ?? 0));
+        state.presentedAt.push(presented);
         if (lastPresentation !== 0) state.intervals.push(presented - lastPresentation);
         lastPresentation = presented;
         const stamp = readStamp(video);
@@ -260,6 +265,11 @@ window.__flow = {
                         codec: report.get(s.codecId)?.mimeType ?? null,
                         decoder: s.decoderImplementation ?? null,
                         framesDecoded: s.framesDecoded ?? null,
+                        packetsLost: s.packetsLost ?? null,
+                        nackCount: s.nackCount ?? null,
+                        pliCount: s.pliCount ?? null,
+                        freezeCount: s.freezeCount ?? null,
+                        keyFramesDecoded: s.keyFramesDecoded ?? null,
                         framesDropped: s.framesDropped ?? null,
                         totalDecodeTime: s.totalDecodeTime ?? null,
                         jitterBufferDelay: s.jitterBufferDelay ?? null,
@@ -271,6 +281,11 @@ window.__flow = {
         return out;
     },
 };
+setInterval(async () => {
+    if (window.__pcs.length === 0) return;
+    const { inbound } = await window.__flow.stats();
+    if (inbound[0]) state.rtp.push({ at: Date.now(), ...inbound[0] });
+}, 1000);
 socket.addEventListener('open', () => {
     window.__flow.ready = true;
 });

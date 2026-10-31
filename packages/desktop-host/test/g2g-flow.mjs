@@ -12,7 +12,7 @@
  *
  *   node packages/desktop-host/test/g2g-flow.mjs [--size 1920x1080] [--max-fps 60]
  *     [--seconds 15] [--scenarios typing,scroll,still] [--gate]
- *     [--baseline <file>] [--require-load-gate] [--netem '<netem args>'] [--codec vp9|h264]
+ *     [--baseline <file>] [--frames-out <file>] [--require-load-gate] [--netem '<netem args>'] [--codec vp9|h264]
  *     [--record-reference <webm> [--record-document <existing-document>]]
  *
  * `--codec h264` has the page ask for H.264 the way the iOS receiver does (H.264
@@ -96,6 +96,7 @@ assert(scenarios.length > 0 && scenarios.every((s) => ['typing', 'scroll', 'stil
 const codec = flag('codec', 'vp9');
 assert(['vp9', 'h264'].includes(codec), '--codec must be vp9 or h264');
 const gate = args.includes('--gate');
+const framesOut = flag('frames-out', null);
 const baselinePath = flag('baseline', null);
 const requireLoadGate = args.includes('--require-load-gate');
 const baselineText = baselinePath === null ? null : readFileSync(baselinePath, 'utf8');
@@ -580,6 +581,8 @@ async function runScenario(scenario, vite) {
             g2g: window.__flow.state.g2g,
             discarded: window.__flow.state.discarded,
             intervals: window.__flow.state.intervals,
+            presentedAt: window.__flow.state.presentedAt,
+            rtp: window.__flow.state.rtp,
             stats: await window.__flow.stats(),
             metrics: await window.__flow.metrics(window.__flow.state.sessionId),
             geometry: window.__flow.state.geometry,
@@ -605,6 +608,8 @@ async function runScenario(scenario, vite) {
                 m[key] -= initial.metrics[key] ?? 0;
             }
         }
+        if (framesOut !== null) writeFileSync(framesOut.replace(/(\.[^.]*)?$/, `.${scenario}$1`), `${result.presentedAt.join('\n')}\n`);
+        if (framesOut !== null) writeFileSync(framesOut.replace(/(\.[^.]*)?$/, `.${scenario}.rtp$1`), result.rtp.map((row) => JSON.stringify(row)).join('\n') + '\n');
         const line = {
             scenario,
             size: `${sizeW}x${sizeH}`,
