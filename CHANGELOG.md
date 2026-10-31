@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.5.17 (2026-10-31)
+
+Joint patch release; protocol version remains 3. All packages move together.
+
+The release's headline: a stopped picture now leaves a record you can read
+without a debugger. The engine writes a bounded local trace by default.
+
 ### Added
 
 - The engine writes a bounded local trace by default: one plain line a second
