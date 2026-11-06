@@ -623,7 +623,7 @@ async function runScenario(scenario, vite) {
             frame_interval_p95_ms: percentile(intervals, 95),
             frame_interval_max_ms: intervals.length > 0 ? intervals[intervals.length - 1] : null,
             // Gaps in the received frame stream, placed in time (`at` is seconds into the run): the Mac
-            // stall hunt compares this line with the same measure on the Mac (mac-soak-flow.mjs).
+            // stall hunt compares this line with the same measure on the Mac (the macOS soak lab driver, a separate PR).
             frame_gaps: (() => {
                 const gaps = frameGaps(result.callbacks);
                 return { ...gaps, longest: gaps.longest.map((g) => ({ at_s: Math.round(g.at - result.callbacks[0]) / 1000, ms: g.ms })) };
