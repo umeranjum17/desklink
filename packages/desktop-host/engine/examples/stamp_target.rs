@@ -19,6 +19,10 @@
 //!   check the engine still refines a frozen desktop).
 //! - `STILL_AFTER_MS`: when `still` stops repainting (default 2000).
 //!
+//! `MODE=idle` repaints the stamp once every `IDLE_MS` (default 3000) and
+//! otherwise leaves the desktop alone: a source that changes less than once
+//! a second, to see what the stream does between changes.
+//!
 //! `--probe` prints the server vendor and geometry and exits, so the harness
 //! can verify it owns the display it was given.
 
@@ -144,6 +148,11 @@ fn main() -> Result<()> {
         .max(1);
     let mode = std::env::var("MODE").unwrap_or_else(|_| String::from("typing"));
     let motion = mode == "scroll" || mode == "motion";
+    let idle_ms: u64 = std::env::var("IDLE_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3000)
+        .max(1);
     let still_after_ms: u64 = std::env::var("STILL_AFTER_MS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -234,7 +243,11 @@ fn main() -> Result<()> {
             motion,
         )?;
         frame += 1;
-        std::thread::sleep(std::time::Duration::from_millis(1000 / rate));
+        std::thread::sleep(std::time::Duration::from_millis(if mode == "idle" {
+            idle_ms
+        } else {
+            1000 / rate
+        }));
     }
 }
 

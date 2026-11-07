@@ -2,6 +2,11 @@
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <CoreVideo/CoreVideo.h>
 #import <CoreMedia/CoreMedia.h>
+#include <chrono>
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 using FrameCallback = void (*)(void *, const uint8_t *, size_t, size_t, size_t, size_t);
 using StatusCallback = void (*)(void *, const char *, bool);
@@ -9,20 +14,43 @@ using StatusCallback = void (*)(void *, const char *, bool);
 @interface DLStreamOutput : NSObject <SCStreamOutput>
 @property(nonatomic, assign) void *context;
 @property(nonatomic, assign) FrameCallback callback;
+@property(nonatomic, assign) FILE *trace;
+@property(nonatomic, assign) int64_t lastSampleMicros;
+@property(nonatomic, assign) int64_t lastTraceFlushMs;
 @end
 
 @implementation DLStreamOutput
 - (void)stream:(SCStream *)stream didOutputSampleBuffer:(CMSampleBufferRef)sample ofType:(SCStreamOutputType)type {
     (void)stream;
     if (type != SCStreamOutputTypeScreen || !CMSampleBufferIsValid(sample)) return;
+    using Clock = std::chrono::steady_clock;
+    const auto started = Clock::now();
+    const auto wallMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const auto startedUs = std::chrono::duration_cast<std::chrono::microseconds>(started.time_since_epoch()).count();
+    const auto gapUs = self.lastSampleMicros ? startedUs - self.lastSampleMicros : 0;
+    self.lastSampleMicros = startedUs;
+    int64_t lockUs = 0;
     @autoreleasepool {
         CVPixelBufferRef pixel = CMSampleBufferGetImageBuffer(sample);
-        if (!pixel || CVPixelBufferLockBaseAddress(pixel, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return;
+        if (!pixel) return;
+        const auto lockStarted = Clock::now();
+        if (CVPixelBufferLockBaseAddress(pixel, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return;
+        lockUs = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - lockStarted).count();
         const uint8_t *base = (const uint8_t *)CVPixelBufferGetBaseAddress(pixel);
         if (base && CVPixelBufferGetPixelFormatType(pixel) == kCVPixelFormatType_32BGRA)
             self.callback(self.context, base, CVPixelBufferGetDataSize(pixel),
                           CVPixelBufferGetWidth(pixel), CVPixelBufferGetHeight(pixel), CVPixelBufferGetBytesPerRow(pixel));
         CVPixelBufferUnlockBaseAddress(pixel, kCVPixelBufferLock_ReadOnly);
+    }
+    if (self.trace) {
+        const auto workUs = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - started).count();
+        fprintf(self.trace, "%lld,%lld,%lld,%lld\n", (long long)wallMs, (long long)gapUs,
+                (long long)lockUs, (long long)workUs);
+        if (wallMs - self.lastTraceFlushMs >= 1000) {
+            fflush(self.trace);
+            self.lastTraceFlushMs = wallMs;
+        }
     }
 }
 @end
@@ -127,6 +155,16 @@ extern "C" void *dl_mac_stream_start(uint32_t display_id, size_t width, size_t h
         config.capturesAudio = NO;
         DLStreamSession *session = [DLStreamSession new];
         session.output = [DLStreamOutput new];
+        const char *tracePath = getenv("DESKLINK_MAC_CAPTURE_TRACE");
+        if (tracePath && *tracePath) {
+            session.output.trace = fopen(tracePath, "w");
+            if (!session.output.trace) {
+                fail(error, capacity, [NSString stringWithFormat:@"Could not open capture trace: %s", strerror(errno)]);
+                return nullptr;
+            }
+            fputs("wall_ms,gap_us,pixel_lock_us,callback_work_us\n", session.output.trace);
+            fflush(session.output.trace);
+        }
         session.output.context = context;
         session.output.callback = callback;
         session.queue = dispatch_queue_create("dev.desklink.capture", DISPATCH_QUEUE_SERIAL);
@@ -144,6 +182,7 @@ extern "C" void *dl_mac_stream_start(uint32_t display_id, size_t width, size_t h
             }];
             dispatch_semaphore_wait(stopped, DISPATCH_TIME_FOREVER);
             dispatch_sync(session.queue, ^{});
+            if (session.output.trace) fclose(session.output.trace);
             return nullptr;
         }
         const char *simulate = getenv("DESKLINK_AXI_SIMULATE_STREAM_STOP_MS");
@@ -186,6 +225,11 @@ extern "C" bool dl_mac_stream_stop(void *handle) {
             return false;
         }
         dispatch_sync(session.queue, ^{});
+        if (session.output.trace) {
+            fflush(session.output.trace);
+            fclose(session.output.trace);
+            session.output.trace = nullptr;
+        }
         return true;
     }
 }
